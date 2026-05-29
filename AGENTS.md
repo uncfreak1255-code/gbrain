@@ -4,6 +4,22 @@ This is your install + operating protocol. Claude Code reads `./CLAUDE.md` autom
 Everyone else (Codex, Cursor, OpenClaw, Aider, Continue, or an LLM fetching via URL):
 start here.
 
+## Sawyer operating fork rule
+
+For Sawyer's local install, `origin` (`garrytan/gbrain`) is upstream supply, not
+the deployment target. The operating branch is `sawyer/gbrain-operating` on
+Sawyer's fork.
+
+- Default finish target: commit, verify, and push to `fork/sawyer/gbrain-operating`.
+- Do not open, update, or treat an upstream PR against `garrytan/gbrain` as a
+  completion gate unless Sawyer explicitly says: `upstream this`.
+- Pull or merge from `origin/master` only to keep the operating fork current.
+- Sawyer-specific runtime, Dream, automation, and agent-workflow changes should
+  remain on the operating fork unless they are deliberately generalized for
+  upstream.
+- If an upstream PR already exists, classify it as optional contribution/proof,
+  not as shipped state for Sawyer's brain.
+
 ## Install (5 min)
 
 1. Install gbrain via Bun (the canonical path):
