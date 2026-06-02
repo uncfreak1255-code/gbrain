@@ -1,0 +1,68 @@
+{
+  "filesIncluded": 2276,
+  "totalScanFiles": 2277,
+  "nodes": 3239,
+  "edges": 5772,
+  "layers": [
+    {
+      "name": "Runtime Core",
+      "count": 502
+    },
+    {
+      "name": "CLI Commands",
+      "count": 135
+    },
+    {
+      "name": "MCP and Serving",
+      "count": 12
+    },
+    {
+      "name": "Admin UI",
+      "count": 17
+    },
+    {
+      "name": "Agent Skills and Protocols",
+      "count": 124
+    },
+    {
+      "name": "Documentation",
+      "count": 109
+    },
+    {
+      "name": "Tests and Verification",
+      "count": 1130
+    },
+    {
+      "name": "Evaluation and Benchmarks",
+      "count": 14
+    },
+    {
+      "name": "Automation Scripts",
+      "count": 72
+    },
+    {
+      "name": "Infrastructure and Config",
+      "count": 26
+    },
+    {
+      "name": "Miscellaneous",
+      "count": 135
+    }
+  ],
+  "byType": {
+    "config": 44,
+    "document": 326,
+    "pipeline": 4,
+    "file": 1896,
+    "service": 3,
+    "table": 3,
+    "function": 921,
+    "class": 42
+  },
+  "byEdgeType": {
+    "contains": 963,
+    "calls": 852,
+    "imports": 3957
+  },
+  "issues": []
+}
