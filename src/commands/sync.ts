@@ -2974,6 +2974,10 @@ export interface SyncStatusReportSource {
 export interface SyncStatusReport {
   schema_version: 1;
   generated_at: string;
+  /** Freshness signal for staleness_class/staleness_hours in this report.
+   *  `stored_db` means commit-relative lag came from the durable
+   *  `sources.newest_content_at` column, not a live git probe. */
+  freshness_mode: 'stored_db';
   sources: SyncStatusReportSource[];
   unacknowledged_failures: number;
   /** The embedding column counts were computed against. Useful for
@@ -3174,6 +3178,7 @@ export async function buildSyncStatusReport(
   return {
     schema_version: 1,
     generated_at: new Date().toISOString(),
+    freshness_mode: 'stored_db',
     sources: out,
     unacknowledged_failures: unackedCount,
     embedding_column: resolved.name,
@@ -3193,6 +3198,7 @@ export function printSyncStatusReport(
 ): void {
   const write = (line: string) => sink.write(line + '\n');
   write(`\nSync status — generated ${report.generated_at}`);
+  write('Freshness mode: stored_db (newest_content_at column; remote-safe)');
   write(`Embedding column: ${report.embedding_column}\n`);
   if (report.sources.length === 0) {
     write('  (no sources registered)');
