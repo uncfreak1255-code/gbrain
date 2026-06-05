@@ -16,6 +16,7 @@ import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import matter from 'gray-matter';
 import { runCapture, __testing } from '../../src/commands/capture.ts';
+import { resolvePageFilePath } from '../../src/core/markdown.ts';
 
 let engine: PGLiteEngine;
 let tmpRoot: string;
@@ -37,6 +38,12 @@ beforeEach(async () => {
   brainDir = path.join(tmpRoot, 'brain');
   fs.mkdirSync(brainDir, { recursive: true });
   await engine.setConfig('sync.repo_path', brainDir);
+  await engine.executeRaw(
+    `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('gbrain', 'gbrain', $1, '{"federated": true}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+    [brainDir],
+  );
 });
 
 describe('capture — defaultSlug helper', () => {
@@ -99,6 +106,19 @@ describe('capture — parseArgs', () => {
     const r3 = __testing.parseArgs(['--help']);
     expect('help' in r3).toBe(true);
   });
+
+  test('--receipt-kind accepts the typed receipt presets', () => {
+    const r = __testing.parseArgs(['--receipt-kind', 'memory_candidate', 'persist this']);
+    if (!('help' in r)) {
+      expect(r.receiptKind).toBe('memory_candidate');
+      expect(r.content).toBe('persist this');
+    }
+  });
+
+  test('--receipt-kind rejects unknown receipt kinds', () => {
+    expect(() => __testing.parseArgs(['--receipt-kind', 'random-note', 'x']))
+      .toThrow(/invalid receipt kind/);
+  });
 });
 
 describe('capture — buildContent', () => {
@@ -148,6 +168,24 @@ describe('capture — buildContent', () => {
     const result = __testing.buildContent('body', { source: 'voice-whisper' });
     expect(result).toContain('captured_via: voice-whisper');
   });
+
+  test('stamps typed receipt frontmatter without changing the page type', () => {
+    const result = __testing.buildContent('remember this', { receiptKind: 'failure_lesson' });
+    const parsed = matter(result);
+    expect(parsed.data.type).toBe('note');
+    expect(parsed.data.receipt_kind).toBe('failure_lesson');
+    expect(parsed.data.receipt_schema_version).toBe(1);
+  });
+
+  test('typed receipt flag wins over existing receipt_kind frontmatter', () => {
+    const result = __testing.buildContent(
+      '---\ntitle: Decision\nreceipt_kind: memory_candidate\n---\n\nApproved',
+      { receiptKind: 'approval_decision' },
+    );
+    const parsed = matter(result);
+    expect(parsed.data.receipt_kind).toBe('approval_decision');
+    expect(parsed.data.receipt_schema_version).toBe(1);
+  });
 });
 
 describe('capture — local install integration', () => {
@@ -168,12 +206,12 @@ describe('capture — local install integration', () => {
     expect(logCaptured[0]).toBe('inbox/test-capture-1');
 
     // Page exists in the DB.
-    const page = await engine.getPage('inbox/test-capture-1');
+    const page = await engine.getPage('inbox/test-capture-1', { sourceId: 'gbrain' });
     expect(page).not.toBeNull();
     expect(page?.compiled_truth).toContain('A captured thought');
 
     // File written to disk via write-through.
-    const onDisk = path.join(brainDir, 'inbox/test-capture-1.md');
+    const onDisk = resolvePageFilePath(brainDir, 'inbox/test-capture-1', 'gbrain');
     expect(fs.existsSync(onDisk)).toBe(true);
   });
 
@@ -190,6 +228,23 @@ describe('capture — local install integration', () => {
     expect(printedSlug).toMatch(/^inbox\/\d{4}-\d{2}-\d{2}-[a-f0-9]{8}$/);
   });
 
+  test('typed receipt capture defaults to receipts/<kind>/YYYY-MM-DD-<hash8>', async () => {
+    const logCaptured: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logCaptured.push(args.map(String).join(' '));
+    try {
+      await runCapture(engine, ['--receipt-kind', 'approval_decision', '--quiet', 'approved the merge']);
+    } finally {
+      console.log = origLog;
+    }
+    const printedSlug = logCaptured[0];
+    expect(printedSlug).toMatch(/^receipts\/approval_decision\/\d{4}-\d{2}-\d{2}-[a-f0-9]{8}$/);
+
+    const page = await engine.getPage(printedSlug, { sourceId: 'gbrain' });
+    expect(page?.frontmatter.receipt_kind).toBe('approval_decision');
+    expect(page?.frontmatter.receipt_schema_version).toBe(1);
+  });
+
   test('--file reads content from disk', async () => {
     const file = path.join(tmpRoot, 'note.md');
     fs.writeFileSync(file, '# from a file\n\nbody content here');
@@ -201,7 +256,7 @@ describe('capture — local install integration', () => {
     } finally {
       console.log = origLog;
     }
-    const page = await engine.getPage('inbox/from-file');
+    const page = await engine.getPage('inbox/from-file', { sourceId: 'gbrain' });
     expect(page).not.toBeNull();
     expect(page?.compiled_truth).toContain('body content here');
   });
@@ -220,6 +275,25 @@ describe('capture — local install integration', () => {
     expect(json.slug).toBe('inbox/json-out');
     expect(json.content_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(json.captured_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  test('--json includes receipt_kind for typed receipt captures', async () => {
+    const logCaptured: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logCaptured.push(args.map(String).join(' '));
+    try {
+      await runCapture(engine, [
+        '--json',
+        '--receipt-kind',
+        'memory_candidate',
+        'candidate memory',
+      ]);
+    } finally {
+      console.log = origLog;
+    }
+    const json = JSON.parse(logCaptured.join('\n'));
+    expect(json.slug).toMatch(/^receipts\/memory_candidate\//);
+    expect(json.receipt_kind).toBe('memory_candidate');
   });
 });
 

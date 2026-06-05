@@ -7,6 +7,7 @@
  *   gbrain capture --file ./notes/2026-05-20.md
  *   echo "from stdin" | gbrain capture --stdin
  *   gbrain capture "..." --slug inbox/specific
+ *   gbrain capture --receipt-kind memory_candidate "..."
  *   gbrain capture "..." --quiet           # slug-only output for pipelines
  *
  * Behavior:
@@ -46,9 +47,22 @@ interface RunOpts {
   stdin?: boolean;
   slug?: string;
   type?: string;
+  receiptKind?: ReceiptKind;
   source?: string;
   quiet?: boolean;
   json?: boolean;
+}
+
+export const RECEIPT_KINDS = [
+  'memory_candidate',
+  'failure_lesson',
+  'approval_decision',
+] as const;
+
+export type ReceiptKind = typeof RECEIPT_KINDS[number];
+
+function isReceiptKind(value: string): value is ReceiptKind {
+  return (RECEIPT_KINDS as readonly string[]).includes(value);
 }
 
 function parseArgs(args: string[]): RunOpts | { help: true; positional: string | undefined } {
@@ -73,6 +87,16 @@ function parseArgs(args: string[]): RunOpts | { help: true; positional: string |
     if (a === '--type') {
       const v = args[++i];
       if (v) opts.type = v;
+      continue;
+    }
+    if (a === '--receipt-kind' || a === '--receipt-type' || a === '--receipt') {
+      const v = args[++i];
+      if (!v || !isReceiptKind(v)) {
+        throw new Error(
+          `invalid receipt kind '${v ?? ''}'. Expected one of: ${RECEIPT_KINDS.join(', ')}`,
+        );
+      }
+      opts.receiptKind = v;
       continue;
     }
     if (a === '--source') {
@@ -102,6 +126,11 @@ Modes (mutually exclusive — first match wins):
 Options:
   --slug SLUG          Override the default inbox/YYYY-MM-DD-<hash6> slug
   --type TYPE          Override the page type (default: note)
+  --receipt-kind KIND  Typed receipt preset. Supported:
+                       memory_candidate, failure_lesson, approval_decision.
+                       Stamps receipt_kind + receipt_schema_version and,
+                       unless --slug is passed, files under
+                       receipts/<kind>/YYYY-MM-DD-<hash8>.
   --source ID          Multi-source brains: write under a non-default source.
                        Resolution: --source flag > GBRAIN_SOURCE env >
                        .gbrain-source dotfile (walk-up) > local_path >
@@ -127,17 +156,26 @@ Notes:
 
 Examples:
   gbrain capture "remember to follow up on the X deal"
+  gbrain capture --receipt-kind approval_decision "Approved merge/materialize"
   echo "from a pipe" | gbrain capture --stdin
   gbrain capture --file ./notes/today.md --slug daily/2026-05-20
   JOB=$(gbrain capture "..." --quiet)
 `;
 
 function defaultSlug(content: string, now: Date = new Date()): string {
+  return datedHashSlug('inbox', content, now);
+}
+
+function defaultReceiptSlug(kind: ReceiptKind, content: string, now: Date = new Date()): string {
+  return datedHashSlug(`receipts/${kind}`, content, now);
+}
+
+function datedHashSlug(prefix: string, content: string, now: Date): string {
   const y = now.getUTCFullYear();
   const m = String(now.getUTCMonth() + 1).padStart(2, '0');
   const d = String(now.getUTCDate()).padStart(2, '0');
   const hashPrefix = computeContentHash(content).slice(0, 8);
-  return `inbox/${y}-${m}-${d}-${hashPrefix}`;
+  return `${prefix}/${y}-${m}-${d}-${hashPrefix}`;
 }
 
 /**
@@ -233,6 +271,7 @@ function deriveTitle(rawBody: string): string {
  *
  * Precedence rules (user-wins by default):
  *   - `type`:         opts.type (CLI flag) > userFm.type > 'note'
+ *   - `receipt_kind`: opts.receiptKind > userFm.receipt_kind
  *   - `title`:        userFm.title > derived-from-body
  *   - `captured_via`: userFm.captured_via > opts.source > 'capture-cli'
  *                     (CV3/Phase 3c will narrow this to always 'capture-cli';
@@ -263,6 +302,10 @@ export function mergeCaptureFrontmatter(rawBody: string, opts: RunOpts): string 
       captured_via: opts.source ?? 'capture-cli',
       captured_at: nowIso,
     };
+    if (opts.receiptKind) {
+      fm.receipt_kind = opts.receiptKind;
+      fm.receipt_schema_version = 1;
+    }
     const looksMarkdown = /^#{1,6}\s/.test(rawBody.trimStart());
     const body = looksMarkdown ? rawBody : `# ${title}\n\n${rawBody}`;
     return matter.stringify(body, fm);
@@ -286,10 +329,16 @@ export function mergeCaptureFrontmatter(rawBody: string, opts: RunOpts): string 
     // mixed precedence (CLI flag wins for `type`; user wins for `title`/
     // `captured_via`/`captured_at`) in one expression per key.
     type: opts.type ?? userFm.type ?? 'note',
+    receipt_kind: opts.receiptKind ?? userFm.receipt_kind,
+    receipt_schema_version: opts.receiptKind
+      ? 1
+      : userFm.receipt_schema_version,
     title: userFm.title ?? deriveTitle(parsed.content),
     captured_via: userFm.captured_via ?? opts.source ?? 'capture-cli',
     captured_at: userFm.captured_at ?? nowIso,
   };
+  if (merged.receipt_kind === undefined) delete merged.receipt_kind;
+  if (merged.receipt_schema_version === undefined) delete merged.receipt_schema_version;
   return matter.stringify(parsed.content, merged);
 }
 
@@ -314,6 +363,7 @@ interface CaptureResult {
   path?: string;
   source_kind: string;
   captured_at: string;
+  receipt_kind?: ReceiptKind;
 }
 
 function printReceipt(result: CaptureResult, quiet: boolean, json: boolean): void {
@@ -328,6 +378,9 @@ function printReceipt(result: CaptureResult, quiet: boolean, json: boolean): voi
   console.log('captured:');
   console.log(`  slug:          ${result.slug}`);
   console.log(`  status:        ${result.status ?? 'unknown'}`);
+  if (result.receipt_kind) {
+    console.log(`  receipt_kind:  ${result.receipt_kind}`);
+  }
   console.log(`  content_hash:  ${result.content_hash.slice(0, 16)}…`);
   if (result.path) {
     console.log(`  file:          ${result.path}`);
@@ -336,7 +389,13 @@ function printReceipt(result: CaptureResult, quiet: boolean, json: boolean): voi
 }
 
 export async function runCapture(engine: BrainEngine | null, args: string[]): Promise<void> {
-  const parsed = parseArgs(args);
+  let parsed: RunOpts | { help: true; positional: string | undefined };
+  try {
+    parsed = parseArgs(args);
+  } catch (e) {
+    console.error(`gbrain capture: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
   if ('help' in parsed) {
     console.log(HELP);
     return;
@@ -439,7 +498,11 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
   // The daemon's 24h LRU dedup keys on this hash; identical captures must
   // produce identical hashes. The DB content_hash (importFromContent at
   // src/core/import-file.ts) gets the same treatment in Phase 3d.
-  const slug = parsed.slug ?? defaultSlug(normalizedBody);
+  const slug = parsed.slug ?? (
+    parsed.receiptKind
+      ? defaultReceiptSlug(parsed.receiptKind, normalizedBody)
+      : defaultSlug(normalizedBody)
+  );
   const fullContent = buildContent(rawBody, parsed);
   const capturedAt = new Date().toISOString();
   const contentHash = computeContentHash(normalizedBody);
@@ -496,6 +559,7 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
       // root cause of WARN-8's audit-trail labeling problem.
       source_kind: 'capture-cli',
       captured_at: capturedAt,
+      receipt_kind: parsed.receiptKind,
     };
     printReceipt(result, parsed.quiet ?? false, parsed.json ?? false);
     return;
@@ -560,6 +624,7 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
         // CV3: source_kind is the channel taxonomy, NOT the DB source FK.
         source_kind: 'capture-cli',
         captured_at: capturedAt,
+        receipt_kind: parsed.receiptKind,
       },
       parsed.quiet ?? false,
       parsed.json ?? false,
@@ -584,10 +649,12 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
 /** Test seam. */
 export const __testing = {
   defaultSlug,
+  defaultReceiptSlug,
   buildContent,
   mergeCaptureFrontmatter,
   deriveTitle,
   parseArgs,
+  isReceiptKind,
   detectBinaryNullByte,
   normalizeForHash,
   maybeRewriteSourceFkError,
