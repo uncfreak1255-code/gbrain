@@ -1,7 +1,7 @@
 /**
  * Drift guard for src/core/doctor-categories.ts.
  *
- * Reads src/commands/doctor.ts source via a literal-string scan, enumerates
+ * Reads the doctor-owned check sources via a literal-string scan, enumerates
  * every `name: '<...>'` Check name, and asserts each appears in exactly ONE
  * category set. The union of the four sets must equal the discovered names
  * exactly — no orphans, no extras.
@@ -25,9 +25,13 @@ import {
 } from '../src/core/doctor-categories.ts';
 
 const DOCTOR_TS_PATH = join(import.meta.dir, '..', 'src', 'commands', 'doctor.ts');
+const ONBOARD_CHECKS_TS_PATH = join(import.meta.dir, '..', 'src', 'core', 'onboard', 'checks.ts');
 
 function enumerateCheckNames(): Set<string> {
-  const source = readFileSync(DOCTOR_TS_PATH, 'utf-8');
+  const source = [
+    readFileSync(DOCTOR_TS_PATH, 'utf-8'),
+    readFileSync(ONBOARD_CHECKS_TS_PATH, 'utf-8'),
+  ].join('\n');
   const names = new Set<string>();
   // 1) Inline object-literal form: `{ name: 'foo', ... }`.
   for (const m of source.matchAll(/name:\s*['"]([a-z][a-z0-9_]+)['"]/g)) {
@@ -44,7 +48,7 @@ function enumerateCheckNames(): Set<string> {
 }
 
 describe('doctor-categories drift guard', () => {
-  test('every check name in doctor.ts source belongs to exactly one category set', () => {
+  test('every doctor check name belongs to exactly one category set', () => {
     const discovered = enumerateCheckNames();
     const allCategorized = new Set<string>([
       ...BRAIN_CHECK_NAMES,
@@ -86,7 +90,7 @@ describe('doctor-categories drift guard', () => {
     expect(dupes).toEqual([]);
   });
 
-  test('every categorized name is currently used in doctor.ts source (no stale entries)', () => {
+  test('every categorized name is currently used by the doctor surface (no stale entries)', () => {
     const discovered = enumerateCheckNames();
     const allCategorized = new Set<string>([
       ...BRAIN_CHECK_NAMES,
