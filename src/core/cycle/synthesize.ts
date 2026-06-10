@@ -43,6 +43,7 @@ import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
 import { safeSplitIndex } from '../text-safe.ts';
+import { canonicalLookup } from '../model-pricing.ts';
 
 // Slug regex from validatePageSlug — kept in sync.
 // Used for the orchestrator-written summary index slug.
@@ -75,6 +76,8 @@ const MIN_PROMPT_TOKENS = 100_000;
 const DEFAULT_MAX_CHUNKS = 24;
 /** Conservative default budget when model is unknown (200K × HEADROOM_RATIO). */
 const UNKNOWN_MODEL_BUDGET_TOKENS = 180_000;
+/** Dry-run cost assumption because subagent max_turns is capped but output tokens are not. */
+const DRY_RUN_ASSUMED_MAX_OUTPUT_TOKENS_PER_CHILD = 8_000;
 
 /**
  * Compute per-chunk character budget for the resolved model + config override.
@@ -113,6 +116,72 @@ function warnUnknownModelOnce(model: string): void {
     `using ${UNKNOWN_MODEL_BUDGET_TOKENS}-token fallback budget. ` +
     `Set dream.synthesize.max_prompt_tokens to override.\n`,
   );
+}
+
+interface SynthesizeRunPlan {
+  allowed_slug_prefixes: string[];
+  model: string;
+  pricing_known: boolean;
+  estimated_input_tokens: number;
+  assumed_max_output_tokens_per_child: number;
+  projected_cost_usd: number | null;
+  cost_projection_note: string;
+  planned_transcripts: number;
+  planned_chunks: number;
+  planned_child_jobs: number;
+  max_chunks_per_transcript: number;
+  max_chars_per_chunk: number;
+  skips: Array<{ filePath: string; reason: string }>;
+}
+
+function planSynthesizeRun(
+  transcripts: DiscoveredTranscript[],
+  config: Pick<SynthConfig, 'model' | 'maxPromptTokens' | 'maxChunksPerTranscript'>,
+  allowedSlugPrefixes: string[],
+): SynthesizeRunPlan {
+  const maxCharsPerChunk = computeChunkCharBudget(config.model, config.maxPromptTokens);
+  const skips: Array<{ filePath: string; reason: string }> = [];
+  let plannedChunks = 0;
+  let estimatedInputTokens = 0;
+
+  for (const t of transcripts) {
+    const chunks = splitTranscriptByBudget(t.content, t.contentHash, maxCharsPerChunk);
+    if (chunks.length > config.maxChunksPerTranscript) {
+      skips.push({
+        filePath: t.filePath,
+        reason: `oversize_after_split: ${chunks.length}/${config.maxChunksPerTranscript}`,
+      });
+      continue;
+    }
+    plannedChunks += chunks.length;
+    for (const chunk of chunks) {
+      estimatedInputTokens += Math.ceil(chunk.length / CHARS_PER_TOKEN);
+    }
+  }
+
+  const pricing = canonicalLookup(config.model);
+  const assumedOutputTokens = plannedChunks * DRY_RUN_ASSUMED_MAX_OUTPUT_TOKENS_PER_CHILD;
+  const projectedCostUsd = pricing
+    ? ((estimatedInputTokens * pricing.input) + (assumedOutputTokens * pricing.output)) / 1_000_000
+    : null;
+
+  return {
+    allowed_slug_prefixes: allowedSlugPrefixes,
+    model: config.model,
+    pricing_known: pricing !== undefined,
+    estimated_input_tokens: estimatedInputTokens,
+    assumed_max_output_tokens_per_child: DRY_RUN_ASSUMED_MAX_OUTPUT_TOKENS_PER_CHILD,
+    projected_cost_usd: projectedCostUsd === null ? null : Number(projectedCostUsd.toFixed(6)),
+    cost_projection_note: pricing
+      ? 'dry-run estimate uses transcript chunk input plus an 8000-output-token assumption per planned child; subagent has max_turns but no hard output-token cap'
+      : 'no canonical pricing for model; projected cost unavailable',
+    planned_transcripts: transcripts.length - skips.length,
+    planned_chunks: plannedChunks,
+    planned_child_jobs: plannedChunks,
+    max_chunks_per_transcript: config.maxChunksPerTranscript,
+    max_chars_per_chunk: maxCharsPerChunk,
+    skips,
+  };
 }
 
 // ── Hash-deterministic transcript chunker (D9) ────────────────────────
@@ -242,6 +311,11 @@ export interface SynthesizePhaseOpts {
    * the synthesize loop. Caller must opt in explicitly.
    */
   bypassDreamGuard?: boolean;
+  /**
+   * Per-run trusted-workspace output allow-list. When set, replaces the
+   * broad repo default from skills/_brain-filing-rules.json.
+   */
+  allowedSlugPrefixes?: string[];
 }
 
 export async function runPhaseSynthesize(
@@ -370,6 +444,16 @@ export async function runPhaseSynthesize(
       }
     }
 
+    const allowedSlugPrefixes = resolveAllowedSlugPrefixesForRun(
+      opts.allowedSlugPrefixes,
+      await loadAllowedSlugPrefixes(),
+    );
+    if (allowedSlugPrefixes.length === 0) {
+      return failed(makeError('InternalError', 'NO_ALLOWLIST',
+        'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
+    }
+    const runPlan = planSynthesizeRun(worthProcessing, config, allowedSlugPrefixes);
+
     // Dry-run stops here: significance filter ran (Haiku verdicts cached),
     // but no Sonnet synthesis. Codex finding #8: --dry-run does NOT mean
     // "zero LLM calls"; it means "skip Sonnet."
@@ -379,6 +463,7 @@ export async function runPhaseSynthesize(
         transcripts_processed: 0,
         pages_written: 0,
         verdicts,
+        ...runPlan,
         dryRun: true,
       });
     }
@@ -397,12 +482,6 @@ export async function runPhaseSynthesize(
 
     // Fan-out: submit one subagent per worth-processing transcript (or one
     // per chunk for transcripts that exceed the model's per-prompt budget).
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes();
-    if (allowedSlugPrefixes.length === 0) {
-      return failed(makeError('InternalError', 'NO_ALLOWLIST',
-        'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
-    }
-
     const queue = new MinionQueue(engine);
     const childIds: number[] = [];
     /** Map child job_id → chunk metadata for D6 orchestrator-side slug rewrite. */
@@ -460,7 +539,7 @@ export async function runPhaseSynthesize(
           : config.model;
       for (let i = 0; i < chunks.length; i++) {
         const childData: SubagentHandlerData = {
-          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock),
+          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock, allowedSlugPrefixes),
           model: subagentModel,
           max_turns: 30,
           allowed_slug_prefixes: allowedSlugPrefixes,
@@ -939,6 +1018,7 @@ function buildSynthesisPrompt(
   chunkIdx: number,
   chunkTotal: number,
   priorContradictionsBlock = '',
+  allowedSlugPrefixes: string[] = [],
 ): string {
   const dateHint = t.inferredDate ?? today();
   const baseSlugSegment = sanitizeForSlug(t.basename) || `session-${dateHint}`;
@@ -952,6 +1032,12 @@ function buildSynthesisPrompt(
   const transcriptHeader = isChunked
     ? `${t.filePath} (chunk ${chunkIdx + 1}/${chunkTotal})`
     : t.filePath;
+  const taskBlock = renderSynthesisTaskBlock({
+    allowedSlugPrefixes,
+    dateHint,
+    hashSuffix,
+    baseSlugSegment,
+  });
   return `You are synthesizing a conversation transcript into the user's personal knowledge brain.
 
 CONTEXT
@@ -966,15 +1052,7 @@ OUTPUT POLICY (ALL of these are required)
 4. Slug discipline: lowercase alphanumeric and hyphens only, slash-separated segments. NO underscores, NO file extensions.
 
 TASKS
-A. Reflections (self-knowledge, pattern recognition, emotional processing):
-   slug: \`wiki/personal/reflections/${dateHint}-<topic-slug>-${hashSuffix}\`
-
-B. Originals (new ideas, frames, theses, mental models):
-   slug: \`wiki/originals/ideas/${dateHint}-<idea-slug>-${hashSuffix}\`
-
-C. People mentions: search first; if a page exists, do not put_page over it (the orchestrator handles people enrichment via timeline entries — your job is the reflection/original synthesis, NOT modifying existing person pages).
-
-D. If nothing in this transcript meets the bar (significance filter already passed but the content is still routine), return without writing anything.
+${taskBlock}
 
 TRANSCRIPT (${transcriptHeader})
 ---
@@ -982,6 +1060,40 @@ ${chunkText}
 ---
 
 When done, briefly list the slugs you wrote in your final message so the orchestrator can audit.`;
+}
+
+function renderSynthesisTaskBlock(input: {
+  allowedSlugPrefixes: string[];
+  dateHint: string;
+  hashSuffix: string;
+  baseSlugSegment: string;
+}): string {
+  const onlyDreamSummaries = input.allowedSlugPrefixes.length === 1
+    && input.allowedSlugPrefixes[0] === 'dream-cycle-summaries/*';
+  if (onlyDreamSummaries) {
+    return [
+      'A. Write at most one reviewed synthesize candidate page.',
+      `   slug: \`dream-cycle-summaries/${input.dateHint}-${input.baseSlugSegment}-${input.hashSuffix}\``,
+      '',
+      'B. Keep it as a reviewable synthesis receipt: concise summary, exact useful user quotes, why it matters, and what should happen next.',
+      '',
+      'C. Do not create or update wiki, people, originals, reflections, patterns, canon, or source-truth pages.',
+      '',
+      'D. If nothing in this transcript meets the bar (significance filter already passed but the content is still routine), return without writing anything.',
+    ].join('\n');
+  }
+
+  return [
+    'A. Reflections (self-knowledge, pattern recognition, emotional processing):',
+    `   slug: \`wiki/personal/reflections/${input.dateHint}-<topic-slug>-${input.hashSuffix}\``,
+    '',
+    'B. Originals (new ideas, frames, theses, mental models):',
+    `   slug: \`wiki/originals/ideas/${input.dateHint}-<idea-slug>-${input.hashSuffix}\``,
+    '',
+    'C. People mentions: search first; if a page exists, do not put_page over it (the orchestrator handles people enrichment via timeline entries — your job is the reflection/original synthesis, NOT modifying existing person pages).',
+    '',
+    'D. If nothing in this transcript meets the bar (significance filter already passed but the content is still routine), return without writing anything.',
+  ].join('\n');
 }
 
 function sanitizeForSlug(s: string): string {
@@ -1236,10 +1348,20 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
   return hint ? { class: cls, code, message, hint } : { class: cls, code, message };
 }
 
+function resolveAllowedSlugPrefixesForRun(
+  perRun: string[] | undefined,
+  repoDefault: string[],
+): string[] {
+  return perRun && perRun.length > 0 ? perRun : repoDefault;
+}
+
 // ── Test-only export ───────────────────────────────────────
 // `__testing` re-exports otherwise-private helpers so unit tests can pin
 // behavior at function granularity (e.g., #745 collectChildPutPageSlugs
 // double-encoded jsonb regression). Not part of the runtime contract.
 export const __testing = {
   collectChildPutPageSlugs,
+  resolveAllowedSlugPrefixesForRun,
+  planSynthesizeRun,
+  buildSynthesisPrompt,
 };
