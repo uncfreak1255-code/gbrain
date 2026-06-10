@@ -182,6 +182,51 @@ describe('onboard E2E — runRemediation recheck loop guard', () => {
       await workerPromise;
     }
   });
+
+  test('does not rerun a retried recommendation with the same idempotency key', async () => {
+    let calls = 0;
+    const worker = new MinionWorker(engine, { pollInterval: 20 });
+    worker.register('test-stable-onboard-idempotency-step', async () => {
+      calls++;
+      return { ok: true };
+    });
+
+    const workerPromise = worker.start();
+    try {
+      const base = {
+        job: 'test-stable-onboard-idempotency-step',
+        params: { sourceId: 'default' },
+        severity: 'medium' as const,
+        est_seconds: 1,
+        est_usd_cost: 0,
+        rationale: 'synthetic persistent recommendation',
+        status: 'remediable' as const,
+      };
+      const first = makeRemediationStep({
+        ...base,
+        id: 'test.stable_onboard_step',
+      });
+      const retrySameWork = makeRemediationStep({
+        ...base,
+        id: 'test.stable_onboard_step:r1',
+      });
+
+      expect(retrySameWork.idempotency_key).toBe(first.idempotency_key);
+
+      const result = await runRemediation(engine, {
+        targetScore: 0,
+        maxUsd: 0,
+        maxJobs: 3,
+        extraRemediations: [first, retrySameWork],
+      });
+
+      expect(calls).toBe(1);
+      expect(result.submitted.map((s) => s.id)).toEqual(['test.stable_onboard_step']);
+    } finally {
+      worker.stop();
+      await workerPromise;
+    }
+  });
 });
 
 describe('onboard E2E — toOnboardRecommendation tier policy', () => {

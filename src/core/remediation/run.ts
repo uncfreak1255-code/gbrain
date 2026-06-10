@@ -184,6 +184,7 @@ export async function runRemediation(
   const submitted: StepResult[] = [];
   const abortedIds = new Set<string>();
   const attemptedIds = new Set<string>();
+  const attemptedIdempotencyKeys = new Set<string>();
   const doctorRunId = crypto.randomUUID();
 
   const { MinionQueue } = await import('../minions/queue.ts');
@@ -231,6 +232,8 @@ export async function runRemediation(
 
       // Resume: skip steps that the checkpoint already marked completed.
       if (completedFromCheckpoint.has(step.id)) {
+        attemptedIds.add(step.id);
+        attemptedIdempotencyKeys.add(step.idempotency_key);
         const result: StepResult = { step: stepCount, id: step.id, job_id: null, status: 'completed' };
         submitted.push(result);
         hooks.onStepEnd?.(result);
@@ -250,6 +253,7 @@ export async function runRemediation(
 
       hooks.onStepStart?.(stepCount, totalSteps, step);
       attemptedIds.add(step.id);
+      attemptedIdempotencyKeys.add(step.idempotency_key);
       try {
         const isProtected = !!step.protected;
         const job = await queue.add(
@@ -310,7 +314,8 @@ export async function runRemediation(
       const freshHealth = await engine.getHealth();
       recs = computeRecommendations(freshHealth, ctx, extraRemediations)
         .filter((r) => r.status === 'remediable')
-        .filter((r) => !attemptedIds.has(r.id));
+        .filter((r) => !attemptedIds.has(r.id))
+        .filter((r) => !attemptedIdempotencyKeys.has(r.idempotency_key));
     }
   };
 
