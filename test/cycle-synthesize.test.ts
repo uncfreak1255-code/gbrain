@@ -404,6 +404,13 @@ describe('synthesize allowed slug prefix override', () => {
     expect(prompt).not.toContain('wiki/personal/reflections/');
     expect(prompt).not.toContain('wiki/originals/ideas/');
   });
+
+  test('per-run allow-list policy hash is stable and order-sensitive', () => {
+    const one = synthTesting.hashAllowedSlugPrefixes(['dream-cycle-summaries/*']);
+    expect(one).toMatch(/^[0-9a-f]{8}$/);
+    expect(synthTesting.hashAllowedSlugPrefixes(['dream-cycle-summaries/*'])).toBe(one);
+    expect(synthTesting.hashAllowedSlugPrefixes(['wiki/originals/*', 'dream-cycle-summaries/*'])).not.toBe(one);
+  });
 });
 
 // ─── v0.41.13: UTF-16 safety in judgeSignificance ─────────────────────
