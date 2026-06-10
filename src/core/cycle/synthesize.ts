@@ -28,6 +28,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { chat as gatewayChat, validateModelId, type ChatResult } from '../ai/gateway.ts';
 import { AIConfigError } from '../ai/errors.ts';
 import { normalizeModelId } from '../model-id.ts';
@@ -490,6 +491,9 @@ export async function runPhaseSynthesize(
     const skipReports: Array<{ filePath: string; reason: string }> = [];
 
     const maxCharsPerChunk = computeChunkCharBudget(config.model, config.maxPromptTokens);
+    const idempotencyPolicySuffix = opts.allowedSlugPrefixes && opts.allowedSlugPrefixes.length > 0
+      ? `:p${hashAllowedSlugPrefixes(allowedSlugPrefixes)}`
+      : '';
 
     for (const t of worthProcessing) {
       const hash16 = t.contentHash.slice(0, 16);
@@ -550,9 +554,12 @@ export async function runPhaseSynthesize(
         //     transcripts on upgrade).
         //   - multi-chunk → `<legacy>:c<i>of<n>` per chunk; durable across
         //     runs because D9 splitTranscriptByBudget is hash-deterministic.
+        //   - per-run allow-list override → append a short policy hash. A
+        //     one-off narrowed run has different prompt/write semantics from
+        //     the repo default and must not reuse an older broad-policy child.
         const idempotency_key = isChunked
-          ? `dream:synth:${t.filePath}:${hash16}:c${i}of${chunks.length}`
-          : `dream:synth:${t.filePath}:${hash16}`;
+          ? `dream:synth:${t.filePath}:${hash16}:c${i}of${chunks.length}${idempotencyPolicySuffix}`
+          : `dream:synth:${t.filePath}:${hash16}${idempotencyPolicySuffix}`;
         const submitOpts: Partial<MinionJobInput> = {
           max_stalled: 3,
           on_child_fail: 'continue',
@@ -1355,6 +1362,13 @@ function resolveAllowedSlugPrefixesForRun(
   return perRun && perRun.length > 0 ? perRun : repoDefault;
 }
 
+function hashAllowedSlugPrefixes(prefixes: string[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify(prefixes))
+    .digest('hex')
+    .slice(0, 8);
+}
+
 // ── Test-only export ───────────────────────────────────────
 // `__testing` re-exports otherwise-private helpers so unit tests can pin
 // behavior at function granularity (e.g., #745 collectChildPutPageSlugs
@@ -1364,4 +1378,5 @@ export const __testing = {
   resolveAllowedSlugPrefixesForRun,
   planSynthesizeRun,
   buildSynthesisPrompt,
+  hashAllowedSlugPrefixes,
 };
