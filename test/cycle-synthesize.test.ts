@@ -411,6 +411,20 @@ describe('synthesize allowed slug prefix override', () => {
     expect(synthTesting.hashAllowedSlugPrefixes(['dream-cycle-summaries/*'])).toBe(one);
     expect(synthTesting.hashAllowedSlugPrefixes(['wiki/originals/*', 'dream-cycle-summaries/*'])).not.toBe(one);
   });
+
+  test('per-run execution policy hash changes when synthesize model changes', () => {
+    const prefixes = ['dream-cycle-summaries/*'];
+    const deepseek = synthTesting.hashSynthesizeExecutionPolicy(prefixes, 'deepseek:deepseek-chat');
+    const openai = synthTesting.hashSynthesizeExecutionPolicy(prefixes, 'openai:gpt-4o-mini');
+    const openaiGatewayLoop = synthTesting.hashSynthesizeExecutionPolicy(prefixes, 'openai:gpt-4o-mini', true);
+    expect(deepseek).toMatch(/^[0-9a-f]{8}$/);
+    expect(openai).toMatch(/^[0-9a-f]{8}$/);
+    expect(openaiGatewayLoop).toMatch(/^[0-9a-f]{8}$/);
+    expect(openai).not.toBe(deepseek);
+    expect(openaiGatewayLoop).not.toBe(openai);
+    expect(synthTesting.hashSynthesizeExecutionPolicy(prefixes, 'openai:gpt-4o-mini')).toBe(openai);
+    expect(synthTesting.hashSynthesizeExecutionPolicy(prefixes, 'openai:gpt-4o-mini', true)).toBe(openaiGatewayLoop);
+  });
 });
 
 // ─── v0.41.13: UTF-16 safety in judgeSignificance ─────────────────────

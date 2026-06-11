@@ -491,8 +491,11 @@ export async function runPhaseSynthesize(
     const skipReports: Array<{ filePath: string; reason: string }> = [];
 
     const maxCharsPerChunk = computeChunkCharBudget(config.model, config.maxPromptTokens);
+    const useGatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
+    const useGatewayLoop = typeof useGatewayLoopRaw === 'string' &&
+      (useGatewayLoopRaw === 'true' || useGatewayLoopRaw === '1');
     const idempotencyPolicySuffix = opts.allowedSlugPrefixes && opts.allowedSlugPrefixes.length > 0
-      ? `:p${hashAllowedSlugPrefixes(allowedSlugPrefixes)}`
+      ? `:p${hashSynthesizeExecutionPolicy(allowedSlugPrefixes, config.model, useGatewayLoop)}`
       : '';
 
     for (const t of worthProcessing) {
@@ -1369,6 +1372,13 @@ function hashAllowedSlugPrefixes(prefixes: string[]): string {
     .slice(0, 8);
 }
 
+function hashSynthesizeExecutionPolicy(prefixes: string[], model: string, useGatewayLoop = false): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ prefixes, model, useGatewayLoop }))
+    .digest('hex')
+    .slice(0, 8);
+}
+
 // ── Test-only export ───────────────────────────────────────
 // `__testing` re-exports otherwise-private helpers so unit tests can pin
 // behavior at function granularity (e.g., #745 collectChildPutPageSlugs
@@ -1379,4 +1389,5 @@ export const __testing = {
   planSynthesizeRun,
   buildSynthesisPrompt,
   hashAllowedSlugPrefixes,
+  hashSynthesizeExecutionPolicy,
 };
