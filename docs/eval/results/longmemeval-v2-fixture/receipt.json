@@ -1,0 +1,120 @@
+{
+  "dataset": {
+    "kind": "longmemeval-v2-root",
+    "limit": 1,
+    "path": "test/fixtures/longmemeval-v2-mini",
+    "top_k": 2,
+    "v2_tier": "small"
+  },
+  "generated_at": "2026-06-15T20:24:22Z",
+  "lanes": [
+    {
+      "command": "bun src/cli.ts eval longmemeval /Users/sawbeck/.codex/worktrees/gbrain-active/test/fixtures/longmemeval-v2-mini --limit 1 --retrieval-only --top-k 2 --by-type --by-type-floor 1 --no-trajectory --output /Users/sawbeck/.codex/worktrees/gbrain-active/docs/eval/results/longmemeval-v2-fixture/keyword-only.jsonl --keyword-only --mode conservative",
+      "exit_code": 0,
+      "first_question_row": {
+        "dataset_schema": "longmemeval-v2",
+        "domain": "enterprise",
+        "environment": "workarena",
+        "eval_function": "norm_phrase_set_match|lower=true",
+        "hypothesis": "session_id: traj-report\n**user:** Trajectory ID: traj_report\nDomain: enterprise\nEnvironment: workarena\nGoal: Rebalance tagged problem workload between agents.\nOutcome: success\nStart URL: https://example.test/nav\n\nState 0 (step 0)\nURL: https://example.test/nav\nThought: I need the reporting workflow before assigning problems.\nAccessibility tree:\nRootWebArea ServiceNow\n\tbutton Reports\n\tbutton Problems\nScreenshot: screenshots/traj_report/0.png\n\nState 1 (step 1)\nURL: https://example.test/reports\nAction: click('Reports')\nThought: The Reports module has the problem workload by tag report.\nAccessibility tree:\nheading Reports\n\tlink Problem workload by tag\nScreenshot: screenshots/traj_report/1.png",
+        "mode": "conservative",
+        "question": "problem workload by tag report",
+        "question_id": "v2-q-1",
+        "question_type": "procedure",
+        "recall_hit": true,
+        "retrieved_session_ids": [
+          "traj-report"
+        ]
+      },
+      "latency_ms": 940,
+      "log_path": "docs/eval/results/longmemeval-v2-fixture/keyword-only.log",
+      "name": "keyword-only",
+      "output_path": "docs/eval/results/longmemeval-v2-fixture/keyword-only.jsonl",
+      "passes_gate": true,
+      "required": true,
+      "reranker_setting": {
+        "enabled": false,
+        "model": null,
+        "note": "--keyword-only disables vector and rerank paths"
+      },
+      "row_count": 2,
+      "summary": {
+        "aggregate": {
+          "hit": 1,
+          "rate": 1,
+          "total": 1
+        },
+        "kind": "by_type_summary",
+        "recall_by_type": {
+          "procedure": {
+            "hit": 1,
+            "rate": 1,
+            "total": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "bun src/cli.ts eval longmemeval /Users/sawbeck/.codex/worktrees/gbrain-active/test/fixtures/longmemeval-v2-mini --limit 1 --retrieval-only --top-k 2 --by-type --by-type-floor 1 --no-trajectory --output /Users/sawbeck/.codex/worktrees/gbrain-active/docs/eval/results/longmemeval-v2-fixture/hybrid-conservative.jsonl --mode conservative",
+      "exit_code": 0,
+      "first_question_row": {
+        "dataset_schema": "longmemeval-v2",
+        "domain": "enterprise",
+        "environment": "workarena",
+        "eval_function": "norm_phrase_set_match|lower=true",
+        "hypothesis": "session_id: traj-report\n**user:** Trajectory ID: traj_report\nDomain: enterprise\nEnvironment: workarena\nGoal: Rebalance tagged problem workload between agents.\nOutcome: success\nStart URL: https://example.test/nav\n\nState 0 (step 0)\nURL: https://example.test/nav\nThought: I need the reporting workflow before assigning problems.\nAccessibility tree:\nRootWebArea ServiceNow\n\tbutton Reports\n\tbutton Problems\nScreenshot: screenshots/traj_report/0.png\n\nState 1 (step 1)\nURL: https://example.test/reports\nAction: click('Reports')\nThought: The Reports module has the problem workload by tag report.\nAccessibility tree:\nheading Reports\n\tlink Problem workload by tag\nScreenshot: screenshots/traj_report/1.png\n\nsession_id: traj-distractor\n**user:** Trajectory ID: traj_distractor\nDomain: enterprise\nEnvironment: workarena\nGoal: Order a laptop from the hardware catalog.\nOutcome: success\nStart URL: https://example.test/catalog\n\nState 0 (step 0)\nURL: https://example.test/catalog\nThought: I need the hardware catalog.\nAccessibility tree:\nRootWebArea Catalog\n\tbutton Hardware\n\tbutton Laptops\nScreenshot: screenshots/traj_distractor/0.png",
+        "mode": "conservative",
+        "question": "problem workload by tag report",
+        "question_id": "v2-q-1",
+        "question_type": "procedure",
+        "recall_hit": true,
+        "retrieved_session_ids": [
+          "traj-report",
+          "traj-distractor"
+        ]
+      },
+      "latency_ms": 2389,
+      "log_path": "docs/eval/results/longmemeval-v2-fixture/hybrid-conservative.log",
+      "name": "hybrid-conservative",
+      "output_path": "docs/eval/results/longmemeval-v2-fixture/hybrid-conservative.jsonl",
+      "passes_gate": true,
+      "required": false,
+      "reranker_setting": {
+        "enabled": false,
+        "model": null,
+        "note": "hybrid path with conservative mode; reranker disabled by mode"
+      },
+      "row_count": 2,
+      "summary": {
+        "aggregate": {
+          "hit": 1,
+          "rate": 1,
+          "total": 1
+        },
+        "kind": "by_type_summary",
+        "recall_by_type": {
+          "procedure": {
+            "hit": 1,
+            "rate": 1,
+            "total": 1
+          }
+        },
+        "schema_version": 1
+      }
+    },
+    {
+      "name": "local-reranker",
+      "passes_gate": null,
+      "required": false,
+      "reranker_setting": {
+        "enabled": true,
+        "model": "not configured",
+        "note": "set GBRAIN_LME_V2_LOCAL_RERANKER_MODEL to run this lane"
+      },
+      "skipped": true
+    }
+  ],
+  "repo_commit": "f487c823",
+  "schema_version": 2
+}
