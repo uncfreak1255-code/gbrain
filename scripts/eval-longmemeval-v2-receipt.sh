@@ -3,161 +3,211 @@ set -euo pipefail
 
 # Bounded LongMemEval-V2 receipt.
 #
-# This intentionally does not run a full benchmark. It checks the current
-# public V2 dataset metadata, downloads only lightweight text/map files, and
-# proves whether the existing v1-shaped `gbrain eval longmemeval` command can
-# consume V2 directly.
+# Default path is deterministic: run the checked-in V2 mini fixture through the
+# same CLI shape used for real V2 roots. To test a downloaded HF dataset root,
+# set GBRAIN_LME_V2_DATA_ROOT=/path/to/longmemeval-v2.
+#
+# Optional local reranker lane:
+#   LLAMA_SERVER_RERANKER_BASE_URL=http://localhost:8081/v1 \
+#   GBRAIN_LME_V2_LOCAL_RERANKER_MODEL=llama-server-reranker:qwen3-reranker-0.6b \
+#   scripts/eval-longmemeval-v2-receipt.sh
 
 ROOT="$(git rev-parse --show-toplevel)"
-OUT_DIR="${1:-$ROOT/docs/eval/results/longmemeval-v2-$(date -u +%Y-%m-%d)}"
-WORK_DIR="${GBRAIN_LME_V2_WORKDIR:-/tmp/gbrain-lme-v2-receipt}"
-DATASET_API="https://huggingface.co/api/datasets/xiaowu0162/longmemeval-v2"
-DATASET_BASE="https://huggingface.co/datasets/xiaowu0162/longmemeval-v2/resolve/main"
+DATA_ROOT="${GBRAIN_LME_V2_DATA_ROOT:-$ROOT/test/fixtures/longmemeval-v2-mini}"
+OUT_DIR="${1:-$ROOT/docs/eval/results/longmemeval-v2-fixture}"
+LIMIT="${GBRAIN_LME_V2_LIMIT:-1}"
+TOP_K="${GBRAIN_LME_V2_TOP_K:-2}"
+LOCAL_RERANKER_MODEL="${GBRAIN_LME_V2_LOCAL_RERANKER_MODEL:-}"
 
-mkdir -p "$OUT_DIR" "$WORK_DIR"
+mkdir -p "$OUT_DIR"
 
-curl -fsSL "$DATASET_API" > "$WORK_DIR/hf-api.json"
-curl -fsSL "$DATASET_BASE/questions.jsonl" > "$WORK_DIR/questions.jsonl"
-curl -fsSL "$DATASET_BASE/haystacks/lme_v2_small.json" > "$WORK_DIR/lme_v2_small.json"
-curl -fsSL "$DATASET_BASE/SCHEMA.md" > "$WORK_DIR/SCHEMA.md"
-curl -fsSL "$DATASET_BASE/checksums.sha256" > "$WORK_DIR/checksums.sha256"
-
-python3 - "$ROOT" "$WORK_DIR" "$OUT_DIR" > "$OUT_DIR/receipt.json" <<'PY'
-import collections
-import hashlib
+python3 - "$ROOT" "$DATA_ROOT" "$OUT_DIR" "$LIMIT" "$TOP_K" "$LOCAL_RERANKER_MODEL" <<'PY'
 import json
+import os
 import pathlib
 import subprocess
 import sys
+import time
 
 root = pathlib.Path(sys.argv[1])
-work = pathlib.Path(sys.argv[2])
+data_root = pathlib.Path(sys.argv[2])
 out = pathlib.Path(sys.argv[3])
+limit = sys.argv[4]
+top_k = sys.argv[5]
+local_reranker_model = sys.argv[6]
 
-api = json.loads((work / "hf-api.json").read_text())
-questions = [json.loads(line) for line in (work / "questions.jsonl").read_text().splitlines() if line.strip()]
-haystack = json.loads((work / "lme_v2_small.json").read_text())
+out.mkdir(parents=True, exist_ok=True)
 
-probe_output = out / "probe-current-harness.jsonl"
-probe_log = out / "probe-current-harness.log"
-cmd = [
-    "bun", "src/cli.ts", "eval", "longmemeval",
-    str(work / "questions.jsonl"),
-    "--limit", "1",
-    "--retrieval-only",
-    "--mode", "conservative",
-    "--output", str(probe_output),
+def rel(path: pathlib.Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+def read_jsonl(path: pathlib.Path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+def run_lane(name, extra_args, reranker_setting, required=True):
+    output = out / f"{name}.jsonl"
+    log = out / f"{name}.log"
+    if output.exists():
+        output.unlink()
+    cmd = [
+        "bun", "src/cli.ts", "eval", "longmemeval",
+        str(data_root),
+        "--limit", limit,
+        "--retrieval-only",
+        "--top-k", top_k,
+        "--by-type",
+        "--by-type-floor", "1",
+        "--no-trajectory",
+        "--output", str(output),
+        *extra_args,
+    ]
+    start = time.perf_counter()
+    proc = subprocess.run(cmd, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    latency_ms = round((time.perf_counter() - start) * 1000)
+    log.write_text(proc.stdout)
+    rows = read_jsonl(output)
+    question_rows = [row for row in rows if row.get("kind") != "by_type_summary"]
+    first = question_rows[0] if question_rows else None
+    summary = next((row for row in rows if row.get("kind") == "by_type_summary"), None)
+    return {
+        "name": name,
+        "required": required,
+        "command": " ".join(cmd),
+        "exit_code": proc.returncode,
+        "latency_ms": latency_ms,
+        "reranker_setting": reranker_setting,
+        "output_path": rel(output),
+        "log_path": rel(log),
+        "row_count": len(rows),
+        "first_question_row": first,
+        "summary": summary,
+        "passes_gate": (
+            proc.returncode == 0
+            and first is not None
+            and first.get("dataset_schema") == "longmemeval-v2"
+            and first.get("recall_hit") is True
+        ),
+    }
+
+lanes = [
+    run_lane(
+        "keyword-only",
+        ["--keyword-only", "--mode", "conservative"],
+        {"enabled": False, "model": None, "note": "--keyword-only disables vector and rerank paths"},
+    ),
+    run_lane(
+        "hybrid-conservative",
+        ["--mode", "conservative"],
+        {"enabled": False, "model": None, "note": "hybrid path with conservative mode; reranker disabled by mode"},
+        required=False,
+    ),
 ]
-proc = subprocess.run(cmd, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-probe_log.write_text(proc.stdout)
 
-rows = []
-if probe_output.exists():
-    rows = [json.loads(line) for line in probe_output.read_text().splitlines() if line.strip()]
-
-def sha256(path: pathlib.Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+if local_reranker_model:
+    lanes.append(run_lane(
+        "local-reranker",
+        ["--mode", "balanced", "--reranker-model", local_reranker_model],
+        {
+            "enabled": True,
+            "model": local_reranker_model,
+            "base_url": os.environ.get("LLAMA_SERVER_RERANKER_BASE_URL", "http://localhost:8081/v1"),
+            "note": "requires a reachable llama-server --reranking process",
+        },
+        required=False,
+    ))
+else:
+    lanes.append({
+        "name": "local-reranker",
+        "required": False,
+        "skipped": True,
+        "reranker_setting": {
+            "enabled": True,
+            "model": "not configured",
+            "note": "set GBRAIN_LME_V2_LOCAL_RERANKER_MODEL to run this lane",
+        },
+        "passes_gate": None,
+    })
 
 receipt = {
-    "schema_version": 1,
+    "schema_version": 2,
     "generated_at": subprocess.check_output(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True).strip(),
     "repo_commit": subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=root, text=True).strip(),
     "dataset": {
-        "name": "xiaowu0162/longmemeval-v2",
-        "sha": api.get("sha"),
-        "lastModified": api.get("lastModified"),
-        "question_count": len(questions),
-        "domains": dict(collections.Counter(q.get("domain") for q in questions)),
-        "question_types": dict(collections.Counter(q.get("question_type") for q in questions)),
-        "image_question_count": sum(1 for q in questions if q.get("image")),
-        "small_haystack_question_count": len(haystack),
-        "small_haystack_min": min(len(v) for v in haystack.values()) if haystack else 0,
-        "small_haystack_max": max(len(v) for v in haystack.values()) if haystack else 0,
-        "questions_sha256": sha256(work / "questions.jsonl"),
-        "small_haystack_sha256": sha256(work / "lme_v2_small.json"),
+        "path": rel(data_root),
+        "kind": "longmemeval-v2-root" if (data_root / "questions.jsonl").exists() else "unknown",
+        "v2_tier": "small",
+        "limit": int(limit),
+        "top_k": int(top_k),
     },
-    "probe": {
-        "purpose": "prove whether the current v1-shaped LongMemEval harness can consume V2 questions directly",
-        "command": " ".join(cmd),
-        "reproduce_command": "scripts/eval-longmemeval-v2-receipt.sh",
-        "exit_code": proc.returncode,
-        "row_count": len(rows),
-        "first_row": rows[0] if rows else None,
-        "log_path": str(probe_log.relative_to(root)) if probe_log.is_relative_to(root) else str(probe_log),
-        "output_path": str(probe_output.relative_to(root)) if probe_output.is_relative_to(root) else str(probe_output),
-    },
+    "lanes": lanes,
 }
-print(json.dumps(receipt, indent=2, sort_keys=True))
+
+(out / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+required_failures = [lane for lane in lanes if lane.get("required") and not lane.get("passes_gate")]
+
+lines = []
+lines.append("# LongMemEval-V2 Tracking Receipt")
+lines.append("")
+lines.append("Generated by `scripts/eval-longmemeval-v2-receipt.sh`.")
+lines.append("")
+lines.append("## Decision")
+lines.append("")
+if required_failures:
+    lines.append("The pinned V2 receipt did not pass. Treat this as a harness regression until the required lanes recover.")
+else:
+    lines.append("The current LongMemEval harness loads a V2 root and records recall evidence on the pinned fixture. This is enough to keep V2 tracking alive without pretending a full HF sweep has run.")
+lines.append("")
+lines.append("## Dataset")
+lines.append("")
+lines.append(f"- Path: `{receipt['dataset']['path']}`")
+lines.append(f"- Repo commit: `{receipt['repo_commit']}`")
+lines.append(f"- Limit: `{limit}`")
+lines.append(f"- Top K: `{top_k}`")
+lines.append("")
+lines.append("## Matrix")
+lines.append("")
+lines.append("| Lane | Required | Exit | Recall hit | Latency ms | Reranker | Status | Output |")
+lines.append("|---|---:|---:|---:|---:|---|---|---|")
+for lane in lanes:
+    if lane.get("skipped"):
+        lines.append(f"| `{lane['name']}` | no | skipped | n/a | n/a | {lane['reranker_setting']['note']} | not configured | n/a |")
+        continue
+    first = lane.get("first_question_row") or {}
+    reranker = lane["reranker_setting"].get("model") or lane["reranker_setting"].get("note", "none")
+    status = "pass" if lane.get("passes_gate") else first.get("error", "no recall hit")
+    lines.append(
+        f"| `{lane['name']}` | {'yes' if lane['required'] else 'no'} | `{lane['exit_code']}` | "
+        f"`{first.get('recall_hit')}` | `{lane['latency_ms']}` | `{reranker}` | `{status}` | `{lane['output_path']}` |"
+    )
+lines.append("")
+lines.append("## Local Reranker Probe")
+lines.append("")
+lines.append("Run this only when a local llama.cpp reranker is actually listening:")
+lines.append("")
+lines.append("```bash")
+lines.append("LLAMA_SERVER_RERANKER_BASE_URL=http://localhost:8081/v1 \\")
+lines.append("GBRAIN_LME_V2_LOCAL_RERANKER_MODEL=llama-server-reranker:qwen3-reranker-0.6b \\")
+lines.append("scripts/eval-longmemeval-v2-receipt.sh")
+lines.append("```")
+lines.append("")
+lines.append("Start with `Qwen3-Reranker-0.6B`, then `Qwen3-Reranker-4B` only if the smaller lane shows useful recall or ranking movement for acceptable latency. Keep `Qwen3-Reranker-8B` and `BAAI/bge-reranker-v2-m3` as later comparison candidates.")
+lines.append("")
+lines.append("## Still Not Proven")
+lines.append("")
+lines.append("- This fixture receipt is not a full LongMemEval-V2 benchmark sweep.")
+lines.append("- Public V2 haystacks do not carry private answer labels unless labels are supplied, so recall gates require a labeled fixture or labeled local copy.")
+lines.append("- A local reranker comparison is skipped unless a reachable `llama-server --reranking` process is configured.")
+lines.append("")
+
+(out / "README.md").write_text("\n".join(lines))
+
+print(out)
+if required_failures:
+    sys.exit(1)
 PY
-
-python3 - "$OUT_DIR" > "$OUT_DIR/README.md" <<'PY'
-import json
-import pathlib
-import sys
-
-out = pathlib.Path(sys.argv[1])
-receipt = json.loads((out / "receipt.json").read_text())
-ds = receipt["dataset"]
-probe = receipt["probe"]
-first = probe.get("first_row") or {}
-
-print("# LongMemEval-V2 Search-Mode Receipt")
-print()
-print("Generated by `scripts/eval-longmemeval-v2-receipt.sh`.")
-print()
-print("## Decision")
-print()
-print("This is not enough evidence to justify Sawyer spending more usage on `tokenmax` or a full search-mode sweep yet. The current repo can see the LongMemEval-V2 dataset, but the existing `gbrain eval longmemeval` harness still expects the older v1 per-question haystack shape. A three-mode V2 sweep today would be fake unless the V2 adapter lands first.")
-print()
-print("## Current V2 Dataset")
-print()
-print(f"- Dataset: `xiaowu0162/longmemeval-v2`")
-print(f"- Dataset commit: `{ds['sha']}`")
-print(f"- Last modified: `{ds['lastModified']}`")
-print(f"- Questions: `{ds['question_count']}`")
-print(f"- Domains: `{json.dumps(ds['domains'], sort_keys=True)}`")
-print(f"- Question types: `{json.dumps(ds['question_types'], sort_keys=True)}`")
-print(f"- Image questions: `{ds['image_question_count']}`")
-print(f"- Small haystack coverage: `{ds['small_haystack_question_count']}` questions, `{ds['small_haystack_min']}`-`{ds['small_haystack_max']}` trajectories each")
-print(f"- `questions.jsonl` sha256: `{ds['questions_sha256']}`")
-print(f"- `lme_v2_small.json` sha256: `{ds['small_haystack_sha256']}`")
-print()
-print("## Current Harness Probe")
-print()
-print(f"- Repo commit: `{receipt['repo_commit']}`")
-print(f"- Reproduce command: `{probe['reproduce_command']}`")
-print(f"- Probe command run by the script: `{probe['command']}`")
-print(f"- Exit code: `{probe['exit_code']}`")
-print(f"- Output rows: `{probe['row_count']}`")
-print(f"- First row error: `{first.get('error', 'none')}`")
-print()
-print("The CLI exits `0` because per-question errors are recorded as JSONL rows, but the row has an empty `hypothesis`. That means this receipt is a compatibility failure, not a passing benchmark.")
-print()
-print("## What Is Still Unproven")
-print()
-print("- No current V2 retrieval scores exist for `conservative`, `balanced`, or `tokenmax`.")
-print("- No V2 answer-generation scores exist.")
-print("- No V2 comparison proves that `tokenmax` helps Sawyer enough to justify extra usage.")
-print("- The `gbrain eval run-all` path is still an audit-trail stub; direct per-mode commands are the runnable path after a V2 adapter exists.")
-print()
-print("## Next Useful Move")
-print()
-print("Build a small V2 adapter that joins `questions.jsonl`, `trajectories.jsonl`, and `haystacks/lme_v2_small.json` into the existing benchmark brain shape, then run a bounded retrieval-only sweep first:")
-print()
-print("```bash")
-print("for mode in conservative balanced tokenmax; do")
-print("  bun src/cli.ts eval longmemeval-v2 \"$DATA_ROOT\" \\")
-print("    --tier small --limit 30 --retrieval-only --by-type \\")
-print("    --mode \"$mode\" \\")
-print("    --output \"docs/eval/results/longmemeval-v2-$(date -u +%Y-%m-%d)/${mode}.jsonl\"")
-print("done")
-print("```")
-print()
-print("Only after that bounded sweep shows a real quality delta should Sawyer spend on full V2 answer scoring.")
-PY
-
-echo "$OUT_DIR"

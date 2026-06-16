@@ -72,6 +72,8 @@ interface ParsedArgs {
   outputPath?: string;
   /** v0.32.3 — search-lite mode to evaluate under. Resolves through resolveSearchMode. */
   mode?: 'conservative' | 'balanced' | 'tokenmax';
+  /** Override the reranker model for this benchmark run. Implies reranker enabled. */
+  rerankerModel?: string;
   /**
    * v0.35.1.0 — path to a previous run's hypothesis JSONL. Question IDs
    * already present in the file are skipped on this run; the run resumes
@@ -154,6 +156,7 @@ function parseArgs(args: string[]): ParsedArgs {
       }
       continue;
     }
+    if (a === '--reranker-model') { out.rerankerModel = args[++i]; continue; }
     if (!a.startsWith('-') && !out.datasetPath) { out.datasetPath = a; continue; }
   }
   return out;
@@ -182,6 +185,8 @@ function printHelp(): void {
     `                            Mode resolves through src/core/search/mode.ts so the search\n` +
     `                            behavior matches what production gets under that mode.\n` +
     `                            --mode tokenmax implies --expansion unless overridden.\n` +
+    `  --reranker-model M        Override the reranker model for this run and enable reranking.\n` +
+    `                            Example: llama-server-reranker:qwen3-reranker-0.6b.\n` +
     `  --output FILE             Write JSONL to FILE instead of stdout.\n` +
     `  --resume-from FILE        Skip question_ids already present in FILE; resume the\n` +
     `                            remaining questions. Typically the same path as --output\n` +
@@ -638,6 +643,10 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     if (opts.mode) {
       await engine.setConfig('search.mode', opts.mode);
     }
+    if (opts.rerankerModel) {
+      await engine.setConfig('search.reranker.model', opts.rerankerModel);
+      await engine.setConfig('search.reranker.enabled', 'true');
+    }
     for (const q of questions) {
       const qStart = Date.now();
       try {
@@ -882,6 +891,7 @@ async function runOneQuestion(
     // v0.32.3 — record the active mode in every per-question row so reviewers
     // can group/compare without re-running. Omitted when --mode is unset.
     ...(opts.mode ? { mode: opts.mode } : {}),
+    ...(opts.rerankerModel ? { reranker_model: opts.rerankerModel } : {}),
     // v0.40.2.0 — trajectory routing fields. methodology_note stamped
     // at top level so downstream readers see the preprocessing step.
     ...(traj.trajectoryEnabled ? {

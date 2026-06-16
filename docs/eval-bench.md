@@ -344,29 +344,52 @@ benchmark directly against gbrain's hybrid retrieval. Different evaluation
 axis from `eval replay`: public dataset with ground-truth labels, end-to-end
 question-answer pipeline, hermetic per-question brains.
 
-### LongMemEval-V2 compatibility note (2026-06-10)
+### LongMemEval-V2 tracking receipt
 
 LongMemEval-V2 is not the same input shape as the older LongMemEval splits this
 command consumes. V2 separates `questions.jsonl`, `trajectories.jsonl`, and
 haystack maps (`haystacks/lme_v2_small.json`, `haystacks/lme_v2_medium.json`).
-The current `gbrain eval longmemeval <dataset.jsonl>` path expects each question
-row to carry `haystack_sessions`, so it cannot produce real V2 evidence yet.
+`gbrain eval longmemeval` now accepts either a V2 root directory or a
+`questions.jsonl` path with sibling `trajectories.jsonl` and `haystacks/`.
+The adapter joins those files into the benchmark brain shape and emits
+`dataset_schema:"longmemeval-v2"` on each row.
 
-To reproduce the current compatibility receipt without spending on a fake
-benchmark sweep:
+To reproduce the pinned V2 tracking receipt:
 
 ```bash
 scripts/eval-longmemeval-v2-receipt.sh
 ```
 
-The generated receipt records the current Hugging Face dataset SHA, question
-counts, haystack coverage, and the one-question probe showing the current
-harness emits an error row for V2. The checked-in receipt lives at
-[`docs/eval/results/longmemeval-v2-2026-06-10/README.md`](./eval/results/longmemeval-v2-2026-06-10/README.md).
+The default receipt uses the checked-in labeled fixture at
+`test/fixtures/longmemeval-v2-mini`, so it does not need network access or live
+model credentials. It records `keyword-only` and `hybrid-conservative` rows with
+V2 schema, recall, latency, and reranker settings. The checked-in receipt lives
+at [`docs/eval/results/longmemeval-v2-fixture/README.md`](./eval/results/longmemeval-v2-fixture/README.md).
+
+To run the same receipt shape against a downloaded HF dataset root:
+
+```bash
+GBRAIN_LME_V2_DATA_ROOT=/path/to/longmemeval-v2 \
+  scripts/eval-longmemeval-v2-receipt.sh
+```
+
+For local reranker scouting, start with the smallest useful Qwen lane and keep
+larger models as comparison candidates:
+
+```bash
+LLAMA_SERVER_RERANKER_BASE_URL=http://localhost:8081/v1 \
+GBRAIN_LME_V2_LOCAL_RERANKER_MODEL=llama-server-reranker:qwen3-reranker-0.6b \
+  scripts/eval-longmemeval-v2-receipt.sh
+```
+
+If the 0.6B lane shows useful recall or ranking movement for acceptable latency,
+repeat with `llama-server-reranker:qwen3-reranker-4b`. Keep
+`Qwen3-Reranker-8B` and `BAAI/bge-reranker-v2-m3` as later comparison candidates,
+not product direction by themselves.
 
 Do not use `gbrain eval run-all --suites longmemeval` as proof of a V2 sweep.
-That command currently writes audit-trail stub records; after a V2 adapter
-exists, run direct per-mode benchmark commands first.
+That command currently writes audit-trail stub records. Use direct per-mode
+benchmark commands first.
 
 ```bash
 # Download the dataset (visit the HF page in a browser; gated/manual download).
@@ -413,6 +436,9 @@ python evaluate_qa.py /tmp/hypothesis.jsonl
 | `--expansion` | **off** | Multi-query expansion. Off by default for determinism (no per-query Haiku call). Pass to opt in. |
 | `--top-k K` | 10 | Retrieval depth |
 | `--model M` | resolved | Default resolves through `resolveModel()` 6-tier chain (`models.eval.longmemeval` config key) |
+| `--mode M` | unset | Search-lite mode: `conservative`, `balanced`, or `tokenmax` |
+| `--reranker-model M` | unset | Override the reranker model for this run and enable reranking |
+| `--v2-tier small\|medium` | `small` | LongMemEval-V2 haystack tier for V2 roots or `questions.jsonl` paths |
 | `--output FILE` | stdout | Write hypothesis JSONL to file instead of stdout |
 
 ### Numbers
