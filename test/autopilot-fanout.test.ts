@@ -220,6 +220,9 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     // source_id threaded through job data
     const sourceIds = added.map(j => (j.data as Record<string, unknown>).source_id).sort();
     expect(sourceIds).toEqual(['alpha', 'beta']);
+    // repoPath must follow each source's local_path, not the global fallback.
+    const repoPaths = added.map(j => (j.data as Record<string, unknown>).repoPath).sort();
+    expect(repoPaths).toEqual(['/tmp/alpha', '/tmp/beta']);
   });
 
   test('pull: true only when source.config.remote_url is set', async () => {
