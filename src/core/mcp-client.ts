@@ -152,6 +152,10 @@ function requireRemoteMcp(config: GBrainConfig | null): NonNullable<GBrainConfig
   return config.remote_mcp;
 }
 
+function remoteAuthMode(remote: NonNullable<GBrainConfig['remote_mcp']>): 'oauth' | 'bearer' {
+  return remote.auth === 'bearer' ? 'bearer' : 'oauth';
+}
+
 function resolveSecret(remote: NonNullable<GBrainConfig['remote_mcp']>): string {
   const secret = process.env.GBRAIN_REMOTE_CLIENT_SECRET ?? remote.oauth_client_secret;
   if (!secret) {
@@ -163,20 +167,62 @@ function resolveSecret(remote: NonNullable<GBrainConfig['remote_mcp']>): string 
   return secret;
 }
 
+function resolveBearerToken(remote: NonNullable<GBrainConfig['remote_mcp']>): string {
+  const token = process.env.GBRAIN_REMOTE_TOKEN ?? remote.bearer_token;
+  if (!token) {
+    throw new RemoteMcpError(
+      'config',
+      'No bearer token available. Set GBRAIN_REMOTE_TOKEN or rerun `gbrain init --mcp-only --bearer-token`.',
+    );
+  }
+  return token;
+}
+
+function requireIssuerUrl(remote: NonNullable<GBrainConfig['remote_mcp']>): string {
+  if (!remote.issuer_url) {
+    throw new RemoteMcpError(
+      'config',
+      'No issuer_url available for OAuth thin-client config. Rerun `gbrain init --mcp-only` with --issuer-url.',
+    );
+  }
+  return remote.issuer_url;
+}
+
+function requireOauthClientId(remote: NonNullable<GBrainConfig['remote_mcp']>): string {
+  if (!remote.oauth_client_id) {
+    throw new RemoteMcpError(
+      'config',
+      'No oauth_client_id available for OAuth thin-client config. Rerun `gbrain init --mcp-only` with --oauth-client-id.',
+    );
+  }
+  return remote.oauth_client_id;
+}
+
+function authAfterRefreshMessage(remote: NonNullable<GBrainConfig['remote_mcp']>): string {
+  return remoteAuthMode(remote) === 'bearer'
+    ? 'Auth failed with the configured bearer token. Verify GBRAIN_REMOTE_TOKEN or bearer_token is still valid on the host.'
+    : 'Auth failed after token refresh. Verify oauth_client_id and secret are still valid; the host operator may need to re-run `gbrain auth register-client`.';
+}
+
 /**
  * Mint or reuse a cached access_token for the given config. Throws
  * RemoteMcpError on discovery failure or auth rejection.
  */
 async function getAccessToken(config: GBrainConfig, force = false): Promise<string> {
   const remote = requireRemoteMcp(config);
+  if (remoteAuthMode(remote) === 'bearer') {
+    return resolveBearerToken(remote);
+  }
   const cached = tokenCache.get(remote.mcp_url);
   if (!force && cached && cached.expires_at_ms > Date.now()) {
     return cached.access_token;
   }
 
   const secret = resolveSecret(remote);
+  const issuerUrl = requireIssuerUrl(remote);
+  const clientId = requireOauthClientId(remote);
 
-  const disco = await discoverOAuth(remote.issuer_url);
+  const disco = await discoverOAuth(issuerUrl);
   if (!disco.ok) {
     throw new RemoteMcpError(
       disco.reason === 'http' || disco.reason === 'parse' ? 'discovery' : 'network',
@@ -185,7 +231,7 @@ async function getAccessToken(config: GBrainConfig, force = false): Promise<stri
     );
   }
 
-  const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, remote.oauth_client_id, secret);
+  const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, clientId, secret);
   if (!tokenRes.ok) {
     throw new RemoteMcpError(
       tokenRes.reason === 'auth' ? 'auth' : tokenRes.reason === 'network' ? 'network' : 'discovery',
@@ -343,7 +389,7 @@ export async function callRemoteTool(
         if (mintErr instanceof RemoteMcpError && mintErr.reason === 'auth') {
           throw new RemoteMcpError(
             'auth_after_refresh',
-            `Auth failed after token refresh. Verify oauth_client_id and secret are still valid; the host operator may need to re-run \`gbrain auth register-client\`.`,
+            authAfterRefreshMessage(remote),
             { mcp_url: remote.mcp_url },
           );
         }
@@ -356,7 +402,7 @@ export async function callRemoteTool(
         if (/401|unauthor|invalid.token/i.test(m2)) {
           throw new RemoteMcpError(
             'auth_after_refresh',
-            `Auth failed after token refresh. Verify oauth_client_id and secret are still valid; the host operator may need to re-run \`gbrain auth register-client\`.`,
+            authAfterRefreshMessage(remote),
             { mcp_url: remote.mcp_url },
           );
         }

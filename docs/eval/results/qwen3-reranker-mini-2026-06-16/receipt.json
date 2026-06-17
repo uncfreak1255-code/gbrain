@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-16T23:45:05.705Z",
+  "fixture_path": "/Users/sawbeck/gbrain/test/fixtures/longmemeval-mini.jsonl",
+  "questions_considered": 5,
+  "top_k": 5,
+  "timeout_ms": 30000,
+  "reranker_base_url": "http://127.0.0.1:8081/v1",
+  "summary": {
+    "status": "blocked",
+    "winner": null,
+    "note": "Comparison blocked: fewer than two reranker models completed."
+  },
+  "models": [
+    {
+      "model": "llama-server-reranker:qwen3-reranker-0.6b",
+      "ok": false,
+      "error": "rerank: Unable to connect. Is the computer able to access the url?",
+      "questions_run": 0,
+      "recall_at_k": 0,
+      "top1_hit_rate": 0,
+      "question_results": []
+    },
+    {
+      "model": "llama-server-reranker:qwen3-reranker-4b",
+      "ok": false,
+      "error": "rerank: Unable to connect. Is the computer able to access the url?",
+      "questions_run": 0,
+      "recall_at_k": 0,
+      "top1_hit_rate": 0,
+      "question_results": []
+    }
+  ]
+}

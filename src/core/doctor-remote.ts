@@ -29,11 +29,16 @@ export interface RemoteDoctorReport {
   schema_version: 2;
   mode: 'thin-client';
   status: 'ok' | 'warn' | 'fail';
+  auth: 'oauth' | 'bearer';
   mcp_url: string;
-  issuer_url: string;
-  oauth_client_id: string;
+  issuer_url?: string;
+  oauth_client_id?: string;
   oauth_scope?: string;
   checks: RemoteCheck[];
+}
+
+function remoteAuthMode(remote: NonNullable<GBrainConfig['remote_mcp']>): 'oauth' | 'bearer' {
+  return remote.auth === 'bearer' ? 'bearer' : 'oauth';
 }
 
 /**
@@ -79,6 +84,7 @@ export async function collectRemoteDoctorReport(
 ): Promise<RemoteDoctorReport> {
   const remote = config.remote_mcp;
   const checks: RemoteCheck[] = [];
+  let grantedScope = '';
 
   // 1. Config integrity. If the dispatch guard let us reach here at all,
   // remote_mcp is set, but defense-in-depth: validate the URL fields look
@@ -95,111 +101,152 @@ export async function collectRemoteDoctorReport(
       schema_version: 2,
       mode: 'thin-client',
       status: 'fail',
+      auth: 'oauth',
       mcp_url: '',
-      issuer_url: '',
-      oauth_client_id: '',
       checks,
     };
   }
 
-  const issuerOk = /^https?:\/\//i.test(remote.issuer_url);
+  const authMode = remoteAuthMode(remote);
   const mcpOk = /^https?:\/\//i.test(remote.mcp_url);
+  const issuerOk = authMode === 'bearer'
+    ? true
+    : typeof remote.issuer_url === 'string' && /^https?:\/\//i.test(remote.issuer_url);
   if (!issuerOk || !mcpOk) {
     checks.push({
       name: 'config_integrity',
       status: 'fail',
-      message: `URL fields malformed: issuer_url=${remote.issuer_url}, mcp_url=${remote.mcp_url}`,
+      message: authMode === 'bearer'
+        ? `URL field malformed: mcp_url=${remote.mcp_url}`
+        : `URL fields malformed: issuer_url=${remote.issuer_url}, mcp_url=${remote.mcp_url}`,
     });
   } else {
     checks.push({
       name: 'config_integrity',
       status: 'ok',
-      message: `mcp_url=${remote.mcp_url}, issuer_url=${remote.issuer_url}`,
+      message: authMode === 'bearer'
+        ? `mcp_url=${remote.mcp_url}, auth=bearer`
+        : `mcp_url=${remote.mcp_url}, issuer_url=${remote.issuer_url}`,
     });
   }
 
-  // Resolve the secret: env var wins, then config file value.
-  const clientSecret = process.env.GBRAIN_REMOTE_CLIENT_SECRET ?? remote.oauth_client_secret;
-  const clientSecretSource: 'env' | 'config' | 'none' = process.env.GBRAIN_REMOTE_CLIENT_SECRET
-    ? 'env'
-    : remote.oauth_client_secret
-      ? 'config'
-      : 'none';
-
-  if (!clientSecret) {
+  if (authMode === 'bearer') {
+    const bearerToken = process.env.GBRAIN_REMOTE_TOKEN ?? remote.bearer_token;
+    const bearerSource: 'env' | 'config' | 'none' = process.env.GBRAIN_REMOTE_TOKEN
+      ? 'env'
+      : remote.bearer_token
+        ? 'config'
+        : 'none';
+    if (!bearerToken) {
+      checks.push({
+        name: 'bearer_credentials',
+        status: 'fail',
+        message: 'No bearer token available. Set GBRAIN_REMOTE_TOKEN or rerun `gbrain init --mcp-only --bearer-token`.',
+      });
+      return finalize(remote, checks);
+    }
     checks.push({
-      name: 'oauth_credentials',
-      status: 'fail',
-      message: 'No client_secret available. Set GBRAIN_REMOTE_CLIENT_SECRET or rerun `gbrain init --mcp-only` with --oauth-client-secret.',
+      name: 'bearer_credentials',
+      status: 'ok',
+      message: `token_source=${bearerSource}`,
     });
-    return {
-      schema_version: 2,
-      mode: 'thin-client',
-      status: 'fail',
-      mcp_url: remote.mcp_url,
-      issuer_url: remote.issuer_url,
-      oauth_client_id: remote.oauth_client_id,
-      checks,
-    };
-  }
-
-  checks.push({
-    name: 'oauth_credentials',
-    status: 'ok',
-    message: `client_id=${remote.oauth_client_id}, secret_source=${clientSecretSource}`,
-  });
-
-  // 2. OAuth discovery
-  const disco = await discoverOAuth(remote.issuer_url);
-  if (!disco.ok) {
-    checks.push({
-      name: 'oauth_discovery',
-      status: 'fail',
-      message: disco.message,
-      detail: { reason: disco.reason, ...(disco.status ? { status: disco.status } : {}) },
-    });
-    return finalize(remote, checks);
-  }
-  checks.push({
-    name: 'oauth_discovery',
-    status: 'ok',
-    message: `token_endpoint=${disco.metadata.token_endpoint}`,
-  });
-
-  // 3. Token round-trip
-  const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, remote.oauth_client_id, clientSecret);
-  if (!tokenRes.ok) {
-    checks.push({
-      name: 'oauth_token',
-      status: 'fail',
-      message: tokenRes.message,
-      detail: { reason: tokenRes.reason, ...(tokenRes.status ? { status: tokenRes.status } : {}) },
-    });
-    return finalize(remote, checks);
-  }
-  checks.push({
-    name: 'oauth_token',
-    status: 'ok',
-    message: `${tokenRes.token.token_type ?? 'bearer'} (scope=${tokenRes.token.scope ?? 'unspecified'}, expires_in=${tokenRes.token.expires_in ?? '?'})`,
-    detail: { scope: tokenRes.token.scope ?? null, expires_in: tokenRes.token.expires_in ?? null },
-  });
-
-  // 4. MCP smoke
-  const mcpRes = await smokeTestMcp(remote.mcp_url, tokenRes.token.access_token);
-  if (!mcpRes.ok) {
+    const mcpRes = await smokeTestMcp(remote.mcp_url, bearerToken);
+    if (!mcpRes.ok) {
+      checks.push({
+        name: 'mcp_smoke',
+        status: 'fail',
+        message: mcpRes.message,
+        detail: { reason: mcpRes.reason, ...(mcpRes.status ? { status: mcpRes.status } : {}) },
+      });
+      return finalize(remote, checks);
+    }
     checks.push({
       name: 'mcp_smoke',
-      status: 'fail',
-      message: mcpRes.message,
-      detail: { reason: mcpRes.reason, ...(mcpRes.status ? { status: mcpRes.status } : {}) },
+      status: 'ok',
+      message: 'initialize round-trip succeeded',
     });
-    return finalize(remote, checks, tokenRes.token.scope);
+  } else {
+    // Resolve the secret: env var wins, then config file value.
+    const clientSecret = process.env.GBRAIN_REMOTE_CLIENT_SECRET ?? remote.oauth_client_secret;
+    const clientSecretSource: 'env' | 'config' | 'none' = process.env.GBRAIN_REMOTE_CLIENT_SECRET
+      ? 'env'
+      : remote.oauth_client_secret
+        ? 'config'
+        : 'none';
+    const clientId = remote.oauth_client_id;
+
+    if (!clientSecret || !clientId || !remote.issuer_url) {
+      checks.push({
+        name: 'oauth_credentials',
+        status: 'fail',
+        message: !clientId
+          ? 'No oauth_client_id available. Rerun `gbrain init --mcp-only` with --oauth-client-id.'
+          : !remote.issuer_url
+            ? 'No issuer_url available. Rerun `gbrain init --mcp-only` with --issuer-url.'
+            : 'No client_secret available. Set GBRAIN_REMOTE_CLIENT_SECRET or rerun `gbrain init --mcp-only` with --oauth-client-secret.',
+      });
+      return finalize(remote, checks);
+    }
+
+    checks.push({
+      name: 'oauth_credentials',
+      status: 'ok',
+      message: `client_id=${clientId}, secret_source=${clientSecretSource}`,
+    });
+
+    // 2. OAuth discovery
+    const disco = await discoverOAuth(remote.issuer_url);
+    if (!disco.ok) {
+      checks.push({
+        name: 'oauth_discovery',
+        status: 'fail',
+        message: disco.message,
+        detail: { reason: disco.reason, ...(disco.status ? { status: disco.status } : {}) },
+      });
+      return finalize(remote, checks);
+    }
+    checks.push({
+      name: 'oauth_discovery',
+      status: 'ok',
+      message: `token_endpoint=${disco.metadata.token_endpoint}`,
+    });
+
+    // 3. Token round-trip
+    const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, clientId, clientSecret);
+    if (!tokenRes.ok) {
+      checks.push({
+        name: 'oauth_token',
+        status: 'fail',
+        message: tokenRes.message,
+        detail: { reason: tokenRes.reason, ...(tokenRes.status ? { status: tokenRes.status } : {}) },
+      });
+      return finalize(remote, checks);
+    }
+    checks.push({
+      name: 'oauth_token',
+      status: 'ok',
+      message: `${tokenRes.token.token_type ?? 'bearer'} (scope=${tokenRes.token.scope ?? 'unspecified'}, expires_in=${tokenRes.token.expires_in ?? '?'})`,
+      detail: { scope: tokenRes.token.scope ?? null, expires_in: tokenRes.token.expires_in ?? null },
+    });
+    grantedScope = tokenRes.token.scope ?? '';
+
+    // 4. MCP smoke
+    const mcpRes = await smokeTestMcp(remote.mcp_url, tokenRes.token.access_token);
+    if (!mcpRes.ok) {
+      checks.push({
+        name: 'mcp_smoke',
+        status: 'fail',
+        message: mcpRes.message,
+        detail: { reason: mcpRes.reason, ...(mcpRes.status ? { status: mcpRes.status } : {}) },
+      });
+      return finalize(remote, checks, tokenRes.token.scope);
+    }
+    checks.push({
+      name: 'mcp_smoke',
+      status: 'ok',
+      message: 'initialize round-trip succeeded',
+    });
   }
-  checks.push({
-    name: 'mcp_smoke',
-    status: 'ok',
-    message: 'initialize round-trip succeeded',
-  });
 
   // 5. v0.31.1 (CDX-5): scope-probe — verify the OAuth client actually has
   // the scopes its token claims. Calls a representative read op (always
@@ -213,7 +260,6 @@ export async function collectRemoteDoctorReport(
   // GBRAIN_DOCTOR_SKIP_SCOPE_PROBE=1 (env-flag for ops bypass) — the MCP
   // SDK Client hangs on JSON-RPC shape mismatch in fixtures that don't
   // implement full tools/call.
-  const grantedScope = tokenRes.token.scope ?? '';
   const skipProbe = opts.skipScopeProbe || process.env.GBRAIN_DOCTOR_SKIP_SCOPE_PROBE === '1';
   if (!skipProbe) {
     const scopeResult = await probeScopes(config);
@@ -251,7 +297,7 @@ export async function collectRemoteDoctorReport(
     checks.push(await runUpgradeDriftCheck(config));
   }
 
-  return finalize(remote, checks, tokenRes.token.scope);
+  return finalize(remote, checks, grantedScope || undefined);
 }
 
 /**
@@ -539,9 +585,10 @@ function finalize(
     schema_version: 2,
     mode: 'thin-client',
     status,
+    auth: remoteAuthMode(remote),
     mcp_url: remote.mcp_url,
-    issuer_url: remote.issuer_url,
-    oauth_client_id: remote.oauth_client_id,
+    ...(remote.issuer_url ? { issuer_url: remote.issuer_url } : {}),
+    ...(remote.oauth_client_id ? { oauth_client_id: remote.oauth_client_id } : {}),
     ...(scope ? { oauth_scope: scope } : {}),
     checks,
   };
@@ -551,9 +598,10 @@ function printHumanReport(report: RemoteDoctorReport): void {
   console.log('\nGBrain Health Check (thin-client)');
   console.log('=================================');
   console.log(`Mode:        ${report.mode}`);
-  console.log(`Issuer URL:  ${report.issuer_url}`);
+  console.log(`Auth:        ${report.auth}`);
+  if (report.issuer_url) console.log(`Issuer URL:  ${report.issuer_url}`);
   console.log(`MCP URL:     ${report.mcp_url}`);
-  console.log(`Client ID:   ${report.oauth_client_id}`);
+  if (report.oauth_client_id) console.log(`Client ID:   ${report.oauth_client_id}`);
   if (report.oauth_scope) console.log(`OAuth scope: ${report.oauth_scope}`);
   console.log('');
 
@@ -571,7 +619,11 @@ function printHumanReport(report: RemoteDoctorReport): void {
     console.log('Connectivity check FAILED — see error above.');
     console.log('Common fixes:');
     console.log('  - Confirm the host is reachable + `gbrain serve --http` is running.');
-    console.log('  - Confirm OAuth credentials are valid (have the host operator re-mint via `gbrain auth register-client`).');
-    console.log('  - Confirm `mcp_url` matches the path the host serves /mcp on (default: <issuer_url>/mcp).');
+    if (report.auth === 'oauth') {
+      console.log('  - Confirm OAuth credentials are valid (have the host operator re-mint via `gbrain auth register-client`).');
+    } else {
+      console.log('  - Confirm the bearer token is still valid (`GBRAIN_REMOTE_TOKEN` or saved bearer_token).');
+    }
+    console.log('  - Confirm `mcp_url` matches the path the host serves /mcp on.');
   }
 }
