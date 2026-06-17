@@ -16,9 +16,21 @@
  */
 
 import { describe, test, expect } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { __thinkAdapter } from '../src/core/think/index.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
 import { withEnv } from './helpers/with-env.ts';
+
+async function withNoAnthropicKey<T>(fn: () => T | Promise<T>): Promise<T> {
+  const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-think-no-key-'));
+  try {
+    return await withEnv({ ANTHROPIC_API_KEY: undefined, GBRAIN_HOME: gbrainHome }, fn);
+  } finally {
+    rmSync(gbrainHome, { recursive: true, force: true });
+  }
+}
 
 describe('think gateway adapter — response shape conversion', () => {
   test('chatResultToMessage maps ChatResult.text to Anthropic.Message content[0].text', () => {
@@ -76,17 +88,17 @@ describe('think gateway adapter — model-id normalization', () => {
   });
 
   test('tryBuildGatewayClient returns null when ANTHROPIC_API_KEY is absent (preserves legacy NO_ANTHROPIC_API_KEY signal)', async () => {
-    await withEnv({ ANTHROPIC_API_KEY: undefined }, async () => {
+    await withNoAnthropicKey(async () => {
       const client = await __thinkAdapter.tryBuildGatewayClient('claude-opus-4-7');
       expect(client).toBeNull();
     });
   });
 
-  test('hasAnthropicKey reads process.env', async () => {
+  test('hasAnthropicKey reads process.env and gbrain config absence', async () => {
     await withEnv({ ANTHROPIC_API_KEY: 'sk-test-key' }, async () => {
       expect(__thinkAdapter.hasAnthropicKey()).toBe(true);
     });
-    await withEnv({ ANTHROPIC_API_KEY: undefined }, async () => {
+    await withNoAnthropicKey(async () => {
       expect(__thinkAdapter.hasAnthropicKey()).toBe(false);
     });
   });
@@ -115,7 +127,7 @@ describe('think gateway adapter — #1698 slash form + explicit-model fork', () 
   });
 
   test('explicit anthropic model with no key THROWS (unavailable)', async () => {
-    await withEnv({ ANTHROPIC_API_KEY: undefined }, async () => {
+    await withNoAnthropicKey(async () => {
       await expect(
         __thinkAdapter.tryBuildGatewayClient('anthropic:claude-sonnet-4-6', { explicitModel: true }),
       ).rejects.toThrow(/not usable.*unavailable/);

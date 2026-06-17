@@ -9,6 +9,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { checkFederationHealth } from '../src/commands/doctor.ts';
+import { getEmbeddingDimensions } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
@@ -71,6 +72,7 @@ describe('checkFederationHealth', () => {
       `INSERT INTO sources (id, name, config, last_sync_at) VALUES ('uncovered', 'uncovered', '{"federated":true}', NOW())`,
     );
     // Seed 200 pages with chunks; 10 embedded.
+    const dims = getEmbeddingDimensions();
     for (let i = 0; i < 200; i++) {
       await engine.putPage(`p${i}`, { type: 'note', title: `p${i}`, compiled_truth: `body ${i}` }, { sourceId: 'uncovered' });
       await engine.upsertChunks(
@@ -80,7 +82,7 @@ describe('checkFederationHealth', () => {
           chunk_text: `chunk ${i}`,
           chunk_source: 'compiled_truth',
           token_count: 1,
-          embedding: i < 10 ? new Float32Array(1536) : undefined,
+          embedding: i < 10 ? new Float32Array(dims) : undefined,
         }],
         { sourceId: 'uncovered' },
       );
