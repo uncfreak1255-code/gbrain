@@ -665,7 +665,9 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                     idempotency_key: `autopilot-sync:${src.id}:${slot}`,
                     max_attempts: 2,
                     timeout_ms: timeoutMs,
-                    maxWaiting: 1,
+                    // No maxWaiting here. It coalesces by (name, queue), not
+                    // source, so it would collapse all freshness syncs into one
+                    // waiting job and strand the rest of the sources.
                   },
                 );
                 if (jsonMode) {
@@ -1150,6 +1152,9 @@ function writeWrapperScript(repoPath: string): string {
 # OPENAI/ANTHROPIC keys exported in zshenv reach autopilot.
 [ -f ~/.zshenv ] && source ~/.zshenv 2>/dev/null
 source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null || true
+# Bun's global gbrain shim is a \`#!/usr/bin/env bun\` script. launchd's
+# default PATH omits ~/.bun/bin, so export it explicitly before exec.
+export PATH="$HOME/.bun/bin:$PATH"
 exec '${safeGbrainPath}' autopilot --repo '${safeRepoPath}'
 `;
   writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
