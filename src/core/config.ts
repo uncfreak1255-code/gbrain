@@ -261,20 +261,24 @@ export interface GBrainConfig {
    * `connectEngine` and refuses any DB-bound subcommand. The `engine` field
    * above is still populated (default-inferred) but never used.
    *
-   * Two URLs because OAuth discovery + `/token` live at the issuer root,
-   * while tool dispatch lives at `/mcp`. They compose from a common base
-   * in the typical setup but the config keeps them explicit so reverse-proxy
-   * topologies work.
+   * Auth can be either:
+   *   - OAuth client-credentials (`auth: 'oauth'`, default when omitted)
+   *   - a static bearer token (`auth: 'bearer'`)
+   *
+   * OAuth needs both URLs because discovery + `/token` live at the issuer
+   * root while tool dispatch lives at `/mcp`. Bearer mode only needs `mcp_url`.
    *
    * `oauth_client_secret` can also be supplied via the
-   * `GBRAIN_REMOTE_CLIENT_SECRET` env var (preferred for headless agents);
-   * env-var value wins when both are present.
+   * `GBRAIN_REMOTE_CLIENT_SECRET` env var. `bearer_token` can also be
+   * supplied via `GBRAIN_REMOTE_TOKEN`. Env-var values win when present.
    */
   remote_mcp?: {
-    issuer_url: string;
+    auth?: 'oauth' | 'bearer';
     mcp_url: string;
-    oauth_client_id: string;
+    issuer_url?: string;
+    oauth_client_id?: string;
     oauth_client_secret?: string;
+    bearer_token?: string;
   };
 
   /**
@@ -433,8 +437,11 @@ export function loadConfig(): GBrainConfig | null {
     ...(process.env.GBRAIN_EMBEDDING_IMAGE_OCR_MODEL
       ? { embedding_image_ocr_model: process.env.GBRAIN_EMBEDDING_IMAGE_OCR_MODEL }
       : {}),
-    ...(process.env.GBRAIN_REMOTE_CLIENT_SECRET && fileConfig?.remote_mcp
+    ...(process.env.GBRAIN_REMOTE_CLIENT_SECRET && fileConfig?.remote_mcp && (fileConfig.remote_mcp.auth ?? 'oauth') === 'oauth'
       ? { remote_mcp: { ...fileConfig.remote_mcp, oauth_client_secret: process.env.GBRAIN_REMOTE_CLIENT_SECRET } }
+      : {}),
+    ...(process.env.GBRAIN_REMOTE_TOKEN && fileConfig?.remote_mcp?.auth === 'bearer'
+      ? { remote_mcp: { ...fileConfig.remote_mcp, bearer_token: process.env.GBRAIN_REMOTE_TOKEN } }
       : {}),
   };
 

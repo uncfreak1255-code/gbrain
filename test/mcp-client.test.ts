@@ -119,10 +119,22 @@ function makeConfig(): GBrainConfig {
   return {
     engine: 'postgres',
     remote_mcp: {
+      auth: 'oauth',
       issuer_url: `http://127.0.0.1:${port}`,
       mcp_url: `http://127.0.0.1:${port}/mcp`,
       oauth_client_id: 'cid',
       oauth_client_secret: 'csecret',
+    },
+  };
+}
+
+function makeBearerConfig(): GBrainConfig {
+  return {
+    engine: 'postgres',
+    remote_mcp: {
+      auth: 'bearer',
+      mcp_url: `http://127.0.0.1:${port}/mcp`,
+      bearer_token: 'gbrain_bearer_test_token',
     },
   };
 }
@@ -152,6 +164,14 @@ describe('callRemoteTool — happy path', () => {
     };
     await callRemoteTool(makeConfig(), 'with_args', { foo: 'bar', n: 42 });
     expect(captured).toEqual({ name: 'with_args', arguments: { foo: 'bar', n: 42 } });
+  });
+
+  test('bearer mode skips OAuth discovery and token minting', async () => {
+    mcpResponseFor = () => ({ content: [{ type: 'text', text: JSON.stringify({ greeting: 'hello' }) }] });
+    const res = await callRemoteTool(makeBearerConfig(), 'echo', {});
+    const parsed = unpackToolResult<{ greeting: string }>(res);
+    expect(parsed.greeting).toBe('hello');
+    expect(tokenMintCount).toBe(0);
   });
 });
 
@@ -208,6 +228,7 @@ describe('callRemoteTool — error surfaces', () => {
     const config: GBrainConfig = {
       engine: 'postgres',
       remote_mcp: {
+        auth: 'oauth',
         issuer_url: `http://127.0.0.1:${port}`,
         mcp_url: `http://127.0.0.1:${port}/mcp`,
         oauth_client_id: 'cid',
@@ -239,6 +260,7 @@ describe('callRemoteTool — error surfaces', () => {
     const config: GBrainConfig = {
       engine: 'postgres',
       remote_mcp: {
+        auth: 'oauth',
         issuer_url: 'http://127.0.0.1:1', // typically refused
         mcp_url: 'http://127.0.0.1:1/mcp',
         oauth_client_id: 'cid',
@@ -252,6 +274,25 @@ describe('callRemoteTool — error surfaces', () => {
       expect(e).toBeInstanceOf(RemoteMcpError);
       expect((e as RemoteMcpError).reason).toBe('network');
     }
+  });
+
+  test('bearer token missing → throws RemoteMcpError(config)', async () => {
+    const config: GBrainConfig = {
+      engine: 'postgres',
+      remote_mcp: {
+        auth: 'bearer',
+        mcp_url: `http://127.0.0.1:${port}/mcp`,
+      },
+    };
+    await withEnv({ GBRAIN_REMOTE_TOKEN: undefined }, async () => {
+      try {
+        await callRemoteTool(config, 'foo', {});
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e).toBeInstanceOf(RemoteMcpError);
+        expect((e as RemoteMcpError).reason).toBe('config');
+      }
+    });
   });
 
   test('tool returns isError → throws RemoteMcpError(tool_error)', async () => {

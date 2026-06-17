@@ -567,10 +567,19 @@ async function initRemoteMcp(opts: {
     const i = args.indexOf(flag);
     return i !== -1 ? args[i + 1] : null;
   };
-  const issuerUrl = (arg('--issuer-url') ?? process.env.GBRAIN_REMOTE_ISSUER_URL ?? '').trim();
-  const mcpUrl = (arg('--mcp-url') ?? process.env.GBRAIN_REMOTE_MCP_URL ?? '').trim();
-  const clientId = (arg('--oauth-client-id') ?? process.env.GBRAIN_REMOTE_CLIENT_ID ?? '').trim();
-  const clientSecret = (arg('--oauth-client-secret') ?? process.env.GBRAIN_REMOTE_CLIENT_SECRET ?? '').trim();
+  const issuerUrlFlag = (arg('--issuer-url') ?? '').trim();
+  const mcpUrlFlag = (arg('--mcp-url') ?? '').trim();
+  const clientIdFlag = (arg('--oauth-client-id') ?? '').trim();
+  const clientSecretFlag = (arg('--oauth-client-secret') ?? '').trim();
+  const bearerTokenFlag = (arg('--bearer-token') ?? '').trim();
+  const issuerUrl = (issuerUrlFlag || process.env.GBRAIN_REMOTE_ISSUER_URL || '').trim();
+  const mcpUrl = (mcpUrlFlag || process.env.GBRAIN_REMOTE_MCP_URL || '').trim();
+  const clientId = (clientIdFlag || process.env.GBRAIN_REMOTE_CLIENT_ID || '').trim();
+  const clientSecret = (clientSecretFlag || process.env.GBRAIN_REMOTE_CLIENT_SECRET || '').trim();
+  const bearerTokenEnv = (process.env.GBRAIN_REMOTE_TOKEN ?? '').trim();
+  const explicitOauthArgsPresent = !!(issuerUrlFlag || clientIdFlag || clientSecretFlag);
+  const bearerToken = (bearerTokenFlag || (!explicitOauthArgsPresent ? bearerTokenEnv : '')).trim();
+  const authMode: 'oauth' | 'bearer' = bearerToken ? 'bearer' : 'oauth';
 
   function fail(reason: string, message: string, extra: Record<string, unknown> = {}): never {
     if (jsonOutput) {
@@ -581,10 +590,15 @@ async function initRemoteMcp(opts: {
     process.exit(1);
   }
 
-  if (!issuerUrl) fail('missing_issuer_url', '--issuer-url is required (or set GBRAIN_REMOTE_ISSUER_URL). Example: --issuer-url https://brain-host.local:3001');
   if (!mcpUrl) fail('missing_mcp_url', '--mcp-url is required (or set GBRAIN_REMOTE_MCP_URL). Example: --mcp-url https://brain-host.local:3001/mcp');
-  if (!clientId) fail('missing_client_id', '--oauth-client-id is required (or set GBRAIN_REMOTE_CLIENT_ID). Get it from `gbrain auth register-client` on the host.');
-  if (!clientSecret) fail('missing_client_secret', '--oauth-client-secret is required (or set GBRAIN_REMOTE_CLIENT_SECRET). Get it from `gbrain auth register-client` on the host.');
+  if (bearerTokenFlag && explicitOauthArgsPresent) {
+    fail('mixed_auth_modes', 'Pass either bearer auth (--bearer-token / GBRAIN_REMOTE_TOKEN) OR OAuth client-credentials flags, not both.');
+  }
+  if (authMode === 'oauth') {
+    if (!issuerUrl) fail('missing_issuer_url', '--issuer-url is required (or set GBRAIN_REMOTE_ISSUER_URL). Example: --issuer-url https://brain-host.local:3001');
+    if (!clientId) fail('missing_client_id', '--oauth-client-id is required (or set GBRAIN_REMOTE_CLIENT_ID). Get it from `gbrain auth register-client` on the host.');
+    if (!clientSecret) fail('missing_client_secret', '--oauth-client-secret is required (or set GBRAIN_REMOTE_CLIENT_SECRET). Get it from `gbrain auth register-client` on the host.');
+  }
 
   // Re-run guard for --mcp-only specifically: refuse without --force to
   // avoid silently rotating credentials on a working install.
@@ -601,41 +615,48 @@ async function initRemoteMcp(opts: {
 
   if (!jsonOutput) {
     console.log('Thin-client setup — running pre-flight smoke...');
-    console.log(`  issuer: ${issuerUrl}`);
+    if (authMode === 'oauth') console.log(`  issuer: ${issuerUrl}`);
     console.log(`  mcp:    ${mcpUrl}`);
   }
 
-  // 1. OAuth discovery
-  const disco = await discoverOAuth(issuerUrl);
-  if (!disco.ok) {
-    fail(
-      `discovery_${disco.reason}`,
-      `Pre-flight failed: OAuth discovery on ${issuerUrl} — ${disco.message}\n` +
-      `Hint: confirm the issuer_url, that the host is reachable, and that \`gbrain serve --http\` is running there.`,
-      { detail: disco.message, ...(disco.status ? { status: disco.status } : {}) },
-    );
-  }
-  if (!jsonOutput) console.log(`  ✓ OAuth discovery (token_endpoint=${disco.metadata.token_endpoint})`);
+  let mcpBearer: string;
+  if (authMode === 'oauth') {
+    // 1. OAuth discovery
+    const disco = await discoverOAuth(issuerUrl);
+    if (!disco.ok) {
+      fail(
+        `discovery_${disco.reason}`,
+        `Pre-flight failed: OAuth discovery on ${issuerUrl} — ${disco.message}\n` +
+        `Hint: confirm the issuer_url, that the host is reachable, and that \`gbrain serve --http\` is running there.`,
+        { detail: disco.message, ...(disco.status ? { status: disco.status } : {}) },
+      );
+    }
+    if (!jsonOutput) console.log(`  ✓ OAuth discovery (token_endpoint=${disco.metadata.token_endpoint})`);
 
-  // 2. Token round-trip
-  const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, clientId, clientSecret);
-  if (!tokenRes.ok) {
-    fail(
-      `token_${tokenRes.reason}`,
-      `Pre-flight failed: OAuth /token — ${tokenRes.message}\n` +
-      `Hint: the host operator can run \`gbrain auth register-client <name> --grant-types client_credentials --scopes read,write,admin\` to mint fresh credentials.`,
-      { detail: tokenRes.message, ...(tokenRes.status ? { status: tokenRes.status } : {}) },
-    );
+    // 2. Token round-trip
+    const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, clientId, clientSecret);
+    if (!tokenRes.ok) {
+      fail(
+        `token_${tokenRes.reason}`,
+        `Pre-flight failed: OAuth /token — ${tokenRes.message}\n` +
+        `Hint: the host operator can run \`gbrain auth register-client <name> --grant-types client_credentials --scopes read,write,admin\` to mint fresh credentials.`,
+        { detail: tokenRes.message, ...(tokenRes.status ? { status: tokenRes.status } : {}) },
+      );
+    }
+    if (!jsonOutput) console.log(`  ✓ OAuth /token (${tokenRes.token.token_type ?? 'bearer'}, scope=${tokenRes.token.scope ?? 'unspecified'})`);
+    mcpBearer = tokenRes.token.access_token;
+  } else {
+    if (!jsonOutput) console.log('  ✓ bearer token provided');
+    mcpBearer = bearerToken;
   }
-  if (!jsonOutput) console.log(`  ✓ OAuth /token (${tokenRes.token.token_type ?? 'bearer'}, scope=${tokenRes.token.scope ?? 'unspecified'})`);
 
   // 3. MCP smoke
-  const mcpRes = await smokeTestMcp(mcpUrl, tokenRes.token.access_token);
+  const mcpRes = await smokeTestMcp(mcpUrl, mcpBearer);
   if (!mcpRes.ok) {
     fail(
       `mcp_smoke_${mcpRes.reason}`,
       `Pre-flight failed: MCP initialize on ${mcpUrl} — ${mcpRes.message}\n` +
-      `Hint: confirm \`mcp_url\` matches the path the host serves \`/mcp\` on (default: <issuer_url>/mcp).`,
+      `Hint: confirm \`mcp_url\` matches the path the host serves \`/mcp\` on.`,
       { detail: mcpRes.message, ...(mcpRes.status ? { status: mcpRes.status } : {}) },
     );
   }
@@ -654,17 +675,26 @@ async function initRemoteMcp(opts: {
   const config: GBrainConfig = {
     ...(baseConfig as GBrainConfig),
     engine: existing?.engine ?? 'postgres',
-    remote_mcp: {
-      issuer_url: issuerUrl.replace(/\/+$/, ''),
-      mcp_url: mcpUrl,
-      oauth_client_id: clientId,
-      // Only persist the secret to disk if it didn't come from the env var.
-      // Env-var-supplied secrets stay in env; on-disk copy is opt-in via
-      // the --oauth-client-secret flag (or absent env var).
-      ...(process.env.GBRAIN_REMOTE_CLIENT_SECRET === clientSecret
-        ? {}
-        : { oauth_client_secret: clientSecret }),
-    },
+    remote_mcp: authMode === 'bearer'
+      ? {
+          auth: 'bearer',
+          mcp_url: mcpUrl,
+          ...(bearerTokenEnv && bearerTokenEnv === bearerToken
+            ? {}
+            : { bearer_token: bearerToken }),
+        }
+      : {
+          auth: 'oauth',
+          issuer_url: issuerUrl.replace(/\/+$/, ''),
+          mcp_url: mcpUrl,
+          oauth_client_id: clientId,
+          // Only persist the secret to disk if it didn't come from the env var.
+          // Env-var-supplied secrets stay in env; on-disk copy is opt-in via
+          // the --oauth-client-secret flag (or absent env var).
+          ...(process.env.GBRAIN_REMOTE_CLIENT_SECRET === clientSecret
+            ? {}
+            : { oauth_client_secret: clientSecret }),
+        },
   };
   // database_url / database_path get explicitly removed when converting; the
   // spread above with `undefined` doesn't drop them in JSON, so prune.
@@ -677,10 +707,17 @@ async function initRemoteMcp(opts: {
     console.log(JSON.stringify({
       status: 'success',
       mode: 'thin-client',
-      issuer_url: config.remote_mcp!.issuer_url,
+      auth: authMode,
       mcp_url: config.remote_mcp!.mcp_url,
-      oauth_client_id: config.remote_mcp!.oauth_client_id,
-      oauth_secret_in_config: 'oauth_client_secret' in config.remote_mcp!,
+      ...(authMode === 'oauth'
+        ? {
+            issuer_url: config.remote_mcp!.issuer_url,
+            oauth_client_id: config.remote_mcp!.oauth_client_id,
+            oauth_secret_in_config: 'oauth_client_secret' in config.remote_mcp!,
+          }
+        : {
+            bearer_token_in_config: 'bearer_token' in config.remote_mcp!,
+          }),
     }));
   } else {
     console.log('');

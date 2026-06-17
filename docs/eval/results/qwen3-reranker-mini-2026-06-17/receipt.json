@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-17T00:24:26.704Z",
+  "fixture_path": "test/fixtures/longmemeval-mini.jsonl",
+  "questions_considered": 5,
+  "top_k": 5,
+  "timeout_ms": 30000,
+  "reranker_base_url": "http://127.0.0.1:8081/v1",
+  "reranker_base_url_by_model": {
+    "llama-server-reranker:qwen3-reranker-0.6b": "http://127.0.0.1:8081/v1",
+    "llama-server-reranker:qwen3-reranker-4b": "http://127.0.0.1:8082/v1"
+  },
+  "summary": {
+    "status": "ok",
+    "winner": "llama-server-reranker:qwen3-reranker-0.6b",
+    "note": "Winner by recall@k then top1-hit-rate: llama-server-reranker:qwen3-reranker-0.6b."
+  },
+  "models": [
+    {
+      "model": "llama-server-reranker:qwen3-reranker-0.6b",
+      "ok": true,
+      "questions_run": 5,
+      "recall_at_k": 1,
+      "top1_hit_rate": 0.8,
+      "question_results": [
+        {
+          "question_id": "lme-mini-1",
+          "question_type": "single-session-user",
+          "answer_session_ids": [
+            "chat/sess-mini-1a"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-1a",
+            "chat/sess-mini-1b",
+            "chat/sess-mini-1c"
+          ],
+          "recall_hit": true,
+          "top1_hit": true
+        },
+        {
+          "question_id": "lme-mini-2",
+          "question_type": "single-session-assistant",
+          "answer_session_ids": [
+            "chat/sess-mini-2a"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-2a",
+            "chat/sess-mini-2b"
+          ],
+          "recall_hit": true,
+          "top1_hit": true
+        },
+        {
+          "question_id": "lme-mini-3",
+          "question_type": "multi-session",
+          "answer_session_ids": [
+            "chat/sess-mini-3a",
+            "chat/sess-mini-3b"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-3a",
+            "chat/sess-mini-3c",
+            "chat/sess-mini-3b"
+          ],
+          "recall_hit": true,
+          "top1_hit": true
+        },
+        {
+          "question_id": "lme-mini-4",
+          "question_type": "temporal-reasoning",
+          "answer_session_ids": [
+            "chat/sess-mini-4a"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-4a",
+            "chat/sess-mini-4b"
+          ],
+          "recall_hit": true,
+          "top1_hit": true
+        },
+        {
+          "question_id": "lme-mini-5",
+          "question_type": "knowledge-update",
+          "answer_session_ids": [
+            "chat/sess-mini-5c"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-5a",
+            "chat/sess-mini-5c",
+            "chat/sess-mini-5b"
+          ],
+          "recall_hit": true,
+          "top1_hit": false
+        }
+      ]
+    },
+    {
+      "model": "llama-server-reranker:qwen3-reranker-4b",
+      "ok": true,
+      "questions_run": 5,
+      "recall_at_k": 1,
+      "top1_hit_rate": 0.4,
+      "question_results": [
+        {
+          "question_id": "lme-mini-1",
+          "question_type": "single-session-user",
+          "answer_session_ids": [
+            "chat/sess-mini-1a"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-1c",
+            "chat/sess-mini-1a",
+            "chat/sess-mini-1b"
+          ],
+          "recall_hit": true,
+          "top1_hit": false
+        },
+        {
+          "question_id": "lme-mini-2",
+          "question_type": "single-session-assistant",
+          "answer_session_ids": [
+            "chat/sess-mini-2a"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-2a",
+            "chat/sess-mini-2b"
+          ],
+          "recall_hit": true,
+          "top1_hit": true
+        },
+        {
+          "question_id": "lme-mini-3",
+          "question_type": "multi-session",
+          "answer_session_ids": [
+            "chat/sess-mini-3a",
+            "chat/sess-mini-3b"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-3b",
+            "chat/sess-mini-3c",
+            "chat/sess-mini-3a"
+          ],
+          "recall_hit": true,
+          "top1_hit": true
+        },
+        {
+          "question_id": "lme-mini-4",
+          "question_type": "temporal-reasoning",
+          "answer_session_ids": [
+            "chat/sess-mini-4a"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-4b",
+            "chat/sess-mini-4a"
+          ],
+          "recall_hit": true,
+          "top1_hit": false
+        },
+        {
+          "question_id": "lme-mini-5",
+          "question_type": "knowledge-update",
+          "answer_session_ids": [
+            "chat/sess-mini-5c"
+          ],
+          "retrieved_session_ids": [
+            "chat/sess-mini-5b",
+            "chat/sess-mini-5c",
+            "chat/sess-mini-5a"
+          ],
+          "recall_hit": true,
+          "top1_hit": false
+        }
+      ]
+    }
+  ]
+}
