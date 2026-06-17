@@ -128,10 +128,23 @@ function makeConfig(overrides: Partial<NonNullable<GBrainConfig['remote_mcp']>> 
   return {
     engine: 'postgres',
     remote_mcp: {
+      auth: 'oauth',
       issuer_url: `http://localhost:${port}`,
       mcp_url: `http://localhost:${port}/mcp`,
       oauth_client_id: 'test-client',
       oauth_client_secret: 'test-secret',
+      ...overrides,
+    },
+  };
+}
+
+function makeBearerConfig(overrides: Partial<NonNullable<GBrainConfig['remote_mcp']>> = {}): GBrainConfig {
+  return {
+    engine: 'postgres',
+    remote_mcp: {
+      auth: 'bearer',
+      mcp_url: `http://localhost:${port}/mcp`,
+      bearer_token: 'gbrain_bearer_test_token',
       ...overrides,
     },
   };
@@ -152,6 +165,20 @@ describe('collectRemoteDoctorReport', () => {
     expect(checkNames).toContain('mcp_smoke');
     expect(report.checks.every(c => c.status === 'ok')).toBe(true);
     expect(report.oauth_scope).toBe('read write admin');
+  });
+
+  test('bearer happy path — bearer credentials + mcp smoke pass without OAuth checks', async () => {
+    reset();
+    const report = await collectRemoteDoctorReport(makeBearerConfig(), SKIP_PROBE_OPTS);
+    expect(report.status).toBe('ok');
+    expect(report.auth).toBe('bearer');
+    const checkNames = report.checks.map(c => c.name);
+    expect(checkNames).toContain('config_integrity');
+    expect(checkNames).toContain('bearer_credentials');
+    expect(checkNames).toContain('mcp_smoke');
+    expect(checkNames).not.toContain('oauth_discovery');
+    expect(checkNames).not.toContain('oauth_token');
+    expect(report.oauth_scope).toBeUndefined();
   });
 
   test('discovery 404 — fails with reason=http and short-circuits', async () => {
@@ -242,6 +269,19 @@ describe('collectRemoteDoctorReport', () => {
     });
   });
 
+  test('missing bearer token entirely — fails before any HTTP call', async () => {
+    reset();
+    await withEnv({ GBRAIN_REMOTE_TOKEN: undefined }, async () => {
+      const config = makeBearerConfig();
+      delete config.remote_mcp!.bearer_token;
+      const report = await collectRemoteDoctorReport(config);
+      const creds = report.checks.find(c => c.name === 'bearer_credentials')!;
+      expect(creds.status).toBe('fail');
+      expect(creds.message).toContain('GBRAIN_REMOTE_TOKEN');
+      expect(report.checks.find(c => c.name === 'mcp_smoke')).toBeUndefined();
+    });
+  });
+
   test('missing remote_mcp on config — fails config_integrity', async () => {
     reset();
     const config: GBrainConfig = { engine: 'postgres' };
@@ -283,6 +323,7 @@ describe('runUpgradeDriftCheck', () => {
     const config: GBrainConfig = {
       engine: 'postgres',
       remote_mcp: {
+        auth: 'oauth',
         issuer_url: 'http://127.0.0.1:1', // unreachable
         mcp_url: 'http://127.0.0.1:1/mcp',
         oauth_client_id: 'x',

@@ -181,6 +181,37 @@ describe('gbrain init --mcp-only — happy path', () => {
     const cfg = JSON.parse(readFileSync(configPath(), 'utf-8'));
     expect(cfg.remote_mcp.issuer_url).toBe(`http://127.0.0.1:${port}`);
   });
+
+  test('writes bearer-shaped remote_mcp config and skips OAuth fields', async () => {
+    const r = await run([
+      'init', '--mcp-only', '--json',
+      '--mcp-url', `http://127.0.0.1:${port}/mcp`,
+      '--bearer-token', 'gbrain_bearer_test_token',
+    ]);
+    expect(r.exitCode).toBe(0);
+    const cfg = JSON.parse(readFileSync(configPath(), 'utf-8'));
+    expect(cfg.remote_mcp.auth).toBe('bearer');
+    expect(cfg.remote_mcp.mcp_url).toBe(`http://127.0.0.1:${port}/mcp`);
+    expect(cfg.remote_mcp.bearer_token).toBe('gbrain_bearer_test_token');
+    expect(cfg.remote_mcp.issuer_url).toBeUndefined();
+    expect(cfg.remote_mcp.oauth_client_id).toBeUndefined();
+    const parsed = JSON.parse(r.stdout.trim().split('\n').pop()!);
+    expect(parsed.auth).toBe('bearer');
+    expect(parsed.bearer_token_in_config).toBe(true);
+  });
+
+  test('env-var bearer token is NOT persisted to config file', async () => {
+    const r = await run([
+      'init', '--mcp-only', '--json',
+      '--mcp-url', `http://127.0.0.1:${port}/mcp`,
+    ], { GBRAIN_REMOTE_TOKEN: 'env-bearer-secret' });
+    expect(r.exitCode).toBe(0);
+    const cfg = JSON.parse(readFileSync(configPath(), 'utf-8'));
+    expect(cfg.remote_mcp.auth).toBe('bearer');
+    expect(cfg.remote_mcp.bearer_token).toBeUndefined();
+    const parsed = JSON.parse(r.stdout.trim().split('\n').pop()!);
+    expect(parsed.bearer_token_in_config).toBe(false);
+  });
 });
 
 describe('gbrain init --mcp-only — required-flag errors', () => {
@@ -230,6 +261,18 @@ describe('gbrain init --mcp-only — required-flag errors', () => {
     expect(r.exitCode).toBe(1);
     const parsed = JSON.parse(r.stdout.trim().split('\n').pop()!);
     expect(parsed.reason).toBe('missing_client_secret');
+  });
+
+  test('mixing bearer and OAuth args exits 1', async () => {
+    const r = await run([
+      'init', '--mcp-only', '--json',
+      '--mcp-url', `http://127.0.0.1:${port}/mcp`,
+      '--bearer-token', 'gbrain_bearer_test_token',
+      '--issuer-url', `http://127.0.0.1:${port}`,
+    ]);
+    expect(r.exitCode).toBe(1);
+    const parsed = JSON.parse(r.stdout.trim().split('\n').pop()!);
+    expect(parsed.reason).toBe('mixed_auth_modes');
   });
 });
 
@@ -301,6 +344,7 @@ describe('gbrain init re-run guard', () => {
     writeFileSync(configPath(), JSON.stringify({
       engine: 'postgres',
       remote_mcp: {
+        auth: 'oauth',
         issuer_url: 'https://existing.example',
         mcp_url: 'https://existing.example/mcp',
         oauth_client_id: 'old-cid',
