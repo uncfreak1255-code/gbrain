@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_at": "2026-06-16T23:45:05.705Z",
-  "fixture_path": "/Users/sawbeck/gbrain/test/fixtures/longmemeval-mini.jsonl",
+  "fixture_path": "test/fixtures/longmemeval-mini.jsonl",
   "questions_considered": 5,
   "top_k": 5,
   "timeout_ms": 30000,

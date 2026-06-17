@@ -567,14 +567,18 @@ async function initRemoteMcp(opts: {
     const i = args.indexOf(flag);
     return i !== -1 ? args[i + 1] : null;
   };
-  const issuerUrl = (arg('--issuer-url') ?? process.env.GBRAIN_REMOTE_ISSUER_URL ?? '').trim();
-  const mcpUrl = (arg('--mcp-url') ?? process.env.GBRAIN_REMOTE_MCP_URL ?? '').trim();
-  const clientId = (arg('--oauth-client-id') ?? process.env.GBRAIN_REMOTE_CLIENT_ID ?? '').trim();
-  const clientSecret = (arg('--oauth-client-secret') ?? process.env.GBRAIN_REMOTE_CLIENT_SECRET ?? '').trim();
+  const issuerUrlFlag = (arg('--issuer-url') ?? '').trim();
+  const mcpUrlFlag = (arg('--mcp-url') ?? '').trim();
+  const clientIdFlag = (arg('--oauth-client-id') ?? '').trim();
+  const clientSecretFlag = (arg('--oauth-client-secret') ?? '').trim();
   const bearerTokenFlag = (arg('--bearer-token') ?? '').trim();
+  const issuerUrl = (issuerUrlFlag || process.env.GBRAIN_REMOTE_ISSUER_URL || '').trim();
+  const mcpUrl = (mcpUrlFlag || process.env.GBRAIN_REMOTE_MCP_URL || '').trim();
+  const clientId = (clientIdFlag || process.env.GBRAIN_REMOTE_CLIENT_ID || '').trim();
+  const clientSecret = (clientSecretFlag || process.env.GBRAIN_REMOTE_CLIENT_SECRET || '').trim();
   const bearerTokenEnv = (process.env.GBRAIN_REMOTE_TOKEN ?? '').trim();
-  const oauthArgsPresent = !!(issuerUrl || clientId || clientSecret);
-  const bearerToken = (bearerTokenFlag || (!oauthArgsPresent ? bearerTokenEnv : '')).trim();
+  const explicitOauthArgsPresent = !!(issuerUrlFlag || clientIdFlag || clientSecretFlag);
+  const bearerToken = (bearerTokenFlag || (!explicitOauthArgsPresent ? bearerTokenEnv : '')).trim();
   const authMode: 'oauth' | 'bearer' = bearerToken ? 'bearer' : 'oauth';
 
   function fail(reason: string, message: string, extra: Record<string, unknown> = {}): never {
@@ -587,7 +591,7 @@ async function initRemoteMcp(opts: {
   }
 
   if (!mcpUrl) fail('missing_mcp_url', '--mcp-url is required (or set GBRAIN_REMOTE_MCP_URL). Example: --mcp-url https://brain-host.local:3001/mcp');
-  if (bearerTokenFlag && (issuerUrl || clientId || clientSecret)) {
+  if (bearerTokenFlag && explicitOauthArgsPresent) {
     fail('mixed_auth_modes', 'Pass either bearer auth (--bearer-token / GBRAIN_REMOTE_TOKEN) OR OAuth client-credentials flags, not both.');
   }
   if (authMode === 'oauth') {

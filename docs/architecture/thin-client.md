@@ -3,12 +3,15 @@
 On-demand reference (see CLAUDE.md Reference map). Current behavior + invariants
 only; release history lives in `CHANGELOG.md` + git.
 
-`gbrain init --mcp-only` (v0.29.2) sets up a thin-client install: no local
-brain content, just an OAuth client pointing at a remote `gbrain serve --http`.
-v0.29.2/v0.30.0 only refused 9 obvious local-only commands; the other ~25
-silently fell through to `connectEngine()` and opened the empty local PGLite,
-returning "No results." against a populated remote brain. v0.31.1 fixes the
-silent-empty-results bug class for every operation surface.
+`gbrain init --mcp-only` sets up a thin-client install: no local brain content,
+just remote MCP credentials pointing at a remote `gbrain serve --http`. Auth can
+be OAuth client-credentials (`--issuer-url`, `--oauth-client-id`,
+`--oauth-client-secret`) or a legacy bearer token (`--bearer-token` or
+`GBRAIN_REMOTE_TOKEN`). If `GBRAIN_REMOTE_TOKEN` is set and no OAuth flags are
+passed explicitly, bearer mode wins even when stale OAuth env vars are present.
+Thin-client routing refuses local-only commands before opening a local engine, so
+the CLI cannot silently query an empty local PGLite when the real brain is
+remote.
 
 Key files:
 
@@ -24,25 +27,31 @@ Key files:
   path runs `JSON.parse(JSON.stringify(result))` so renderers see the same
   shape on both paths (kills Date/bigint/Buffer drift class).
 - `src/core/mcp-client.ts` — `callRemoteTool(config, toolName, args, opts)`.
-  Hardened in v0.31.1 (CDX-4): all transport errors normalized to
-  `RemoteMcpError` via the `toRemoteMcpError` funnel. New `CallRemoteToolOptions
-  {timeoutMs, signal}`; `buildAbortController` composes external signal with
-  timeout. New `RemoteMcpErrorReason` stable union, `RemoteMcpErrorDetail.kind`
-  ('timeout' | 'aborted' | 'unreachable') sub-tag, `RemoteMcpErrorDetail.code`
-  field carrying server-supplied error codes (e.g. `missing_scope`).
+  Uses bearer auth directly when `remote_mcp.auth === 'bearer'`; otherwise
+  discovers OAuth metadata, mints a client-credentials access token, and caches
+  it by `mcp_url`. Env credentials win over config-file credentials:
+  `GBRAIN_REMOTE_TOKEN` for bearer mode and `GBRAIN_REMOTE_CLIENT_SECRET` for
+  OAuth mode. All transport errors normalize to `RemoteMcpError` via the
+  `toRemoteMcpError` funnel. `CallRemoteToolOptions {timeoutMs, signal}` lets
+  callers bound the whole token/tool-call flow. `RemoteMcpErrorDetail.kind`
+  carries timeout/abort/unreachable sub-tags, and `RemoteMcpErrorDetail.code`
+  carries server-supplied tool error codes such as `missing_scope`.
   `extractToolErrorCode` parses JSON envelopes first, falls back to substring
-  detection for legacy server messages. `unpackToolResult<T>(res)` unchanged
-  (parses tool-call JSON content). `_clearMcpClientTokenCache()` test escape.
+  detection for legacy server messages. `unpackToolResult<T>(res)` parses
+  tool-call JSON content. `_clearMcpClientTokenCache()` is the test escape.
 - `src/core/cli-options.ts` — `parseGlobalFlags` adds `--timeout=Ns` (accepts
   `30s`, `2m`, `500ms`, plain ms). Default `null` = per-command default (30s
   for most ops, 180s for `think`). `parseTimeout(s)` exported helper.
-- `src/core/doctor-remote.ts` — `gbrain remote doctor` adds the
-  `oauth_client_scopes_probe` check (CDX-5). Probes the read tier via
-  `get_brain_identity` and admin tier via `get_health`; reports per-tier
-  status with pinpoint remediation when admin is missing. `buildScopeCheck`
-  + `ScopeProbeResult` exported for test access. Skippable via
-  `GBRAIN_DOCTOR_SKIP_SCOPE_PROBE=1` for fixtures that mock /mcp at JSON-RPC
-  initialize level only (MCP SDK Client hangs on shape mismatch).
+- `src/core/doctor-remote.ts` — `gbrain remote doctor` validates either bearer
+  or OAuth thin-client config, then smoke-tests MCP initialize with the resolved
+  bearer. OAuth mode also runs discovery, token minting, and the
+  `oauth_client_scopes_probe` check. The scope probe calls `get_brain_identity`
+  for read scope and `get_health` for admin scope, reporting a pinpoint
+  remediation when admin is missing. Bearer mode skips OAuth-only scope
+  reporting because legacy bearer tokens are verified by the host transport.
+  `buildScopeCheck` + `ScopeProbeResult` are exported for test access. The
+  extra MCP tool probes are skippable via `GBRAIN_DOCTOR_SKIP_SCOPE_PROBE=1` for
+  fixtures that mock `/mcp` at JSON-RPC initialize level only.
 - `src/core/ssrf-validate.ts` (v0.36 Commit 0) — DNS-rebinding-defended URL validation. `validateAndResolveUrl(url)` resolves the hostname via `dns.lookup({all: true, family: 0})`, checks EVERY A AND AAAA record against the internal-IP deny list, returns the resolved IP so callers fetch by IP (defeats DNS rebinding: validation IP === fetch IP). `fetchWithSSRFGuard(url, opts)` does redirect-aware fetching with per-hop re-validation, max 3 hops by default. Reusable across all URL-fetching features. Test seam `__setDnsLookupForTests` for hermetic tests.
 - `src/core/search/query-intent.ts` extension (v0.36 cross-modal wave) — new `suggestedModality: 'text' | 'image' | 'both'` axis on `QuerySuggestions`. Module-scope `CROSS_MODAL_PATTERNS` regex array (compiles once at module load). `isAmbiguousModalityQuery(query)` heuristic gate fires when a visual noun + reference marker combination indicates genuinely ambiguous routing — used by the Commit 4 LLM tie-break to bound LLM calls to <1% of queries.
 - `src/core/search/mode.ts` extension (v0.36 cross-modal wave) — `ModeBundle` extended with 7 cross-modal knobs: `cross_modal_both_text_weight` / `cross_modal_both_image_weight` (D6 weighted RRF for `'both'` mode, defaults 0.6/0.4), `image_query_text_refinement_weight` / `image_query_image_refinement_weight` (D13 hybrid intersect for `searchByImage` query refinement, defaults 0.4/0.6), `unified_multimodal` + `unified_multimodal_only` (Phase 3 unified column routing flags), `cross_modal_llm_intent` (Commit 4 opt-in escalation). `SEARCH_MODE_CONFIG_KEYS` extended with 7 corresponding config keys. `KNOBS_HASH_VERSION` bumped 2→3 (D2 — closes the silent cache-hit class where a cached text-mode result could leak to an image-mode caller).

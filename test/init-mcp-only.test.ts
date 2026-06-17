@@ -212,6 +212,27 @@ describe('gbrain init --mcp-only — happy path', () => {
     const parsed = JSON.parse(r.stdout.trim().split('\n').pop()!);
     expect(parsed.bearer_token_in_config).toBe(false);
   });
+
+  test('env-var bearer token wins over stale OAuth env vars', async () => {
+    const r = await run([
+      'init', '--mcp-only', '--json',
+      '--mcp-url', `http://127.0.0.1:${port}/mcp`,
+    ], {
+      GBRAIN_REMOTE_TOKEN: 'env-bearer-secret',
+      GBRAIN_REMOTE_ISSUER_URL: 'http://127.0.0.1:1',
+      GBRAIN_REMOTE_CLIENT_ID: 'stale-client',
+      GBRAIN_REMOTE_CLIENT_SECRET: 'stale-secret',
+    });
+    expect(r.exitCode).toBe(0);
+    const cfg = JSON.parse(readFileSync(configPath(), 'utf-8'));
+    expect(cfg.remote_mcp.auth).toBe('bearer');
+    expect(cfg.remote_mcp.issuer_url).toBeUndefined();
+    expect(cfg.remote_mcp.oauth_client_id).toBeUndefined();
+    expect(cfg.remote_mcp.bearer_token).toBeUndefined();
+    const parsed = JSON.parse(r.stdout.trim().split('\n').pop()!);
+    expect(parsed.auth).toBe('bearer');
+    expect(parsed.bearer_token_in_config).toBe(false);
+  });
 });
 
 describe('gbrain init --mcp-only — required-flag errors', () => {

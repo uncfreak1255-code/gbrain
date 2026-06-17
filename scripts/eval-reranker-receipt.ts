@@ -13,7 +13,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { dirname, join, relative, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { loadConfig } from '../src/core/config.ts';
 import { buildGatewayConfig } from '../src/core/ai/build-gateway-config.ts';
@@ -109,6 +109,11 @@ function loadFixture(fixturePath: string, limit: number): LongMemEvalQuestion[] 
     .filter(Boolean)
     .slice(0, limit);
   return lines.map((line) => JSON.parse(line) as LongMemEvalQuestion);
+}
+
+function repoRelativePath(repoRoot: string, filePath: string): string {
+  const rel = relative(repoRoot, filePath);
+  return rel.startsWith('..') ? filePath : rel;
 }
 
 function normalizeSessions(question: LongMemEvalQuestion): LongMemEvalSession[] {
@@ -272,7 +277,7 @@ async function main(): Promise<void> {
     const receipt = {
       schema_version: 1,
       generated_at: new Date().toISOString(),
-      fixture_path: args.fixturePath,
+      fixture_path: repoRelativePath(resolve(dirname(fileURLToPath(import.meta.url)), '..'), args.fixturePath),
       questions_considered: questions.length,
       top_k: args.topK,
       timeout_ms: args.timeoutMs,
