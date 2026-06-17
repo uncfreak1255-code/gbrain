@@ -855,6 +855,7 @@
             <span class="status-item">Health: warnings, not dead</span>
             <span class="status-item">Last verified: 2026-06-16 15:31 ET</span>
             <span class="status-item">Queue: 0 waiting, 0 active</span>
+            <span class="status-item">Anthropic budget: ~$10/week</span>
           </div>
         </div>
         <button class="button" type="button" aria-label="View activity">
@@ -964,6 +965,23 @@
               <div class="row-meta">
                 <span class="chip good">full run</span>
                 <span class="row-sub">promote with proof</span>
+              </div>
+            </div>
+
+            <div class="watch-row">
+              <div class="icon-box">
+                <svg class="svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 7h16M4 12h16M4 17h16"></path>
+                  <path d="M8 7v10M16 7v10"></path>
+                </svg>
+              </div>
+              <div>
+                <div class="row-title">Model Budget</div>
+                <div class="row-sub">DeepSeek first when quality matches; Anthropic is the premium lane.</div>
+              </div>
+              <div class="row-meta">
+                <span class="chip good">$10/wk cap</span>
+                <span class="row-sub">receipt needed</span>
               </div>
             </div>
 
@@ -1286,6 +1304,33 @@
               <div>
                 <div class="relay-label">Agent brief</div>
                 <pre class="relay-copy">Make Dream readiness concrete. Check transcript/session folder config, model key, enabled phases, and dry-run result. Allow Dream summaries/reflections/patterns in approved Dream areas. Anything changing canon, skills, repo instructions, or public work must become a decision packet. Gate: dry-run JSON plus exact skipped phases.</pre>
+              </div>
+              <div class="relay-actions">
+                <button class="copy-button" type="button" data-copy>Copy agent brief</button>
+                <span class="copy-status" aria-live="polite"></span>
+              </div>
+            </div>
+          </article>
+
+          <article class="decision-card" data-decision-card>
+            <div class="decision-main">
+              <div class="decision-kicker">
+                <span class="chip good">DeepSeek first</span>
+                <span class="chip neutral">all repos</span>
+                <span class="chip warn">$10/wk Anthropic</span>
+              </div>
+              <h3>Keep premium model spend bounded</h3>
+              <p class="decision-copy">Recommended decision: default Dream, cheap synthesis, triage, and recommendation cards to DeepSeek V4 Flash. Use V4 Pro for heavier reasoning if receipts prove comparable. Spend Anthropic only when prompt caching or reliability beats the cost.</p>
+              <div class="choice-row" role="group" aria-label="Model budget decision choices">
+                <button class="choice selected" type="button"><strong>Approve</strong>DeepSeek first.</button>
+                <button class="choice" type="button"><strong>Hold</strong>Need quality proof.</button>
+                <button class="choice" type="button"><strong>Escalate</strong>Anthropic cap exceeded.</button>
+              </div>
+            </div>
+            <div class="relay-panel">
+              <div>
+                <div class="relay-label">Agent brief</div>
+                <pre class="relay-copy">Enforce the model-spend policy. Default Dream, cheap synthesis, triage, and recommendation cards to deepseek-v4-flash. Use deepseek-v4-pro only when heavier reasoning is needed and quality proof is comparable. Reserve Anthropic for prompt-cached subagent loops or reliability-critical work. Gate: weekly Anthropic receipt showing spent, remaining, top users, and DeepSeek fallbacks.</pre>
               </div>
               <div class="relay-actions">
                 <button class="copy-button" type="button" data-copy>Copy agent brief</button>

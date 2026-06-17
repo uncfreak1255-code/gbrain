@@ -32,6 +32,7 @@ interface Args {
   topK: number;
   timeoutMs: number;
   models: string[];
+  baseUrlByModel: Record<string, string>;
 }
 
 interface QuestionResult {
@@ -76,6 +77,7 @@ function parseArgs(argv: string[]): Args {
     topK: 5,
     timeoutMs: 30_000,
     models: [...DEFAULT_MODELS],
+    baseUrlByModel: {},
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -87,6 +89,15 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--timeout-ms') args.timeoutMs = Number(argv[++i]);
     else if (a === '--models') {
       args.models = argv[++i].split(',').map(s => s.trim()).filter(Boolean);
+    }
+    else if (a === '--model-base-url') {
+      const raw = argv[++i];
+      const eq = raw.indexOf('=');
+      if (eq === -1) throw new Error(`--model-base-url expects model=url, got: ${raw}`);
+      const model = raw.slice(0, eq).trim();
+      const url = raw.slice(eq + 1).trim();
+      if (!model || !url) throw new Error(`--model-base-url expects model=url, got: ${raw}`);
+      args.baseUrlByModel[model] = url;
     }
   }
   return args;
@@ -137,10 +148,21 @@ async function runModelReceipt(
   questions: LongMemEvalQuestion[],
   topK: number,
   timeoutMs: number,
+  defaultBaseUrl: string,
+  baseUrlByModel: Record<string, string>,
+  gatewayCfg: ReturnType<typeof buildGatewayConfig>,
 ): Promise<ModelReceipt> {
   const questionResults: QuestionResult[] = [];
+  const modelBaseUrl = baseUrlByModel[model] ?? defaultBaseUrl;
 
   try {
+    configureGateway({
+      ...gatewayCfg,
+      base_urls: {
+        ...gatewayCfg.base_urls,
+        'llama-server-reranker': modelBaseUrl,
+      },
+    });
     for (const question of questions) {
       const pages = haystackToPages(question);
       const sessionSlugs = sessionSlugsForQuestion(question);
@@ -227,21 +249,24 @@ async function main(): Promise<void> {
     throw new Error('No gbrain config loaded; cannot configure embedding/reranker gateway.');
   }
 
-  configureGateway({
-    ...buildGatewayConfig(cfg),
-    base_urls: {
-      ...buildGatewayConfig(cfg).base_urls,
-      'llama-server-reranker':
-        buildGatewayConfig(cfg).base_urls?.['llama-server-reranker'] ??
-        process.env.LLAMA_SERVER_RERANKER_BASE_URL ??
-        'http://127.0.0.1:8081/v1',
-    },
-  });
+  const gatewayCfg = buildGatewayConfig(cfg);
+  const defaultBaseUrl =
+    gatewayCfg.base_urls?.['llama-server-reranker'] ??
+    process.env.LLAMA_SERVER_RERANKER_BASE_URL ??
+    'http://127.0.0.1:8081/v1';
 
   try {
     const modelReceipts: ModelReceipt[] = [];
     for (const model of args.models) {
-      modelReceipts.push(await runModelReceipt(model, questions, args.topK, args.timeoutMs));
+      modelReceipts.push(await runModelReceipt(
+        model,
+        questions,
+        args.topK,
+        args.timeoutMs,
+        defaultBaseUrl,
+        args.baseUrlByModel,
+        gatewayCfg,
+      ));
     }
     const summary = summarize(modelReceipts);
     const receipt = {
@@ -251,10 +276,8 @@ async function main(): Promise<void> {
       questions_considered: questions.length,
       top_k: args.topK,
       timeout_ms: args.timeoutMs,
-      reranker_base_url:
-        buildGatewayConfig(cfg).base_urls?.['llama-server-reranker'] ??
-        process.env.LLAMA_SERVER_RERANKER_BASE_URL ??
-        'http://127.0.0.1:8081/v1',
+      reranker_base_url: defaultBaseUrl,
+      reranker_base_url_by_model: args.baseUrlByModel,
       summary,
       models: modelReceipts,
     };
