@@ -185,10 +185,10 @@ cron scheduling, reports, identity, and access control.
 | Dev / run the CLI | `bun run src/cli.ts` (or `bun run dev`) |
 | Build the binary | `bun run build` |
 | Typecheck | `bun run typecheck` (`tsc --noEmit`) |
-| Tests | `bun run test` (typecheck + shell pre-checks + unit runner) |
+| Tests | `bun run test` (parallel unit-test runner — no typecheck, no E2E) |
 | Single test file | `bun test <path>` |
 | Verify gate | `bun run verify` |
-| Full local CI | `bun run ci:local` (Docker: gitleaks + units + 29 E2E) |
+| Full local CI | `bun run ci:local` (Docker: gitleaks + units + all E2E) |
 | Regenerate LLM bundle | `bun run build:llms` (REQUIRED after any CLAUDE.md / reference-doc edit) |
 
 `bun test` (the bun runner) skips TypeScript type checking — it only enforces runtime
