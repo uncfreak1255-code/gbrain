@@ -5996,7 +5996,7 @@ export async function buildChecks(
 
   progress.heartbeat('content_sanity_audit_recent');
   try {
-    const { readRecentContentSanityEvents, summarizeContentSanityEvents } =
+    const { readRecentContentSanityEvents, summarizeContentSanityEvents, contentSanityDoctorSeverity } =
       await import('../core/audit/content-sanity-audit.ts');
     const events = readRecentContentSanityEvents(7);
     if (events.length === 0) {
@@ -6013,12 +6013,11 @@ export async function buildChecks(
         .slice(0, 3)
         .map(([s, n]) => `${s}=${n}`)
         .join(', ');
-      const status: 'ok' | 'warn' | 'fail' =
-        events.length >= 100 ? 'fail' : events.length >= 10 ? 'warn' : 'ok';
+      const severity = contentSanityDoctorSeverity(summary);
       checks.push({
         name: 'content_sanity_audit_recent',
-        status,
-        message: `${events.length} events (hard=${summary.by_type.hard_block} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
+        status: severity.status,
+        message: `${events.length} events, actionable=${severity.actionable_events} (hard=${summary.by_type.hard_block} quarantine=${summary.by_type.quarantine} reject=${summary.by_type.reject} flag=${summary.by_type.flag} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. Non-blocking flag/soft/warn rows are informational so graph-quality checks stay visible. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
       });
     }
   } catch (err) {
@@ -6173,16 +6172,19 @@ export async function buildChecks(
           .join(', ');
         sourceMessages.push(`${src.source_id}: ${src.total} (${codes})`);
       }
+      const ignoredMissingOpenHint = report.ignored_missing_open
+        ? ` Ignored ${report.ignored_missing_open} missing-frontmatter markdown file(s); run \`gbrain frontmatter validate <path>\` only for a strict per-file audit.`
+        : '';
       const fixHint = report.partial
         ? `Raise GBRAIN_DOCTOR_FM_TIMEOUT_MS or run \`gbrain frontmatter validate <source>\` directly. Fix issues: \`gbrain frontmatter validate <source> --fix\``
-        : `Fix: gbrain frontmatter validate <source-path> --fix`;
+        : `Inspect with \`gbrain frontmatter audit --source <id>\`; fix specific files with \`gbrain frontmatter validate <path> --fix\``;
       checks.push({
         name: 'frontmatter_integrity',
         status: 'warn',
         message:
           `${report.total} frontmatter issue(s)` +
           (report.partial ? ` (PARTIAL SCAN — timeout after ${fmTimeoutMs / 1000}s)` : '') +
-          `. ${sourceMessages.join('; ')}. ${fixHint}`,
+          `. ${sourceMessages.join('; ')}.${ignoredMissingOpenHint} ${fixHint}`,
       });
     }
   } catch (e) {
