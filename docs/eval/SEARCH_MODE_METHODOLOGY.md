@@ -147,7 +147,7 @@ Every metric the report prints has a plain-English entry in `docs/eval/METRIC_GL
 
 ## Cost anchors
 
-The mode-picker prompt at `gbrain init` and the CLAUDE.md `## Search Mode` table both surface these rough cost anchors. Working through the math so they're auditable:
+The mode-picker prompt at `gbrain init` surfaces these rough cost anchors; this doc is the canonical reference for the full matrix (CLAUDE.md's `## Search modes` section links here). Working through the math so they're auditable:
 
 **Variables:**
 - `T` = avg tokens per search-result chunk. The recursive chunker targets 300 words / chunk → ~400 tokens (English, OpenAI tiktoken approx).
@@ -192,7 +192,7 @@ The mode-picker prompt at `gbrain init` and the CLAUDE.md `## Search Mode` table
 - Most agents make 1-5 searches per turn; cost-per-turn is what bills you, not cost-per-query.
 - The model price column drifts as providers reprice; pin the rate via `src/core/model-pricing.ts` (the canonical chat-pricing table) for a current snapshot.
 
-The picker copy + CLAUDE.md table are the canonical user-facing source. Update them in lockstep when the underlying chunker size or default `searchLimit` changes.
+The picker copy + this doc are the canonical user-facing source. Update them in lockstep when the underlying chunker size or default `searchLimit` changes.
 
 ## Mode × Model matrix (the 25x spread)
 
