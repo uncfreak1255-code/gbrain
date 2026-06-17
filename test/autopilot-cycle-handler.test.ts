@@ -141,6 +141,10 @@ describe('autopilot-cycle handler source_id validation + archive recheck', () =>
 
     expect(result.status).toBe('clean');
     expect(result.report.phases[0]?.details?.reason).toBe('no_brain_dir');
+    const rows = await engine.executeRaw<{ config: { last_full_cycle_at?: string } | null }>(
+      `SELECT config FROM sources WHERE id = 'db-only'`,
+    );
+    expect(rows[0]?.config?.last_full_cycle_at ?? null).toBeNull();
   });
 });
 
