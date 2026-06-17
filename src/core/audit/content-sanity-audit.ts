@@ -179,6 +179,11 @@ export interface ContentSanitySummary {
   top_patterns: Array<{ name: string; count: number }>;
 }
 
+export interface ContentSanityDoctorSeverity {
+  status: 'ok' | 'warn' | 'fail';
+  actionable_events: number;
+}
+
 export function summarizeContentSanityEvents(
   events: ReadonlyArray<ContentSanityAuditEvent>,
 ): ContentSanitySummary {
@@ -213,5 +218,23 @@ export function summarizeContentSanityEvents(
     by_type,
     by_source,
     top_patterns,
+  };
+}
+
+/**
+ * Doctor should page on content that was blocked/hidden/rejected, not on the
+ * volume of non-blocking audit chatter. Otherwise large sources with many
+ * warn/flag/soft rows drown out the graph-quality checks that need attention.
+ */
+export function contentSanityDoctorSeverity(
+  summary: ContentSanitySummary,
+): ContentSanityDoctorSeverity {
+  const actionable_events =
+    summary.by_type.hard_block +
+    summary.by_type.quarantine +
+    summary.by_type.reject;
+  return {
+    actionable_events,
+    status: actionable_events >= 100 ? 'fail' : actionable_events > 0 ? 'warn' : 'ok',
   };
 }

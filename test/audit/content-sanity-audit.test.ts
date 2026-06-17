@@ -7,6 +7,7 @@ import {
   logContentSanityAssessment,
   readRecentContentSanityEvents,
   summarizeContentSanityEvents,
+  contentSanityDoctorSeverity,
   computeContentSanityAuditFilename,
   type ContentSanityAuditEvent,
 } from '../../src/core/audit/content-sanity-audit.ts';
@@ -224,5 +225,48 @@ describe('summarizeContentSanityEvents', () => {
     ]);
     expect(s.top_patterns).toContainEqual({ name: 'reddit_blocked', count: 2 });
     expect(s.top_patterns).toContainEqual({ name: 'linkedin_wall', count: 1 });
+  });
+});
+
+describe('contentSanityDoctorSeverity', () => {
+  function event(over: Partial<ContentSanityAuditEvent>): ContentSanityAuditEvent {
+    return {
+      ts: new Date().toISOString(),
+      event_type: 'warn',
+      slug: 'test',
+      source_id: 'default',
+      bytes: 100,
+      junk_pattern_matches: [],
+      literal_substring_matches: [],
+      reason_messages: [],
+      ...over,
+    };
+  }
+
+  test('keeps non-blocking audit volume informational', () => {
+    const events = [
+      ...Array.from({ length: 120 }, () => event({ event_type: 'warn' })),
+      ...Array.from({ length: 80 }, () => event({ event_type: 'flag' })),
+      ...Array.from({ length: 50 }, () => event({ event_type: 'soft_block' })),
+    ];
+    const severity = contentSanityDoctorSeverity(summarizeContentSanityEvents(events));
+
+    expect(severity).toEqual({ status: 'ok', actionable_events: 0 });
+  });
+
+  test('warns when blocked or hidden content appears', () => {
+    const severity = contentSanityDoctorSeverity(summarizeContentSanityEvents([
+      event({ event_type: 'quarantine' }),
+      event({ event_type: 'reject' }),
+    ]));
+
+    expect(severity).toEqual({ status: 'warn', actionable_events: 2 });
+  });
+
+  test('fails only when actionable blockers are high volume', () => {
+    const events = Array.from({ length: 100 }, () => event({ event_type: 'hard_block' }));
+    const severity = contentSanityDoctorSeverity(summarizeContentSanityEvents(events));
+
+    expect(severity).toEqual({ status: 'fail', actionable_events: 100 });
   });
 });
