@@ -1,9 +1,8 @@
 # Releasing & contributing (gbrain)
 
-The full release + contributor process. CLAUDE.md keeps the ship-critical IRON RULES
-inline (the Version-locations table, branch=workspace, post-ship `/document-release`,
-the Privacy + Responsible-disclosure rules, PR-title-version-first, never-hand-roll-ship)
-and points here for everything else. **Before any ship, read this in full. Use `/ship` —
+The full release + contributor process, plus the merge-conflict recovery procedure and
+the Privacy + Responsible-disclosure rules. CLAUDE.md keeps a one-line pointer to each of
+these and points here for the detail. **Before any ship, read this in full. Use `/ship` —
 never hand-roll a release.**
 
 ## Pre-ship requirements
@@ -430,4 +429,152 @@ Why this over alternatives: adding `garrytan-agents` as a collaborator, or
 flipping the repo-wide "send secrets to fork PRs" toggle, both broaden
 secret distribution to every fork PR from that account or any fork. Moving
 the branch keeps secret scope tight to just the one PR being shipped.
+
+## Merge-conflict recovery procedure (memorize this)
+
+Every feature branch that ships hits conflicts on VERSION + package.json +
+CHANGELOG.md because master ships its own version bumps. Auto-merge sometimes
+resolves these silently in unexpected ways. After any merge, branch update, or
+version-related edit, run the 3-line version-consistency audit (the
+Version-locations table in CLAUDE.md carries it inline). The trio MUST agree on
+the same `MAJOR.MINOR.PATCH.MICRO`; if any one disagrees, the merge is not
+finished.
+
+When `git merge origin/master` reports conflicts on VERSION, package.json, or
+CHANGELOG.md, resolve in this exact order:
+
+1. **VERSION** — overwrite with the wave's version (`echo -n "X.Y.Z.W"
+   > VERSION`). Highest semver wins; do NOT take master's lower version.
+2. **package.json** — strip the conflict markers, keep the wave's
+   version line. Sed pattern:
+   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/,/^>>>>>>> /d' package.json && rm package.json.bak`
+   (assumes ours is above the `=======`).
+3. **CHANGELOG.md** — strip ALL three conflict markers; both your entry
+   and master's entry stay. Sed pattern:
+   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/master$/d' CHANGELOG.md && rm CHANGELOG.md.bak`
+   Then verify your entry is the topmost `## [X.Y.Z.W]` and master's
+   newer-than-yours entries (if any) sit below.
+4. **Run the 3-line audit.** If it doesn't show your version on all three
+   lines, you missed a marker.
+5. **Run `bun install`** to refresh `bun.lock` against the resolved
+   `package.json`. Stage and commit if it changed.
+6. **Run `bun run typecheck`** before committing the merge.
+7. Only THEN run `git commit` for the merge.
+
+If the audit shows drift after step 4, do NOT proceed to step 5. Re-run
+steps 1-3 against the actual file content; you missed a marker or
+resolved one in the wrong direction.
+
+**Anti-pattern to avoid:** Resolving via `git checkout --ours package.json`
+and `git checkout --theirs scripts/test-shard.sh` mixed in the same
+commit. The selective directional resolution is fine, but on
+VERSION/package.json/CHANGELOG specifically, ALWAYS use the explicit
+`echo > VERSION` + sed-strip-markers pattern above. The directional
+checkout flags have bitten us when the conflict shape was unexpected
+(e.g. master stripped a section we expected to keep).
+
+**Pre-push gate (manual).** Before any `git push` of a merge commit, run the
+3-line audit one more time. If you've been editing via `/ship` you can rely on
+its Step 12 idempotency check; if you've been resolving conflicts or bumping
+the version manually, the audit is the last line of defense before CI yells.
+
+## Privacy rule: scrub real names from public docs
+
+**Never reference real people, companies, funds, or private agent names in any
+public-facing artifact.** Public artifacts include: `CHANGELOG.md`, `README.md`,
+`docs/`, `skills/`, PR titles + bodies, commit messages, and comments in checked-in
+code. Query examples, benchmark stories, and migration guides MUST use generic
+placeholders.
+
+Why: gbrain runs a personal knowledge brain containing notes on real people and
+real companies (YC founders, portfolio companies, funds, investors, meeting
+attendees). When a doc copies a query like `gbrain graph diana-hu --depth 2` or
+names a specific agent fork like `Wintermute`, that real name gets indexed by
+search engines, surfaced in cross-references, and distributed with every release.
+
+**Name mapping** to use in examples:
+- Agent forks → `your agent fork`, `a downstream agent`, or `agent-fork`
+- Example person → `alice-example`, `charlie-example`, or `a-founder`
+- Example company → `acme-example`, `widget-co`, or `a-company`
+- Example fund → `fund-a`, `fund-b`, `fund-c`
+- Example deal → `acme-seed`, `widget-series-a`
+- Example meeting → `meetings/2026-04-03` (generic date is fine)
+- Example user → `you` or `the user`, never a proper name
+
+**Specific rule: never say `Wintermute` in any CHANGELOG, README, doc, PR, or
+commit message.** When the temptation is to illustrate with the real fork name:
+- Reader-facing copy → `your OpenClaw` (covers Wintermute, Hermes, AlphaClaw,
+  and any other downstream OpenClaw deployment in one term the reader already
+  recognizes).
+- First-person / origin-story copy → `Garry's OpenClaw` (honest that this is
+  the production deployment driving the feature, without exposing the private
+  agent's name).
+
+`Wintermute` may appear in private artifacts (scratch plans under
+`~/.gstack/projects/…`, memory files, conversation transcripts, CEO-review
+plans) — those aren't distributed. Anything checked into this repo or shipped
+in a release must use the OpenClaw phrasing above. Sweeping a stale reference
+is a small clean-up PR, not a debate.
+
+**When in doubt, ask yourself:** "Would this query reveal private information
+about the user's contacts, investments, or portfolio if it were read by a
+stranger?" If yes, replace with generic placeholders.
+
+**Illustrative API examples with household-brand companies** (Stripe, Brex, OpenAI,
+GitHub, etc.) are fine — they're public entities, not contacts in anyone's brain.
+Do not confuse illustrative API examples with queries that reveal real
+relationships.
+
+## Responsible-disclosure rule: don't broadcast attack surface in release notes
+
+**When a release fixes a security gap or a user-impacting bug, describe the fix
+functionally. Do not enumerate the attack surface, quantify the exposure window,
+or highlight the most sensitive records by name in public-facing artifacts.**
+
+Public-facing artifacts include: `CHANGELOG.md`, `README.md`, `docs/`, PR titles
+and bodies, commit messages, GitHub issue titles and comments, release pages,
+tweets, blog posts.
+
+**Don't write:**
+- "10 tables were publicly readable by the anon key for months, including X, Y, Z"
+- "X and Y are the most sensitive ones"
+- "N tables exposed. Fix: enable RLS on these specific tables: ..."
+
+**Do write:**
+- "Security hardening pass. Fresh installs secure by default. Existing brains
+  brought to the same bar automatically on upgrade."
+- "If `gbrain doctor` still flags anything after upgrade, the message names each
+  table and gives the exact fix."
+
+Why: anyone reading the release page before they've upgraded now has a directed
+probe list for unpatched installs. The source code ships the specifics anyway
+(`src/schema.sql`, `src/core/migrate.ts`, test fixtures) — reverse engineers can
+get them. But the release page is a broadcast channel. Don't hand attackers a
+curated list with a banner.
+
+**The test:** if a reader with no prior context could read the release note and
+walk away knowing "gbrain at version X has table Y readable by anon key until
+they patch," the note is too specific. Rewrite until that's no longer possible.
+
+**What IS fine in public artifacts:**
+- The mechanism of the fix ("the check now scans every public table instead of
+  a hardcoded allowlist").
+- User-facing operator ergonomics (the escape-hatch SQL template, the upgrade
+  commands, the breaking-change flag).
+- Credit to contributors.
+- Generic framing of severity ("security posture tightening pass") without
+  quantification.
+
+**What stays in private artifacts (plan files, private memories, internal docs):**
+- Specific table names, record counts, exposure duration.
+- Which records stand out as highest-risk.
+- Detailed before/after tables in the "numbers that matter" format.
+
+If the CEO/Eng review of a plan produces a detailed exposure table, keep it in
+the plan file under `~/.claude/plans/` or `~/.gstack/projects/`. Don't copy it
+into the CHANGELOG or PR body.
+
+Applies retroactively: if you see a prior CHANGELOG entry naming attack-surface
+specifics, scrub it as a small cleanup commit, the same way a stale Wintermute
+reference gets swept.
 
