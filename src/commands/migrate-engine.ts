@@ -158,7 +158,13 @@ export async function copySourceRowsForMigration(
         row.local_path,
         row.last_commit,
         asIsoTimestamp(row.last_sync_at),
-        JSON.stringify(normalizeSourceConfig(row.config)),
+        // Bind the RAW config object (not JSON.stringify'd) to the $6::jsonb
+        // cast. postgres.js double-encodes a pre-stringified value into a JSONB
+        // STRING literal on a Postgres target, so config->>'key' returns NULL;
+        // PGLite silently normalizes it back, hiding the bug. A raw object
+        // binds with the correct jsonb type oid on both engines — the same
+        // positional pattern as the minion_jobs INSERT (core/minions/queue.ts).
+        normalizeSourceConfig(row.config),
         row.chunker_version,
         row.archived,
         asIsoTimestamp(row.archived_at),
