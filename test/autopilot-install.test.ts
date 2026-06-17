@@ -98,4 +98,10 @@ describe('autopilot wrapper script — env source order (v0.36.1.x #966)', () =>
     expect(src).toMatch(/source\s+~\/\.zshenv/);
     expect(src).toMatch(/source\s+~\/\.zshrc/);
   });
+
+  test('wrapper exports ~/.bun/bin into PATH before exec (launchd shebang fix)', async () => {
+    const { readFileSync } = await import('fs');
+    const src = readFileSync('src/commands/autopilot.ts', 'utf8');
+    expect(src).toContain('export PATH="$HOME/.bun/bin:$PATH"');
+  });
 });

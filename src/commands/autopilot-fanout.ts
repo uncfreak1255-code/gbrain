@@ -205,7 +205,10 @@ export async function dispatchPerSource(
       const job = await queue.add(
         'autopilot-cycle',
         {
-          repoPath: opts.repoPath,
+          // Source-scoped cycles must carry the source's own checkout so the
+          // filesystem phases (lint/backlinks/sync/extract) and the DB phases
+          // operate on the same repo.
+          repoPath: src.local_path,
           source_id: src.id,
           pull: !!remoteUrl,
         },

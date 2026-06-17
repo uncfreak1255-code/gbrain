@@ -20,6 +20,7 @@ import {
   willEmbedSynchronously,
   shouldBlockSync,
 } from '../src/core/embedding.ts';
+import { resetGateway } from '../src/core/ai/gateway.ts';
 import { lookupEmbeddingPrice } from '../src/core/embedding-pricing.ts';
 import { estimateTokens } from '../src/core/chunkers/code.ts';
 
@@ -32,6 +33,7 @@ describe('Layer 8 D1 — embedding cost model', () => {
   });
 
   test('estimateEmbeddingCostUsd scales linearly (gateway-unconfigured fallback = OpenAI rate)', () => {
+    resetGateway();
     // With no gateway configured (unit-test context) the estimator falls back
     // to the OpenAI text-embedding-3-large rate ($0.13/Mtok = $0.00013/1k).
     expect(estimateEmbeddingCostUsd(0)).toBe(0);
@@ -63,6 +65,7 @@ describe('Layer 8 D1 — embedding cost model', () => {
   });
 
   test('5K-file TS repo sanity check: ~$5 at ~400k tokens', () => {
+    resetGateway();
     // A 5K-file TS repo at ~80 tokens/file averages ~400k tokens. Cost:
     // 400_000 / 1000 * 0.00013 = $0.052 ≈ $0.05. Not $5. The CHANGELOG
     // prose claim "~$5 one-time" was conservative for very-large repos
