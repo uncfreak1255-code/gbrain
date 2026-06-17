@@ -9,12 +9,13 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
 let engine: PGLiteEngine;
 let brainDir: string;
+const tempDirs = new Set<string>();
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -34,14 +35,20 @@ beforeEach(async () => {
   await engine.executeRaw('DELETE FROM gbrain_cycle_locks').catch(() => {});
   await engine.executeRaw(`DELETE FROM sources WHERE id <> 'default'`).catch(() => {});
   brainDir = mkdtempSync(join(tmpdir(), 'gbrain-autopilot-handler-'));
+  tempDirs.add(brainDir);
 });
 
-async function seedSource(id: string, opts: { archived?: boolean } = {}): Promise<void> {
+async function seedSource(
+  id: string,
+  opts: { archived?: boolean; localPath?: string | null } = {},
+): Promise<void> {
   await engine.executeRaw(
     `INSERT INTO sources (id, name, local_path, config, archived, created_at)
      VALUES ($1, $2, $3, '{}'::jsonb, $4, NOW())
-     ON CONFLICT (id) DO UPDATE SET archived = EXCLUDED.archived`,
-    [id, id, brainDir, opts.archived === true],
+     ON CONFLICT (id) DO UPDATE
+       SET local_path = EXCLUDED.local_path,
+           archived = EXCLUDED.archived`,
+    [id, id, opts.localPath === undefined ? brainDir : opts.localPath, opts.archived === true],
   );
 }
 
@@ -65,6 +72,20 @@ async function runHandlerOnce(jobData: Record<string, unknown>): Promise<{ parti
 }
 
 describe('autopilot-cycle handler source_id validation + archive recheck', () => {
+  test('source_id resolves brainDir from the source local_path, not queued repoPath', async () => {
+    const sourceDir = mkdtempSync(join(tmpdir(), 'gbrain-autopilot-source-'));
+    tempDirs.add(sourceDir);
+    await seedSource('alpha', { localPath: sourceDir });
+
+    const result = await runHandlerOnce({
+      repoPath: '/definitely/not/the/source/path',
+      source_id: 'alpha',
+      phases: ['lint'],
+    });
+
+    expect(['ok', 'clean']).toContain(result.status);
+  });
+
   test('missing source_id (legacy caller) runs cycle normally', async () => {
     const result = await runHandlerOnce({ repoPath: brainDir, phases: ['lint'] });
     // status is whatever runCycle decided; just ensure handler didn't reject
@@ -109,4 +130,22 @@ describe('autopilot-cycle handler source_id validation + archive recheck', () =>
     const result = await runHandlerOnce({ repoPath: brainDir, source_id: 'echo', pull: false, phases: ['lint'] });
     expect(['ok', 'clean']).toContain(result.status);
   });
+
+  test('source_id with no local_path does not fall back to the queued repoPath', async () => {
+    await seedSource('db-only', { localPath: null });
+    const result = await runHandlerOnce({
+      repoPath: brainDir,
+      source_id: 'db-only',
+      phases: ['lint'],
+    });
+
+    expect(result.status).toBe('clean');
+    expect(result.report.phases[0]?.details?.reason).toBe('no_brain_dir');
+  });
+});
+
+afterAll(() => {
+  for (const dir of tempDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
