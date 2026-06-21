@@ -75,6 +75,64 @@ describe('gateway tool schema + message shape (real AI SDK v6)', () => {
     ).rejects.toThrow();
   });
 
+  it('REGRESSION: replayed multi-turn tool history passes the real ModelMessage schema', async () => {
+    const model = mockModel();
+    const tools = {
+      brain_search: {
+        description: 'search the brain',
+        inputSchema: jsonSchema({ type: 'object', properties: { query: { type: 'string' } } } as any),
+      },
+      brain_get_page: {
+        description: 'get a page',
+        inputSchema: jsonSchema({ type: 'object', properties: { slug: { type: 'string' } } } as any),
+      },
+    };
+    const replayMessages: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'synthesize this transcript' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I will search first.' },
+          { type: 'tool-call', toolCallId: 'toolu_search_1', toolName: 'brain_search', input: { query: 'debugging workflow' } },
+          { type: 'tool-call', toolCallId: 'toolu_search_2', toolName: 'brain_search', input: { query: 'draft send proof' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool-result', toolCallId: 'toolu_search_1', toolName: 'brain_search', output: [{ slug: 'wiki/example-one', title: 'Example One' }] },
+          { type: 'tool-result', toolCallId: 'toolu_search_2', toolName: 'brain_search', output: [{ slug: 'wiki/example-two', title: 'Example Two' }] },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I need one page and another search.' },
+          { type: 'tool-call', toolCallId: 'toolu_page_1', toolName: 'brain_get_page', input: { slug: 'wiki/example-one' } },
+          { type: 'tool-call', toolCallId: 'toolu_search_3', toolName: 'brain_search', input: { query: 'workflow proof gate' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool-result', toolCallId: 'toolu_page_1', toolName: 'brain_get_page', output: { slug: 'wiki/example-one', body: 'example page' } },
+          { type: 'tool-result', toolCallId: 'toolu_search_3', toolName: 'brain_search', output: [{ slug: 'wiki/example-three', title: 'Example Three' }] },
+        ],
+      },
+    ];
+
+    const result = await generateText({
+      model: model as any,
+      tools: tools as any,
+      messages: toModelMessages(replayMessages) as any,
+    });
+
+    expect(result.text).toBe('ok');
+    const prompt = model.doGenerateCalls[0]!.prompt as any[];
+    expect(prompt.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool']);
+    expect(prompt.filter((m) => m.role === 'tool')).toHaveLength(2);
+  });
+
   it('REGRESSION: raw tool-result in a role:user message (pre-fix shape) is rejected by v6', async () => {
     const model = mockModel();
     const tools = {

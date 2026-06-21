@@ -7,15 +7,15 @@
  *     composes the tracker without explicit per-call injection.
  *   - Nested scopes replace the active tracker for the inner closure and
  *     restore the outer tracker on exit.
- *   - Calls OUTSIDE any withBudgetTracker scope are budget-no-op (the
- *     existing pre-v0.37 contract is preserved).
+ *   - Calls OUTSIDE any withBudgetTracker scope are ledgered by a per-call
+ *     tracker, so paid provider calls cannot disappear from receipts.
  *
  * Hermetic: routes through __setChatTransportForTests so no network /
  * provider / env variable is touched.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -23,6 +23,7 @@ import {
   withBudgetTracker,
   getCurrentBudgetTracker,
   __setChatTransportForTests,
+  __testing as gatewayTesting,
   type ChatOpts,
   type ChatResult,
 } from '../../../src/core/ai/gateway.ts';
@@ -31,18 +32,24 @@ import {
   BudgetExhausted,
   _resetBudgetTrackerWarningsForTest,
 } from '../../../src/core/budget/budget-tracker.ts';
+import { isoWeekFilename } from '../../../src/core/audit-week-file.ts';
 
 let tmp: string;
 let auditPath: string;
+let oldAuditDir: string | undefined;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-gw-budget-'));
   auditPath = join(tmp, 'budget.jsonl');
+  oldAuditDir = process.env.GBRAIN_AUDIT_DIR;
+  process.env.GBRAIN_AUDIT_DIR = tmp;
   _resetBudgetTrackerWarningsForTest();
 });
 
 afterEach(() => {
   __setChatTransportForTests(null);
+  if (oldAuditDir === undefined) delete process.env.GBRAIN_AUDIT_DIR;
+  else process.env.GBRAIN_AUDIT_DIR = oldAuditDir;
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -67,6 +74,46 @@ function fakeChatTransport(usage = { input_tokens: 100, output_tokens: 50 }) {
   return Object.assign(fn, { get calls() { return calls; } });
 }
 
+describe('gateway chat usage normalization', () => {
+  test('uses AI SDK inputTokenDetails so cached tokens are not double-counted', () => {
+    expect(gatewayTesting.normalizeChatUsageForBudget({
+      inputTokens: 118,
+      outputTokens: 50,
+      inputTokenDetails: {
+        noCacheTokens: 100,
+        cacheReadTokens: 7,
+        cacheWriteTokens: 11,
+      },
+    }, undefined)).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 7,
+      cacheCreationTokens: 11,
+    });
+  });
+
+  test('falls back to Anthropic raw usage metadata when SDK details are absent', () => {
+    expect(gatewayTesting.normalizeChatUsageForBudget({
+      inputTokens: 118,
+      outputTokens: 50,
+    }, {
+      anthropic: {
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_read_input_tokens: 7,
+          cache_creation_input_tokens: 11,
+        },
+      },
+    })).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 7,
+      cacheCreationTokens: 11,
+    });
+  });
+});
+
 describe('withBudgetTracker — scope semantics', () => {
   test('chat() inside scope auto-composes the tracker', async () => {
     const tracker = new BudgetTracker({ maxCostUsd: 1.0, label: 'test-gw', auditPath });
@@ -90,16 +137,26 @@ describe('withBudgetTracker — scope semantics', () => {
     expect(tracker.snapshot().callsRecorded).toBe(1);
   });
 
-  test('chat() OUTSIDE any scope is a budget no-op (back-compat)', async () => {
+  test('chat() OUTSIDE any scope writes a ledger-only receipt', async () => {
     const transport = fakeChatTransport();
     __setChatTransportForTests(transport);
-    // No withBudgetTracker wrapper — current behavior preserved.
+    // No withBudgetTracker wrapper: the gateway still emits reserve + record
+    // rows under a per-call ledger-only tracker.
     await chat({
       model: 'claude-haiku-4-5-20251001',
       messages: [{ role: 'user', content: 'hi' }],
     });
-    // No tracker; nothing to assert other than "no throw".
     expect(getCurrentBudgetTracker()).toBeNull();
+
+    const receiptPath = join(tmp, isoWeekFilename('budget'));
+    expect(existsSync(receiptPath)).toBe(true);
+    const rows = readFileSync(receiptPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(rows.map(r => r.event)).toEqual(['reserve', 'record']);
+    expect(rows.every(r => r.label === 'gateway.unscoped')).toBe(true);
+    expect(rows[1].actual_cost_usd).toBeGreaterThan(0);
   });
 
   test('nested scopes restore outer tracker on exit', async () => {

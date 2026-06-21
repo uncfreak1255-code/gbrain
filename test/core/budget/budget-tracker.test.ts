@@ -429,6 +429,28 @@ describe('BudgetTracker.record', () => {
     expect(audit[0].actual_cost_usd).toBeCloseTo(0.0035, 6);
   });
 
+  test('prices Anthropic cache tokens with cache-specific multipliers', () => {
+    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    t.record({
+      modelId: 'claude-haiku-4-5-20251001',
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 1000,
+      cacheCreationTokens: 1000,
+      kind: 'chat',
+    } as any);
+
+    // Haiku: input $0.001 + output $0.0025 + cache read $0.0001
+    // + 5-minute cache write $0.00125 = $0.00485.
+    expect(t.totalSpent).toBeCloseTo(0.00485, 6);
+    const audit = readAudit();
+    expect(audit[0].cache_read_tokens).toBe(1000);
+    expect(audit[0].cache_creation_tokens).toBe(1000);
+    expect(audit[0].cache_read_input_multiplier).toBe(0.1);
+    expect(audit[0].cache_creation_input_multiplier).toBe(1.25);
+    expect(audit[0].actual_cost_usd).toBeCloseTo(0.00485, 6);
+  });
+
   test('unpriced record: no throw, audited as record_unpriced', () => {
     const t = new BudgetTracker({ label: 'test', auditPath });
     expect(() =>
@@ -511,6 +533,23 @@ describe('extractUsageFromError (A3 amended)', () => {
   test('camelCase usage variant', () => {
     const err = { usage: { inputTokens: 300, outputTokens: 100 } };
     expect(extractUsageFromError(err, fallback)).toEqual({ inputTokens: 300, outputTokens: 100 });
+  });
+
+  test('preserves separate cache usage fields for cache-aware pricing', () => {
+    const err = {
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 7,
+        cache_creation_input_tokens: 11,
+      },
+    };
+    expect(extractUsageFromError(err, fallback)).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 7,
+      cacheCreationTokens: 11,
+    });
   });
 
   test('returns pessimistic fallback when no usage present (A3 amended)', () => {
