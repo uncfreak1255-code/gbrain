@@ -2328,6 +2328,29 @@ export interface ChatToolDef {
   inputSchema: Record<string, unknown>;
 }
 
+function toJsonCompatibleValue(value: unknown): unknown {
+  if (value === undefined) return null;
+  if (typeof value === 'bigint') return value.toString();
+  try {
+    return JSON.parse(JSON.stringify(value, (_key, nested) => {
+      if (typeof nested === 'bigint') return nested.toString();
+      if (typeof nested === 'function' || typeof nested === 'symbol') return String(nested);
+      return nested;
+    }));
+  } catch {
+    return String(value);
+  }
+}
+
+function stringifyToolError(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(toJsonCompatibleValue(value));
+  } catch {
+    return String(value);
+  }
+}
+
 /**
  * Convert gbrain's provider-neutral ChatMessage[] into AI SDK v6 ModelMessage[].
  *
@@ -2356,10 +2379,10 @@ export function toModelMessages(messages: ChatMessage[]): unknown[] {
             toolCallId: b.toolCallId,
             toolName: b.toolName,
             output: b.isError
-              ? { type: 'error-text' as const, value: typeof b.output === 'string' ? b.output : JSON.stringify(b.output) }
+              ? { type: 'error-text' as const, value: stringifyToolError(b.output) }
               : (typeof b.output === 'string'
                 ? { type: 'text' as const, value: b.output }
-                : { type: 'json' as const, value: (b.output ?? null) as never }),
+                : { type: 'json' as const, value: toJsonCompatibleValue(b.output) as never }),
           })),
       };
     }
@@ -2367,7 +2390,14 @@ export function toModelMessages(messages: ChatMessage[]): unknown[] {
       role: m.role,
       content: blocks.map((b) => {
         if (b.type === 'text') return { type: 'text' as const, text: b.text };
-        if (b.type === 'tool-call') return { type: 'tool-call' as const, toolCallId: b.toolCallId, toolName: b.toolName, input: b.input };
+        if (b.type === 'tool-call') {
+          return {
+            type: 'tool-call' as const,
+            toolCallId: b.toolCallId,
+            toolName: b.toolName,
+            input: toJsonCompatibleValue(b.input ?? {}) as never,
+          };
+        }
         return b;
       }),
     };
