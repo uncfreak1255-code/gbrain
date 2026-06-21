@@ -2328,16 +2328,25 @@ export interface ChatToolDef {
   inputSchema: Record<string, unknown>;
 }
 
-function toJsonSafeToolValue(value: unknown, seen = new WeakSet<object>()): unknown {
+function toJsonCompatibleValue(value: unknown, seen = new WeakSet<object>()): unknown {
   if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'undefined') return null;
   if (value === null || typeof value !== 'object') return value;
   if (seen.has(value)) return '[Circular]';
   seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => toJsonSafeToolValue(item, seen));
+  if (Array.isArray(value)) return value.map((item) => toJsonCompatibleValue(item, seen));
   return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, toJsonSafeToolValue(nested, seen)]),
+    Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, toJsonCompatibleValue(nested, seen)]),
   );
+}
+
+function stringifyToolError(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(toJsonCompatibleValue(value));
+  } catch {
+    return String(value);
+  }
 }
 
 /**
@@ -2368,10 +2377,10 @@ export function toModelMessages(messages: ChatMessage[]): unknown[] {
             toolCallId: b.toolCallId,
             toolName: b.toolName,
             output: b.isError
-              ? { type: 'error-text' as const, value: typeof b.output === 'string' ? b.output : JSON.stringify(toJsonSafeToolValue(b.output)) }
+              ? { type: 'error-text' as const, value: stringifyToolError(b.output) }
               : (typeof b.output === 'string'
                 ? { type: 'text' as const, value: b.output }
-                : { type: 'json' as const, value: toJsonSafeToolValue(b.output ?? null) as never }),
+                : { type: 'json' as const, value: toJsonCompatibleValue(b.output) as never }),
           })),
       };
     }
@@ -2379,7 +2388,14 @@ export function toModelMessages(messages: ChatMessage[]): unknown[] {
       role: m.role,
       content: blocks.map((b) => {
         if (b.type === 'text') return { type: 'text' as const, text: b.text };
-        if (b.type === 'tool-call') return { type: 'tool-call' as const, toolCallId: b.toolCallId, toolName: b.toolName, input: b.input };
+        if (b.type === 'tool-call') {
+          return {
+            type: 'tool-call' as const,
+            toolCallId: b.toolCallId,
+            toolName: b.toolName,
+            input: toJsonCompatibleValue(b.input ?? {}) as never,
+          };
+        }
         return b;
       }),
     };

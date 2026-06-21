@@ -153,6 +153,84 @@ describe('gateway tool schema + message shape (real AI SDK v6)', () => {
     expect(prompt.at(-1).content[1].output.value.id).toBe('17773');
   });
 
+  it('REGRESSION: live 22625-style multi-turn tool replay with DB ids passes the real ModelMessage schema', async () => {
+    const model = mockModel();
+    const tools = {
+      brain_query: {
+        description: 'query the brain',
+        inputSchema: jsonSchema({ type: 'object', properties: { question: { type: 'string' } } } as any),
+      },
+      brain_get_page: {
+        description: 'get a page',
+        inputSchema: jsonSchema({ type: 'object', properties: { slug: { type: 'string' } } } as any),
+      },
+    };
+    const replayMessages: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'synthesize this transcript' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I will inspect neighboring memory first.' },
+          { type: 'tool-call', toolCallId: 'toolu_01Cuq8THTQ8PubikSgFwhw8i', toolName: 'brain_query', input: { question: 'what changed in the prior run' } },
+          { type: 'tool-call', toolCallId: 'toolu_01NqeZySmCtpWEmxRVPa1bQu', toolName: 'brain_query', input: { question: 'what is still unresolved' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'toolu_01Cuq8THTQ8PubikSgFwhw8i',
+            toolName: 'brain_query',
+            output: [{ slug: 'sessions/22625-neighbor-one', page_id: 17775n, chunk_id: 183106n }],
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'toolu_01NqeZySmCtpWEmxRVPa1bQu',
+            toolName: 'brain_query',
+            output: [{ slug: 'sessions/22625-neighbor-two', page_id: 17776n, chunk_id: 183107n }],
+          },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I need one full page and another neighbor.' },
+          { type: 'tool-call', toolCallId: 'toolu_01XqcAd7vWeWhU9CHKCTQFH1', toolName: 'brain_query', input: { question: 'operator proof gate' } },
+          { type: 'tool-call', toolCallId: 'toolu_01JdRsDHvFNCBsTeMqT8UiJ6', toolName: 'brain_get_page', input: { slug: 'sessions/22625-neighbor-one' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'toolu_01XqcAd7vWeWhU9CHKCTQFH1',
+            toolName: 'brain_query',
+            output: [{ slug: 'sessions/22625-neighbor-three', page_id: 17777n, chunk_id: 183108n }],
+          },
+          {
+            type: 'tool-result',
+            toolCallId: 'toolu_01JdRsDHvFNCBsTeMqT8UiJ6',
+            toolName: 'brain_get_page',
+            output: { id: 17775n, slug: 'sessions/22625-neighbor-one', body: 'page body' },
+          },
+        ],
+      },
+    ];
+
+    const result = await generateText({
+      model: model as any,
+      tools: tools as any,
+      messages: toModelMessages(replayMessages) as any,
+    });
+
+    expect(result.text).toBe('ok');
+    const prompt = model.doGenerateCalls[0]!.prompt as any[];
+    expect(prompt.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool']);
+    expect(prompt.at(-1).content[1].output.value.id).toBe('17775');
+  });
+
   it('REGRESSION: raw tool-result in a role:user message (pre-fix shape) is rejected by v6', async () => {
     const model = mockModel();
     const tools = {
