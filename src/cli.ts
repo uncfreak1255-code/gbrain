@@ -2161,11 +2161,8 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
       // clear per startup is microseconds, no hot path.
       configureGateway(buildGatewayConfig(merged));
     }
-    const { configureBudgetTrackerDefaults } = await import('./core/budget/budget-tracker.ts');
-    const { resolveMonthlyBudgetCapFromEngine } = await import('./core/budget/monthly-cap.ts');
-    configureBudgetTrackerDefaults({
-      monthlyBudget: await resolveMonthlyBudgetCapFromEngine(engine),
-    });
+    const { configureBudgetTrackerDefaultsFromEngine } = await import('./core/budget/defaults.ts');
+    await configureBudgetTrackerDefaultsFromEngine(engine);
     // v0.31.12: re-resolve gateway defaults through resolveModel so
     // `models.tier.*` and `models.default` overrides apply to expansion +
     // chat. Per Codex F3 — configureGateway is sync; this is the async
