@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  runPhaseProposeTakes,
+  runPhaseProposeTakes as runPhaseProposeTakesBase,
   parseExtractorOutput,
   contentHash,
   hasCompleteFence,
@@ -32,23 +32,24 @@ import { BudgetExhausted, BudgetTracker } from '../src/core/budget/budget-tracke
 import type { OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let auditDir: string;
-const previousAuditDir = process.env.GBRAIN_AUDIT_DIR;
 
 beforeAll(() => {
   auditDir = mkdtempSync(join(tmpdir(), 'gbrain-propose-takes-audit-'));
-  process.env.GBRAIN_AUDIT_DIR = auditDir;
 });
 
 afterAll(() => {
-  if (previousAuditDir === undefined) {
-    delete process.env.GBRAIN_AUDIT_DIR;
-  } else {
-    process.env.GBRAIN_AUDIT_DIR = previousAuditDir;
-  }
   rmSync(auditDir, { recursive: true, force: true });
 });
+
+async function runPhaseProposeTakes(
+  ctx: OperationContext,
+  opts?: Parameters<typeof runPhaseProposeTakesBase>[1],
+) {
+  return withEnv({ GBRAIN_AUDIT_DIR: auditDir }, () => runPhaseProposeTakesBase(ctx, opts));
+}
 
 // ─── Mock engine ────────────────────────────────────────────────────
 
@@ -506,7 +507,11 @@ New prose appended here.`;
   test('receipt cost is the phase delta when an outer BudgetTracker already has spend', async () => {
     const pages = [buildPage({ slug: 'wiki/outer-tracker', body: 'One more prediction worth proposing.' })];
     const { engine, putPages } = buildMockEngine({ pages });
-    const outerTracker = new BudgetTracker({ label: 'outer-test', maxCostUsd: 1 });
+    const outerTracker = new BudgetTracker({
+      label: 'outer-test',
+      maxCostUsd: 1,
+      auditPath: join(auditDir, 'outer-test-budget.jsonl'),
+    });
     outerTracker.record({
       modelId: 'anthropic:claude-sonnet-4-6',
       inputTokens: 10_000,
@@ -587,7 +592,11 @@ New prose appended here.`;
   test('final-call BudgetTracker overage marks the phase halted', async () => {
     const pages = [buildPage({ slug: 'wiki/final-overage', body: 'Final call can exceed cap after usage records.' })];
     const { engine, captured } = buildMockEngine({ pages });
-    const tracker = new BudgetTracker({ label: 'outer-tight', maxCostUsd: 0.000001 });
+    const tracker = new BudgetTracker({
+      label: 'outer-tight',
+      maxCostUsd: 0.000001,
+      auditPath: join(auditDir, 'outer-tight-budget.jsonl'),
+    });
     const extractor: ProposeTakesExtractor = async () => {
       try {
         getCurrentBudgetTracker()!.record({

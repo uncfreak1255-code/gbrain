@@ -29,6 +29,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { isoWeekFilename } from '../src/core/audit-week-file.ts';
 import { withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { BudgetTracker } from '../src/core/budget/budget-tracker.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -154,60 +155,58 @@ describe('subagent handler happy path', () => {
 
   test('legacy Anthropic path writes budget reserve and record receipts', async () => {
     const auditDir = mkdtempSync(join(tmpdir(), 'gbrain-subagent-budget-'));
-    const prevAuditDir = process.env.GBRAIN_AUDIT_DIR;
-    process.env.GBRAIN_AUDIT_DIR = auditDir;
     try {
-      const client = new FakeMessagesClient([
-        {
-          content: [{ type: 'text', text: 'tracked' }] as any,
-          stop_reason: 'end_turn',
-          usage: {
-            input_tokens: 10,
-            output_tokens: 5,
-            cache_read_input_tokens: 7,
-            cache_creation_input_tokens: 11,
-          } as any,
-        },
-      ]);
-      const handler = makeSubagentHandler({ engine, client, toolRegistry: [] });
-      const ctx = await makeCtx({ prompt: 'hi' });
+      await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, async () => {
+        const client = new FakeMessagesClient([
+          {
+            content: [{ type: 'text', text: 'tracked' }] as any,
+            stop_reason: 'end_turn',
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              cache_read_input_tokens: 7,
+              cache_creation_input_tokens: 11,
+            } as any,
+          },
+        ]);
+        const handler = makeSubagentHandler({ engine, client, toolRegistry: [] });
+        const ctx = await makeCtx({ prompt: 'hi' });
 
-      await handler(ctx);
+        await handler(ctx);
 
-      const receiptPath = join(auditDir, isoWeekFilename('budget'));
-      expect(existsSync(receiptPath)).toBe(true);
-      const rows = readFileSync(receiptPath, 'utf8')
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as {
-          event: string;
-          label: string;
-          sub_label?: string;
-          input_tokens?: number;
-          cache_read_tokens?: number;
-          cache_creation_tokens?: number;
-          actual_cost_usd?: number;
-        });
+        const receiptPath = join(auditDir, isoWeekFilename('budget'));
+        expect(existsSync(receiptPath)).toBe(true);
+        const rows = readFileSync(receiptPath, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as {
+            event: string;
+            label: string;
+            sub_label?: string;
+            input_tokens?: number;
+            cache_read_tokens?: number;
+            cache_creation_tokens?: number;
+            actual_cost_usd?: number;
+          });
 
-      expect(rows.some((row) =>
-        row.event === 'reserve' &&
-        row.label === 'subagent.legacy' &&
-        row.sub_label === 'subagent.legacy.messages',
-      )).toBe(true);
-      expect(rows.some((row) =>
-        row.event === 'record' &&
-        row.label === 'subagent.legacy' &&
-        row.sub_label === 'subagent.legacy.messages' &&
-        row.input_tokens === 10 &&
-        row.cache_read_tokens === 7 &&
-        row.cache_creation_tokens === 11 &&
-        typeof row.actual_cost_usd === 'number' &&
-        row.actual_cost_usd > 0,
-      )).toBe(true);
+        expect(rows.some((row) =>
+          row.event === 'reserve' &&
+          row.label === 'subagent.legacy' &&
+          row.sub_label === 'subagent.legacy.messages',
+        )).toBe(true);
+        expect(rows.some((row) =>
+          row.event === 'record' &&
+          row.label === 'subagent.legacy' &&
+          row.sub_label === 'subagent.legacy.messages' &&
+          row.input_tokens === 10 &&
+          row.cache_read_tokens === 7 &&
+          row.cache_creation_tokens === 11 &&
+          typeof row.actual_cost_usd === 'number' &&
+          row.actual_cost_usd > 0,
+        )).toBe(true);
+      });
     } finally {
-      if (prevAuditDir === undefined) delete process.env.GBRAIN_AUDIT_DIR;
-      else process.env.GBRAIN_AUDIT_DIR = prevAuditDir;
       rmSync(auditDir, { recursive: true, force: true });
     }
   });

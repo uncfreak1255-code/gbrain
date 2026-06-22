@@ -33,25 +33,25 @@ import {
   _resetBudgetTrackerWarningsForTest,
 } from '../../../src/core/budget/budget-tracker.ts';
 import { isoWeekFilename } from '../../../src/core/audit-week-file.ts';
+import { withEnv } from '../../helpers/with-env.ts';
 
 let tmp: string;
 let auditPath: string;
-let oldAuditDir: string | undefined;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-gw-budget-'));
   auditPath = join(tmp, 'budget.jsonl');
-  oldAuditDir = process.env.GBRAIN_AUDIT_DIR;
-  process.env.GBRAIN_AUDIT_DIR = tmp;
   _resetBudgetTrackerWarningsForTest();
 });
 
 afterEach(() => {
   __setChatTransportForTests(null);
-  if (oldAuditDir === undefined) delete process.env.GBRAIN_AUDIT_DIR;
-  else process.env.GBRAIN_AUDIT_DIR = oldAuditDir;
   rmSync(tmp, { recursive: true, force: true });
 });
+
+async function withAuditDir<T>(fn: () => T | Promise<T>): Promise<T> {
+  return withEnv({ GBRAIN_AUDIT_DIR: tmp }, fn);
+}
 
 function fakeChatTransport(usage = { input_tokens: 100, output_tokens: 50 }) {
   let calls = 0;
@@ -142,9 +142,11 @@ describe('withBudgetTracker — scope semantics', () => {
     __setChatTransportForTests(transport);
     // No withBudgetTracker wrapper: the gateway still emits reserve + record
     // rows under a per-call ledger-only tracker.
-    await chat({
-      model: 'claude-haiku-4-5-20251001',
-      messages: [{ role: 'user', content: 'hi' }],
+    await withAuditDir(async () => {
+      await chat({
+        model: 'claude-haiku-4-5-20251001',
+        messages: [{ role: 'user', content: 'hi' }],
+      });
     });
     expect(getCurrentBudgetTracker()).toBeNull();
 
@@ -163,10 +165,12 @@ describe('withBudgetTracker — scope semantics', () => {
     const transport = fakeChatTransport();
     __setChatTransportForTests(transport);
 
-    await chat({
-      model: 'claude-haiku-4-5-20251001',
-      budgetLabel: 'contextual_retrieval.synopsis',
-      messages: [{ role: 'user', content: 'hi' }],
+    await withAuditDir(async () => {
+      await chat({
+        model: 'claude-haiku-4-5-20251001',
+        budgetLabel: 'contextual_retrieval.synopsis',
+        messages: [{ role: 'user', content: 'hi' }],
+      });
     });
 
     const receiptPath = join(tmp, isoWeekFilename('budget'));
@@ -209,10 +213,12 @@ describe('withBudgetTracker — scope semantics', () => {
     };
     __setChatTransportForTests(transport);
 
-    await expect(chat({
-      model: 'claude-haiku-4-5-20251001',
-      messages: [{ role: 'user', content: 'hi' }],
-    })).rejects.toThrow('provider exploded');
+    await withAuditDir(async () => {
+      await expect(chat({
+        model: 'claude-haiku-4-5-20251001',
+        messages: [{ role: 'user', content: 'hi' }],
+      })).rejects.toThrow('provider exploded');
+    });
 
     const receiptPath = join(tmp, isoWeekFilename('budget'));
     const rows = readFileSync(receiptPath, 'utf8')
@@ -230,10 +236,12 @@ describe('withBudgetTracker — scope semantics', () => {
     };
     __setChatTransportForTests(transport);
 
-    await expect(chat({
-      model: 'claude-haiku-4-5-20251001',
-      messages: [{ role: 'user', content: 'hi' }],
-    })).rejects.toThrow('provider exploded before usage');
+    await withAuditDir(async () => {
+      await expect(chat({
+        model: 'claude-haiku-4-5-20251001',
+        messages: [{ role: 'user', content: 'hi' }],
+      })).rejects.toThrow('provider exploded before usage');
+    });
 
     const receiptPath = join(tmp, isoWeekFilename('budget'));
     const rows = readFileSync(receiptPath, 'utf8')
