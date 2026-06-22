@@ -14,7 +14,10 @@
  *  - parseExtractorOutput unit tests for the raw JSON parser
  */
 
-import { describe, test, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, test, expect } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   runPhaseProposeTakes,
   parseExtractorOutput,
@@ -29,6 +32,23 @@ import { BudgetExhausted, BudgetTracker } from '../src/core/budget/budget-tracke
 import type { OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
+
+let auditDir: string;
+const previousAuditDir = process.env.GBRAIN_AUDIT_DIR;
+
+beforeAll(() => {
+  auditDir = mkdtempSync(join(tmpdir(), 'gbrain-propose-takes-audit-'));
+  process.env.GBRAIN_AUDIT_DIR = auditDir;
+});
+
+afterAll(() => {
+  if (previousAuditDir === undefined) {
+    delete process.env.GBRAIN_AUDIT_DIR;
+  } else {
+    process.env.GBRAIN_AUDIT_DIR = previousAuditDir;
+  }
+  rmSync(auditDir, { recursive: true, force: true });
+});
 
 // ─── Mock engine ────────────────────────────────────────────────────
 
@@ -369,6 +389,31 @@ New prose appended here.`;
     };
     await runPhaseProposeTakes(buildCtx(engine), { extractor });
     expect(extractorCalls).toBe(1);
+  });
+
+  test('oversize prompts are skipped before the extractor can spend', async () => {
+    const pages = [
+      buildPage({ slug: 'wiki/huge', body: 'oversized body '.repeat(1_000) }),
+    ];
+    const { engine, captured } = buildMockEngine({ pages });
+    const ctx = buildCtx(engine);
+    ctx.config = { 'cycle.propose_takes.max_prompt_tokens': 100 } as never;
+    let extractorCalls = 0;
+    const extractor: ProposeTakesExtractor = async () => {
+      extractorCalls++;
+      return [{ claim_text: 'should not run', kind: 'take', holder: 'brain', weight: 0.5 }];
+    };
+
+    const result = await runPhaseProposeTakes(ctx, { extractor });
+    const details = result.details as Record<string, unknown>;
+
+    expect(extractorCalls).toBe(0);
+    expect(result.status).toBe('ok');
+    expect(details.cache_misses).toBe(1);
+    expect(details.oversize_pages_skipped).toBe(1);
+    expect(details.proposals_inserted).toBe(0);
+    expect((details.warnings as string[])[0]).toContain('prompt estimate');
+    expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
   });
 
   test('skipPagesWithFence:true bypasses pages that already have a complete fence', async () => {

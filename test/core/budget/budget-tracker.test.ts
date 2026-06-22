@@ -29,6 +29,7 @@ import {
   _resetBudgetTrackerWarningsForTest,
 } from '../../../src/core/budget/budget-tracker.ts';
 import {
+  budgetAuditRowFingerprint,
   isModelInMonthlyBudgetScope,
   readMonthlyChatSpendUsd,
   resolveMonthlyBudgetCapFromEngine,
@@ -629,7 +630,7 @@ describe('monthly Claude+DeepSeek budget helpers', () => {
     expect(isModelInMonthlyBudgetScope('openrouter:anthropic/claude-sonnet-4-6')).toBe(false);
   });
 
-  test('readback sums current-month record rows for scoped native chat providers only', () => {
+  test('readback sums current-month actual scoped provider rows unless quarantined', () => {
     writeAuditRows([
       {
         schema_version: 1,
@@ -671,8 +672,109 @@ describe('monthly Claude+DeepSeek budget helpers', () => {
         model: 'anthropic:claude-sonnet-4-6',
         projected_cost_usd: 100,
       },
+      {
+        schema_version: 1,
+        ts: '2026-06-17T00:00:00.000Z',
+        event: 'record',
+        kind: 'chat',
+        model: 'anthropic:claude-sonnet-4-6',
+        label: 'outer-test',
+        actual_cost_usd: 100,
+      },
+      {
+        schema_version: 1,
+        ts: '2026-06-17T00:00:00.000Z',
+        event: 'record',
+        kind: 'chat',
+        model: 'anthropic:claude-sonnet-4-6',
+        sub_label: 'gateway.chat.failed',
+        actual_cost_usd: 100,
+      },
     ]);
-    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(11.25);
+    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(111.25);
+  });
+
+  test('monthly cap does not infer test status from plausible propose_takes token counts', () => {
+    writeAuditRows([
+      {
+        schema_version: 1,
+        ts: '2026-06-17T00:00:00.000Z',
+        event: 'record',
+        label: 'cycle.propose_takes',
+        sub_label: 'gateway.chat',
+        kind: 'chat',
+        model: 'anthropic:claude-sonnet-4-6',
+        input_tokens: 1000,
+        output_tokens: 500,
+        actual_cost_usd: 0.0105,
+      },
+    ]);
+    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(0.0105);
+  });
+
+  test('monthly cap excludes fallback accounting rows from provider spend', () => {
+    writeAuditRows([
+      {
+        schema_version: 1,
+        ts: '2026-06-17T00:00:00.000Z',
+        event: 'record',
+        label: 'gateway.chat',
+        sub_label: 'gateway.chat.failed.fallback',
+        kind: 'chat',
+        model: 'anthropic:claude-sonnet-4-6',
+        input_tokens: 1000,
+        output_tokens: 500,
+        actual_cost_usd: 0.0105,
+      },
+      {
+        schema_version: 1,
+        ts: '2026-06-17T00:00:00.000Z',
+        event: 'record',
+        label: 'gateway.chat',
+        sub_label: 'gateway.chat.failed.provider_usage',
+        kind: 'chat',
+        model: 'anthropic:claude-sonnet-4-6',
+        input_tokens: 1000,
+        output_tokens: 500,
+        actual_cost_usd: 0.0205,
+      },
+    ]);
+    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(0.0205);
+  });
+
+  test('monthly cap skips explicitly quarantined local audit rows', () => {
+    const quarantinedRow = {
+      schema_version: 1,
+      ts: '2026-06-17T00:00:00.000Z',
+      event: 'record',
+      label: 'cycle.propose_takes',
+      sub_label: 'gateway.chat',
+      kind: 'chat',
+      model: 'anthropic:claude-sonnet-4-6',
+      input_tokens: 1000,
+      output_tokens: 500,
+      actual_cost_usd: 0.0105,
+    };
+    writeAuditRows([
+      quarantinedRow,
+      {
+        schema_version: 1,
+        ts: '2026-06-17T00:00:00.000Z',
+        event: 'record',
+        kind: 'chat',
+        model: 'anthropic:claude-sonnet-4-6',
+        actual_cost_usd: 0.25,
+      },
+    ]);
+    writeFileSync(
+      join(tmp, 'budget-quarantine.jsonl'),
+      JSON.stringify({
+        fingerprint: budgetAuditRowFingerprint(quarantinedRow),
+        reason: 'legacy_local_test_fixture',
+      }) + '\n',
+      'utf-8',
+    );
+    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(0.25);
   });
 
   test('DB config readback resolves the cap and defaults mode to block', async () => {

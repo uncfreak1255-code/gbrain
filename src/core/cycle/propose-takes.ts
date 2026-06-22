@@ -57,6 +57,9 @@ import type { PhaseStatus, CyclePhase } from '../cycle.ts';
 export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.0-tuned-cat15';
 const PROPOSE_TAKES_BUDGET_USD_KEY = 'cycle.propose_takes.budget_usd';
 const PROPOSE_TAKES_BUDGET_USD_DEFAULT = 5.0;
+const PROPOSE_TAKES_MAX_PROMPT_TOKENS_KEY = 'cycle.propose_takes.max_prompt_tokens';
+const PROPOSE_TAKES_MAX_PROMPT_TOKENS_DEFAULT = 20_000;
+const PROPOSE_TAKES_MAX_OUTPUT_TOKENS = 2048;
 
 /**
  * Tuned extractor prompt, validated against the hand-labeled synthetic
@@ -154,6 +157,7 @@ export interface ProposeTakesResult {
   pages_scanned: number;
   cache_hits: number;
   cache_misses: number;
+  oversize_pages_skipped: number;
   proposals_inserted: number;
   budget_exhausted: boolean;
   warnings: string[];
@@ -226,14 +230,12 @@ export function extractExistingTakesForDedup(pageBody: string): Array<{
 export async function defaultExtractor(
   input: Parameters<ProposeTakesExtractor>[0],
 ): Promise<ProposedTake[]> {
-  const prompt = EXTRACT_TAKES_PROMPT
-    .replace('{EXISTING_TAKES_JSON}', JSON.stringify(input.existingTakes, null, 2))
-    .replace('{PAGE_BODY}', input.pageBody);
+  const prompt = buildExtractorPrompt(input);
 
   const result = await gatewayChat({
     messages: [{ role: 'user', content: prompt }],
     ...(input.modelHint ? { model: input.modelHint } : {}),
-    maxTokens: 2048,
+    maxTokens: PROPOSE_TAKES_MAX_OUTPUT_TOKENS,
   });
 
   // ChatResult.text is already the concatenated text content.
@@ -280,6 +282,16 @@ export function parseExtractorOutput(raw: string): ProposedTake[] {
     out.push({ claim_text, kind, holder, weight, domain });
   }
   return out;
+}
+
+function buildExtractorPrompt(input: Parameters<ProposeTakesExtractor>[0]): string {
+  return EXTRACT_TAKES_PROMPT
+    .replace('{EXISTING_TAKES_JSON}', JSON.stringify(input.existingTakes, null, 2))
+    .replace('{PAGE_BODY}', input.pageBody);
+}
+
+function estimateExtractorPromptTokens(input: Parameters<ProposeTakesExtractor>[0]): number {
+  return Math.ceil(buildExtractorPrompt(input).length / 4);
 }
 
 /**
@@ -333,6 +345,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
       pages_scanned: 0,
       cache_hits: 0,
       cache_misses: 0,
+      oversize_pages_skipped: 0,
       proposals_inserted: 0,
       budget_exhausted: false,
       warnings: [],
@@ -377,11 +390,26 @@ class ProposeTakesPhase extends BaseCyclePhase {
       }
       result.cache_misses += 1;
 
-      // Budget pre-check before the LLM call. Estimate: ~1500 input tokens + 500 output.
+      const estimatedInputTokens = estimateExtractorPromptTokens({
+        pagePath: page.slug,
+        pageBody: body,
+        existingTakes,
+        modelHint: opts.model,
+      });
+      const maxPromptTokens = resolveMaxPromptTokens(ctx);
+      if (estimatedInputTokens > maxPromptTokens) {
+        result.oversize_pages_skipped += 1;
+        result.warnings.push(
+          `skipped ${page.slug}: prompt estimate ${estimatedInputTokens.toLocaleString()} tokens exceeds cap ${maxPromptTokens.toLocaleString()}`,
+        );
+        continue;
+      }
+
+      // Budget pre-check before the LLM call. Use the real extractor prompt size.
       const budget = this.checkBudget({
         modelId: opts.model ?? 'claude-sonnet-4-6',
-        estimatedInputTokens: 1500,
-        maxOutputTokens: 500,
+        estimatedInputTokens,
+        maxOutputTokens: PROPOSE_TAKES_MAX_OUTPUT_TOKENS,
       });
       if (!budget.allowed) {
         result.budget_exhausted = true;
@@ -517,6 +545,18 @@ function resolveTrackerBudgetUsd(ctx: OperationContext, opts: ProposeTakesOpts):
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
   }
   return undefined;
+}
+
+function resolveMaxPromptTokens(ctx: OperationContext): number {
+  const raw = (ctx.config as unknown as Record<string, unknown>)[PROPOSE_TAKES_MAX_PROMPT_TOKENS_KEY];
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
+  }
+  if (typeof raw === 'string') {
+    const parsed = Number.parseFloat(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+  }
+  return PROPOSE_TAKES_MAX_PROMPT_TOKENS_DEFAULT;
 }
 
 function detectSpendOverage(

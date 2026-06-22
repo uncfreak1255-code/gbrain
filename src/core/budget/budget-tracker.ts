@@ -593,6 +593,20 @@ export function extractUsageFromError(
   err: unknown,
   fallback: { inputTokens: number; outputTokens: number },
 ): { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number } {
+  const { source: _source, ...usage } = extractUsageFromErrorWithSource(err, fallback);
+  return usage;
+}
+
+export function extractUsageFromErrorWithSource(
+  err: unknown,
+  fallback: { inputTokens: number; outputTokens: number },
+): {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  source: 'provider_error_usage' | 'fallback';
+} {
   if (err && typeof err === 'object') {
     const top = (err as { usage?: unknown }).usage;
     const nested = (err as { response?: { usage?: unknown } }).response?.usage;
@@ -634,11 +648,11 @@ export function extractUsageFromError(
         };
         if (cacheReadTokens > 0) Object.assign(usage, { cacheReadTokens });
         if (cacheCreationTokens > 0) Object.assign(usage, { cacheCreationTokens });
-        return usage;
+        return { ...usage, source: 'provider_error_usage' };
       }
     }
   }
-  return { inputTokens: fallback.inputTokens, outputTokens: fallback.outputTokens };
+  return { inputTokens: fallback.inputTokens, outputTokens: fallback.outputTokens, source: 'fallback' };
 }
 
 function numericOrNull(v: unknown): number | null {

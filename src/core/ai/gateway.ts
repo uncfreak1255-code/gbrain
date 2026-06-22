@@ -32,7 +32,7 @@ import { z } from 'zod';
 
 import {
   BudgetTracker,
-  extractUsageFromError as _extractUsageFromError,
+  extractUsageFromErrorWithSource as _extractUsageFromErrorWithSource,
   type BudgetKind,
 } from '../budget/budget-tracker.ts';
 
@@ -2427,6 +2427,13 @@ export interface ChatResult {
 export interface ChatOpts {
   /** "provider:modelId" — defaults to config.chat_model. */
   model?: string;
+  /**
+   * Optional attribution label for this chat call. Without an active
+   * BudgetTracker scope, the gateway uses this instead of the generic
+   * `gateway.unscoped` ledger label. Inside a scope, it rides as the
+   * sub-label so leaf callers stay visible under the parent phase/command.
+   */
+  budgetLabel?: string;
   /** System prompt. */
   system?: string;
   messages: ChatMessage[];
@@ -2708,7 +2715,11 @@ async function classifyGatewayGuardrail(input: {
 }
 
 export async function chat(opts: ChatOpts): Promise<ChatResult> {
-  const tracker = trackerForGatewayCall();
+  const activeTracker = getCurrentBudgetTracker();
+  const budgetLabelBase = opts.budgetLabel?.trim() || 'gateway.chat';
+  const tracker = activeTracker ?? new BudgetTracker({
+    label: opts.budgetLabel?.trim() || 'gateway.unscoped',
+  });
   const modelStrEarly = opts.model ?? getChatModel();
 
   // Guardrail seam: classify ONLY the latest user message before provider
@@ -2740,7 +2751,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       estimatedInputTokens,
       maxOutputTokens,
       kind: 'chat' as BudgetKind,
-      label: 'gateway.chat',
+      label: budgetLabelBase,
     });
   }
 
@@ -2766,10 +2777,10 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
               outputTokens: res.usage.output_tokens,
               cacheReadTokens: res.usage.cache_read_tokens,
               cacheCreationTokens: res.usage.cache_creation_tokens,
-              label: 'gateway.chat',
+              label: budgetLabelBase,
             });
           } else {
-            const usage = _extractUsageFromError(threw, {
+            const usage = _extractUsageFromErrorWithSource(threw, {
               inputTokens: estimatedInputTokens,
               outputTokens: maxOutputTokens,
             });
@@ -2779,7 +2790,9 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
               outputTokens: usage.outputTokens,
               cacheReadTokens: usage.cacheReadTokens,
               cacheCreationTokens: usage.cacheCreationTokens,
-              label: 'gateway.chat',
+              label: usage.source === 'provider_error_usage'
+                ? `${budgetLabelBase}.failed.provider_usage`
+                : `${budgetLabelBase}.failed.fallback`,
             });
           }
         } catch {
@@ -2826,6 +2839,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     outputTokens: number,
     cacheReadTokens = 0,
     cacheCreationTokens = 0,
+    budgetLabel = budgetLabelBase,
   ): void => {
     if (!tracker || _budgetRecorded) return;
     _budgetRecorded = true;
@@ -2836,7 +2850,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
         outputTokens,
         cacheReadTokens,
         cacheCreationTokens,
-        label: 'gateway.chat',
+        label: budgetLabel,
       });
     } catch {
       // BudgetExhausted (TX1) raised here; surface via next reserve()
@@ -2916,7 +2930,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   } catch (err) {
     // Pessimistic fallback (A3 amended): when err.usage isn't there, charge
     // the worst-case ceiling — better to overcount on failure than under.
-    const fallback = _extractUsageFromError(err, {
+    const fallback = _extractUsageFromErrorWithSource(err, {
       inputTokens: estimatedInputTokens,
       outputTokens: maxOutputTokens,
     });
@@ -2926,6 +2940,9 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       fallback.outputTokens,
       fallback.cacheReadTokens ?? 0,
       fallback.cacheCreationTokens ?? 0,
+      fallback.source === 'provider_error_usage'
+        ? `${budgetLabelBase}.failed.provider_usage`
+        : `${budgetLabelBase}.failed.fallback`,
     );
     throw normalizeAIError(err, `chat(${recipe.id}:${modelId})`);
   }

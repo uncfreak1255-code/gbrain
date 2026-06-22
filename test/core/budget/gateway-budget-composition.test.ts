@@ -159,6 +159,92 @@ describe('withBudgetTracker — scope semantics', () => {
     expect(rows[1].actual_cost_usd).toBeGreaterThan(0);
   });
 
+  test('chat() OUTSIDE any scope uses an explicit budget label for attribution', async () => {
+    const transport = fakeChatTransport();
+    __setChatTransportForTests(transport);
+
+    await chat({
+      model: 'claude-haiku-4-5-20251001',
+      budgetLabel: 'contextual_retrieval.synopsis',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    const receiptPath = join(tmp, isoWeekFilename('budget'));
+    const rows = readFileSync(receiptPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(rows.map(r => r.event)).toEqual(['reserve', 'record']);
+    expect(rows.every(r => r.label === 'contextual_retrieval.synopsis')).toBe(true);
+    expect(rows.every(r => r.sub_label === 'contextual_retrieval.synopsis')).toBe(true);
+  });
+
+  test('chat() INSIDE a scope keeps the outer label and uses the explicit budget label as sub-label', async () => {
+    const transport = fakeChatTransport();
+    __setChatTransportForTests(transport);
+    const tracker = new BudgetTracker({ maxCostUsd: 1.0, label: 'outer-scope', auditPath });
+
+    await withBudgetTracker(tracker, async () => {
+      await chat({
+        model: 'claude-haiku-4-5-20251001',
+        budgetLabel: 'think.answer',
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+    });
+
+    const rows = readFileSync(auditPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(rows.map(r => r.event)).toEqual(['reserve', 'record']);
+    expect(rows.every(r => r.label === 'outer-scope')).toBe(true);
+    expect(rows.every(r => r.sub_label === 'think.answer')).toBe(true);
+  });
+
+  test('failed chat calls with provider usage keep provider-usage accounting labels', async () => {
+    const transport = async (): Promise<ChatResult> => {
+      const err = new Error('provider exploded') as Error & { usage?: Record<string, number> };
+      err.usage = { input_tokens: 100, output_tokens: 50 };
+      throw err;
+    };
+    __setChatTransportForTests(transport);
+
+    await expect(chat({
+      model: 'claude-haiku-4-5-20251001',
+      messages: [{ role: 'user', content: 'hi' }],
+    })).rejects.toThrow('provider exploded');
+
+    const receiptPath = join(tmp, isoWeekFilename('budget'));
+    const rows = readFileSync(receiptPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(rows.map(r => r.event)).toEqual(['reserve', 'record']);
+    expect(rows[1].sub_label).toBe('gateway.chat.failed.provider_usage');
+    expect(rows[1].actual_cost_usd).toBeGreaterThan(0);
+  });
+
+  test('failed chat calls without provider usage mark fallback accounting rows', async () => {
+    const transport = async (): Promise<ChatResult> => {
+      throw new Error('provider exploded before usage');
+    };
+    __setChatTransportForTests(transport);
+
+    await expect(chat({
+      model: 'claude-haiku-4-5-20251001',
+      messages: [{ role: 'user', content: 'hi' }],
+    })).rejects.toThrow('provider exploded before usage');
+
+    const receiptPath = join(tmp, isoWeekFilename('budget'));
+    const rows = readFileSync(receiptPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(rows.map(r => r.event)).toEqual(['reserve', 'record']);
+    expect(rows[1].sub_label).toBe('gateway.chat.failed.fallback');
+    expect(rows[1].actual_cost_usd).toBeGreaterThan(0);
+  });
+
   test('nested scopes restore outer tracker on exit', async () => {
     const outer = new BudgetTracker({ maxCostUsd: 1.0, label: 'outer', auditPath });
     const inner = new BudgetTracker({ maxCostUsd: 1.0, label: 'inner', auditPath: join(tmp, 'inner.jsonl') });

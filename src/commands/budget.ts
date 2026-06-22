@@ -9,7 +9,13 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { resolveAuditDir } from '../core/audit-week-file.ts';
-import { providerForMonthlyBudget } from '../core/budget/monthly-cap.ts';
+import {
+  budgetAuditRowFingerprint,
+  classifyBudgetAuditRow,
+  providerForMonthlyBudget,
+  readBudgetAuditQuarantineDir,
+  type BudgetAuditAccountingKind,
+} from '../core/budget/monthly-cap.ts';
 
 export type BudgetProviderFilter = 'anthropic' | 'deepseek' | 'all';
 
@@ -19,17 +25,23 @@ export interface BudgetReconcileArgs {
   json: boolean;
   externalReceiptsPath: string | null;
   outPath: string | null;
+  maxDeltaUsd: number | null;
   now: Date;
 }
 
 interface SpendRecord {
   ts: string;
+  event: string | null;
   model: string | null;
   provider: string | null;
   label: string | null;
+  subLabel: string | null;
   costUsd: number;
+  projectedCostUsd: number;
   inputTokens: number;
   outputTokens: number;
+  estimatedInputTokens: number;
+  maxOutputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   sourceFile: string;
@@ -38,12 +50,26 @@ interface SpendRecord {
 export interface BudgetSpendSummary {
   records: number;
   cost_usd: number;
+  projected_cost_usd: number;
   input_tokens: number;
   output_tokens: number;
+  estimated_input_tokens: number;
+  max_output_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
   by_model: Array<{ model: string; records: number; cost_usd: number }>;
   by_label: Array<{ label: string; records: number; cost_usd: number }>;
+}
+
+export interface BudgetExcludedSpendSummary extends BudgetSpendSummary {
+  by_kind: Array<{ kind: BudgetAuditAccountingKind; records: number; cost_usd: number; projected_cost_usd: number }>;
+  by_reason: Array<{ reason: string; records: number; cost_usd: number; projected_cost_usd: number }>;
+}
+
+export interface BudgetNonBilledSummary {
+  estimates: BudgetSpendSummary;
+  fallback_error: BudgetSpendSummary;
+  test_simulated: BudgetSpendSummary;
 }
 
 export interface BudgetReconcileReport {
@@ -51,11 +77,15 @@ export interface BudgetReconcileReport {
   window: { since: string; until: string; days: number };
   provider: BudgetProviderFilter;
   internal: BudgetSpendSummary & { audit_dir: string; files_read: string[] };
+  non_billed_internal: BudgetNonBilledSummary;
+  excluded_internal: BudgetExcludedSpendSummary;
   external: (BudgetSpendSummary & { path: string }) | null;
   comparison: {
     external_provided: boolean;
     delta_usd: number | null;
     within_one_cent: boolean | null;
+    max_delta_usd: number | null;
+    gate_passed: boolean | null;
   };
 }
 
@@ -63,16 +93,19 @@ const HELP = `gbrain budget reconcile - local budget ledger readback
 
 USAGE
   gbrain budget reconcile [--days N] [--provider anthropic|deepseek|all]
-                           [--external-receipts PATH] [--out PATH] [--json]
+                           [--external-receipts PATH] [--max-delta-usd N]
+                           [--out PATH] [--json]
 
 WHAT IT DOES
-  Reads ~/.gbrain/audit/budget-*.jsonl (or GBRAIN_AUDIT_DIR) and totals recent
-  paid-provider chat records. With --external-receipts, compares against a local
-  JSON/JSONL provider receipt export. It never calls Anthropic or any provider.
+  Reads ~/.gbrain/audit/budget-*.jsonl (or GBRAIN_AUDIT_DIR), separates provider
+  billed-candidate usage from estimates, fallback/error accounting, and test or
+  simulated rows. With --external-receipts, compares billed candidates against a
+  local JSON/JSONL provider receipt export. It never calls Anthropic or any provider.
 
 EXAMPLES
   gbrain budget reconcile --days 7
   gbrain budget reconcile --days 7 --external-receipts ~/Downloads/anthropic-usage.jsonl
+  gbrain budget reconcile --days 7 --external-receipts ~/Downloads/anthropic-usage.jsonl --max-delta-usd 0.05
   gbrain budget reconcile --days 7 --json --out .context/budget-reconcile.json
 `;
 
@@ -107,7 +140,7 @@ export async function runBudget(args: string[]): Promise<number> {
     if (!parsed.json) process.stdout.write(`Wrote receipt: ${out}\n\n`);
   }
   process.stdout.write(parsed.json ? JSON.stringify(report, null, 2) + '\n' : formatBudgetReconcileText(report));
-  return 0;
+  return report.comparison.gate_passed === false ? 1 : 0;
 }
 
 export function parseBudgetReconcileArgs(args: string[], now = new Date()): BudgetReconcileArgs {
@@ -116,6 +149,7 @@ export function parseBudgetReconcileArgs(args: string[], now = new Date()): Budg
   let json = false;
   let externalReceiptsPath: string | null = null;
   let outPath: string | null = null;
+  let maxDeltaUsd: number | null = null;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -148,6 +182,13 @@ export function parseBudgetReconcileArgs(args: string[], now = new Date()): Budg
         outPath = raw;
         break;
       }
+      case '--max-delta-usd': {
+        const raw = args[++i];
+        const parsed = numberFrom(raw);
+        if (parsed === null || parsed < 0) throw new Error('--max-delta-usd must be a non-negative number');
+        maxDeltaUsd = parsed;
+        break;
+      }
       case '--json':
         json = true;
         break;
@@ -156,27 +197,43 @@ export function parseBudgetReconcileArgs(args: string[], now = new Date()): Budg
     }
   }
 
-  return { days, provider, json, externalReceiptsPath, outPath, now };
+  if (maxDeltaUsd !== null && externalReceiptsPath === null) {
+    throw new Error('--max-delta-usd requires --external-receipts');
+  }
+
+  return { days, provider, json, externalReceiptsPath, outPath, maxDeltaUsd, now };
 }
 
 export function buildBudgetReconcileReport(args: BudgetReconcileArgs): BudgetReconcileReport {
   const until = args.now;
   const since = new Date(until.getTime() - args.days * 24 * 60 * 60 * 1000);
   const auditDir = resolveAuditDir();
-  const internalRecords = readInternalBudgetRecords(auditDir, since, until, args.provider);
+  const internalRead = readInternalBudgetRecords(auditDir, since, until, args.provider);
+  const internalRecords = internalRead.billed;
   const externalRecords = args.externalReceiptsPath
     ? readExternalReceiptRecords(args.externalReceiptsPath, since, until, args.provider)
     : null;
   const internalSummary = summarizeRecords(internalRecords);
+  const nonBilledSummary: BudgetNonBilledSummary = {
+    estimates: summarizeRecords(internalRead.estimates.map((r) => r.record)),
+    fallback_error: summarizeRecords(internalRead.fallbackError.map((r) => r.record)),
+    test_simulated: summarizeRecords(internalRead.testSimulated.map((r) => r.record)),
+  };
+  const excludedSummary = summarizeExcludedRecords(internalRead.excluded);
   const externalSummary = externalRecords ? summarizeRecords(externalRecords) : null;
-  const filesRead = Array.from(new Set(internalRecords.map((r) => r.sourceFile))).sort();
+  const filesRead = Array.from(new Set([...internalRecords, ...internalRead.excluded.map((r) => r.record)].map((r) => r.sourceFile))).sort();
 
   const delta = externalSummary ? internalSummary.cost_usd - externalSummary.cost_usd : null;
+  const gatePassed = args.maxDeltaUsd === null || delta === null
+    ? null
+    : Math.abs(delta) <= args.maxDeltaUsd;
   return {
     schema_version: 1,
     window: { since: since.toISOString(), until: until.toISOString(), days: args.days },
     provider: args.provider,
     internal: { ...internalSummary, audit_dir: auditDir, files_read: filesRead },
+    non_billed_internal: nonBilledSummary,
+    excluded_internal: excludedSummary,
     external: externalSummary && args.externalReceiptsPath
       ? { ...externalSummary, path: resolve(args.externalReceiptsPath) }
       : null,
@@ -184,6 +241,8 @@ export function buildBudgetReconcileReport(args: BudgetReconcileArgs): BudgetRec
       external_provided: !!externalSummary,
       delta_usd: delta,
       within_one_cent: delta === null ? null : Math.abs(delta) <= 0.01,
+      max_delta_usd: args.maxDeltaUsd,
+      gate_passed: gatePassed,
     },
   };
 }
@@ -193,39 +252,78 @@ function readInternalBudgetRecords(
   since: Date,
   until: Date,
   provider: BudgetProviderFilter,
-): SpendRecord[] {
-  if (!existsSync(auditDir)) return [];
+): {
+  billed: SpendRecord[];
+  estimates: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }>;
+  fallbackError: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }>;
+  testSimulated: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }>;
+  excluded: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }>;
+} {
+  if (!existsSync(auditDir)) {
+    return { billed: [], estimates: [], fallbackError: [], testSimulated: [], excluded: [] };
+  }
   const files = readdirSync(auditDir)
     .filter((name) => name.endsWith('.jsonl') && (name.startsWith('budget-') || name === 'budget.jsonl'))
     .map((name) => join(auditDir, name));
-  const records: SpendRecord[] = [];
+  const quarantine = readBudgetAuditQuarantineDir(auditDir);
+  const billed: SpendRecord[] = [];
+  const estimates: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }> = [];
+  const fallbackError: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }> = [];
+  const testSimulated: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }> = [];
+  const excluded: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }> = [];
 
   for (const file of files) {
     for (const row of readJsonRecords(file)) {
-      if (row.event !== 'record' || row.kind !== 'chat') continue;
+      if (row.kind !== 'chat') continue;
       const ts = timestampInWindow(row.ts, since, until);
       if (!ts) continue;
       const model = typeof row.model === 'string' ? row.model : null;
       const rowProvider = model ? providerForMonthlyBudget(model) : null;
       if (!providerMatches(rowProvider, provider, false)) continue;
-      const costUsd = numberFrom(row.actual_cost_usd);
-      if (costUsd === null) continue;
-      records.push({
+      const costUsd = numberFrom(row.actual_cost_usd) ?? 0;
+      const projectedCostUsd = firstNumber(row.projected_cost_usd, row.estimated_cost_usd) ?? 0;
+      if (costUsd === 0 && projectedCostUsd === 0 && row.event !== 'reserve_unpriced') continue;
+      const record = {
         ts,
+        event: typeof row.event === 'string' ? row.event : null,
         model,
         provider: rowProvider,
         label: typeof row.label === 'string' ? row.label : null,
+        subLabel: typeof row.sub_label === 'string' ? row.sub_label : null,
         costUsd,
+        projectedCostUsd,
         inputTokens: numberFrom(row.input_tokens) ?? 0,
         outputTokens: numberFrom(row.output_tokens) ?? 0,
+        estimatedInputTokens: numberFrom(row.estimated_input_tokens) ?? 0,
+        maxOutputTokens: numberFrom(row.max_output_tokens) ?? 0,
         cacheReadTokens: numberFrom(row.cache_read_tokens) ?? 0,
         cacheCreationTokens: numberFrom(row.cache_creation_tokens) ?? 0,
         sourceFile: file,
-      });
+      };
+      let classification = classifyBudgetAuditRow(row);
+      const quarantineReason = quarantine.get(budgetAuditRowFingerprint(row));
+      if (quarantineReason) {
+        classification = { kind: 'test_or_simulated', reason: quarantineReason };
+      }
+      if (classification.kind === 'provider_billed_candidate') {
+        billed.push(record);
+      } else if (classification.kind === 'estimate_or_reservation') {
+        const item = { record, reason: classification.reason, kind: classification.kind };
+        estimates.push(item);
+        excluded.push(item);
+      } else if (classification.kind === 'fallback_or_error') {
+        const item = { record, reason: classification.reason, kind: classification.kind };
+        fallbackError.push(item);
+        excluded.push(item);
+      } else if (classification.kind === 'test_or_simulated') {
+        const item = { record, reason: classification.reason, kind: classification.kind };
+        testSimulated.push(item);
+        excluded.push(item);
+      }
     }
   }
 
-  return records;
+  return { billed, estimates, fallbackError, testSimulated, excluded };
 }
 
 function readExternalReceiptRecords(
@@ -248,12 +346,17 @@ function readExternalReceiptRecords(
     if (costUsd === null) continue;
     records.push({
       ts,
+      event: stringFrom(row.event),
       model,
       provider: rowProvider,
       label: stringFrom(row.label ?? row.operation ?? row.event),
+      subLabel: stringFrom(row.sub_label ?? row.subLabel),
       costUsd,
+      projectedCostUsd: 0,
       inputTokens: firstNumber(row.input_tokens, row.inputTokens) ?? 0,
       outputTokens: firstNumber(row.output_tokens, row.outputTokens) ?? 0,
+      estimatedInputTokens: 0,
+      maxOutputTokens: 0,
       cacheReadTokens: firstNumber(row.cache_read_tokens, row.cacheReadTokens, row.cache_read_input_tokens) ?? 0,
       cacheCreationTokens: firstNumber(row.cache_creation_tokens, row.cacheCreationTokens, row.cache_creation_input_tokens) ?? 0,
       sourceFile: fullPath,
@@ -286,15 +389,21 @@ function summarizeRecords(records: SpendRecord[]): BudgetSpendSummary {
   const modelMap = new Map<string, { records: number; cost_usd: number }>();
   const labelMap = new Map<string, { records: number; cost_usd: number }>();
   let cost = 0;
+  let projectedCost = 0;
   let input = 0;
   let output = 0;
+  let estimatedInput = 0;
+  let maxOutput = 0;
   let cacheRead = 0;
   let cacheCreate = 0;
 
   for (const r of records) {
     cost += r.costUsd;
+    projectedCost += r.projectedCostUsd;
     input += r.inputTokens;
     output += r.outputTokens;
+    estimatedInput += r.estimatedInputTokens;
+    maxOutput += r.maxOutputTokens;
     cacheRead += r.cacheReadTokens;
     cacheCreate += r.cacheCreationTokens;
     bump(modelMap, r.model ?? '(unknown)', r.costUsd);
@@ -304,8 +413,11 @@ function summarizeRecords(records: SpendRecord[]): BudgetSpendSummary {
   return {
     records: records.length,
     cost_usd: roundUsd(cost),
+    projected_cost_usd: roundUsd(projectedCost),
     input_tokens: input,
     output_tokens: output,
+    estimated_input_tokens: estimatedInput,
+    max_output_tokens: maxOutput,
     cache_read_tokens: cacheRead,
     cache_creation_tokens: cacheCreate,
     by_model: sortedModelBreakdown(modelMap),
@@ -313,11 +425,29 @@ function summarizeRecords(records: SpendRecord[]): BudgetSpendSummary {
   };
 }
 
+function summarizeExcludedRecords(
+  records: Array<{ record: SpendRecord; reason: string; kind: BudgetAuditAccountingKind }>,
+): BudgetExcludedSpendSummary {
+  const summary = summarizeRecords(records.map((r) => r.record));
+  const reasonMap = new Map<string, { records: number; cost_usd: number }>();
+  const kindMap = new Map<BudgetAuditAccountingKind, { records: number; cost_usd: number; projected_cost_usd: number }>();
+  for (const { record, reason, kind } of records) {
+    bump(reasonMap, reason, record.costUsd, record.projectedCostUsd);
+    bumpKind(kindMap, kind, record.costUsd, record.projectedCostUsd);
+  }
+  return {
+    ...summary,
+    by_kind: sortedKindBreakdown(kindMap),
+    by_reason: sortedReasonBreakdown(reasonMap),
+  };
+}
+
 function formatBudgetReconcileText(report: BudgetReconcileReport): string {
   const lines: string[] = [];
   lines.push(`Budget readback (${report.window.since.slice(0, 10)} to ${report.window.until.slice(0, 10)} UTC)`);
   lines.push(`Provider: ${report.provider}`);
-  lines.push(`Internal ledger: ${formatUsd(report.internal.cost_usd)} across ${report.internal.records} chat record(s)`);
+  lines.push(`Provider-billed candidate usage: ${formatUsd(report.internal.cost_usd)} across ${report.internal.records} chat record(s)`);
+  lines.push(`Not counted as provider spend: ${formatUsd(report.excluded_internal.cost_usd)} accounted / ${formatUsd(report.excluded_internal.projected_cost_usd)} projected across ${report.excluded_internal.records} audit row(s)`);
   lines.push(`Audit dir: ${report.internal.audit_dir}`);
   lines.push(`Audit files: ${report.internal.files_read.length > 0 ? report.internal.files_read.join(', ') : '(none with matching records)'}`);
   lines.push(`Tokens: input=${report.internal.input_tokens}, output=${report.internal.output_tokens}, cache_read=${report.internal.cache_read_tokens}, cache_create=${report.internal.cache_creation_tokens}`);
@@ -334,16 +464,30 @@ function formatBudgetReconcileText(report: BudgetReconcileReport): string {
   }
   if (report.internal.by_label.length === 0) lines.push('  (none)');
 
+  if (report.excluded_internal.records > 0) {
+    lines.push('');
+    lines.push('Not counted as provider spend:');
+    lines.push(`  estimates/reservations: ${formatUsd(report.non_billed_internal.estimates.projected_cost_usd)} projected (${report.non_billed_internal.estimates.records})`);
+    lines.push(`  fallback/error accounting: ${formatUsd(report.non_billed_internal.fallback_error.cost_usd)} accounted (${report.non_billed_internal.fallback_error.records})`);
+    lines.push(`  test/simulated rows: ${formatUsd(report.non_billed_internal.test_simulated.cost_usd)} simulated (${report.non_billed_internal.test_simulated.records})`);
+  }
+
   if (report.external) {
     lines.push('');
     lines.push(`External receipts: ${formatUsd(report.external.cost_usd)} across ${report.external.records} record(s)`);
     lines.push(`External path: ${report.external.path}`);
-    lines.push(`Delta (internal - external): ${formatUsd(report.comparison.delta_usd ?? 0)}`);
+    lines.push(`Delta (billed candidates - external): ${formatUsd(report.comparison.delta_usd ?? 0)}`);
     lines.push(`Within one cent: ${report.comparison.within_one_cent ? 'yes' : 'no'}`);
+    if (report.comparison.max_delta_usd !== null) {
+      lines.push(`Gate: ${report.comparison.gate_passed ? 'PASS' : 'FAIL'} (max delta ${formatUsd(report.comparison.max_delta_usd)})`);
+    }
   } else {
     lines.push('');
     lines.push('External receipts: not provided');
-    lines.push('Compare the internal total above with the Anthropic Console/API export for the same UTC window.');
+    lines.push('Compare only the provider-billed candidate total above with the Anthropic Console/API export for the same UTC window.');
+    if (report.comparison.max_delta_usd !== null) {
+      lines.push(`Gate: not evaluated (max delta ${formatUsd(report.comparison.max_delta_usd)} requires --external-receipts)`);
+    }
   }
   return lines.join('\n') + '\n';
 }
@@ -388,10 +532,29 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function bump(map: Map<string, { records: number; cost_usd: number }>, key: string, cost: number): void {
-  const prev = map.get(key) ?? { records: 0, cost_usd: 0 };
+function bump(
+  map: Map<string, { records: number; cost_usd: number; projected_cost_usd?: number }>,
+  key: string,
+  cost: number,
+  projectedCost = 0,
+): void {
+  const prev = map.get(key) ?? { records: 0, cost_usd: 0, projected_cost_usd: 0 };
   prev.records++;
   prev.cost_usd += cost;
+  prev.projected_cost_usd = (prev.projected_cost_usd ?? 0) + projectedCost;
+  map.set(key, prev);
+}
+
+function bumpKind(
+  map: Map<BudgetAuditAccountingKind, { records: number; cost_usd: number; projected_cost_usd: number }>,
+  key: BudgetAuditAccountingKind,
+  cost: number,
+  projectedCost: number,
+): void {
+  const prev = map.get(key) ?? { records: 0, cost_usd: 0, projected_cost_usd: 0 };
+  prev.records++;
+  prev.cost_usd += cost;
+  prev.projected_cost_usd += projectedCost;
   map.set(key, prev);
 }
 
@@ -409,6 +572,32 @@ function sortedLabelBreakdown(
   return Array.from(map.entries())
     .map(([label, value]) => ({ label, records: value.records, cost_usd: roundUsd(value.cost_usd) }))
     .sort((a, b) => b.cost_usd - a.cost_usd || a.label.localeCompare(b.label));
+}
+
+function sortedReasonBreakdown(
+  map: Map<string, { records: number; cost_usd: number; projected_cost_usd?: number }>,
+): Array<{ reason: string; records: number; cost_usd: number; projected_cost_usd: number }> {
+  return Array.from(map.entries())
+    .map(([reason, value]) => ({
+      reason,
+      records: value.records,
+      cost_usd: roundUsd(value.cost_usd),
+      projected_cost_usd: roundUsd(value.projected_cost_usd ?? 0),
+    }))
+    .sort((a, b) => (b.cost_usd + b.projected_cost_usd) - (a.cost_usd + a.projected_cost_usd) || a.reason.localeCompare(b.reason));
+}
+
+function sortedKindBreakdown(
+  map: Map<BudgetAuditAccountingKind, { records: number; cost_usd: number; projected_cost_usd: number }>,
+): Array<{ kind: BudgetAuditAccountingKind; records: number; cost_usd: number; projected_cost_usd: number }> {
+  return Array.from(map.entries())
+    .map(([kind, value]) => ({
+      kind,
+      records: value.records,
+      cost_usd: roundUsd(value.cost_usd),
+      projected_cost_usd: roundUsd(value.projected_cost_usd),
+    }))
+    .sort((a, b) => (b.cost_usd + b.projected_cost_usd) - (a.cost_usd + a.projected_cost_usd) || a.kind.localeCompare(b.kind));
 }
 
 function roundUsd(value: number): number {
