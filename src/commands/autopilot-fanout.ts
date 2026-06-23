@@ -69,7 +69,7 @@ export interface FanoutOpts {
   emit?: (line: string) => void;
   /** Sink for non-JSON human log lines; defaults to console.log. */
   log?: (line: string) => void;
-  /** Test seam for filesystem/git eligibility. Production uses isAutopilotSyncableSource. */
+  /** Test seam for filesystem/git eligibility. Production uses isSyncableSourcePath. */
   isSourceSyncable?: (source: SourceRow) => boolean;
 }
 
@@ -392,8 +392,8 @@ function sourceRemoteUrl(source: AutopilotSourceLike): string | null {
 }
 
 /**
- * Autopilot should skip dead local-only paths, but it must still queue gbrain-
- * owned remote clones: sync.ts can repair those by recloning.
+ * Freshness sync should skip dead local-only paths, but it must still queue
+ * gbrain-owned remote clones: sync.ts can repair those by recloning.
  */
 export function isAutopilotSyncableSource(source: AutopilotSourceLike): boolean {
   if (isSyncableSourcePath(source.local_path)) return true;
@@ -520,7 +520,7 @@ export async function dispatchPerSource(
     cooldownOpts = { baseMin: 0, capMin: FAILURE_COOLDOWN_CAP_MIN };
   }
 
-  const sourceSyncable = opts.isSourceSyncable ?? isAutopilotSyncableSource;
+  const sourceSyncable = opts.isSourceSyncable ?? ((source: SourceRow) => isSyncableSourcePath(source.local_path));
   const skippedUnsyncable = sources.filter((s) => !sourceSyncable(s));
   const syncableSources = skippedUnsyncable.length > 0
     ? sources.filter((s) => sourceSyncable(s))

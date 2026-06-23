@@ -257,6 +257,23 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(JSON.parse(skipEvent!).sources).toEqual(['missing']);
   });
 
+  test('fanout does not enqueue missing owned remote clones', async () => {
+    const managed = src('managed', undefined, {
+      remote_url: 'https://github.com/example/repo',
+      managed_clone: true,
+    });
+    managed.local_path = '/path/that/does/not/exist';
+    const { engine, queue, added, fanoutOpts } = makeStubs([managed]);
+    delete fanoutOpts.isSourceSyncable;
+
+    const result = await dispatchPerSource(engine, queue, fanoutOpts);
+
+    expect(isAutopilotSyncableSource(managed)).toBe(true);
+    expect(result.dispatched).toEqual([]);
+    expect(result.skipped_unsyncable).toEqual(['managed']);
+    expect(added.length).toBe(0);
+  });
+
   test('pull: true only when source.config.remote_url is set', async () => {
     const remote = src('remote', undefined, { remote_url: 'https://github.com/x/y' });
     const local = src('local');
