@@ -536,8 +536,9 @@ function shouldSkipProvider(modelStr: string, skip: string[]): boolean {
 }
 
 export async function runModels(engine: BrainEngine, args: string[]): Promise<void> {
-  const json = args.includes('--json');
-  const sub = args[1] === 'doctor' ? 'doctor' : args[1] === 'help' || args.includes('--help') || args.includes('-h') ? 'help' : 'read';
+  const cliArgs = args[0] === 'models' ? args.slice(1) : args;
+  const json = cliArgs.includes('--json');
+  const sub = cliArgs[0] === 'doctor' ? 'doctor' : cliArgs[0] === 'help' || cliArgs.includes('--help') || cliArgs.includes('-h') ? 'help' : 'read';
 
   if (sub === 'help') {
     process.stdout.write(
@@ -572,7 +573,7 @@ Tiers: utility (haiku-class) | reasoning (sonnet) | deep (opus) | subagent (Anth
   }
 
   // doctor mode
-  const skipArgs = args.filter(a => a.startsWith('--skip='));
+  const skipArgs = cliArgs.filter(a => a.startsWith('--skip='));
   const skip = skipArgs.map(a => a.slice('--skip='.length).toLowerCase()).filter(Boolean);
 
   const { getChatModel, getExpansionModel } = await import('../core/ai/gateway.ts');
