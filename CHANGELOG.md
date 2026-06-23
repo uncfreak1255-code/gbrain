@@ -6,7 +6,7 @@ All notable changes to GBrain will be documented in this file.
 
 **GBrain can now preview Google Drive and Outlook ingestion before anything is written, and autopilot stops wasting work on local sources it cannot sync.** The new collectors are deliberately narrow: they classify what would be kept or skipped, print counts first, and require an explicit write flag before adding pages to the brain. That gives agents a safe first move for business mail and high-signal Drive folders without treating the whole account as memory.
 
-Autopilot also gets quieter and more honest. Dead local-only source paths are skipped instead of spawning doomed sync jobs, while gbrain-owned remote clones can still be queued so sync can repair them by recloning. Eval replay drops the temporary regression-drill surface so the gate stays focused on the stable replay contract.
+Autopilot also gets quieter and more honest. Dead local-only source paths are skipped instead of spawning doomed sync jobs, while gbrain-owned remote clones can still be queued so sync can repair them by recloning.
 
 ### To take advantage of v0.45.0.0
 `gbrain upgrade`. For Google Drive, set `GBRAIN_GOOGLE_DRIVE_ACCESS_TOKEN`, then run:
@@ -31,10 +31,9 @@ gbrain outlook scan --dry-run
 ### Changed
 - **Autopilot skips unsyncable sources.** Local-only sources with missing or non-git paths are reported as `skipped_unsyncable` instead of dispatching sync jobs that cannot succeed.
 - **Owned remote clones remain repairable.** Missing gbrain-owned clones with a configured remote URL are still eligible for sync so the normal clone-repair path can bring them back.
-- **Eval replay uses the stable compare-limit contract.** The temporary privacy-safe drill flags and docs were removed from `eval gate` / `eval replay`; replay now sticks to numeric `--compare-limit` behavior.
 
 ### Tests
-- Added focused coverage for Drive filtering and dry-run behavior, Outlook config and dry-run scanning, autopilot unsyncable-source skips, and the eval gate/replay contract.
+- Added focused coverage for Drive filtering and dry-run behavior, Outlook config and dry-run scanning, and autopilot unsyncable-source skips.
 
 ## [0.44.1.0] - 2026-06-19
 
