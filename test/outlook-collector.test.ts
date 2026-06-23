@@ -206,7 +206,7 @@ describe('outlook collector strict scan', () => {
           conversationId: 'machine-1',
           subject: 'Security alert',
           receivedDateTime: '2026-06-22T12:00:00Z',
-          from: { emailAddress: { name: 'System Mail', address: 'do-not-reply@cloud-protect.net' } },
+          from: { emailAddress: { name: 'System Mail', address: 'do-not-reply@security-example.com' } },
           toRecipients: [{ emailAddress: { name: 'The User', address: 'me@example-user.com' } }],
           bodyPreview: 'Automated delivery.',
         },
