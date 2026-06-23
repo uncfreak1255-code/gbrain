@@ -1,14 +1,13 @@
 import { mkdir, open, readFile } from 'node:fs/promises';
-import { basename } from 'node:path';
 import matter from 'gray-matter';
-import { configDir, gbrainPath, loadConfig } from './config.ts';
+import { configDir, gbrainPath, loadConfig, loadConfigFileOnly } from './config.ts';
 import { computeContentHash } from './ingestion/types.ts';
 import { operations, type OperationContext } from './operations.ts';
 import type { BrainEngine } from './engine.ts';
 import { resolveSourceWithTier } from './source-resolver.ts';
 
-export const DEFAULT_OUTLOOK_CLIENT_ID = 'a0e20552-180b-47ea-8a06-5e425c96c7e1';
-export const DEFAULT_OUTLOOK_TENANT_ID = '6b2eed62-a587-4701-87ac-c890e3b8e44f';
+export const DEFAULT_OUTLOOK_CLIENT_ID = '';
+export const DEFAULT_OUTLOOK_TENANT_ID = '';
 
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 const DEFAULT_SCOPES = [
@@ -140,6 +139,24 @@ export function outlookTokenPath(): string {
   return gbrainPath('outlook-token.json');
 }
 
+export function resolveOutlookAppConfig(opts: {
+  clientId?: string;
+  tenantId?: string;
+  env?: Record<string, string | undefined>;
+} = {}): { clientId: string; tenantId: string } {
+  const env = opts.env ?? process.env;
+  const cfg = loadConfigFileOnly()?.outlook;
+  const clientId = opts.clientId || env.GBRAIN_OUTLOOK_CLIENT_ID || cfg?.client_id || DEFAULT_OUTLOOK_CLIENT_ID;
+  const tenantId = opts.tenantId || env.GBRAIN_OUTLOOK_TENANT_ID || cfg?.tenant_id || DEFAULT_OUTLOOK_TENANT_ID;
+  if (!clientId) {
+    throw new Error('Missing Outlook client id. Pass --client-id, set GBRAIN_OUTLOOK_CLIENT_ID, or set outlook.client_id in ~/.gbrain/config.json');
+  }
+  if (!tenantId) {
+    throw new Error('Missing Outlook tenant id. Pass --tenant-id, set GBRAIN_OUTLOOK_TENANT_ID, or set outlook.tenant_id in ~/.gbrain/config.json');
+  }
+  return { clientId, tenantId };
+}
+
 export async function runDeviceCodeLogin(opts: {
   clientId?: string;
   tenantId?: string;
@@ -148,8 +165,7 @@ export async function runDeviceCodeLogin(opts: {
   now?: () => number;
   out?: Pick<typeof console, 'log'>;
 } = {}): Promise<OutlookTokenCache> {
-  const clientId = opts.clientId ?? DEFAULT_OUTLOOK_CLIENT_ID;
-  const tenantId = opts.tenantId ?? DEFAULT_OUTLOOK_TENANT_ID;
+  const { clientId, tenantId } = resolveOutlookAppConfig(opts);
   const scopes = opts.scopes ?? DEFAULT_SCOPES;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const now = opts.now ?? Date.now;
@@ -200,8 +216,7 @@ export async function loadOutlookToken(opts: {
   if (token.expires_at - 60_000 > now()) return token;
   if (!token.refresh_token) throw new Error('Outlook token expired and has no refresh_token. Run: gbrain outlook login');
 
-  const clientId = opts.clientId ?? DEFAULT_OUTLOOK_CLIENT_ID;
-  const tenantId = opts.tenantId ?? DEFAULT_OUTLOOK_TENANT_ID;
+  const { clientId, tenantId } = resolveOutlookAppConfig(opts);
   const refreshed = await postForm(opts.fetchImpl ?? fetch, `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
     grant_type: 'refresh_token',
     client_id: clientId,
@@ -275,7 +290,13 @@ export function scanOutlook(input: OutlookScanInput): OutlookScanSummary {
 
   const people = new Map<string, OutlookPersonSignal>();
   const threads = new Map<string, OutlookThreadSignal>();
+  const conversationCounts = new Map<string, number>();
   let skipped = 0;
+
+  for (const msg of input.messages) {
+    if (!msg.conversationId) continue;
+    conversationCounts.set(msg.conversationId, (conversationCounts.get(msg.conversationId) ?? 0) + 1);
+  }
 
   for (const msg of input.messages) {
     const from = normalizeAddress(msg.from?.emailAddress);
@@ -284,8 +305,9 @@ export function scanOutlook(input: OutlookScanInput): OutlookScanSummary {
       continue;
     }
     const recipients = messageRecipients(msg).map(normalizeAddress).filter(a => a.email);
-    const direct = recipients.some(a => selfEmails.has(a.email) || selfDomains.has(a.domain));
-    const active = Boolean(msg.conversationId && input.messages.filter(m => m.conversationId === msg.conversationId).length > 1);
+    const direct = recipients.some(a => selfEmails.has(a.email) || selfDomains.has(a.domain))
+      && isLikelyHumanSender(from, msg);
+    const active = Boolean(msg.conversationId && (conversationCounts.get(msg.conversationId) ?? 0) > 1);
     const calendarLinked = calendarEmails.has(from.email);
     const knownBusiness = knownDomains.has(from.domain) || Boolean(contactByEmail.get(from.email)?.companyName);
     const reply = /^(re|fw|fwd):/i.test(msg.subject ?? '');
@@ -498,7 +520,17 @@ function isSpammyMessage(msg: OutlookMessage, fromEmail: string): boolean {
 
 function isMachineAddress(email: string): boolean {
   const local = email.split('@')[0] ?? '';
-  return /^(no-?reply|donotreply|notifications?|mailer|marketing|news|newsletter|bounce|support|hello)$/i.test(local);
+  return /^(no-?reply|do-?not-?reply|donotreply|notifications?|mailer|marketing|news|newsletter|bounce|support|hello)$/i.test(local);
+}
+
+function isLikelyHumanSender(from: { name: string; email: string; domain: string }, msg: OutlookMessage): boolean {
+  if (!from.email || isMachineAddress(from.email)) return false;
+  const subject = `${msg.subject ?? ''} ${msg.bodyPreview ?? ''}`.toLowerCase();
+  if (/\b(security|support|team|alert|notification|billing|sales|success|admin)\b/i.test(from.name)) return false;
+  if (/\b(webinar|newsletter|unsubscribe|promotion|discount|limited time|security alert)\b/i.test(subject)) return false;
+  const words = from.name.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return false;
+  return words.every(word => /^[a-z][a-z'.-]*$/i.test(word));
 }
 
 function normalizeAddress(addr?: OutlookEmailAddress): { name: string; email: string; domain: string } {
@@ -628,6 +660,7 @@ function threadPage(t: OutlookThreadSignal) {
 }
 
 function meetingPage(m: OutlookMeetingSignal) {
+  const hash = computeContentHash(m.id).slice(0, 10);
   const body = [
     `# ${m.subject}`,
     '',
@@ -637,7 +670,7 @@ function meetingPage(m: OutlookMeetingSignal) {
     '## People',
     ...m.people.map(p => `- ${p}`),
   ].filter(Boolean).join('\n');
-  return markdownPage(`meetings/outlook-${slugPart(basename(m.id))}`, {
+  return markdownPage(`meetings/outlook-${slugPart(m.subject)}-${hash}`, {
     type: 'meeting',
     title: m.subject,
     starts_at: m.startsAt,
