@@ -63,7 +63,17 @@ export interface NightlyProbeDeps {
   /** Resolves the repo root so we can find the committed fixture. */
   resolveRepoRoot: () => string | Promise<string>;
   /** Runs the longmemeval command; returns the path to the JSONL output. */
-  runLongMemEval: (args: { fixturePath: string; outputPath: string; model?: string; extractorModel?: string }) => Promise<void>;
+  runLongMemEval: (args: {
+    fixturePath: string;
+    outputPath: string;
+    model?: string;
+    extractorModel?: string;
+    rerankerModel?: string;
+    rerankerEnabled?: boolean;
+    rerankerTimeoutMs?: number;
+    rerankerTopNIn?: number;
+    rerankerTopNOut?: number | null;
+  }) => Promise<void>;
   /** Runs the cross-modal batch; returns exit code (0/1/2). */
   runCrossModalBatch: (args: {
     batchPath: string;
@@ -82,6 +92,11 @@ export interface NightlyProbeDeps {
   slotCModel?: string;
   longMemEvalModel?: string;
   longMemEvalExtractorModel?: string;
+  longMemEvalRerankerModel?: string;
+  longMemEvalRerankerEnabled?: boolean;
+  longMemEvalRerankerTimeoutMs?: number;
+  longMemEvalRerankerTopNIn?: number;
+  longMemEvalRerankerTopNOut?: number | null;
 }
 
 /**
@@ -196,6 +211,11 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
       outputPath: lmeOutPath,
       model: deps.longMemEvalModel,
       extractorModel: deps.longMemEvalExtractorModel,
+      rerankerModel: deps.longMemEvalRerankerModel,
+      rerankerEnabled: deps.longMemEvalRerankerEnabled,
+      rerankerTimeoutMs: deps.longMemEvalRerankerTimeoutMs,
+      rerankerTopNIn: deps.longMemEvalRerankerTopNIn,
+      rerankerTopNOut: deps.longMemEvalRerankerTopNOut,
     });
     const { exitCode, summary } = await deps.runCrossModalBatch({
       batchPath: lmeOutPath,

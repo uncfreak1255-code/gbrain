@@ -275,6 +275,28 @@ describe('runNightlyQualityProbe (DI stub harness)', () => {
       expect(seenDimensions?.join('\n')).not.toContain('SOURCING');
     });
   });
+
+  test('passes live reranker config to LongMemEval benchmark brain', async () => {
+    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
+      let seenArgs: Parameters<NightlyProbeDeps['runLongMemEval']>[0] | undefined;
+      const r = await runNightlyQualityProbe(makeDeps({
+        longMemEvalRerankerModel: 'llama-server-reranker:bge-reranker-v2-m3',
+        longMemEvalRerankerEnabled: true,
+        longMemEvalRerankerTimeoutMs: 60000,
+        longMemEvalRerankerTopNIn: 25,
+        longMemEvalRerankerTopNOut: null,
+        runLongMemEval: async (args) => {
+          seenArgs = args;
+        },
+      }));
+      expect(r.outcome).toBe('pass');
+      expect(seenArgs?.rerankerModel).toBe('llama-server-reranker:bge-reranker-v2-m3');
+      expect(seenArgs?.rerankerEnabled).toBe(true);
+      expect(seenArgs?.rerankerTimeoutMs).toBe(60000);
+      expect(seenArgs?.rerankerTopNIn).toBe(25);
+      expect(seenArgs?.rerankerTopNOut).toBe(null);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

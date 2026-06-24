@@ -194,6 +194,12 @@ interface ParsedArgs {
   outputPath?: string;
   /** v0.32.3 — search-lite mode to evaluate under. Resolves through resolveSearchMode. */
   mode?: 'conservative' | 'balanced' | 'tokenmax';
+  /** Explicit reranker settings to seed into the in-memory benchmark brain. */
+  rerankerModel?: string;
+  rerankerEnabled?: boolean;
+  rerankerTimeoutMs?: number;
+  rerankerTopNIn?: number;
+  rerankerTopNOut?: number | null;
   /**
    * v0.35.1.0 — path to a previous run's hypothesis JSONL. Question IDs
    * already present in the file are skipped on this run; the run resumes
@@ -264,6 +270,48 @@ function parseArgs(args: string[]): ParsedArgs {
       }
       continue;
     }
+    if (a === '--reranker-model') { out.rerankerModel = args[++i]; continue; }
+    if (a === '--reranker-enabled') {
+      const v = args[++i]?.toLowerCase();
+      if (v === 'true' || v === '1' || v === 'yes' || v === 'on') {
+        out.rerankerEnabled = true;
+      } else if (v === 'false' || v === '0' || v === 'no' || v === 'off') {
+        out.rerankerEnabled = false;
+      } else {
+        throw new Error(`--reranker-enabled must be true|false (got: ${args[i]})`);
+      }
+      continue;
+    }
+    if (a === '--reranker-timeout-ms') {
+      const v = Number(args[++i]);
+      if (!Number.isFinite(v) || v <= 0) {
+        throw new Error(`--reranker-timeout-ms must be > 0 (got: ${args[i]})`);
+      }
+      out.rerankerTimeoutMs = v;
+      continue;
+    }
+    if (a === '--reranker-top-n-in') {
+      const v = Number(args[++i]);
+      if (!Number.isFinite(v) || v <= 0 || !Number.isInteger(v)) {
+        throw new Error(`--reranker-top-n-in must be a positive integer (got: ${args[i]})`);
+      }
+      out.rerankerTopNIn = v;
+      continue;
+    }
+    if (a === '--reranker-top-n-out') {
+      const raw = args[++i];
+      const trimmed = raw?.trim().toLowerCase();
+      if (trimmed === '' || trimmed === 'null' || trimmed === 'none') {
+        out.rerankerTopNOut = null;
+      } else {
+        const v = Number(raw);
+        if (!Number.isFinite(v) || v <= 0 || !Number.isInteger(v)) {
+          throw new Error(`--reranker-top-n-out must be a positive integer or null|none (got: ${args[i]})`);
+        }
+        out.rerankerTopNOut = v;
+      }
+      continue;
+    }
     if (!a.startsWith('-') && !out.datasetPath) { out.datasetPath = a; continue; }
   }
   return out;
@@ -289,6 +337,11 @@ function printHelp(): void {
     `                            Mode resolves through src/core/search/mode.ts so the search\n` +
     `                            behavior matches what production gets under that mode.\n` +
     `                            --mode tokenmax implies --expansion unless overridden.\n` +
+    `  --reranker-model M        Seed search.reranker.model in the benchmark brain.\n` +
+    `  --reranker-enabled BOOL   Seed search.reranker.enabled in the benchmark brain.\n` +
+    `  --reranker-timeout-ms N   Seed search.reranker.timeout_ms in the benchmark brain.\n` +
+    `  --reranker-top-n-in N     Seed search.reranker.top_n_in in the benchmark brain.\n` +
+    `  --reranker-top-n-out N    Seed search.reranker.top_n_out; null|none means no truncation.\n` +
     `  --output FILE             Write JSONL to FILE instead of stdout.\n` +
     `  --resume-from FILE        Skip question_ids already present in FILE; resume the\n` +
     `                            remaining questions. Typically the same path as --output\n` +
@@ -650,6 +703,21 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     // for the run. hybridSearch resolves it through the standard chain.
     if (opts.mode) {
       await engine.setConfig('search.mode', opts.mode);
+    }
+    if (opts.rerankerModel) {
+      await engine.setConfig('search.reranker.model', opts.rerankerModel);
+    }
+    if (opts.rerankerEnabled !== undefined) {
+      await engine.setConfig('search.reranker.enabled', opts.rerankerEnabled ? 'true' : 'false');
+    }
+    if (opts.rerankerTimeoutMs !== undefined) {
+      await engine.setConfig('search.reranker.timeout_ms', String(opts.rerankerTimeoutMs));
+    }
+    if (opts.rerankerTopNIn !== undefined) {
+      await engine.setConfig('search.reranker.top_n_in', String(opts.rerankerTopNIn));
+    }
+    if (opts.rerankerTopNOut !== undefined) {
+      await engine.setConfig('search.reranker.top_n_out', opts.rerankerTopNOut === null ? 'null' : String(opts.rerankerTopNOut));
     }
     for (const q of questions) {
       const qStart = Date.now();

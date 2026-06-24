@@ -94,6 +94,20 @@ describe('autopilot wiring: nightly quality probe', () => {
     expect(SOURCE).toContain(`longMemEvalExtractorModel`);
   });
 
+  test('threads live reranker config into the hermetic LongMemEval brain', () => {
+    expect(SOURCE).toContain(`engine.getConfig('search.reranker.enabled')`);
+    expect(SOURCE).toContain(`engine.getConfig('search.reranker.model')`);
+    expect(SOURCE).toContain(`engine.getConfig('search.reranker.timeout_ms')`);
+    expect(SOURCE).toContain(`engine.getConfig('search.reranker.top_n_in')`);
+    expect(SOURCE).toContain(`engine.getConfig('search.reranker.top_n_out')`);
+    expect(SOURCE).toContain(`longMemEvalRerankerModel`);
+    expect(SOURCE).toContain(`longMemEvalRerankerEnabled`);
+    expect(SOURCE).toContain(`longMemEvalRerankerTimeoutMs`);
+    expect(SOURCE).toContain(`longMemEvalRerankerTopNIn`);
+    expect(SOURCE).toContain(`longMemEvalRerankerTopNOut`);
+    expect(SOURCE).toContain(`parsePositiveIntegerOrNullSentinel`);
+  });
+
   test('doctor reads DB-backed nightly enable config', () => {
     const doctorSrc = readFileSync(resolve('src/commands/doctor.ts'), 'utf-8');
     expect(doctorSrc).toContain(`engine.getConfig('autopilot.nightly_quality_probe.enabled')`);

@@ -185,6 +185,26 @@ function parseNonNegativeNumber(raw: string | null, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function parsePositiveInteger(raw: string | null): number | undefined {
+  if (raw == null) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function parsePositiveIntegerOrNullSentinel(raw: string | null): number | null | undefined {
+  if (raw == null) return undefined;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === '' || trimmed === 'null' || trimmed === 'none') return null;
+  const n = Number(trimmed);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function parsePositiveNumberOptional(raw: string | null): number | undefined {
+  if (raw == null) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 async function resolveOptionalModelConfig(
   engine: BrainEngine,
   configKey: string,
@@ -1184,6 +1204,26 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           resolveOptionalModelConfig(engine, 'models.eval.cross_modal.slot_b', resolveModel),
           resolveOptionalModelConfig(engine, 'models.eval.cross_modal.slot_c', resolveModel),
         ]);
+        const [
+          rerankerEnabledRaw,
+          rerankerModelRaw,
+          rerankerTimeoutRaw,
+          rerankerTopNInRaw,
+          rerankerTopNOutRaw,
+        ] = await Promise.all([
+          engine.getConfig('search.reranker.enabled'),
+          engine.getConfig('search.reranker.model'),
+          engine.getConfig('search.reranker.timeout_ms'),
+          engine.getConfig('search.reranker.top_n_in'),
+          engine.getConfig('search.reranker.top_n_out'),
+        ]);
+        const longMemEvalRerankerEnabled = rerankerEnabledRaw == null
+          ? undefined
+          : parseConfigBool(rerankerEnabledRaw, false);
+        const longMemEvalRerankerModel = rerankerModelRaw?.trim() || undefined;
+        const longMemEvalRerankerTimeoutMs = parsePositiveNumberOptional(rerankerTimeoutRaw);
+        const longMemEvalRerankerTopNIn = parsePositiveInteger(rerankerTopNInRaw);
+        const longMemEvalRerankerTopNOut = parsePositiveIntegerOrNullSentinel(rerankerTopNOutRaw);
         const longMemEvalModel = await resolveModel(engine, {
           configKey: 'models.eval.longmemeval',
           tier: 'reasoning',
@@ -1208,6 +1248,11 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           slotCModel: slotCModel ?? undefined,
           longMemEvalModel,
           longMemEvalExtractorModel,
+          longMemEvalRerankerModel,
+          longMemEvalRerankerEnabled,
+          longMemEvalRerankerTimeoutMs,
+          longMemEvalRerankerTopNIn,
+          longMemEvalRerankerTopNOut,
         });
       }
     } catch (e) {

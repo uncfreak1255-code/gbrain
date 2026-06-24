@@ -23,6 +23,11 @@ export interface LongMemEvalProbeArgs {
   outputPath: string;
   model?: string;
   extractorModel?: string;
+  rerankerModel?: string;
+  rerankerEnabled?: boolean;
+  rerankerTimeoutMs?: number;
+  rerankerTopNIn?: number;
+  rerankerTopNOut?: number | null;
 }
 
 /** Arguments accepted by the cross-modal adapter. */
@@ -62,9 +67,17 @@ export interface CrossModalBatchSummary {
 export async function runLongMemEvalForProbe(args: LongMemEvalProbeArgs): Promise<void> {
   const { runEvalLongMemEval } = await import('../../commands/eval-longmemeval.ts');
   const modelArgs = args.model ? ['--model', args.model] : [];
+  const rerankerArgs = [
+    ...(args.rerankerModel ? ['--reranker-model', args.rerankerModel] : []),
+    ...(args.rerankerEnabled !== undefined ? ['--reranker-enabled', args.rerankerEnabled ? 'true' : 'false'] : []),
+    ...(args.rerankerTimeoutMs !== undefined ? ['--reranker-timeout-ms', String(args.rerankerTimeoutMs)] : []),
+    ...(args.rerankerTopNIn !== undefined ? ['--reranker-top-n-in', String(args.rerankerTopNIn)] : []),
+    ...(args.rerankerTopNOut !== undefined ? ['--reranker-top-n-out', args.rerankerTopNOut === null ? 'null' : String(args.rerankerTopNOut)] : []),
+  ];
   await runEvalLongMemEval([
     args.fixturePath,
     ...modelArgs,
+    ...rerankerArgs,
     '--by-type',
     '--output',
     args.outputPath,

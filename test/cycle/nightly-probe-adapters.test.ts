@@ -120,6 +120,11 @@ describe('nightly-probe-adapters: argv shape regression (codex round-2 #1)', () 
     // longmemeval adapter: model is passed explicitly so nightly does not
     // fall back to the historical Sonnet default.
     expect(source).toContain(`'--model'`);
+    expect(source).toContain(`'--reranker-model'`);
+    expect(source).toContain(`'--reranker-enabled'`);
+    expect(source).toContain(`'--reranker-timeout-ms'`);
+    expect(source).toContain(`'--reranker-top-n-in'`);
+    expect(source).toContain(`'--reranker-top-n-out'`);
     expect(source).toContain(`'--by-type'`);
     expect(source).toContain(`args.outputPath`);
     expect(source).toContain(`extractorModel: args.extractorModel`);
