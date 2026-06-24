@@ -82,8 +82,8 @@ const PROPOSE_TAKES_MAX_OUTPUT_TOKENS = 2048;
  *     (pure facts, direct quotes, restatements).
  *   - conviction inference rules anchored to specific hedging language
  *     ("I bet"/"strong conviction"=0.7-0.85, "I think"/"moderate"=0.5-0.7).
- *   - kind enum kept narrow ('prediction'|'judgment'|'bet') — the v1
- *     stub's 4-tag enum bled into noise classification.
+ *   - extractor kind labels stay narrow ('prediction'|'judgment'|'bet').
+ *     They normalize into gbrain's canonical takes enum before DB writes.
  *
  * Replaces the v0.36.1.0-stub. If you re-tune, run cat15 against the
  * fixtures before bumping PROPOSE_TAKES_PROMPT_VERSION; the train-holdout
@@ -128,6 +128,22 @@ export interface ProposedTake {
   holder: string;
   weight: number;
   domain?: string;
+}
+
+const EXTRACTOR_KIND_ALIASES: Record<string, ProposedTake['kind']> = {
+  prediction: 'bet',
+  judgment: 'take',
+  opinion: 'take',
+  intuition: 'hunch',
+};
+
+function normalizeProposedTakeKind(kind: unknown): ProposedTake['kind'] {
+  if (typeof kind !== 'string') return 'take';
+  const normalized = kind.trim().toLowerCase();
+  if (normalized === 'fact' || normalized === 'take' || normalized === 'bet' || normalized === 'hunch') {
+    return normalized;
+  }
+  return EXTRACTOR_KIND_ALIASES[normalized] ?? 'take';
 }
 
 /** Extractor function signature — injected for tests; production calls gateway. */
@@ -273,9 +289,7 @@ export function parseExtractorOutput(raw: string): ProposedTake[] {
     const r = raw as Record<string, unknown>;
     const claim_text = typeof r.claim_text === 'string' ? r.claim_text.trim() : '';
     if (!claim_text || claim_text.length > 500) continue;
-    const kind = ['fact', 'take', 'bet', 'hunch'].includes(r.kind as string)
-      ? (r.kind as ProposedTake['kind'])
-      : 'take';
+    const kind = normalizeProposedTakeKind(r.kind);
     const holder = typeof r.holder === 'string' && r.holder.length > 0 ? r.holder : 'brain';
     const weightRaw = typeof r.weight === 'number' ? r.weight : 0.5;
     const weight = Math.max(0, Math.min(1, weightRaw));

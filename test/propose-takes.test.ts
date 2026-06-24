@@ -186,6 +186,16 @@ describe('parseExtractorOutput', () => {
     expect(parseExtractorOutput(raw)).toHaveLength(1);
   });
 
+  test('normalizes tuned extractor kind labels to canonical takes kinds', () => {
+    const raw = JSON.stringify([
+      { claim_text: 'a', kind: 'prediction', holder: 'brain', weight: 0.7 },
+      { claim_text: 'b', kind: 'judgment', holder: 'brain', weight: 0.6 },
+      { claim_text: 'c', kind: 'intuition', holder: 'brain', weight: 0.4 },
+    ]);
+    const out = parseExtractorOutput(raw);
+    expect(out.map(row => row.kind)).toEqual(['bet', 'take', 'hunch']);
+  });
+
   test('coerces unknown kind to "take" and clamps weight to [0,1]', () => {
     const raw = JSON.stringify([
       { claim_text: 'a', kind: 'unknown_kind', holder: 'brain', weight: 2.5 },
