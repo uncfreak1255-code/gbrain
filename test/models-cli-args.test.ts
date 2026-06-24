@@ -43,20 +43,30 @@ describe('runModels CLI arg normalization', () => {
   });
 
   test('doctor works when cli.ts passes only the subcommand tail', async () => {
-    configureGateway({
-      embedding_model: 'ollama:bge-m3',
-      embedding_dimensions: 1024,
-      expansion_model: 'anthropic:claude-haiku-4-5-20251001',
-      chat_model: 'zai:glm-5.2',
-      env: { ANTHROPIC_API_KEY: 'test', ZAI_API_KEY: 'test' },
-    });
+    try {
+      configureGateway({
+        embedding_model: 'ollama:bge-m3',
+        embedding_dimensions: 1024,
+        expansion_model: 'anthropic:claude-haiku-4-5-20251001',
+        chat_model: 'zai:glm-5.2',
+        env: { ANTHROPIC_API_KEY: 'test', ZAI_API_KEY: 'test' },
+      });
 
-    const out = await captureStdout(() => runModels(makeEngineStub(), ['doctor', '--skip=anthropic', '--skip=zai', '--skip=zeroentropyai', '--json']));
-    const report = JSON.parse(out) as { probes: Array<{ touchpoint: string }>; summary: { failed: number } };
-    expect(report.probes.some(p => p.touchpoint === 'chat')).toBe(false);
-    expect(report.probes.some(p => p.touchpoint === 'expansion')).toBe(false);
-    expect(report.summary.failed).toBe(0);
-
-    resetGateway();
+      const out = await captureStdout(() => runModels(makeEngineStub(), [
+        'doctor',
+        '--skip=anthropic',
+        '--skip=ollama',
+        '--skip=zai',
+        '--skip=zeroentropyai',
+        '--json',
+      ]));
+      const report = JSON.parse(out) as { probes: Array<{ touchpoint: string }>; summary: { failed: number } };
+      expect(report.probes.some(p => p.touchpoint === 'chat')).toBe(false);
+      expect(report.probes.some(p => p.touchpoint === 'expansion')).toBe(false);
+      expect(report.probes.some(p => p.touchpoint === 'embedding_reachability')).toBe(false);
+      expect(report.summary.failed).toBe(0);
+    } finally {
+      resetGateway();
+    }
   });
 });
