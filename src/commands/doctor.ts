@@ -1425,6 +1425,9 @@ export async function checkVoiceGateHealth(engine: BrainEngine): Promise<Check> 
  *      return 'ok: reranker disabled'. Avoids keeping stale audit failures
  *      alive after the operator intentionally turns the reranker off.
  *   2) Walk last 7 days of `~/.gbrain/audit/rerank-failures-*.jsonl`.
+ *      When a concrete `search.reranker.model` is configured, scope audit
+ *      failures to that model so stale failures from a prior provider do not
+ *      keep the current local reranker yellow.
  *   3) Auth failures: ANY single one warns (config-time problem doctor's
  *      own probe should have caught — surface it).
  *   4) Transient (network/timeout/rate_limit): warn at >=5 in window.
@@ -1449,14 +1452,20 @@ export async function checkRerankerHealth(engine: BrainEngine): Promise<Check> {
 
     const { readRecentRerankFailures } = await import('../core/rerank-audit.ts');
     const rerankerEnabled = normalizedCfg === 'true' || normalizedCfg === '1';
+    const currentModel = (await engine.getConfig('search.reranker.model'))?.trim() || null;
 
-    const failures = readRecentRerankFailures(7);
+    const allFailures = readRecentRerankFailures(7);
+    const failures = currentModel
+      ? allFailures.filter((f) => f.model === currentModel)
+      : allFailures;
     if (failures.length === 0) {
       return {
         name: 'reranker_health',
         status: 'ok',
         message: rerankerEnabled
-          ? 'No rerank failures in last 7 days'
+          ? currentModel
+            ? `No rerank failures for ${currentModel} in last 7 days`
+            : 'No rerank failures in last 7 days'
           : 'Reranker disabled — no failures expected',
       };
     }
