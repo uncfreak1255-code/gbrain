@@ -139,6 +139,43 @@ describe('computeDoctorReport — category_scores', () => {
   });
 });
 
+describe('computeDoctorReport — action tiers', () => {
+  test('separates broken runtime from cleanup and quality opportunities', () => {
+    const checks: Check[] = [
+      check('supervisor', 'ok'),
+      check('cycle_freshness', 'warn'),
+      check('frontmatter_integrity', 'warn'),
+      check('brain_score', 'warn'),
+      check('graph_coverage', 'warn'),
+    ];
+    const r = computeDoctorReport(checks);
+    expect(r.action_tiers).toEqual({ red: 0, yellow: 2, blue: 2, gray: 1 });
+    expect(r.checks.find((c) => c.name === 'cycle_freshness')?.action_tier).toBe('yellow');
+    expect(r.checks.find((c) => c.name === 'brain_score')?.action_tier).toBe('blue');
+    expect(r.checks.find((c) => c.name === 'supervisor')?.action_tier).toBe('gray');
+  });
+
+  test('runtime failures are red even when legacy health_score stays additive', () => {
+    const r = computeDoctorReport([
+      check('connection', 'fail'),
+      check('embed_staleness', 'warn'),
+      check('type_proliferation', 'warn'),
+    ]);
+    expect(r.health_score).toBe(70);
+    expect(r.action_tiers).toEqual({ red: 1, yellow: 1, blue: 1, gray: 0 });
+    expect(r.checks.find((c) => c.name === 'connection')?.action_tier).toBe('red');
+  });
+
+  test('pre-tagged action tiers stay consistent with summary counts', () => {
+    const r = computeDoctorReport([
+      { ...check('connection', 'warn'), action_tier: 'yellow' },
+      check('brain_score', 'warn'),
+    ]);
+    expect(r.checks.find((c) => c.name === 'connection')?.action_tier).toBe('yellow');
+    expect(r.action_tiers).toEqual({ red: 0, yellow: 1, blue: 1, gray: 0 });
+  });
+});
+
 describe('computeDoctorReport — categorization fall-through', () => {
   test('checks without category get tagged via categorizeCheck(name)', () => {
     const r = computeDoctorReport([
