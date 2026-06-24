@@ -174,6 +174,19 @@ describe('computeDoctorReport — action tiers', () => {
     expect(r.checks.find((c) => c.name === 'connection')?.action_tier).toBe('yellow');
     expect(r.action_tiers).toEqual({ red: 0, yellow: 1, blue: 1, gray: 0 });
   });
+
+  test('advisory ops warnings do not inflate red runtime issue count', () => {
+    const r = computeDoctorReport([
+      check('pool_budget', 'warn'),
+      check('autopilot_fanout_concurrency', 'warn'),
+      check('unknown_ops_warning', 'warn', 'ops'),
+      check('unknown_ops_failure', 'fail', 'ops'),
+    ]);
+    expect(r.action_tiers).toEqual({ red: 1, yellow: 3, blue: 0, gray: 0 });
+    expect(r.checks.find((c) => c.name === 'pool_budget')?.action_tier).toBe('yellow');
+    expect(r.checks.find((c) => c.name === 'unknown_ops_warning')?.action_tier).toBe('yellow');
+    expect(r.checks.find((c) => c.name === 'unknown_ops_failure')?.action_tier).toBe('red');
+  });
 });
 
 describe('computeDoctorReport — categorization fall-through', () => {

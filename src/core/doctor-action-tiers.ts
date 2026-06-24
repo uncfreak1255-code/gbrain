@@ -42,6 +42,7 @@ const RED_RUNTIME_CHECKS = new Set([
 
 const YELLOW_BACKLOG_CHECKS = new Set([
   'abandoned_threads',
+  'autopilot_fanout_concurrency',
   'content_sanity_audit_recent',
   'conversation_facts_backlog',
   'cross_modal_modality_backfill',
@@ -61,6 +62,9 @@ const YELLOW_BACKLOG_CHECKS = new Set([
   'orphan_ratio',
   'orphan_clones',
   'oversized_pages',
+  'pool_budget',
+  'pool_reap_health',
+  'progressive_batch_audit_health',
   'quarantined_pages',
   'scraper_junk_pages',
   'sync_consolidation',
@@ -112,7 +116,7 @@ export function actionTierForCheck(check: TierableCheck): DoctorActionTier {
   if (YELLOW_BACKLOG_CHECKS.has(check.name)) return 'yellow';
   if (BLUE_QUALITY_CHECKS.has(check.name)) return 'blue';
   if (check.status === 'fail') return 'red';
-  if (check.category === 'ops') return 'red';
+  if (check.category === 'ops') return 'yellow';
   if (check.category === 'skill') return 'blue';
   if (check.category === 'meta') return 'yellow';
   return 'yellow';
