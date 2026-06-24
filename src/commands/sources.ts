@@ -1098,11 +1098,21 @@ async function runRehome(engine: BrainEngine, args: string[]): Promise<void> {
     if (a === '--json' || a === '--dry-run') continue;
     if (a === '--apply') continue;
     if (a === '--limit') {
-      limit = parsePositiveIntFlag(args[++i], '--limit');
+      try {
+        limit = parsePositiveIntFlag(args[++i], '--limit');
+      } catch (e) {
+        console.error((e as Error).message);
+        process.exit(2);
+      }
       continue;
     }
     if (a === '--timeout-ms') {
-      timeoutMs = parsePositiveIntFlag(args[++i], '--timeout-ms');
+      try {
+        timeoutMs = parsePositiveIntFlag(args[++i], '--timeout-ms');
+      } catch (e) {
+        console.error((e as Error).message);
+        process.exit(2);
+      }
       continue;
     }
     if (a.startsWith('--')) {
