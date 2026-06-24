@@ -110,7 +110,7 @@ export interface ShellJobResult {
 function buildChildEnv(
   override: Record<string, string> | undefined,
   inherit: string[] | undefined,
-  cfg: GBrainConfig | null | undefined,
+  cfg: GBrainConfig | null,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of SHELL_ENV_ALLOWLIST) {
