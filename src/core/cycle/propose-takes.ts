@@ -344,6 +344,18 @@ class ProposeTakesPhase extends BaseCyclePhase {
       };
     }
 
+    const bootstrapEnabled = await isTakesBootstrapEnabled(engine, ctx);
+    if (!bootstrapEnabled) {
+      return {
+        summary: 'propose_takes skipped: takes.bootstrap_enabled is false',
+        details: {
+          reason: 'takes_bootstrap_disabled',
+          enable_hint: 'gbrain config set takes.bootstrap_enabled true',
+        },
+        status: 'skipped',
+      };
+    }
+
     const result: ProposeTakesResult = {
       pages_scanned: 0,
       cache_hits: 0,
@@ -405,6 +417,14 @@ class ProposeTakesPhase extends BaseCyclePhase {
         result.warnings.push(
           `skipped ${page.slug}: prompt estimate ${estimatedInputTokens.toLocaleString()} tokens exceeds cap ${maxPromptTokens.toLocaleString()}`,
         );
+        continue;
+      }
+
+      // Dry-run previews eligibility without spending or writing. Keep the
+      // cache/oversize accounting above so the operator sees what a real run
+      // would submit, but do not call the LLM extractor or mutate proposal,
+      // receipt, or rollup tables.
+      if (opts.dryRun) {
         continue;
       }
 
@@ -500,6 +520,16 @@ class ProposeTakesPhase extends BaseCyclePhase {
         `budget exhausted after final page (${finalOverage})`,
       );
     }
+    if (opts.dryRun) {
+      return {
+        summary:
+          `propose_takes dry-run: scanned ${result.pages_scanned} pages, ` +
+          `${result.cache_hits} cached, ${result.cache_misses} would be submitted`,
+        details: { ...result, dry_run: true, proposal_run_id: proposalRunId, prompt_version: promptVersion, cost_usd: 0 },
+        status: result.budget_exhausted ? 'warn' : 'ok',
+      };
+    }
+
     if (result.proposals_inserted > 0) {
       try {
         await writeReceipt(engine, {
@@ -532,6 +562,24 @@ class ProposeTakesPhase extends BaseCyclePhase {
       details: { ...result, proposal_run_id: proposalRunId, prompt_version: promptVersion, cost_usd: costUsd },
       status: result.budget_exhausted ? 'warn' : 'ok',
     };
+  }
+}
+
+async function isTakesBootstrapEnabled(engine: BrainEngine, ctx: OperationContext): Promise<boolean> {
+  const fromCtx = (ctx.config as unknown as Record<string, unknown>)['takes.bootstrap_enabled'];
+  if (typeof fromCtx === 'boolean') return fromCtx;
+  if (typeof fromCtx === 'number') return fromCtx === 1;
+  if (typeof fromCtx === 'string') {
+    const v = fromCtx.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(v)) return true;
+    if (['0', 'false', 'no', 'off', ''].includes(v)) return false;
+  }
+  try {
+    const raw = await engine.getConfig('takes.bootstrap_enabled');
+    const v = raw?.trim().toLowerCase();
+    return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+  } catch {
+    return false;
   }
 }
 
