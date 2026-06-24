@@ -1183,7 +1183,9 @@ async function runRehome(engine: BrainEngine, args: string[]): Promise<void> {
   const rows = await engine.executeRaw<{ id: string; local_path: string | null; archived: boolean | null }>(
     `SELECT id, local_path, archived FROM sources WHERE archived IS NOT TRUE ORDER BY id`,
   );
-  const eligible = rows.filter((row) => row.id !== 'default' && row.local_path);
+  const eligible = rows
+    .filter((row) => row.id !== 'default' && row.local_path)
+    .map((row) => ({ id: row.id, local_path: row.local_path as string }));
 
   let selected = eligible;
   if (sourceId !== null) {
@@ -1204,7 +1206,7 @@ async function runRehome(engine: BrainEngine, args: string[]): Promise<void> {
       console.error(`Source "${sourceId}" is archived — restore it before running rehome preview.`);
       process.exit(4);
     }
-    selected = [{ id: match.id, local_path: match.local_path }];
+    selected = [{ id: match.id, local_path: match.local_path as string }];
   }
 
   if (selected.length === 0) {
