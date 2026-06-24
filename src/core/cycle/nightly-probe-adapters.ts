@@ -21,6 +21,8 @@ import { readFileSync, existsSync } from 'node:fs';
 export interface LongMemEvalProbeArgs {
   fixturePath: string;
   outputPath: string;
+  model?: string;
+  extractorModel?: string;
 }
 
 /** Arguments accepted by the cross-modal adapter. */
@@ -28,10 +30,15 @@ export interface CrossModalProbeArgs {
   batchPath: string;
   summaryPath: string;
   maxUsd: number;
+  slotAModel?: string;
+  slotBModel?: string;
+  slotCModel?: string;
+  dimensions?: string[];
 }
 
 /** Cross-modal batch summary shape (matches `runEvalCrossModal --batch --json`'s envelope). */
 export interface CrossModalBatchSummary {
+  total: number;
   pass_count: number;
   fail_count: number;
   inconclusive_count: number;
@@ -54,7 +61,16 @@ export interface CrossModalBatchSummary {
  */
 export async function runLongMemEvalForProbe(args: LongMemEvalProbeArgs): Promise<void> {
   const { runEvalLongMemEval } = await import('../../commands/eval-longmemeval.ts');
-  await runEvalLongMemEval([args.fixturePath, '--output', args.outputPath]);
+  const modelArgs = args.model ? ['--model', args.model] : [];
+  await runEvalLongMemEval([
+    args.fixturePath,
+    ...modelArgs,
+    '--by-type',
+    '--output',
+    args.outputPath,
+  ], {
+    extractorModel: args.extractorModel,
+  });
 }
 
 /**
@@ -74,9 +90,17 @@ export async function runCrossModalBatchForProbe(
   args: CrossModalProbeArgs,
 ): Promise<{ exitCode: number; summary: CrossModalBatchSummary }> {
   const { runEvalCrossModal } = await import('../../commands/eval-cross-modal.ts');
+  const slotArgs = [
+    ...(args.slotAModel ? ['--slot-a-model', args.slotAModel] : []),
+    ...(args.slotBModel ? ['--slot-b-model', args.slotBModel] : []),
+    ...(args.slotCModel ? ['--slot-c-model', args.slotCModel] : []),
+  ];
+  const dimensionArgs = args.dimensions?.length ? ['--dimensions', args.dimensions.join(',')] : [];
   const exitCode = await runEvalCrossModal([
     '--batch',
     args.batchPath,
+    ...slotArgs,
+    ...dimensionArgs,
     '--output',
     args.summaryPath,
     '--max-usd',
@@ -124,6 +148,7 @@ export async function runCrossModalBatchForProbe(
   // being slightly larger (e.g. per-question receipts inline).
   const obj = parsed as Record<string, unknown>;
   const summary: CrossModalBatchSummary = {
+    total: Number(obj.total ?? 0),
     pass_count: Number(obj.pass_count ?? 0),
     fail_count: Number(obj.fail_count ?? 0),
     inconclusive_count: Number(obj.inconclusive_count ?? 0),

@@ -1,7 +1,7 @@
 /**
  * v0.28.1: `gbrain eval longmemeval <dataset.jsonl>` — public LongMemEval
  * benchmark adapter. Spins up an in-memory PGLite, imports each question's
- * haystack, runs hybridSearch, optionally generates an answer via Anthropic,
+ * haystack, runs hybridSearch, optionally generates an answer via the AI gateway,
  * emits hypothesis JSONL on stdout for downstream `evaluate_qa.py`.
  *
  * Hermetic by design: cli.ts skips connectEngine() when this subcommand
@@ -24,6 +24,10 @@ import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'
 import type { PGLiteEngine } from '../core/pglite-engine.ts';
 import type { SearchResult } from '../core/types.ts';
 import { BudgetTracker, extractUsageFromError } from '../core/budget/budget-tracker.ts';
+import { configureGateway, chat as gatewayChat } from '../core/ai/gateway.ts';
+import { buildGatewayConfig } from '../core/ai/build-gateway-config.ts';
+import { loadConfig } from '../core/config.ts';
+import { normalizeModelId } from '../core/model-id.ts';
 // v0.40.2.0 — trajectory routing imports.
 import { classifyIntent, type Intent } from '../eval/longmemeval/intent.ts';
 import {
@@ -120,6 +124,60 @@ function budgetedThinkClient(label: string, create: ThinkLLMClient['create']): T
         }
         throw err;
       }
+    },
+  };
+}
+
+function anthropicContentToText(content: Anthropic.MessageParam['content']): string {
+  if (typeof content === 'string') return content;
+  return (content ?? []).map((block) => {
+    if (block.type === 'text') return block.text;
+    return JSON.stringify(block);
+  }).join('\n');
+}
+
+function ensureGatewayConfiguredForEval(): void {
+  const cfg = loadConfig();
+  if (cfg) {
+    configureGateway(buildGatewayConfig(cfg));
+    return;
+  }
+  const envEmbeddingDimensions = process.env.GBRAIN_EMBEDDING_DIMENSIONS
+    ? Number.parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10)
+    : undefined;
+  configureGateway({
+    embedding_model: process.env.GBRAIN_EMBEDDING_MODEL,
+    embedding_dimensions: Number.isFinite(envEmbeddingDimensions) ? envEmbeddingDimensions : undefined,
+    expansion_model: undefined,
+    chat_model: undefined,
+    chat_fallback_chain: undefined,
+    base_urls: undefined,
+    env: { ...process.env },
+  });
+}
+
+function gatewayThinkClient(label: string): ThinkLLMClient {
+  ensureGatewayConfiguredForEval();
+  return {
+    async create(params, callOpts) {
+      const result = await gatewayChat({
+        model: normalizeModelId(params.model),
+        system: typeof params.system === 'string' ? params.system : undefined,
+        messages: params.messages.map((m) => ({
+          role: m.role,
+          content: anthropicContentToText(m.content),
+        })),
+        maxTokens: params.max_tokens,
+        abortSignal: callOpts?.signal,
+        budgetLabel: `${label}.messages`,
+      });
+      return {
+        content: [{ type: 'text', text: result.text }],
+        usage: {
+          input_tokens: result.usage.input_tokens,
+          output_tokens: result.usage.output_tokens,
+        },
+      } as Anthropic.Message;
     },
   };
 }
@@ -543,18 +601,11 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     fallback: 'sonnet',
   });
 
-  // Wrap Anthropic SDK so its `.messages.create` shape matches ThinkLLMClient.
-  // Same pattern as src/core/think/index.ts:247-249.
-  const realClient = new Anthropic();
-  const client: ThinkLLMClient = runOpts.client ?? budgetedThinkClient(
-    'eval.longmemeval.answer',
-    (params, callOpts) => realClient.messages.create(params, callOpts),
-  );
-  // v0.40.2.0 — separate extractor client (defaults to same SDK).
-  const extractorClient: ThinkLLMClient = runOpts.extractorClient ?? budgetedThinkClient(
-    'eval.longmemeval.extractor',
-    (params, callOpts) => realClient.messages.create(params, callOpts),
-  );
+  const client: ThinkLLMClient = runOpts.client ?? gatewayThinkClient('eval.longmemeval.answer');
+  // v0.40.2.0 — separate extractor client. Production routes through the
+  // provider-neutral gateway so non-Anthropic eval models are real, not just
+  // strings passed to the Anthropic SDK.
+  const extractorClient: ThinkLLMClient = runOpts.extractorClient ?? gatewayThinkClient('eval.longmemeval.extractor');
   const trajectoryEnabled = !opts.noTrajectory;
   const extractorModel = trajectoryEnabled
     ? await resolveModel(null, {
@@ -620,6 +671,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
           question_id: q.question_id,
           question: q.question,
           question_type: q.question_type,
+          answer: q.answer,
           hypothesis: '',
           error: String(err?.message ?? err),
         });
@@ -825,6 +877,10 @@ async function runOneQuestion(
     // cross-modal --batch consumer has the `task` it needs without joining
     // back against the source dataset.
     question: q.question,
+    // v0.40.1.0 Track D follow-up: carry the expected answer so
+    // `eval cross-modal --batch` can score answer correctness without
+    // re-joining the original fixture.
+    answer: q.answer,
     // v0.40.1.0 (Track D / T2) — copy question_type into the row so the
     // by_type_summary can be rebuilt from the file on resume runs.
     question_type: q.question_type,

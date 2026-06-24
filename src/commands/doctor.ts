@@ -4815,11 +4815,17 @@ export async function buildChecks(
   // doctor — doctor just surfaces what the probe wrote.
   try {
     const { readRecentQualityProbeEvents } = await import('../core/audit-quality-probe.ts');
-    const { loadConfig } = await import('../core/config.ts');
     let probeEnabled = false;
     try {
-      const cfg = loadConfig();
-      probeEnabled = Boolean((cfg as any)?.autopilot?.nightly_quality_probe?.enabled);
+      const raw = engine ? await engine.getConfig('autopilot.nightly_quality_probe.enabled') : null;
+      if (raw != null) {
+        const v = raw.trim().toLowerCase();
+        probeEnabled = ['1', 'true', 'yes', 'on'].includes(v);
+      } else {
+        const { loadConfig } = await import('../core/config.ts');
+        const cfg = loadConfig();
+        probeEnabled = Boolean((cfg as any)?.autopilot?.nightly_quality_probe?.enabled);
+      }
     } catch { /* config unavailable → treat as disabled */ }
     const events = readRecentQualityProbeEvents(7);
     const check = computeNightlyQualityProbeHealthCheck(probeEnabled, events);
