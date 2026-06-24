@@ -114,6 +114,42 @@ function corpusPath(corpusDir: string, basename: string): string {
 }
 
 describe('E2E synthesize chunking — D5 cap hit', () => {
+  test('max_transcripts_per_cycle caps routine corpus scans but reports full discovery count', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_transcripts_per_cycle', '1');
+
+      for (const basename of ['2026-06-23-one.txt', '2026-06-23-two.txt']) {
+        const filePath = corpusPath(rig.corpusDir, basename);
+        const content = `${basename} useful transcript content\n`.repeat(120);
+        writeFileSync(filePath, content);
+        await seedVerdict(rig.engine, filePath, content);
+      }
+
+      await withoutAnthropicKey(async () => {
+        const result = await runPhaseSynthesize(rig.engine, {
+          brainDir: rig.brainDir,
+          dryRun: true,
+        });
+        expect(result.status).toBe('ok');
+        const details = result.details as {
+          transcripts_discovered: number;
+          transcripts_discovered_before_limit: number;
+          max_transcripts_per_cycle: number;
+          verdicts: Array<unknown>;
+        };
+        expect(details.transcripts_discovered_before_limit).toBe(2);
+        expect(details.transcripts_discovered).toBe(1);
+        expect(details.max_transcripts_per_cycle).toBe(1);
+        expect(details.verdicts).toHaveLength(1);
+      });
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
   test('chunks > max_chunks_per_transcript → skipped with no jobs and no verdict-cache write', async () => {
     const rig = await setupRig();
     try {

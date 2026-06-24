@@ -312,7 +312,7 @@ export async function runPhaseSynthesize(
     const priorContradictionsBlock = await loadPriorContradictionsBlock(engine);
 
     // Discover.
-    const transcripts = opts.inputFile
+    let transcripts = opts.inputFile
       ? loadAdHocTranscript(opts.inputFile, config.minChars, config.excludePatterns, opts.bypassDreamGuard)
       : discoverTranscripts({
           corpusDir: config.corpusDir!,
@@ -324,6 +324,22 @@ export async function runPhaseSynthesize(
           to: opts.to,
           bypassGuard: opts.bypassDreamGuard,
         });
+    const discoveredBeforeLimit = transcripts.length;
+    const prefetchedVerdicts = new Map<string, Awaited<ReturnType<BrainEngine['getDreamVerdict']>>>();
+    if (!explicitTarget && config.maxTranscriptsPerCycle !== null) {
+      const selected: DiscoveredTranscript[] = [];
+      for (const t of transcripts) {
+        const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
+        prefetchedVerdicts.set(t.filePath, cached);
+        // Cached "not worth processing" transcripts should not consume the
+        // nightly canary budget forever. They were already judged and would
+        // otherwise starve later corpus files because discovery order is stable.
+        if (cached && !cached.worth_processing) continue;
+        selected.push(t);
+        if (selected.length >= config.maxTranscriptsPerCycle) break;
+      }
+      transcripts = selected;
+    }
 
     if (transcripts.length === 0) {
       return ok('no transcripts to process', { transcripts_processed: 0, pages_written: 0 });
@@ -339,7 +355,9 @@ export async function runPhaseSynthesize(
     // as the cheap pre-flight check).
     const judge = makeJudgeClient(config.verdictModel);
     for (const t of transcripts) {
-      const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
+      const cached = prefetchedVerdicts.has(t.filePath)
+        ? prefetchedVerdicts.get(t.filePath)!
+        : await engine.getDreamVerdict(t.filePath, t.contentHash);
       if (cached) {
         verdicts.push({ filePath: t.filePath, worth: cached.worth_processing, reasons: cached.reasons, cached: true });
         if (cached.worth_processing) worthProcessing.push(t);
@@ -380,11 +398,13 @@ export async function runPhaseSynthesize(
     }
 
     // Dry-run stops here: significance filter ran (Haiku verdicts cached),
-    // but no Sonnet synthesis. Codex finding #8: --dry-run does NOT mean
-    // "zero LLM calls"; it means "skip Sonnet."
+    // but no configured synthesis-model pass. Codex finding #8: --dry-run
+    // does NOT mean "zero LLM calls"; it means "skip synthesis."
     if (opts.dryRun) {
       return ok(`dry-run: ${worthProcessing.length} of ${transcripts.length} transcripts would synthesize`, {
         transcripts_discovered: transcripts.length,
+        transcripts_discovered_before_limit: discoveredBeforeLimit,
+        max_transcripts_per_cycle: config.maxTranscriptsPerCycle,
         transcripts_processed: 0,
         pages_written: 0,
         verdicts,
@@ -398,6 +418,8 @@ export async function runPhaseSynthesize(
       // re-run pick up if a new transcript lands later.
       return ok('all transcripts skipped by significance filter', {
         transcripts_discovered: transcripts.length,
+        transcripts_discovered_before_limit: discoveredBeforeLimit,
+        max_transcripts_per_cycle: config.maxTranscriptsPerCycle,
         transcripts_processed: 0,
         pages_written: 0,
         verdicts,
@@ -554,6 +576,8 @@ export async function runPhaseSynthesize(
     const submittedTranscripts = worthProcessing.length - skipReports.length;
     return ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s`, {
       transcripts_discovered: transcripts.length,
+      transcripts_discovered_before_limit: discoveredBeforeLimit,
+      max_transcripts_per_cycle: config.maxTranscriptsPerCycle,
       transcripts_processed: submittedTranscripts,
       pages_written: writtenSlugs.length,
       // v0.29: emit the slug list so the recompute_emotional_weight phase can
@@ -602,6 +626,7 @@ interface SynthConfig {
    * `dream.synthesize.max_chunks_per_transcript`.
    */
   maxChunksPerTranscript: number;
+  maxTranscriptsPerCycle: number | null;
 }
 
 async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
@@ -630,6 +655,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
   const cooldownHoursStr = await engine.getConfig('dream.synthesize.cooldown_hours');
   const maxPromptTokensStr = await engine.getConfig('dream.synthesize.max_prompt_tokens');
   const maxChunksStr = await engine.getConfig('dream.synthesize.max_chunks_per_transcript');
+  const maxTranscriptsStr = await engine.getConfig('dream.synthesize.max_transcripts_per_cycle');
 
   let excludePatterns: string[] = ['medical', 'therapy'];
   if (excludeStr) {
@@ -655,6 +681,13 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
       maxChunksPerTranscript = parsed;
     }
   }
+  let maxTranscriptsPerCycle: number | null = null;
+  if (maxTranscriptsStr) {
+    const parsed = parseInt(maxTranscriptsStr, 10);
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      maxTranscriptsPerCycle = parsed;
+    }
+  }
 
   return {
     enabled,
@@ -667,6 +700,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     cooldownHours: cooldownHoursStr ? Math.max(0, parseInt(cooldownHoursStr, 10) || 12) : 12,
     maxPromptTokens,
     maxChunksPerTranscript,
+    maxTranscriptsPerCycle,
   };
 }
 
