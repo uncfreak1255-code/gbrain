@@ -4899,13 +4899,14 @@ export async function buildChecks(
   if (engine) {
     try {
       const { parseConversation } = await import('../core/conversation-parser/parse.ts');
+      const { isConversationFactsCandidatePage } = await import('../core/conversation-parser/candidates.ts');
       const allowedTypes = ['conversation', 'meeting', 'slack', 'email'] as const;
       // PageFilters supports singular `type` only; iterate the 4 types
       // and cap at ~50/each to land at ~200 total max.
       const sample: import('../core/types.ts').Page[] = [];
       for (const t of allowedTypes) {
         const slice = await engine.listPages({ limit: 50, type: t as import('../core/types.ts').PageType });
-        sample.push(...slice);
+        sample.push(...slice.filter(isConversationFactsCandidatePage));
       }
       if (sample.length === 0) {
         checks.push({
