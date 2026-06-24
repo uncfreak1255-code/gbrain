@@ -27,6 +27,8 @@ export const zai: Recipe = {
       models: ['glm-5.2'],
       supports_tools: true,
       supports_subagent_loop: true,
+      // Keep false until cached-token pricing is represented in the budget
+      // tracker; otherwise GLM cached reads can undercount spend caps.
       supports_prompt_cache: false,
       max_context_tokens: 1_000_000,
       cost_per_1m_input_usd: 1.4,
