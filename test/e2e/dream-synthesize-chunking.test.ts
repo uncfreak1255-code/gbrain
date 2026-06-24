@@ -59,6 +59,24 @@ async function withoutAnthropicKey<T>(body: () => Promise<T>): Promise<T> {
   }
 }
 
+async function captureStderr<T>(body: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const chunks: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (process.stderr as any).write = (chunk: any, ..._args: any[]): boolean => {
+    const s = typeof chunk === 'string' ? chunk : chunk.toString();
+    chunks.push(s);
+    return true;
+  };
+  try {
+    const result = await body();
+    return { result, stderr: chunks.join('') };
+  } finally {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = original;
+  }
+}
+
 /**
  * Run `body` while a background loop force-cancels any subagent jobs the
  * synthesize phase submits. Without a worker, those jobs would sit in
@@ -129,10 +147,12 @@ describe('E2E synthesize chunking — D5 cap hit', () => {
       }
 
       await withoutAnthropicKey(async () => {
-        const result = await runPhaseSynthesize(rig.engine, {
-          brainDir: rig.brainDir,
-          dryRun: true,
-        });
+        const { result, stderr } = await captureStderr(() =>
+          runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: true,
+          }),
+        );
         expect(result.status).toBe('ok');
         const details = result.details as {
           transcripts_discovered: number;
@@ -144,6 +164,57 @@ describe('E2E synthesize chunking — D5 cap hit', () => {
         expect(details.transcripts_discovered).toBe(1);
         expect(details.max_transcripts_per_cycle).toBe(1);
         expect(details.verdicts).toHaveLength(1);
+      });
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('max_transcripts_per_cycle skips legacy-completed worth transcripts before filling the cap', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_transcripts_per_cycle', '1');
+
+      const firstBasename = '2026-06-23-already-synthesized.txt';
+      const firstPath = corpusPath(rig.corpusDir, firstBasename);
+      const firstContent = `${firstBasename} useful transcript content\n`.repeat(120);
+      writeFileSync(firstPath, firstContent);
+      const firstHash = await seedVerdict(rig.engine, firstPath, firstContent);
+
+      const secondBasename = '2026-06-23-fresh.txt';
+      const secondPath = corpusPath(rig.corpusDir, secondBasename);
+      const secondContent = `${secondBasename} useful transcript content\n`.repeat(120);
+      writeFileSync(secondPath, secondContent);
+      await seedVerdict(rig.engine, secondPath, secondContent);
+
+      await rig.engine.executeRaw(
+        `INSERT INTO minion_jobs (name, queue, status, idempotency_key, finished_at)
+         VALUES ('subagent', 'default', 'completed', $1, now())`,
+        [`dream:synth:${firstPath}:${firstHash.slice(0, 16)}`],
+      );
+
+      await withoutAnthropicKey(async () => {
+        const { result, stderr } = await captureStderr(() =>
+          runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: true,
+          }),
+        );
+        expect(result.status).toBe('ok');
+        const details = result.details as {
+          transcripts_discovered: number;
+          transcripts_discovered_before_limit: number;
+          max_transcripts_per_cycle: number;
+          verdicts: Array<{ filePath: string }>;
+        };
+        expect(details.transcripts_discovered_before_limit).toBe(2);
+        expect(details.transcripts_discovered).toBe(1);
+        expect(details.max_transcripts_per_cycle).toBe(1);
+        expect(details.verdicts).toHaveLength(1);
+        expect(details.verdicts[0].filePath).toBe(secondPath);
+        expect(stderr).toMatch(/\[dream\] skipped 2026-06-23-already-synthesized: already synthesized by legacy single-chunk completion; keeping cap room for newer transcripts/);
       });
     } finally {
       await rig.cleanup();
@@ -170,10 +241,12 @@ describe('E2E synthesize chunking — D5 cap hit', () => {
       await seedVerdict(rig.engine, filePath, content);
 
       await withoutAnthropicKey(async () => {
-        const result = await runPhaseSynthesize(rig.engine, {
-          brainDir: rig.brainDir,
-          dryRun: false,
-        });
+        const { result, stderr } = await captureStderr(() =>
+          runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+          }),
+        );
 
         expect(result.status).toBe('ok');
         const details = result.details as {
@@ -184,6 +257,7 @@ describe('E2E synthesize chunking — D5 cap hit', () => {
         expect(details.skips).toHaveLength(1);
         expect(details.skips[0].filePath).toBe(filePath);
         expect(details.skips[0].reason).toMatch(/oversize_after_split/);
+        expect(stderr).toMatch(/\[dream\] transcript 2026-05-08-fat-transcript produced \d+ chunks/);
       });
 
       // No subagent jobs submitted.
@@ -226,10 +300,12 @@ describe('E2E synthesize chunking — D8 legacy single-chunk migration', () => {
       );
 
       await withoutAnthropicKey(async () => {
-        const result = await runPhaseSynthesize(rig.engine, {
-          brainDir: rig.brainDir,
-          dryRun: false,
-        });
+        const { result, stderr } = await captureStderr(() =>
+          runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+          }),
+        );
         const details = result.details as {
           children_submitted: number;
           skips: Array<{ reason: string }>;
@@ -237,9 +313,57 @@ describe('E2E synthesize chunking — D8 legacy single-chunk migration', () => {
         expect(details.children_submitted).toBe(0);
         expect(details.skips).toHaveLength(1);
         expect(details.skips[0].reason).toBe('already_synthesized_legacy_single_chunk');
+        expect(stderr).toMatch(/\[dream\] skipped 2026-04-25-already-synthesized: already synthesized by legacy single-chunk completion/);
       });
 
       // No NEW subagent job: still exactly one (the seeded completed row).
+      const jobs = await rig.engine.executeRaw<{ cnt: string | number }>(
+        `SELECT count(*) AS cnt FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(Number(jobs[0].cnt)).toBe(1);
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('dead legacy idempotency key is released so a fresh child can be submitted', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+
+      const basename = '2026-04-25-retry-dead-child.txt';
+      const filePath = corpusPath(rig.corpusDir, basename);
+      const content = 'meaningful conversation lines\n'.repeat(200);
+      writeFileSync(filePath, content);
+      const contentHash = await seedVerdict(rig.engine, filePath, content);
+
+      const legacyKey = `dream:synth:${filePath}:${contentHash.slice(0, 16)}`;
+      await rig.engine.executeRaw(
+        `INSERT INTO minion_jobs (name, queue, status, idempotency_key, finished_at)
+         VALUES ('subagent', 'default', 'dead', $1, now())`,
+        [legacyKey],
+      );
+
+      await withoutAnthropicKey(async () => {
+        await withSubagentAutoCancel(rig.engine, async () => {
+          const { result, stderr } = await captureStderr(() =>
+            runPhaseSynthesize(rig.engine, {
+              brainDir: rig.brainDir,
+              dryRun: false,
+            }),
+          );
+          expect(result.status).toBe('ok');
+          const details = result.details as {
+            children_submitted: number;
+            skips: Array<{ reason: string }>;
+          };
+          expect(details.children_submitted).toBe(1);
+          expect(details.skips).toEqual([]);
+          expect(stderr).toMatch(/\[dream\] retrying 2026-04-25-retry-dead-child: cleared stale dead synth child \d+/);
+        });
+      });
+
       const jobs = await rig.engine.executeRaw<{ cnt: string | number }>(
         `SELECT count(*) AS cnt FROM minion_jobs WHERE name = 'subagent'`,
       );

@@ -73,6 +73,24 @@ async function withoutAnthropicKey<T>(body: () => Promise<T>): Promise<T> {
   }
 }
 
+async function captureStderr<T>(body: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const chunks: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (process.stderr as any).write = (chunk: any, ..._args: any[]): boolean => {
+    const s = typeof chunk === 'string' ? chunk : chunk.toString();
+    chunks.push(s);
+    return true;
+  };
+  try {
+    const result = await body();
+    return { result, stderr: chunks.join('') };
+  } finally {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = original;
+  }
+}
+
 describe('E2E synthesize — disabled / not_configured', () => {
   test('not_configured when enabled=false (default)', async () => {
     const rig = await setupRig();
@@ -152,10 +170,12 @@ describe('E2E synthesize — gateway-adapter mid-run AIConfigError catch (v0.41 
           'a meaningful conversation\n'.repeat(200),
         );
 
-        const result = await runPhaseSynthesize(rig.engine, {
-          brainDir: rig.brainDir,
-          dryRun: false,
-        });
+        const { result, stderr } = await captureStderr(() =>
+          runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+          }),
+        );
 
         // The phase did NOT throw; it converted the AIConfigError into a
         // per-transcript "worth=false, reasons=['gateway error: ...']"
@@ -165,6 +185,7 @@ describe('E2E synthesize — gateway-adapter mid-run AIConfigError catch (v0.41 
         expect(verdicts).toHaveLength(1);
         expect(verdicts[0].worth).toBe(false);
         expect(verdicts[0].reasons[0]).toMatch(/gateway error:.*simulated mid-run provider auth failure/);
+        expect(stderr).toMatch(/\[dream\] skipped 2026-04-25-mid-run: gateway error while judging significance: simulated mid-run provider auth failure/);
       } finally {
         if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
         else process.env.ANTHROPIC_API_KEY = savedKey;
@@ -188,10 +209,12 @@ describe('E2E synthesize — no API key skip path', () => {
         'a meaningful conversation\n'.repeat(200),
       );
       await withoutAnthropicKey(async () => {
-        const result = await runPhaseSynthesize(rig.engine, {
-          brainDir: rig.brainDir,
-          dryRun: false,
-        });
+        const { result, stderr } = await captureStderr(() =>
+          runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+          }),
+        );
         expect(result.status).toBe('ok');
         expect((result.details as { transcripts_processed: number }).transcripts_processed).toBe(0);
         expect((result.details as { pages_written: number }).pages_written).toBe(0);
@@ -203,6 +226,7 @@ describe('E2E synthesize — no API key skip path', () => {
         // string was 'no ANTHROPIC_API_KEY for significance judge'; post-
         // rework is 'no configured provider for verdict model: <model>'.
         expect(verdicts[0].reasons[0]).toMatch(/no configured provider for verdict model/);
+        expect(stderr).toMatch(/\[dream\] skipped 2026-04-25-session: no configured provider for verdict model /);
       });
     } finally {
       await rig.cleanup();
@@ -415,28 +439,6 @@ describe('E2E synthesize — GLM dream replacement proof', () => {
 });
 
 describe('E2E synthesize — round-trip self-consumption guard (v0.23.2)', () => {
-  /**
-   * Capture stderr writes during a single synthesize run, restoring the
-   * original writer afterward (even on throw). Returns the captured chunks.
-   */
-  async function captureStderr<T>(body: () => Promise<T>): Promise<{ result: T; stderr: string }> {
-    const chunks: string[] = [];
-    const original = process.stderr.write.bind(process.stderr);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (process.stderr as any).write = (chunk: any, ..._args: any[]): boolean => {
-      const s = typeof chunk === 'string' ? chunk : chunk.toString();
-      chunks.push(s);
-      return true;
-    };
-    try {
-      const result = await body();
-      return { result, stderr: chunks.join('') };
-    } finally {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (process.stderr as any).write = original;
-    }
-  }
-
   test('round-trip: synthesize-rendered dream output is skipped on the next run', async () => {
     // Production-realistic recursion:
     //   1. The synthesize phase wrote a reflection (DB + reverseWriteSlugs).
@@ -607,10 +609,11 @@ describe('E2E synthesize — round-trip self-consumption guard (v0.23.2)', () =>
         expect(verdicts[0].filePath).toMatch(/2026-04-30-real-convo\.txt$/);
         // Stderr log fired for the leaked file specifically.
         expect(stderr).toMatch(/\[dream\] skipped 2026-04-30-leaked: dream_generated marker/);
-        // ... and only the leaked file. A legitimate transcript that merely
-        // mentions a reflection slug (codex finding #1's headline false-positive)
-        // must not be skipped.
-        expect(stderr).not.toMatch(/\[dream\] skipped 2026-04-30-real-convo/);
+        // A legitimate transcript that merely mentions a reflection slug
+        // must not be mistaken for dream-generated output.
+        expect(stderr).not.toMatch(
+          /\[dream\] skipped 2026-04-30-real-convo: dream_generated marker/,
+        );
       });
     } finally {
       await rig.cleanup();

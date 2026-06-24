@@ -114,13 +114,17 @@ function lookupModelContextTokens(model: string): number | undefined {
 }
 
 const _unknownModelWarned = new Set<string>();
+function dreamLog(line: string): void {
+  process.stderr.write(`[dream] ${line}\n`);
+}
+
 function warnUnknownModelOnce(model: string): void {
   if (_unknownModelWarned.has(model)) return;
   _unknownModelWarned.add(model);
-  process.stderr.write(
-    `[dream] model "${model}" is not in MODEL_CONTEXT_TOKENS; ` +
+  dreamLog(
+    `model "${model}" is not in MODEL_CONTEXT_TOKENS; ` +
     `using ${UNKNOWN_MODEL_BUDGET_TOKENS}-token fallback budget. ` +
-    `Set dream.synthesize.max_prompt_tokens to override.\n`,
+    `Set dream.synthesize.max_prompt_tokens to override.`,
   );
 }
 
@@ -335,6 +339,19 @@ export async function runPhaseSynthesize(
         // nightly canary budget forever. They were already judged and would
         // otherwise starve later corpus files because discovery order is stable.
         if (cached && !cached.worth_processing) continue;
+        // Legacy-completed worth-processing transcripts are also dead weight
+        // for the routine cap. Skip them here so the nightly canary reaches
+        // fresh transcripts instead of spending its whole budget on rows that
+        // the later fan-out loop will drop as already synthesized.
+        if (cached && cached.worth_processing) {
+          const hash16 = t.contentHash.slice(0, 16);
+          if (await hasLegacySingleChunkCompletion(engine, t.filePath, hash16)) {
+            dreamLog(
+              `skipped ${t.basename}: already synthesized by legacy single-chunk completion; keeping cap room for newer transcripts`,
+            );
+            continue;
+          }
+        }
         selected.push(t);
         if (selected.length >= config.maxTranscriptsPerCycle) break;
       }
@@ -366,6 +383,9 @@ export async function runPhaseSynthesize(
       if (!judge) {
         // No configured provider for the verdict model — can't judge.
         // Skip with explicit reason; don't crash phase.
+        dreamLog(
+          `skipped ${t.basename}: no configured provider for verdict model ${config.verdictModel}`,
+        );
         verdicts.push({
           filePath: t.filePath,
           worth: false,
@@ -385,6 +405,9 @@ export async function runPhaseSynthesize(
         // this transcript with the gateway error message so the user sees the
         // shape of the problem in `gbrain dream --phase synthesize --dry-run`.
         if (e instanceof AIConfigError) {
+          dreamLog(
+            `skipped ${t.basename}: gateway error while judging significance: ${e.message}`,
+          );
           verdicts.push({
             filePath: t.filePath,
             worth: false,
@@ -453,6 +476,9 @@ export async function runPhaseSynthesize(
       // that was previously single-chunk now multi-chunks (because budget
       // shrank or model changed).
       if (await hasLegacySingleChunkCompletion(engine, t.filePath, hash16)) {
+        dreamLog(
+          `skipped ${t.basename}: already synthesized by legacy single-chunk completion`,
+        );
         skipReports.push({
           filePath: t.filePath,
           reason: 'already_synthesized_legacy_single_chunk',
@@ -505,6 +531,17 @@ export async function runPhaseSynthesize(
         const idempotency_key = isChunked
           ? `dream:synth:${t.filePath}:${hash16}:c${i}of${chunks.length}`
           : `dream:synth:${t.filePath}:${hash16}`;
+        // A prior dead/failed/cancelled child should not pin this transcript
+        // forever. Completed rows stay deduped; stale terminal failures free
+        // the idempotency slot so a later synth run can retry with current
+        // handler/model behavior.
+        const released = await releaseTerminalSynthChild(queue, engine, idempotency_key);
+        if (released) {
+          dreamLog(
+            `retrying ${t.basename}: cleared stale ${released.status} synth child ${released.id}` +
+            (isChunked ? ` for chunk ${i + 1}/${chunks.length}` : ''),
+          );
+        }
         const submitOpts: Partial<MinionJobInput> = {
           max_stalled: 3,
           on_child_fail: 'continue',
@@ -758,6 +795,28 @@ async function loadAllowedSlugPrefixes(): Promise<string[]> {
 
 export interface JudgeClient {
   create: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
+}
+
+async function releaseTerminalSynthChild(
+  queue: MinionQueue,
+  engine: BrainEngine,
+  idempotencyKey: string,
+): Promise<{ id: number; status: string } | null> {
+  const rows = await engine.executeRaw<{ id: number | string; status: string }>(
+    `SELECT id
+            , status
+       FROM minion_jobs
+      WHERE idempotency_key = $1
+        AND status IN ('failed', 'dead', 'cancelled')
+      ORDER BY id DESC
+      LIMIT 1`,
+    [idempotencyKey],
+  );
+  if (rows.length === 0) return null;
+  const id = Number(rows[0].id);
+  if (!Number.isFinite(id)) return null;
+  await queue.removeJob(id);
+  return { id, status: rows[0].status };
 }
 
 /**
