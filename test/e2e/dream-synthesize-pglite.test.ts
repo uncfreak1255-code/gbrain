@@ -17,11 +17,14 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { runPhaseSynthesize, renderPageToMarkdown } from '../../src/core/cycle/synthesize.ts';
+import { runPhaseSynthesize, renderPageToMarkdown, __testing as synthTesting } from '../../src/core/cycle/synthesize.ts';
 import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { MinionWorker } from '../../src/core/minions/worker.ts';
 import { registerBuiltinHandlers } from '../../src/commands/jobs.ts';
+import { matchesSlugAllowList } from '../../src/core/operations.ts';
 import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
+
+const { buildTranscriptAllowedSlugPrefixes } = synthTesting;
 
 interface TestRig {
   engine: PGLiteEngine;
@@ -91,6 +94,33 @@ async function captureStderr<T>(body: () => Promise<T>): Promise<{ result: T; st
     (process.stderr as any).write = original;
   }
 }
+
+describe('E2E synthesize — transcript-scoped allow-list', () => {
+  test('rejects non-date stray slugs', () => {
+    const prefixes = buildTranscriptAllowedSlugPrefixes({
+      inferredDate: '2026-05-26',
+    } as never, [
+      'wiki/personal/reflections/*',
+      'wiki/originals/ideas/*',
+    ]);
+    expect(prefixes).toEqual([
+      'wiki/personal/reflections/2026-05-26-*',
+      'wiki/originals/ideas/2026-05-26-*',
+    ]);
+    expect(
+      matchesSlugAllowList(
+        'wiki/personal/reflections/2026-05-26-stale-lease-heartbeat-restart-third-run-b300d2',
+        prefixes,
+      ),
+    ).toBe(true);
+    expect(matchesSlugAllowList('wiki/personal/reflections/test-f279b4', prefixes)).toBe(false);
+    expect(buildTranscriptAllowedSlugPrefixes({
+      inferredDate: '2026-05-26',
+    } as never, ['wiki/originals/ideas/*'])).toEqual([
+      'wiki/originals/ideas/2026-05-26-*',
+    ]);
+  });
+});
 
 describe('E2E synthesize — disabled / not_configured', () => {
   test('not_configured when enabled=false (default)', async () => {
@@ -718,11 +748,11 @@ describe('E2E synthesize — child failures do not look successful', () => {
           child_ids_without_writes: number[];
         };
         expect(details.child_outcomes).toHaveLength(1);
-        expect(details.child_outcomes[0].status).toBe('empty_output');
+        expect(details.child_outcomes[0].status).toBe('dead');
         expect(details.completed_children).toBe(0);
-        expect(details.completed_without_writes).toBe(1);
-        expect(details.completed_with_empty_output).toBe(1);
-        expect(details.child_ids_with_empty_output).toEqual(details.child_ids_without_writes);
+        expect(details.completed_without_writes).toBe(0);
+        expect(details.completed_with_empty_output).toBe(0);
+        expect(details.child_ids_with_empty_output).toEqual([]);
       } finally {
         if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
         else process.env.ANTHROPIC_API_KEY = savedKey;

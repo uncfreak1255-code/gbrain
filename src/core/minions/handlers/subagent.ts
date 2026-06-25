@@ -1091,12 +1091,11 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
         model: null,
       });
     },
-    onNoToolCalls: async (turnIdx, messageIdx) => {
+    onNoToolCalls: async (turnIdx, messageIdx, finalText) => {
       const missingRequiredTools = await missingRequiredCompletedTools(engine, ctx.id, requiredTools);
-      const assistantText = arguments[2];
       const correctiveText = buildNoToolCorrectiveText({
         missingRequiredTools,
-        finalText: typeof assistantText === 'string' ? assistantText : '',
+        finalText: typeof finalText === 'string' ? finalText : '',
       });
       if (correctiveText === null) return null;
       if (turnIdx + 1 >= maxTurns) {

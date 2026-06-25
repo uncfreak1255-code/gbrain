@@ -4,7 +4,7 @@ import { __testing } from '../src/core/cycle/synthesize.ts';
 const {
   collectChildPutPageSlugs,
   collectChildPutPageWriterJobIds,
-} = __testing as {
+} = __testing as unknown as {
   collectChildPutPageSlugs: (
     engine: { executeRaw(sql: string, params: unknown[]): Promise<Array<{ job_id: unknown; slug: string }>> },
     childIds: number[],

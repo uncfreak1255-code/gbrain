@@ -177,6 +177,8 @@ export function validatePageSlug(slug: string): void {
  * trailing `/*`) matches that exact slug only. The `*` is intentionally
  * permissive — depth is unbounded, so `wiki/originals/*` matches both
  * `wiki/originals/idea-x` and `wiki/originals/ideas/2026-04-25-idea-y`.
+ * Bare trailing `*` is also supported for tighter date/topic prefixes like
+ * `wiki/personal/reflections/2026-05-26-*`.
  *
  * Used by the v0.23 dream-cycle trusted-workspace path. Order doesn't
  * matter; the first match wins (returns true on any match).
@@ -187,6 +189,11 @@ export function matchesSlugAllowList(slug: string, prefixes: readonly string[]):
       const base = p.slice(0, -2);
       if (slug === base) continue;
       if (slug.startsWith(base + '/')) return true;
+    } else if (p.endsWith('*')) {
+      const base = p.slice(0, -1);
+      if (base.length === 0) continue;
+      if (slug.length === base.length) continue;
+      if (slug.startsWith(base)) return true;
     } else if (p === slug) {
       return true;
     }

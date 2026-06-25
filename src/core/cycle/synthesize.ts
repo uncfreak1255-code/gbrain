@@ -3,8 +3,9 @@
  *
  * Reads transcripts from the configured corpus dir, runs a cheap Haiku
  * "is this worth processing?" verdict (cached in `dream_verdicts`), then
- * fans out one Sonnet subagent per worth-processing transcript with the
- * trusted-workspace `allowed_slug_prefixes` list. After children resolve,
+ * fans out one Sonnet subagent per worth-processing transcript with a
+ * transcript-date-scoped slice of the trusted-workspace `allowed_slug_prefixes`
+ * list. After children resolve,
  * the orchestrator queries `subagent_tool_executions` for the put_page
  * slugs each child wrote (codex finding #2: NOT a time-windowed pages
  * query — picks up unrelated writes), reverse-renders each new page from
@@ -43,6 +44,7 @@ import { discoverTranscripts, type DiscoveredTranscript } from './transcript-dis
 import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
+import { matchesSlugAllowList } from '../operations.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 
 // Slug regex from validatePageSlug — kept in sync.
@@ -453,8 +455,8 @@ export async function runPhaseSynthesize(
 
     // Fan-out: submit one subagent per worth-processing transcript (or one
     // per chunk for transcripts that exceed the model's per-prompt budget).
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes();
-    if (allowedSlugPrefixes.length === 0) {
+    const configuredAllowedSlugPrefixes = await loadAllowedSlugPrefixes();
+    if (configuredAllowedSlugPrefixes.length === 0) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
     }
@@ -507,6 +509,18 @@ export async function runPhaseSynthesize(
       }
 
       const isChunked = chunks.length > 1;
+      const allowedSlugPrefixes = buildTranscriptAllowedSlugPrefixes(t, configuredAllowedSlugPrefixes);
+      if (allowedSlugPrefixes.length === 0) {
+        process.stderr.write(
+          `[dream] skipped ${t.basename}: no configured dream_synthesize_paths.globs allow ` +
+          `${t.inferredDate ?? today()}-scoped synth output\n`,
+        );
+        skipReports.push({
+          filePath: t.filePath,
+          reason: 'no_configured_allowlist_for_transcript_date',
+        });
+        continue;
+      }
       // queue.add subagent validator (classifyCapabilities → resolveRecipe)
       // requires `provider:model`. resolveModel can return a bare id when
       // TIER_DEFAULTS / DEFAULT_ALIASES carry a bare value; ensure the
@@ -1194,6 +1208,21 @@ function sanitizeForSlug(s: string): string {
     .slice(0, 60);
 }
 
+function buildTranscriptAllowedSlugPrefixes(
+  t: DiscoveredTranscript,
+  configuredAllowedSlugPrefixes: readonly string[],
+): string[] {
+  const dateHint = t.inferredDate ?? today();
+  const candidates = [
+    `wiki/personal/reflections/${dateHint}-*`,
+    `wiki/originals/ideas/${dateHint}-*`,
+  ];
+  return candidates.filter((candidate) => {
+    const probeSlug = `${candidate.slice(0, -1)}probe`;
+    return matchesSlugAllowList(probeSlug, configuredAllowedSlugPrefixes);
+  });
+}
+
 // ── Slug collection from child put_page calls (codex #2 + D6) ────────
 
 /**
@@ -1543,6 +1572,7 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // behavior at function granularity (e.g., #745 collectChildPutPageSlugs
 // double-encoded jsonb regression). Not part of the runtime contract.
 export const __testing = {
+  buildTranscriptAllowedSlugPrefixes,
   collectChildPutPageSlugs,
   collectChildPutPageWriterJobIds,
 };

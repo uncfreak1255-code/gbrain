@@ -340,6 +340,7 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(result.stop_reason).toBe('end_turn');
     expect(turn).toBe(3);
     expect(JSON.stringify(seenMessages[1])).toContain('Required tool call missing: search');
+    expect(JSON.stringify(seenMessages[1])).not.toContain('Your previous response was empty.');
     expect(executions).toHaveLength(1);
     expect(executions[0].name).toBe('search');
 
@@ -352,6 +353,7 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     );
     expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant']);
     expect(JSON.stringify(messages[2].content_blocks)).toContain('Required tool call missing: search');
+    expect(JSON.stringify(messages[2].content_blocks)).not.toContain('Your previous response was empty.');
 
     const toolRows = await engine.executeRaw<Record<string, unknown>>(
       `SELECT tool_name, status
