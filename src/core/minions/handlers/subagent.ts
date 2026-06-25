@@ -53,7 +53,12 @@ import { buildSystemPrompt, DEFAULT_SUBAGENT_SYSTEM } from '../system-prompt.ts'
 import { getCurrentBudgetTracker, toolLoop as gatewayToolLoop, withBudgetTracker } from '../../ai/gateway.ts';
 import type { ChatToolDef, ChatMessage, ChatBlock, ChatResult, ToolHandler } from '../../ai/gateway.ts';
 import { classifyCapabilities } from '../../ai/capabilities.ts';
-import { BudgetExhausted, BudgetTracker, extractUsageFromError } from '../../budget/budget-tracker.ts';
+import {
+  BudgetExhausted,
+  BudgetTracker,
+  CompositeBudgetTracker,
+  extractUsageFromError,
+} from '../../budget/budget-tracker.ts';
 import { randomUUIDv7 } from 'bun';
 
 // ── Defaults ────────────────────────────────────────────────
@@ -1138,12 +1143,16 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
     const hasScopedMaxCost = typeof data.max_cost_usd === 'number'
       && Number.isFinite(data.max_cost_usd)
       && data.max_cost_usd > 0;
-    if (hasScopedMaxCost && getCurrentBudgetTracker() === null) {
+    if (hasScopedMaxCost) {
+      const activeBudgetTracker = getCurrentBudgetTracker();
       scopedGatewayBudgetTracker = new BudgetTracker({
         label: 'subagent.gateway',
         maxCostUsd: data.max_cost_usd,
       });
-      result = await withBudgetTracker(scopedGatewayBudgetTracker, runGatewayLoop);
+      const trackerForRun = activeBudgetTracker
+        ? new CompositeBudgetTracker([activeBudgetTracker, scopedGatewayBudgetTracker])
+        : scopedGatewayBudgetTracker;
+      result = await withBudgetTracker(trackerForRun, runGatewayLoop);
       assertGatewayScopedBudgetNotExceeded(scopedGatewayBudgetTracker, 'subagent.gateway');
     } else {
       result = await runGatewayLoop();

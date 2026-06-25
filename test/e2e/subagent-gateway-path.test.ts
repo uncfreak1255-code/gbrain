@@ -32,6 +32,7 @@ import {
   __setChatTransportForTests,
   configureGateway,
   resetGateway,
+  withBudgetTracker,
   type ChatBlock,
   type ChatResult,
 } from '../../src/core/ai/gateway.ts';
@@ -688,6 +689,29 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     });
 
     await expect(handler(ctx)).rejects.toThrow(/budget_exhausted/);
+  });
+
+  it('per-job max_cost_usd still applies inside an outer budget scope', async () => {
+    __setChatTransportForTests(async () => ({
+      text: 'still too expensive',
+      blocks: [{ type: 'text', text: 'still too expensive' }] as ChatBlock[],
+      stopReason: 'end',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    } satisfies ChatResult));
+
+    const tools = makeStubTools([]);
+    const handler = buildHandler(tools);
+    const { ctx } = await makeFakeJob({
+      prompt: 'hi again',
+      model: 'anthropic:claude-sonnet-4-6',
+      max_cost_usd: 0.000001,
+    });
+    const outerTracker = new BudgetTracker({ label: 'outer.scope' });
+
+    await expect(withBudgetTracker(outerTracker, () => handler(ctx))).rejects.toThrow(/budget_exhausted/);
+    expect(outerTracker.totalSpent).toBeGreaterThan(0);
   });
 
   it('refusal stop reason: handler maps refusal → SubagentStopReason refusal', async () => {
