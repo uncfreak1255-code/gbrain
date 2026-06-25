@@ -367,13 +367,18 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       );
       if (pendingToolUses.length === 0) {
         const missingRequiredTools = await missingRequiredCompletedTools(engine, ctx.id, requiredTools);
-        if (missingRequiredTools.length === 0) {
-          const finalText = last.content_blocks
-            .filter((b): b is { type: 'text'; text: string } & Record<string, unknown> =>
-              b.type === 'text' && typeof (b as { text?: unknown }).text === 'string',
-            )
-            .map(b => b.text)
-            .join('\n');
+        const finalText = last.content_blocks
+          .filter((b): b is { type: 'text'; text: string } & Record<string, unknown> =>
+            b.type === 'text' && typeof (b as { text?: unknown }).text === 'string',
+          )
+          .map(b => b.text)
+          .join('\n');
+        const correctiveText = buildNoToolCorrectiveText({
+          missingRequiredTools,
+          prompt: data.prompt,
+          finalText,
+        });
+        if (correctiveText === null) {
           return {
             result: finalText,
             turns_count: assistantTurns,
@@ -382,9 +387,12 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           };
         }
         if (assistantTurns >= maxTurns) {
-          throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
+          if (missingRequiredTools.length > 0) {
+            throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
+          }
+          throw new UnrecoverableError('final_response_contract_violation');
         }
-        const correctiveBlocks = [{ type: 'text', text: requiredToolCorrectiveText(missingRequiredTools) }] as ContentBlock[];
+        const correctiveBlocks = [{ type: 'text', text: correctiveText }] as ContentBlock[];
         await persistMessage(engine, ctx.id, {
           message_idx: nextMessageIdx++,
           role: 'user',
@@ -672,6 +680,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         const missingRequiredTools = await missingRequiredCompletedTools(engine, ctx.id, requiredTools);
         const correctiveText = buildNoToolCorrectiveText({
           missingRequiredTools,
+          prompt: data.prompt,
           finalText: assistantText,
         });
         if (correctiveText !== null) {
@@ -679,7 +688,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
             if (missingRequiredTools.length > 0) {
               throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
             }
-            throw new UnrecoverableError('empty_final_response');
+            throw new UnrecoverableError('final_response_contract_violation');
           }
           const userIdx = nextMessageIdx++;
           const correctiveBlocks = [{ type: 'text', text: correctiveText }] as ContentBlock[];
@@ -1095,6 +1104,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       const missingRequiredTools = await missingRequiredCompletedTools(engine, ctx.id, requiredTools);
       const correctiveText = buildNoToolCorrectiveText({
         missingRequiredTools,
+        prompt: data.prompt,
         finalText: typeof finalText === 'string' ? finalText : '',
       });
       if (correctiveText === null) return null;
@@ -1102,7 +1112,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
         if (missingRequiredTools.length > 0) {
           throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
         }
-        throw new UnrecoverableError('empty_final_response');
+        throw new UnrecoverableError('final_response_contract_violation');
       }
       const correctiveBlocks = [
         { type: 'text', text: correctiveText },
@@ -1171,8 +1181,43 @@ function emptyFinalResponseCorrectiveText(): string {
   ].join(' ');
 }
 
+function exactFinalPhraseCorrectiveText(phrase: string): string {
+  return [
+    'Your previous response mentioned a required exact no-op phrase, but did not use it verbatim.',
+    `If the correct outcome is a no-op, reply with exactly \`${phrase}\` and no other words.`,
+    'If you did perform work, do not use that phrase; reply only with the required success receipt.',
+  ].join(' ');
+}
+
+function extractExactRequiredFinalPhrases(prompt: string): string[] {
+  const matches = new Set<string>();
+  const re = /final (?:message|response) must be exactly:\s*(?:`([^`]+)`|"([^"]+)"|'([^']+)')/gi;
+  for (const match of prompt.matchAll(re)) {
+    const phrase = match[1] ?? match[2] ?? match[3] ?? '';
+    const trimmed = phrase.trim();
+    if (trimmed.length > 0) matches.add(trimmed);
+  }
+  return [...matches];
+}
+
+function findExactFinalPhraseViolation(prompt: string, finalText: string): string | null {
+  const trimmed = finalText.trim();
+  if (trimmed.length === 0) return null;
+  for (const phrase of extractExactRequiredFinalPhrases(prompt)) {
+    if (trimmed === phrase) continue;
+    if (trimmed.includes(phrase)) return phrase;
+    const cueIdx = phrase.indexOf(':');
+    if (cueIdx > 0) {
+      const cue = phrase.slice(0, cueIdx + 1);
+      if (trimmed.includes(cue)) return phrase;
+    }
+  }
+  return null;
+}
+
 function buildNoToolCorrectiveText(opts: {
   missingRequiredTools: string[];
+  prompt: string;
   finalText: string;
 }): string | null {
   const parts: string[] = [];
@@ -1181,6 +1226,9 @@ function buildNoToolCorrectiveText(opts: {
   }
   if (opts.finalText.trim().length === 0) {
     parts.push(emptyFinalResponseCorrectiveText());
+  } else {
+    const exactPhraseViolation = findExactFinalPhraseViolation(opts.prompt, opts.finalText);
+    if (exactPhraseViolation) parts.push(exactFinalPhraseCorrectiveText(exactPhraseViolation));
   }
   return parts.length > 0 ? parts.join(' ') : null;
 }
