@@ -91,8 +91,11 @@ export function extractDreamSummarySlugs(markdown: string): string[] {
 }
 
 export function scoreDreamPage(page: Page): DreamQualityPageScore {
-  const text = `${page.title}\n${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`;
   const frontmatter = page.frontmatter ?? {};
+  const text = `${page.title}\n${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`;
+  const frontmatterText = Object.entries(frontmatter)
+    .map(([key, value]) => `${key}: ${formatFrontmatterValue(value)}`)
+    .join('\n');
   const checks: Record<string, boolean> = {
     dreamGenerated: frontmatter.dream_generated === true || frontmatter.dream_generated === 'true',
     substantial: text.trim().length >= 900,
@@ -100,7 +103,8 @@ export function scoreDreamPage(page: Page): DreamQualityPageScore {
     hasCrossLink: /\[\[[^\]]+\]\]|\[[^\]]+\]\([^)]+\)/.test(text),
     hasEvidenceMarker: /\b(Session|Origin|Proof|Receipt|Decision|What Happened|Related)\b/i.test(text),
     hasNonGenericTitle: page.title.trim().length >= 12 && !/^untitled|note$/i.test(page.title.trim()),
-    hasTraceability: /\b(session_id|Origin|Source|Transcript|Date|Repo)\b/i.test(text),
+    hasTraceability: /\b(session_id|started_at|session_started|source_path|source_hash_suffix|transcript_suffix|Origin|Source|Transcript|Date|Repo)\b/i
+      .test(`${frontmatterText}\n${text}`),
   };
 
   const passedCount = Object.values(checks).filter(Boolean).length;
@@ -121,6 +125,17 @@ export function scoreDreamPage(page: Page): DreamQualityPageScore {
     promotion_reason: needsPromotion ? owner.reason : null,
     needs_promotion_review: needsPromotion,
   };
+}
+
+function formatFrontmatterValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(formatFrontmatterValue).join(', ');
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, inner]) => `${key}: ${formatFrontmatterValue(inner)}`)
+      .join(', ');
+  }
+  if (value == null) return '';
+  return String(value);
 }
 
 function inferPromotionOwner(text: string): { owner: DreamPromotionOwner; reason: string | null; next: string | null } {

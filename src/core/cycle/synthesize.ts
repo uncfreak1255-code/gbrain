@@ -535,10 +535,10 @@ export async function runPhaseSynthesize(
         // forever. Completed rows stay deduped; stale terminal failures free
         // the idempotency slot so a later synth run can retry with current
         // handler/model behavior.
-        const released = await releaseTerminalSynthChild(queue, engine, idempotency_key);
+        const released = await releaseRetryableSynthChild(queue, engine, idempotency_key);
         if (released) {
           dreamLog(
-            `retrying ${t.basename}: cleared stale ${released.status} synth child ${released.id}` +
+            `retrying ${t.basename}: cleared stale ${released.reason} synth child ${released.id}` +
             (isChunked ? ` for chunk ${i + 1}/${chunks.length}` : ''),
           );
         }
@@ -592,6 +592,20 @@ export async function runPhaseSynthesize(
     // v0.32.8: refs carry source_id so reverseWriteRefs picks the correct
     // (source, slug) row (currently always 'default' from subagent put_page).
     const writtenRefs = await collectChildPutPageSlugs(engine, childIds, chunkInfo);
+    const childIdsWithWrites = await collectChildPutPageWriterJobIds(engine, childIds);
+    const nonCompletedChildren = childOutcomes.filter(o => o.status !== 'completed');
+    const completedChildrenWithoutWrites = childOutcomes.filter(
+      o => o.status === 'completed' && !childIdsWithWrites.has(o.jobId),
+    );
+    const completedNoWriteAcknowledgedIds = new Set<number>();
+    for (const child of completedChildrenWithoutWrites) {
+      if (await childReportedExplicitNoWrite(engine, child.jobId)) {
+        completedNoWriteAcknowledgedIds.add(child.jobId);
+      }
+    }
+    const retryableCompletedChildrenWithoutWrites = completedChildrenWithoutWrites.filter(
+      child => !completedNoWriteAcknowledgedIds.has(child.jobId),
+    );
 
     // Dual-write: reverse-render each DB row → markdown file.
     const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs);
@@ -606,12 +620,9 @@ export async function runPhaseSynthesize(
       await writeSummaryPage(engine, opts.brainDir, summarySlug, summaryDate, writtenSlugs, childOutcomes);
     }
 
-    // Write completion timestamp ON SUCCESS only.
-    await engine.setConfig('dream.synthesize.last_completion_ts', new Date().toISOString());
-
     const ms = Date.now() - start;
     const submittedTranscripts = worthProcessing.length - skipReports.length;
-    return ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s`, {
+    const commonDetails = {
       transcripts_discovered: transcripts.length,
       transcripts_discovered_before_limit: discoveredBeforeLimit,
       max_transcripts_per_cycle: config.maxTranscriptsPerCycle,
@@ -631,7 +642,36 @@ export async function runPhaseSynthesize(
       skips: skipReports,
       summary_slug: summarySlug,
       verdicts,
-    });
+      completed_no_write_acknowledged: completedNoWriteAcknowledgedIds.size,
+      child_ids_no_write_acknowledged: [...completedNoWriteAcknowledgedIds],
+    };
+
+    if (nonCompletedChildren.length > 0 || retryableCompletedChildrenWithoutWrites.length > 0) {
+      const completedChildren = childOutcomes.filter(o => o.status === 'completed').length;
+      const warningParts: string[] = [];
+      if (nonCompletedChildren.length > 0) {
+        warningParts.push(`${nonCompletedChildren.length} child job(s) did not complete`);
+      }
+      if (retryableCompletedChildrenWithoutWrites.length > 0) {
+        warningParts.push(`${retryableCompletedChildrenWithoutWrites.length} completed child job(s) wrote no page`);
+      }
+      return warn(
+        `${submittedTranscripts} transcript(s) submitted in ${(ms / 1000).toFixed(1)}s; ` +
+        warningParts.join('; '),
+        {
+          ...commonDetails,
+          completed_children: completedChildren,
+          non_completed_children: nonCompletedChildren.length,
+          completed_without_writes: retryableCompletedChildrenWithoutWrites.length,
+          child_ids_without_writes: retryableCompletedChildrenWithoutWrites.map(child => child.jobId),
+        },
+      );
+    }
+
+    // Write completion timestamp ON SUCCESS only.
+    await engine.setConfig('dream.synthesize.last_completion_ts', new Date().toISOString());
+
+    return ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s`, commonDetails);
   } catch (e) {
     return failed(makeError('InternalError', 'SYNTH_PHASE_FAIL',
       e instanceof Error ? (e.message || 'synthesize phase threw') : String(e)));
@@ -797,17 +837,19 @@ export interface JudgeClient {
   create: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
 }
 
-async function releaseTerminalSynthChild(
+const SYNTH_NO_WRITE_PREFIX = 'NO_WRITE:';
+const SYNTH_NO_WRITE_SENTINEL = 'NO_WRITE: no page met the synthesis bar.';
+
+async function releaseRetryableSynthChild(
   queue: MinionQueue,
   engine: BrainEngine,
   idempotencyKey: string,
-): Promise<{ id: number; status: string } | null> {
+): Promise<{ id: number; status: string; reason: string } | null> {
   const rows = await engine.executeRaw<{ id: number | string; status: string }>(
     `SELECT id
             , status
        FROM minion_jobs
       WHERE idempotency_key = $1
-        AND status IN ('failed', 'dead', 'cancelled')
       ORDER BY id DESC
       LIMIT 1`,
     [idempotencyKey],
@@ -815,8 +857,21 @@ async function releaseTerminalSynthChild(
   if (rows.length === 0) return null;
   const id = Number(rows[0].id);
   if (!Number.isFinite(id)) return null;
-  await queue.removeJob(id);
-  return { id, status: rows[0].status };
+  const status = rows[0].status;
+  let reason: string | null = null;
+  if (status === 'completed') {
+    const wrotePage = await childHasCompletedPutPage(engine, id);
+    if (!wrotePage) {
+      const explicitNoWrite = await childReportedExplicitNoWrite(engine, id);
+      if (!explicitNoWrite) reason = 'completed_without_writes';
+    }
+  } else if (status === 'failed' || status === 'dead' || status === 'cancelled') {
+    reason = status;
+  }
+  if (!reason) return null;
+  const removed = await queue.removeJob(id);
+  if (!removed) return null;
+  return { id, status, reason };
 }
 
 /**
@@ -1067,6 +1122,8 @@ OUTPUT POLICY (ALL of these are required)
 2. Cross-reference compulsively: every new page MUST contain at least one wikilink (e.g., \`[ref](people/jane-doe)\` or \`[[people/jane-doe]]\`) to existing brain content. Use the search tool to find existing pages first.
 3. Do NOT write to any path outside the allow-list shown in the put_page schema.
 4. Slug discipline: lowercase alphanumeric and hyphens only, slash-separated segments. NO underscores, NO file extensions.
+5. When you call \`put_page\`, the \`content\` must be FULL markdown with a VALID YAML frontmatter block, then a blank line, then the page body. Include at least \`title:\` and \`type:\`, close every quote/list, and include a top-level \`# Heading\`.
+6. If you are not confident you can produce valid frontmatter plus body, do NOT call \`put_page\`.
 
 TASKS
 A. Reflections (self-knowledge, pattern recognition, emotional processing):
@@ -1077,14 +1134,16 @@ B. Originals (new ideas, frames, theses, mental models):
 
 C. People mentions: search first; if a page exists, do not put_page over it (the orchestrator handles people enrichment via timeline entries — your job is the reflection/original synthesis, NOT modifying existing person pages).
 
-D. If nothing in this transcript meets the bar (significance filter already passed but the content is still routine), return without writing anything.
+D. If nothing in this transcript meets the bar (significance filter already passed but the content is still routine), do not call \`put_page\`.
+E. If you wrote at least one page, briefly list the slugs you wrote in your final message so the orchestrator can audit.
+F. If you wrote nothing, your final message must be exactly: \`${SYNTH_NO_WRITE_SENTINEL}\`
 
 TRANSCRIPT (${transcriptHeader})
 ---
 ${chunkText}
 ---
 
-When done, briefly list the slugs you wrote in your final message so the orchestrator can audit.`;
+When done, follow the final-message contract exactly.`;
 }
 
 function sanitizeForSlug(s: string): string {
@@ -1145,11 +1204,77 @@ async function collectChildPutPageSlugs(
   return Array.from(rewritten).sort().map(slug => ({ slug, source_id: 'default' }));
 }
 
+async function collectChildPutPageWriterJobIds(
+  engine: BrainEngine,
+  childIds: number[],
+): Promise<Set<number>> {
+  if (childIds.length === 0) return new Set();
+  const rows = await engine.executeRaw<{ job_id: number }>(
+    `SELECT DISTINCT job_id
+       FROM subagent_tool_executions
+      WHERE job_id = ANY($1::int[])
+        AND tool_name = 'brain_put_page'
+        AND status = 'complete'`,
+    [childIds],
+  );
+  return new Set(rows.map(row => row.job_id));
+}
+
+async function childHasCompletedPutPage(
+  engine: BrainEngine,
+  childId: number,
+): Promise<boolean> {
+  const rows = await engine.executeRaw<{ one: number | string }>(
+    `SELECT 1 AS one
+       FROM subagent_tool_executions
+      WHERE job_id = $1
+        AND tool_name = 'brain_put_page'
+        AND status = 'complete'
+      LIMIT 1`,
+    [childId],
+  );
+  return rows.length > 0;
+}
+
+async function childReportedExplicitNoWrite(
+  engine: BrainEngine,
+  childId: number,
+): Promise<boolean> {
+  const rows = await engine.executeRaw<{ result: unknown }>(
+    `SELECT result
+       FROM minion_jobs
+      WHERE id = $1
+      LIMIT 1`,
+    [childId],
+  );
+  const finalText = extractCompletedChildFinalText(rows[0]?.result);
+  return finalText.startsWith(SYNTH_NO_WRITE_PREFIX);
+}
+
+function extractCompletedChildFinalText(raw: unknown): string {
+  if (raw == null) return '';
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return raw.trim();
+    }
+  }
+  if (parsed && typeof parsed === 'object') {
+    const result = (parsed as { result?: unknown }).result;
+    if (typeof result === 'string') return result.trim();
+  }
+  return '';
+}
+
 /**
- * D8: query for any `completed` legacy single-chunk job at the canonical
- * idempotency key shape `dream:synth:<filePath>:<hash16>`. Used at fan-out
- * time to detect transcripts that were synthesized under the pre-chunking
- * code path; those should NOT be re-submitted under chunked keys.
+ * D8: query for any legacy single-chunk job at the canonical idempotency key
+ * shape `dream:synth:<filePath>:<hash16>` that both completed AND actually
+ * wrote a page. Used at fan-out time to detect transcripts that were
+ * synthesized under the pre-chunking code path; those should NOT be
+ * re-submitted under chunked keys. Completed no-write children are
+ * intentionally ignored so they can be retried.
  *
  * Reuses the existing `minion_jobs.idempotency_key` index — no schema
  * additions. One indexed lookup per worth-processing transcript.
@@ -1160,15 +1285,18 @@ async function hasLegacySingleChunkCompletion(
   hash16: string,
 ): Promise<boolean> {
   const legacyKey = `dream:synth:${filePath}:${hash16}`;
-  const rows = await engine.executeRaw<{ status: string }>(
-    `SELECT status
+  const rows = await engine.executeRaw<{ id: number | string }>(
+    `SELECT id
        FROM minion_jobs
       WHERE idempotency_key = $1
         AND status = 'completed'
       LIMIT 1`,
     [legacyKey],
   );
-  return rows.length > 0;
+  if (rows.length === 0) return false;
+  const id = Number(rows[0].id);
+  if (!Number.isFinite(id)) return false;
+  return childHasCompletedPutPage(engine, id);
 }
 
 // ── Reverse-write DB rows → markdown files ───────────────────────────
@@ -1322,6 +1450,10 @@ function skipped(reason: string, summary: string): PhaseResult {
     summary,
     details: { reason },
   };
+}
+
+function warn(summary: string, details: Record<string, unknown> = {}): PhaseResult {
+  return { phase: 'synthesize', status: 'warn', duration_ms: 0, summary, details };
 }
 
 function failed(error: PhaseError): PhaseResult {

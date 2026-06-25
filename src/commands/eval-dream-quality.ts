@@ -2,6 +2,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseMarkdown } from '../core/markdown.ts';
+import type { Page } from '../core/types.ts';
 import {
   buildDreamQualityReceipt,
   defaultDreamQualityReceiptPath,
@@ -70,10 +71,32 @@ export async function runEvalDreamQuality(engine: BrainEngine, args: string[]): 
   if (receipt.verdict === 'inconclusive') process.exit(2);
 }
 
-async function getPageOrLocalMarkdown(engine: BrainEngine, slug: string) {
+export async function getPageOrLocalMarkdown(
+  engine: Pick<BrainEngine, 'getPage'>,
+  slug: string,
+  cwd = process.cwd(),
+): Promise<Page | null> {
+  const localPage = readLocalDreamPage(slug, cwd);
   const page = await engine.getPage(slug);
+  if (page && localPage) {
+    return {
+      ...page,
+      type: localPage.type,
+      title: localPage.title,
+      compiled_truth: localPage.compiled_truth,
+      timeline: localPage.timeline,
+      frontmatter: {
+        ...(page.frontmatter ?? {}),
+        ...(localPage.frontmatter ?? {}),
+      },
+    };
+  }
   if (page) return page;
-  const localPath = join(process.cwd(), `${slug}.md`);
+  return localPage;
+}
+
+function readLocalDreamPage(slug: string, cwd = process.cwd()): Page | null {
+  const localPath = join(cwd, `${slug}.md`);
   if (!existsSync(localPath)) return null;
   const parsed = parseMarkdown(readFileSync(localPath, 'utf8'));
   const now = new Date();

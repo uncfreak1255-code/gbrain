@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -7,7 +7,7 @@ import {
   extractDreamSummarySlugs,
   scoreDreamPage,
 } from '../src/core/dream-quality.ts';
-import { parseArgs } from '../src/commands/eval-dream-quality.ts';
+import { getPageOrLocalMarkdown, parseArgs } from '../src/commands/eval-dream-quality.ts';
 import type { Page } from '../src/core/types.ts';
 
 function page(overrides: Partial<Page> = {}): Page {
@@ -68,6 +68,18 @@ describe('dream quality receipt', () => {
     expect(receipt.receipt_sha8).toHaveLength(8);
   });
 
+  test('traceability counts frontmatter provenance fields', () => {
+    const scored = scoreDreamPage(page({
+      compiled_truth: '# Cost Cap as Forcing Function\n\n## What Happened\n\n' + 'Grounded detail '.repeat(90),
+      frontmatter: {
+        dream_generated: true,
+        session_id: '019example',
+        started_at: '2026-06-23T20:00:00Z',
+      },
+    }));
+    expect(scored.checks.hasTraceability).toBe(true);
+  });
+
   test('parseArgs supports summary file, output, json, and positional slugs', () => {
     const args = parseArgs(['--summary-file', 's.md', '--output', 'out.json', '--json', 'wiki/x']);
     expect(args.summaryFile).toBe('s.md');
@@ -82,6 +94,51 @@ describe('dream quality receipt', () => {
       const path = join(dir, 'summary.md');
       writeFileSync(path, '- [[wiki/a]]\n');
       expect(extractDreamSummarySlugs(readFileSync(path, 'utf8'))).toEqual(['wiki/a']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('local markdown stamps override DB page shape for dream-quality scoring', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dream-quality-local-'));
+    try {
+      const slug = 'wiki/originals/ideas/example-dream-page';
+      const filePath = join(dir, `${slug}.md`);
+      mkdirSync(join(dir, 'wiki', 'originals', 'ideas'), { recursive: true });
+      writeFileSync(
+        filePath,
+        `---
+type: original
+title: Example Dream Page
+session_id: 019local
+started_at: '2026-06-23T20:00:00Z'
+dream_generated: true
+---
+
+# Example Dream Page
+
+## What Happened
+
+${'Grounded detail with links to [[wiki/originals/ideas/source]] and a real receipt. '.repeat(20)}
+`,
+      );
+
+      const merged = await getPageOrLocalMarkdown({
+        getPage: async () => page({
+          slug,
+          type: 'original',
+          title: 'Example Dream Page',
+          compiled_truth: '# Example Dream Page\n\n## What Happened\n\n' + 'Grounded detail '.repeat(20),
+          frontmatter: {},
+        }),
+      } as any, slug, dir);
+
+      expect(merged).not.toBeNull();
+      expect(merged?.frontmatter?.dream_generated).toBe(true);
+
+      const scored = scoreDreamPage(merged!);
+      expect(scored.checks.dreamGenerated).toBe(true);
+      expect(scored.checks.hasTraceability).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
