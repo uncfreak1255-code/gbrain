@@ -18,6 +18,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { runPhaseSynthesize, renderPageToMarkdown } from '../../src/core/cycle/synthesize.ts';
+import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { MinionWorker } from '../../src/core/minions/worker.ts';
 import { registerBuiltinHandlers } from '../../src/commands/jobs.ts';
 import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
@@ -516,7 +517,7 @@ describe('E2E synthesize — child failures do not look successful', () => {
         const summaryPath = join(rig.brainDir, `${details.summary_slug}.md`);
         expect(await Bun.file(summaryPath).exists()).toBe(true);
         const summaryText = await Bun.file(summaryPath).text();
-        expect(summaryText).toContain('0 completed, 1 failed/timeout');
+        expect(summaryText).toContain('0 completed, 1 not successful');
         expect(summaryText).toContain('**Pages written:** 0.');
       } finally {
         if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
@@ -605,23 +606,123 @@ describe('E2E synthesize — child failures do not look successful', () => {
           child_outcomes: Array<{ jobId: number; status: string }>;
           completed_children: number;
           completed_without_writes: number;
+          completed_missing_write_contract: number;
           child_ids_without_writes: number[];
+          child_queue: string;
           summary_slug: string;
         };
         expect(details.pages_written).toBe(0);
         expect(details.child_outcomes).toHaveLength(1);
-        expect(details.child_outcomes[0].status).toBe('completed');
-        expect(details.completed_children).toBe(1);
+        expect(details.child_outcomes[0].status).toBe('missing_write_contract');
+        expect(details.completed_children).toBe(0);
         expect(details.completed_without_writes).toBe(1);
+        expect(details.completed_missing_write_contract).toBe(1);
         expect(details.child_ids_without_writes).toHaveLength(1);
+        expect(details.child_queue).toBe('default');
 
         expect(await rig.engine.getConfig('dream.synthesize.last_completion_ts')).toBe('2000-01-01T00:00:00.000Z');
 
         const summaryPath = join(rig.brainDir, `${details.summary_slug}.md`);
         expect(await Bun.file(summaryPath).exists()).toBe(true);
         const summaryText = await Bun.file(summaryPath).text();
-        expect(summaryText).toContain('1 completed, 0 failed/timeout');
+        expect(summaryText).toContain('0 completed, 1 not successful');
         expect(summaryText).toContain('**Pages written:** 0.');
+      } finally {
+        if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+        else process.env.ANTHROPIC_API_KEY = savedKey;
+        __setChatTransportForTests(null);
+        resetGateway();
+      }
+    } finally {
+      worker.stop();
+      await runPromise;
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('completed synth children with blank final output are not treated as successful completions', async () => {
+    const { __setChatTransportForTests, resetGateway } = await import('../../src/core/ai/gateway.ts');
+
+    const rig = await setupRig();
+    const worker = new MinionWorker(rig.engine, { pollInterval: 25, lockDuration: 30_000 });
+    await registerBuiltinHandlers(worker, rig.engine);
+    const runPromise = worker.start();
+
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('models.dream.synthesize', 'zai:glm-5.2');
+      await rig.engine.setConfig('models.dream.synthesize_verdict', 'anthropic:claude-haiku-4-5-20251001');
+      await rig.engine.setConfig('agent.use_gateway_loop', 'true');
+      await rig.engine.setConfig('dream.synthesize.last_completion_ts', '2000-01-01T00:00:00.000Z');
+
+      writeFileSync(
+        join(rig.corpusDir, '2026-06-23-glm-blank-output.txt'),
+        'User: keep testing GLM through the dream path.\n' +
+        'Agent: ' + 'meaningful conversation '.repeat(220),
+      );
+
+      __setChatTransportForTests(async (opts: ChatOpts): Promise<ChatResult> => {
+        if ((opts.system ?? '').includes('You judge whether a conversation transcript is worth synthesizing')) {
+          return {
+            text: JSON.stringify({
+              worth_processing: true,
+              reasons: ['user wants to validate blank-output handling on dream synthesis'],
+            }),
+            blocks: [{
+              type: 'text',
+              text: JSON.stringify({
+                worth_processing: true,
+                reasons: ['user wants to validate blank-output handling on dream synthesis'],
+              }),
+            }],
+            stopReason: 'end',
+            usage: { input_tokens: 12, output_tokens: 8, cache_read_tokens: 0, cache_creation_tokens: 0 },
+            model: 'anthropic:claude-haiku-4-5-20251001',
+            providerId: 'anthropic',
+          };
+        }
+
+        if (opts.model === 'zai:glm-5.2') {
+          return {
+            text: '',
+            blocks: [{
+              type: 'text',
+              text: '',
+            }],
+            stopReason: 'end',
+            usage: { input_tokens: 18, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 },
+            model: 'zai:glm-5.2',
+            providerId: 'zai',
+          };
+        }
+
+        throw new Error(`unexpected chat transport model/system: ${opts.model ?? '<default>'}`);
+      });
+
+      const savedKey = process.env.ANTHROPIC_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'sk-test-glm-judge';
+      try {
+        const result = await runPhaseSynthesize(rig.engine, {
+          brainDir: rig.brainDir,
+          dryRun: false,
+        });
+
+        expect(result.status).toBe('warn');
+        const details = result.details as {
+          child_outcomes: Array<{ jobId: number; status: string }>;
+          completed_children: number;
+          completed_without_writes: number;
+          completed_with_empty_output: number;
+          child_ids_with_empty_output: number[];
+          child_ids_without_writes: number[];
+        };
+        expect(details.child_outcomes).toHaveLength(1);
+        expect(details.child_outcomes[0].status).toBe('empty_output');
+        expect(details.completed_children).toBe(0);
+        expect(details.completed_without_writes).toBe(1);
+        expect(details.completed_with_empty_output).toBe(1);
+        expect(details.child_ids_with_empty_output).toEqual(details.child_ids_without_writes);
       } finally {
         if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
         else process.env.ANTHROPIC_API_KEY = savedKey;
@@ -750,6 +851,7 @@ describe('E2E synthesize — child failures do not look successful', () => {
         };
         expect(firstDetails.completed_without_writes).toBe(1);
         expect(firstDetails.child_outcomes).toHaveLength(1);
+        expect(firstDetails.child_outcomes[0].status).toBe('missing_write_contract');
 
         const second = await runPhaseSynthesize(rig.engine, {
           brainDir: rig.brainDir,
@@ -864,7 +966,7 @@ describe('E2E synthesize — child failures do not look successful', () => {
         };
         expect(firstDetails.pages_written).toBe(0);
         expect(firstDetails.child_outcomes).toHaveLength(1);
-        expect(firstDetails.child_outcomes[0].status).toBe('completed');
+        expect(firstDetails.child_outcomes[0].status).toBe('no_write_acknowledged');
         expect(firstDetails.completed_no_write_acknowledged).toBe(1);
         expect(firstDetails.child_ids_no_write_acknowledged).toHaveLength(1);
         expect(await rig.engine.getConfig('dream.synthesize.last_completion_ts')).not.toBe('2000-01-01T00:00:00.000Z');
@@ -877,6 +979,143 @@ describe('E2E synthesize — child failures do not look successful', () => {
         });
         expect(second.status).toBe('ok');
         expect(synthAttempt).toBe(1);
+      } finally {
+        if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+        else process.env.ANTHROPIC_API_KEY = savedKey;
+        __setChatTransportForTests(null);
+        resetGateway();
+      }
+    } finally {
+      worker.stop();
+      await runPromise;
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('boxed synth queue keeps unrelated default-queue jobs untouched', async () => {
+    const { __setChatTransportForTests, resetGateway } = await import('../../src/core/ai/gateway.ts');
+
+    const rig = await setupRig();
+    const worker = new MinionWorker(rig.engine, {
+      queue: 'dream-synth-test',
+      pollInterval: 25,
+      lockDuration: 30_000,
+    });
+    await registerBuiltinHandlers(worker, rig.engine);
+    const runPromise = worker.start();
+
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.queue', 'dream-synth-test');
+      await rig.engine.setConfig('models.dream.synthesize', 'zai:glm-5.2');
+      await rig.engine.setConfig('models.dream.synthesize_verdict', 'anthropic:claude-haiku-4-5-20251001');
+      await rig.engine.setConfig('agent.use_gateway_loop', 'true');
+      await rig.engine.setConfig('dream.synthesize.last_completion_ts', '2000-01-01T00:00:00.000Z');
+
+      writeFileSync(
+        join(rig.corpusDir, '2026-06-23-glm-boxed-queue.txt'),
+        'User: keep testing GLM through the dream path.\n' +
+        'Agent: ' + 'meaningful conversation '.repeat(220),
+      );
+
+      const queue = new MinionQueue(rig.engine);
+      const unrelated = await queue.add(
+        'subagent',
+        { prompt: 'unrelated default-queue job', model: 'zai:glm-5.2' },
+        { queue: 'default' },
+        { allowProtectedSubmit: true },
+      );
+
+      let synthTurn = 0;
+      __setChatTransportForTests(async (opts: ChatOpts): Promise<ChatResult> => {
+        if ((opts.system ?? '').includes('You judge whether a conversation transcript is worth synthesizing')) {
+          return {
+            text: JSON.stringify({
+              worth_processing: true,
+              reasons: ['user wants to validate queue isolation on dream synthesis'],
+            }),
+            blocks: [{
+              type: 'text',
+              text: JSON.stringify({
+                worth_processing: true,
+                reasons: ['user wants to validate queue isolation on dream synthesis'],
+              }),
+            }],
+            stopReason: 'end',
+            usage: { input_tokens: 12, output_tokens: 8, cache_read_tokens: 0, cache_creation_tokens: 0 },
+            model: 'anthropic:claude-haiku-4-5-20251001',
+            providerId: 'anthropic',
+          };
+        }
+
+        if (opts.model === 'zai:glm-5.2') {
+          synthTurn++;
+          if (synthTurn === 1) {
+            return {
+              text: '',
+              blocks: [{
+                type: 'tool-call',
+                toolCallId: 'glm-boxed-queue-put-page',
+                toolName: 'brain_put_page',
+                input: {
+                  slug: 'wiki/personal/reflections/2026-06-23-glm-boxed-queue',
+                  content: [
+                    '---',
+                    'title: GLM boxed queue',
+                    'type: note',
+                    '---',
+                    '',
+                    '# GLM boxed queue',
+                    '',
+                    'The synth child ran on its own queue and left default-queue work untouched.',
+                  ].join('\n'),
+                },
+              }],
+              stopReason: 'tool_calls',
+              usage: { input_tokens: 40, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 },
+              model: 'zai:glm-5.2',
+              providerId: 'zai',
+            };
+          }
+
+          return {
+            text: 'reflection written',
+            blocks: [{ type: 'text', text: 'reflection written' }],
+            stopReason: 'end',
+            usage: { input_tokens: 30, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 },
+            model: 'zai:glm-5.2',
+            providerId: 'zai',
+          };
+        }
+
+        throw new Error(`unexpected chat transport model/system: ${opts.model ?? '<default>'}`);
+      });
+
+      const savedKey = process.env.ANTHROPIC_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'sk-test-glm-judge';
+      try {
+        const result = await runPhaseSynthesize(rig.engine, {
+          brainDir: rig.brainDir,
+          dryRun: false,
+        });
+
+        expect(result.status).toBe('ok');
+        const details = result.details as {
+          child_queue: string;
+          child_outcomes: Array<{ jobId: number; status: string }>;
+        };
+        expect(details.child_queue).toBe('dream-synth-test');
+        expect(details.child_outcomes).toHaveLength(1);
+
+        const childRow = await rig.engine.executeRaw<{ queue: string }>(
+          'SELECT queue FROM minion_jobs WHERE id = $1',
+          [details.child_outcomes[0].jobId],
+        );
+        expect(childRow[0]?.queue).toBe('dream-synth-test');
+
+        const unrelatedAfter = await queue.getJob(unrelated.id);
+        expect(unrelatedAfter?.status).toBe('waiting');
       } finally {
         if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
         else process.env.ANTHROPIC_API_KEY = savedKey;

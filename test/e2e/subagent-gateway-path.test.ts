@@ -362,6 +362,60 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(toolRows).toEqual([{ tool_name: 'search', status: 'complete' }]);
   });
 
+  it('adds corrective turn on empty gateway response before accepting success', async () => {
+    let turn = 0;
+    const seenMessages: unknown[] = [];
+    __setChatTransportForTests(async (opts) => {
+      turn++;
+      seenMessages.push(opts.messages);
+      if (turn === 1) {
+        return {
+          text: '',
+          blocks: [] as ChatBlock[],
+          stopReason: 'end',
+          usage: { input_tokens: 11, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'anthropic:claude-sonnet-4-6',
+          providerId: 'anthropic',
+        } satisfies ChatResult;
+      }
+      return {
+        text: 'NO_WRITE: no page met the synthesis bar.',
+        blocks: [{ type: 'text', text: 'NO_WRITE: no page met the synthesis bar.' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 15, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'anthropic:claude-sonnet-4-6',
+        providerId: 'anthropic',
+      } satisfies ChatResult;
+    });
+
+    const executions: Array<{ name: string; input: unknown; ts: number }> = [];
+    const tools = makeStubTools(executions);
+    const handler = buildHandler(tools);
+    const { jobId, ctx } = await makeFakeJob({
+      prompt: 'find nothing',
+      model: 'anthropic:claude-sonnet-4-6',
+      max_turns: 3,
+    });
+
+    const result = await handler(ctx);
+
+    expect(result.result).toBe('NO_WRITE: no page met the synthesis bar.');
+    expect(result.stop_reason).toBe('end_turn');
+    expect(turn).toBe(2);
+    expect(executions).toHaveLength(0);
+    expect(JSON.stringify(seenMessages[1])).toContain('Your previous response was empty.');
+
+    const messages = await engine.executeRaw<Record<string, unknown>>(
+      `SELECT message_idx, role, content_blocks
+         FROM subagent_messages
+        WHERE job_id = $1
+        ORDER BY message_idx`,
+      [jobId],
+    );
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+    expect(JSON.stringify(messages[2].content_blocks)).toContain('Your previous response was empty.');
+  });
+
   it('required_tools adds corrective turn before gateway resume from text-only assistant tail', async () => {
     let turn = 0;
     const seenMessages: unknown[] = [];

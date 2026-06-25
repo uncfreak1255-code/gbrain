@@ -71,6 +71,8 @@ const MIN_PROMPT_TOKENS = 100_000;
 const DEFAULT_MAX_CHUNKS = 24;
 /** Conservative default budget when model is unknown (200K × HEADROOM_RATIO). */
 const UNKNOWN_MODEL_BUDGET_TOKENS = 180_000;
+/** Default minion queue for synth children unless the operator boxes them off. */
+const DEFAULT_SYNTH_QUEUE = 'default';
 
 /**
  * Compute per-chunk character budget for the resolved model + config override.
@@ -543,6 +545,7 @@ export async function runPhaseSynthesize(
           );
         }
         const submitOpts: Partial<MinionJobInput> = {
+          queue: config.queueName,
           max_stalled: 3,
           on_child_fail: 'continue',
           idempotency_key,
@@ -563,17 +566,17 @@ export async function runPhaseSynthesize(
 
     // Wait for every child to reach a terminal state. Tick yieldDuringPhase
     // every 5 min so the cycle lock TTL refreshes.
-    const childOutcomes: Array<{ jobId: number; status: string }> = [];
+    const childJobs: Array<{ id: number; status: string; result: unknown }> = [];
     for (const jobId of childIds) {
       try {
         const job = await waitForCompletion(queue, jobId, {
           timeoutMs: 35 * 60 * 1000,
           pollMs: 5 * 1000,
         });
-        childOutcomes.push({ jobId, status: job.status });
+        childJobs.push({ id: job.id, status: job.status, result: job.result });
       } catch (e) {
         if (e instanceof TimeoutError) {
-          childOutcomes.push({ jobId, status: 'timeout' });
+          childJobs.push({ id: jobId, status: 'timeout', result: null });
         } else {
           throw e;
         }
@@ -593,19 +596,38 @@ export async function runPhaseSynthesize(
     // (source, slug) row (currently always 'default' from subagent put_page).
     const writtenRefs = await collectChildPutPageSlugs(engine, childIds, chunkInfo);
     const childIdsWithWrites = await collectChildPutPageWriterJobIds(engine, childIds);
-    const nonCompletedChildren = childOutcomes.filter(o => o.status !== 'completed');
-    const completedChildrenWithoutWrites = childOutcomes.filter(
-      o => o.status === 'completed' && !childIdsWithWrites.has(o.jobId),
-    );
+    const queueNonCompletedChildren = childJobs.filter(job => job.status !== 'completed');
     const completedNoWriteAcknowledgedIds = new Set<number>();
-    for (const child of completedChildrenWithoutWrites) {
-      if (await childReportedExplicitNoWrite(engine, child.jobId)) {
-        completedNoWriteAcknowledgedIds.add(child.jobId);
+    const completedWithEmptyOutputIds = new Set<number>();
+    const completedMissingWriteContractIds = new Set<number>();
+    const childOutcomes: Array<{ jobId: number; status: string }> = [];
+    for (const job of childJobs) {
+      if (job.status !== 'completed') {
+        childOutcomes.push({ jobId: job.id, status: job.status });
+        continue;
+      }
+      if (childIdsWithWrites.has(job.id)) {
+        childOutcomes.push({ jobId: job.id, status: 'completed' });
+        continue;
+      }
+      if (await childReportedExplicitNoWrite(engine, job.id)) {
+        completedNoWriteAcknowledgedIds.add(job.id);
+        childOutcomes.push({ jobId: job.id, status: 'no_write_acknowledged' });
+        continue;
+      }
+      const finalText = extractChildFinalText(job.result);
+      if (finalText === null || finalText.trim().length === 0) {
+        completedWithEmptyOutputIds.add(job.id);
+        childOutcomes.push({ jobId: job.id, status: 'empty_output' });
+      } else {
+        completedMissingWriteContractIds.add(job.id);
+        childOutcomes.push({ jobId: job.id, status: 'missing_write_contract' });
       }
     }
-    const retryableCompletedChildrenWithoutWrites = completedChildrenWithoutWrites.filter(
-      child => !completedNoWriteAcknowledgedIds.has(child.jobId),
-    );
+    const retryableCompletedChildrenWithoutWrites = [
+      ...completedWithEmptyOutputIds,
+      ...completedMissingWriteContractIds,
+    ].sort((a, b) => a - b);
 
     // Dual-write: reverse-render each DB row → markdown file.
     const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs);
@@ -634,6 +656,7 @@ export async function runPhaseSynthesize(
       written_slugs: writtenSlugs,
       reverse_write_count: reverseWriteCount,
       child_outcomes: childOutcomes,
+      child_queue: config.queueName,
       // Children submitted (one per chunk for chunked transcripts; one per
       // transcript for single-chunk). Differs from transcripts_processed
       // when chunking is in play.
@@ -644,16 +667,25 @@ export async function runPhaseSynthesize(
       verdicts,
       completed_no_write_acknowledged: completedNoWriteAcknowledgedIds.size,
       child_ids_no_write_acknowledged: [...completedNoWriteAcknowledgedIds],
+      completed_with_empty_output: completedWithEmptyOutputIds.size,
+      child_ids_with_empty_output: [...completedWithEmptyOutputIds],
+      completed_missing_write_contract: completedMissingWriteContractIds.size,
+      child_ids_missing_write_contract: [...completedMissingWriteContractIds],
     };
 
-    if (nonCompletedChildren.length > 0 || retryableCompletedChildrenWithoutWrites.length > 0) {
-      const completedChildren = childOutcomes.filter(o => o.status === 'completed').length;
+    if (queueNonCompletedChildren.length > 0 || retryableCompletedChildrenWithoutWrites.length > 0) {
+      const completedChildren = childOutcomes.filter(
+        o => o.status === 'completed' || o.status === 'no_write_acknowledged',
+      ).length;
       const warningParts: string[] = [];
-      if (nonCompletedChildren.length > 0) {
-        warningParts.push(`${nonCompletedChildren.length} child job(s) did not complete`);
+      if (queueNonCompletedChildren.length > 0) {
+        warningParts.push(`${queueNonCompletedChildren.length} child job(s) did not complete`);
       }
       if (retryableCompletedChildrenWithoutWrites.length > 0) {
-        warningParts.push(`${retryableCompletedChildrenWithoutWrites.length} completed child job(s) wrote no page`);
+        warningParts.push(`${retryableCompletedChildrenWithoutWrites.length} completed child job(s) missed the write/no-write contract`);
+      }
+      if (completedWithEmptyOutputIds.size > 0) {
+        warningParts.push(`${completedWithEmptyOutputIds.size} returned empty output`);
       }
       return warn(
         `${submittedTranscripts} transcript(s) submitted in ${(ms / 1000).toFixed(1)}s; ` +
@@ -661,9 +693,9 @@ export async function runPhaseSynthesize(
         {
           ...commonDetails,
           completed_children: completedChildren,
-          non_completed_children: nonCompletedChildren.length,
+          non_completed_children: queueNonCompletedChildren.length,
           completed_without_writes: retryableCompletedChildrenWithoutWrites.length,
-          child_ids_without_writes: retryableCompletedChildrenWithoutWrites.map(child => child.jobId),
+          child_ids_without_writes: retryableCompletedChildrenWithoutWrites,
         },
       );
     }
@@ -684,6 +716,7 @@ interface SynthConfig {
   enabled: boolean;
   corpusDir: string | null;
   meetingTranscriptsDir: string | null;
+  queueName: string;
   minChars: number;
   excludePatterns: string[];
   model: string;
@@ -713,6 +746,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
   // Explicit enabled=false still wins for pausing synthesis without removing corpus config.
   const enabled = enabledRaw === 'false' ? false : (enabledRaw === 'true' || !!corpusDir);
   const meetingTranscriptsDir = await engine.getConfig('dream.synthesize.meeting_transcripts_dir');
+  const queueRaw = await engine.getConfig('dream.synthesize.queue');
   const minCharsStr = await engine.getConfig('dream.synthesize.min_chars');
   const excludeStr = await engine.getConfig('dream.synthesize.exclude_patterns');
   // v0.28: resolveModel() unifies CLI flag > new key > deprecated key > models.default > env > fallback
@@ -770,6 +804,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     enabled,
     corpusDir: corpusDir ?? null,
     meetingTranscriptsDir: meetingTranscriptsDir ?? null,
+    queueName: normalizeSynthQueueName(queueRaw),
     minChars: minCharsStr ? Math.max(0, parseInt(minCharsStr, 10) || 2000) : 2000,
     excludePatterns,
     model,
@@ -779,6 +814,11 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     maxChunksPerTranscript,
     maxTranscriptsPerCycle,
   };
+}
+
+function normalizeSynthQueueName(raw: string | null): string {
+  const trimmed = (raw ?? '').trim();
+  return trimmed.length > 0 ? trimmed : DEFAULT_SYNTH_QUEUE;
 }
 
 async function checkCooldown(
@@ -1186,7 +1226,7 @@ async function collectChildPutPageSlugs(
   // product behavior. Threading the source_id through reverseWriteRefs
   // guarantees getPage targets the correct (source, slug) row instead of
   // the first DB match.
-  const rows = await engine.executeRaw<{ job_id: number; slug: string }>(
+  const rows = await engine.executeRaw<{ job_id: unknown; slug: string }>(
     `SELECT job_id,
             COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
        FROM subagent_tool_executions
@@ -1198,7 +1238,8 @@ async function collectChildPutPageSlugs(
   const rewritten = new Set<string>();
   for (const r of rows) {
     if (typeof r.slug !== 'string' || r.slug.length === 0) continue;
-    const ci = chunkInfo.get(r.job_id);
+    const normalizedJobId = normalizeChildJobId(r.job_id);
+    const ci = normalizedJobId === null ? undefined : chunkInfo.get(normalizedJobId);
     rewritten.add(ci ? rewriteChunkedSlug(r.slug, ci.hash6, ci.idx) : r.slug);
   }
   return Array.from(rewritten).sort().map(slug => ({ slug, source_id: 'default' }));
@@ -1209,7 +1250,7 @@ async function collectChildPutPageWriterJobIds(
   childIds: number[],
 ): Promise<Set<number>> {
   if (childIds.length === 0) return new Set();
-  const rows = await engine.executeRaw<{ job_id: number }>(
+  const rows = await engine.executeRaw<{ job_id: unknown }>(
     `SELECT DISTINCT job_id
        FROM subagent_tool_executions
       WHERE job_id = ANY($1::int[])
@@ -1217,7 +1258,25 @@ async function collectChildPutPageWriterJobIds(
         AND status = 'complete'`,
     [childIds],
   );
-  return new Set(rows.map(row => row.job_id));
+  const out = new Set<number>();
+  for (const row of rows) {
+    const normalized = normalizeChildJobId(row.job_id);
+    if (normalized !== null) out.add(normalized);
+  }
+  return out;
+}
+
+function normalizeChildJobId(jobId: unknown): number | null {
+  if (typeof jobId === 'number' && Number.isSafeInteger(jobId)) return jobId;
+  if (typeof jobId === 'bigint') {
+    const asNumber = Number(jobId);
+    return Number.isSafeInteger(asNumber) ? asNumber : null;
+  }
+  if (typeof jobId === 'string' && /^\d+$/.test(jobId)) {
+    const asNumber = Number(jobId);
+    return Number.isSafeInteger(asNumber) ? asNumber : null;
+  }
+  return null;
 }
 
 async function childHasCompletedPutPage(
@@ -1249,6 +1308,12 @@ async function childReportedExplicitNoWrite(
   );
   const finalText = extractCompletedChildFinalText(rows[0]?.result);
   return finalText.startsWith(SYNTH_NO_WRITE_PREFIX);
+}
+
+function extractChildFinalText(result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null;
+  const maybeText = (result as { result?: unknown }).result;
+  return typeof maybeText === 'string' ? maybeText : null;
 }
 
 function extractCompletedChildFinalText(raw: unknown): string {
@@ -1366,13 +1431,15 @@ async function writeSummaryPage(
   writtenSlugs: string[],
   childOutcomes: Array<{ jobId: number; status: string }>,
 ): Promise<void> {
-  const completed = childOutcomes.filter(c => c.status === 'completed').length;
+  const completed = childOutcomes.filter(
+    c => c.status === 'completed' || c.status === 'no_write_acknowledged',
+  ).length;
   const failed = childOutcomes.length - completed;
 
   const lines: string[] = [];
   lines.push(`# Dream cycle ${summaryDate}`);
   lines.push('');
-  lines.push(`**Children:** ${completed} completed, ${failed} failed/timeout.`);
+  lines.push(`**Children:** ${completed} completed, ${failed} not successful.`);
   lines.push(`**Pages written:** ${writtenSlugs.length}.`);
   lines.push('');
   if (writtenSlugs.length > 0) {
@@ -1477,4 +1544,5 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // double-encoded jsonb regression). Not part of the runtime contract.
 export const __testing = {
   collectChildPutPageSlugs,
+  collectChildPutPageWriterJobIds,
 };

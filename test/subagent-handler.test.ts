@@ -337,6 +337,28 @@ describe('subagent handler happy path', () => {
     expect(out).toEqual({ echoed: { value: 'v2' } });
   });
 
+  test('empty end_turn response forces a corrective turn before accepting success', async () => {
+    const client = new FakeMessagesClient([
+      {
+        content: [] as any,
+        stop_reason: 'end_turn',
+      },
+      {
+        content: [{ type: 'text', text: 'NO_WRITE: no page met the synthesis bar.' }] as any,
+        stop_reason: 'end_turn',
+      },
+    ]);
+    const handler = makeSubagentHandler({ engine, client, toolRegistry: [] });
+    const ctx = await makeCtx({ prompt: 'go', max_turns: 3 });
+
+    const result = await handler(ctx);
+
+    expect(result.stop_reason).toBe('end_turn');
+    expect(result.result).toBe('NO_WRITE: no page met the synthesis bar.');
+    expect(client.calls.length).toBe(2);
+    expect(JSON.stringify(client.calls[1]!.messages)).toContain('Your previous response was empty.');
+  });
+
   test('source_id is passed through to required brain tools', async () => {
     let seenSourceId: string | undefined;
     const tool: ToolDef = {

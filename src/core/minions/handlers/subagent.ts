@@ -665,11 +665,21 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           b.type === 'tool_use',
       );
       if (toolUses.length === 0) {
+        const assistantText = blocks
+          .filter(b => b.type === 'text' && typeof b.text === 'string')
+          .map(b => b.text as string)
+          .join('\n');
         const missingRequiredTools = await missingRequiredCompletedTools(engine, ctx.id, requiredTools);
-        if (missingRequiredTools.length > 0) {
-          const correctiveText = requiredToolCorrectiveText(missingRequiredTools);
+        const correctiveText = buildNoToolCorrectiveText({
+          missingRequiredTools,
+          finalText: assistantText,
+        });
+        if (correctiveText !== null) {
           if (assistantTurns >= maxTurns) {
-            throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
+            if (missingRequiredTools.length > 0) {
+              throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
+            }
+            throw new UnrecoverableError('empty_final_response');
           }
           const userIdx = nextMessageIdx++;
           const correctiveBlocks = [{ type: 'text', text: correctiveText }] as ContentBlock[];
@@ -688,10 +698,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         }
         stopReason = 'end_turn';
         // Concatenate text blocks as the final answer.
-        finalText = blocks
-          .filter(b => b.type === 'text' && typeof b.text === 'string')
-          .map(b => b.text as string)
-          .join('\n');
+        finalText = assistantText;
         break;
       }
 
@@ -1086,12 +1093,20 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
     },
     onNoToolCalls: async (turnIdx, messageIdx) => {
       const missingRequiredTools = await missingRequiredCompletedTools(engine, ctx.id, requiredTools);
-      if (missingRequiredTools.length === 0) return null;
+      const assistantText = arguments[2];
+      const correctiveText = buildNoToolCorrectiveText({
+        missingRequiredTools,
+        finalText: typeof assistantText === 'string' ? assistantText : '',
+      });
+      if (correctiveText === null) return null;
       if (turnIdx + 1 >= maxTurns) {
-        throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
+        if (missingRequiredTools.length > 0) {
+          throw new UnrecoverableError(`required_tools_missing: ${missingRequiredTools.join(', ')}`);
+        }
+        throw new UnrecoverableError('empty_final_response');
       }
       const correctiveBlocks = [
-        { type: 'text', text: requiredToolCorrectiveText(missingRequiredTools) },
+        { type: 'text', text: correctiveText },
       ] as ChatBlock[];
       await persistMessage(engine, ctx.id, {
         message_idx: messageIdx,
@@ -1146,6 +1161,29 @@ function requiredToolCorrectiveText(missingRequiredTools: string[]): string {
     `You must call each required tool before claiming the task is complete.`,
     `A text-only claim is not accepted for this job.`,
   ].join(' ');
+}
+
+function emptyFinalResponseCorrectiveText(): string {
+  return [
+    'Your previous response was empty.',
+    'Return a non-empty final message now.',
+    'If you intentionally made no changes, say so explicitly.',
+    'If the task gave an exact required no-op phrase, use it verbatim.',
+  ].join(' ');
+}
+
+function buildNoToolCorrectiveText(opts: {
+  missingRequiredTools: string[];
+  finalText: string;
+}): string | null {
+  const parts: string[] = [];
+  if (opts.missingRequiredTools.length > 0) {
+    parts.push(requiredToolCorrectiveText(opts.missingRequiredTools));
+  }
+  if (opts.finalText.trim().length === 0) {
+    parts.push(emptyFinalResponseCorrectiveText());
+  }
+  return parts.length > 0 ? parts.join(' ') : null;
 }
 
 function normalizeRequiredTools(required: string[] | undefined, toolDefs: ToolDef[]): string[] {
