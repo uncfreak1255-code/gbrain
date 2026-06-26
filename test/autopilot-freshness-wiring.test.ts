@@ -11,6 +11,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 const SRC = readFileSync(join(import.meta.dir, '..', 'src', 'commands', 'autopilot.ts'), 'utf8');
+const CONTEXT_SRC = readFileSync(join(import.meta.dir, '..', 'src', 'core', 'remediation', 'context.ts'), 'utf8');
 
 describe('autopilot freshness sync wiring', () => {
   test('uses a per-source idempotency key', () => {
@@ -41,5 +42,7 @@ describe('autopilot freshness sync wiring', () => {
     expect(SRC).toContain("import('../core/remediation/context.ts')");
     expect(SRC).toMatch(/const ctx = await loadRecommendationContext\(engine,\s*\{\s*repoPath\s*\}\)/);
     expect(SRC).toMatch(/computeRecommendations\(health,\s*ctx,\s*extraRemediations\)/);
+    expect(CONTEXT_SRC).toContain('sourceScoped?: boolean');
+    expect(CONTEXT_SRC).toContain('if (opts.sourceScoped === true) sourceId = source.id;');
   });
 });

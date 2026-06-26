@@ -24,7 +24,7 @@ export type { RecommendationContext };
  */
 export async function loadRecommendationContext(
   engine: BrainEngine,
-  opts: { repoPath?: string } = {},
+  opts: { repoPath?: string; sourceScoped?: boolean } = {},
 ): Promise<RecommendationContext> {
   // v0.37 fix wave (Lane E.4 + CDX2-11): read schema-sizing fields from
   // gateway, not DB. The DB plane is schema-applied metadata; the file
@@ -57,7 +57,7 @@ export async function loadRecommendationContext(
       );
       const source = rows[0];
       if (source) {
-        sourceId = source.id;
+        if (opts.sourceScoped === true) sourceId = source.id;
         const gitFresh = isSourceUnchangedSinceSync(source.local_path, source.last_commit, {
           requireCleanWorkingTree: 'ignore-untracked',
         });
