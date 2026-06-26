@@ -39,7 +39,7 @@ describe('autopilot freshness sync wiring', () => {
 
   test('uses shared recommendation context for targeted remediation planning', () => {
     expect(SRC).toContain("import('../core/remediation/context.ts')");
-    expect(SRC).toMatch(/const loadedCtx = await loadRecommendationContext\(engine\)/);
+    expect(SRC).toMatch(/const ctx = await loadRecommendationContext\(engine,\s*\{\s*repoPath\s*\}\)/);
     expect(SRC).toMatch(/computeRecommendations\(health,\s*ctx,\s*extraRemediations\)/);
   });
 });

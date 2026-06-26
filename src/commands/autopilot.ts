@@ -954,8 +954,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         const health = await engine.getHealth();
         const score = health.brain_score;
         const { loadRecommendationContext } = await import('../core/remediation/context.ts');
-        const loadedCtx = await loadRecommendationContext(engine);
-        const ctx = { ...loadedCtx, repoPath: loadedCtx.repoPath ?? repoPath };
+        const ctx = await loadRecommendationContext(engine, { repoPath });
         // v0.41.18.0 (A5 + A19 + A22, T15): consult onboard recommendations
         // ALONGSIDE doctor's brain-score recommendations. Onboard's 4 new
         // checks (embed_staleness, link_coverage, timeline_coverage,

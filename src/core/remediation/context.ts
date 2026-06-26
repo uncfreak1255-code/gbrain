@@ -24,6 +24,7 @@ export type { RecommendationContext };
  */
 export async function loadRecommendationContext(
   engine: BrainEngine,
+  opts: { repoPath?: string } = {},
 ): Promise<RecommendationContext> {
   // v0.37 fix wave (Lane E.4 + CDX2-11): read schema-sizing fields from
   // gateway, not DB. The DB plane is schema-applied metadata; the file
@@ -34,7 +35,7 @@ export async function loadRecommendationContext(
   // Also extended the API-key check to recognize the ZE key alongside
   // OpenAI (was OpenAI-only). After Lane C.3, zeroentropy_api_key lives
   // in GBrainConfig + propagates to the gateway env dict.
-  const repoPath = await engine.getConfig('sync.repo_path');
+  const repoPath = opts.repoPath ?? await engine.getConfig('sync.repo_path');
   let sourceId: string | undefined;
   let repoNeedsSync = false;
   let staleExtractionPages = 0;
