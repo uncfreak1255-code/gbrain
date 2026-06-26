@@ -654,7 +654,7 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
     }
     const sidIdx = args.indexOf('--source-id');
     const staleSourceId = (sidIdx >= 0 && sidIdx + 1 < args.length) ? args[sidIdx + 1] : undefined;
-    await extractStaleFromDB(engine, {
+    await runExtractStaleCore(engine, {
       dryRun: args.includes('--dry-run'),
       jsonMode: args.includes('--json'),
       includeFrontmatter: args.includes('--include-frontmatter'),
@@ -1764,6 +1764,36 @@ async function extractStaleFromDB(
     }) + '\n');
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining };
+}
+
+export async function runExtractStaleCore(
+  engine: BrainEngine,
+  opts: {
+    dryRun?: boolean;
+    jsonMode?: boolean;
+    includeFrontmatter?: boolean;
+    sourceIdFilter?: string;
+    catchUp?: boolean;
+  } = {},
+): Promise<{
+  links_created: number;
+  timeline_entries_created: number;
+  pages_processed: number;
+  stale_remaining: number;
+}> {
+  const result = await extractStaleFromDB(engine, {
+    dryRun: !!opts.dryRun,
+    jsonMode: !!opts.jsonMode,
+    includeFrontmatter: !!opts.includeFrontmatter,
+    sourceIdFilter: opts.sourceIdFilter,
+    catchUp: !!opts.catchUp,
+  });
+  return {
+    links_created: result.linksCreated,
+    timeline_entries_created: result.timelineCreated,
+    pages_processed: result.pagesProcessed,
+    stale_remaining: result.staleRemaining,
+  };
 }
 
 /**

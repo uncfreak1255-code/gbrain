@@ -766,7 +766,12 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         const queue = new MinionQueue(engine);
         const slotMs = Math.floor(Date.now() / (baseInterval * 1000)) * baseInterval * 1000;
         const slot = new Date(slotMs).toISOString();
-        const timeoutMs = Math.max(baseInterval * 2 * 1000, 300_000);
+        const { defaultTimeoutMsFor } = await import('../core/minions/handler-timeouts.ts');
+        const routineTimeoutMs = Math.max(baseInterval * 2 * 1000, 300_000);
+        const cycleTimeoutMs = Math.max(
+          routineTimeoutMs,
+          defaultTimeoutMsFor('autopilot-cycle') ?? routineTimeoutMs,
+        );
 
         // ── v0.40 D17: per-source freshness check ────────────────────
         // Runs first; independent of score gate. Submits a 'sync' job per
@@ -810,11 +815,13 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                   {
                     queue: 'default',
                     idempotency_key: `autopilot-sync:${src.id}:${slot}`,
+                    maxWaiting: 1,
+                    stagger_key: `autopilot-freshness:${src.id}`,
                     max_attempts: 2,
-                    timeout_ms: timeoutMs,
-                    // No maxWaiting here: it coalesces by (name, queue), not
-                    // source, so it can collapse all source-specific freshness
-                    // syncs into one waiting job.
+                    timeout_ms: routineTimeoutMs,
+                    // Scope backpressure by source via stagger_key so repeated
+                    // freshness nudges for one source coalesce without
+                    // suppressing sibling sources that share name='sync'.
                   },
                 );
                 if (jsonMode) {
@@ -918,7 +925,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                           queue: 'default',
                           idempotency_key: idemKey,
                           max_attempts: 1,
-                          timeout_ms: timeoutMs,
+                          timeout_ms: routineTimeoutMs,
                         },
                         { allowProtectedSubmit: true },
                       );
@@ -998,7 +1005,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         }
         const dispatchGlobalMaintenanceSafely = async () => {
           try {
-            await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs, jsonMode });
+            await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs: routineTimeoutMs, jsonMode });
           } catch (e) {
             if (jsonMode) process.stderr.write(JSON.stringify({ event: 'global_maintenance_dispatch_failed', error: e instanceof Error ? e.message : String(e) }) + '\n');
           }
@@ -1038,7 +1045,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           const result = await dispatchPerSource(engine, queue, {
             repoPath,
             slot,
-            timeoutMs,
+            timeoutMs: cycleTimeoutMs,
             fanoutMax,
             jsonMode,
           });
@@ -1093,7 +1100,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                 queue: 'default',
                 idempotency_key: step.idempotency_key,
                 max_attempts: 2,
-                timeout_ms: timeoutMs,
+                timeout_ms: routineTimeoutMs,
                 maxWaiting: 1,
               };
               const job = await queue.add(

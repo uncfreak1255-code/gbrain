@@ -8,6 +8,9 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { RecommendationContext } from '../brain-score-recommendations.ts';
+import { CHUNKER_VERSION } from '../chunkers/code.ts';
+import { isSourceUnchangedSinceSync } from '../git-head.ts';
+import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 
 // Re-export so consumers can `import { RecommendationContext } from '../remediation'`
 // — the canonical RecommendationContext type still lives in
@@ -32,6 +35,51 @@ export async function loadRecommendationContext(
   // OpenAI (was OpenAI-only). After Lane C.3, zeroentropy_api_key lives
   // in GBrainConfig + propagates to the gateway env dict.
   const repoPath = await engine.getConfig('sync.repo_path');
+  let sourceId: string | undefined;
+  let repoNeedsSync = false;
+  let staleExtractionPages = 0;
+
+  if (repoPath) {
+    try {
+      const rows = await engine.executeRaw<{
+        id: string;
+        local_path: string | null;
+        last_commit: string | null;
+        chunker_version: string | number | null;
+      }>(
+        `SELECT id, local_path, last_commit, chunker_version
+           FROM sources
+          WHERE local_path = $1
+          ORDER BY id
+          LIMIT 1`,
+        [repoPath],
+      );
+      const source = rows[0];
+      if (source) {
+        sourceId = source.id;
+        const gitFresh = isSourceUnchangedSinceSync(source.local_path, source.last_commit, {
+          requireCleanWorkingTree: 'ignore-untracked',
+        });
+        const chunkerFresh = String(source.chunker_version ?? '') === String(CHUNKER_VERSION);
+        repoNeedsSync = !(gitFresh && chunkerFresh);
+      } else {
+        repoNeedsSync = true;
+      }
+    } catch {
+      // Older or partially migrated schemas should still be able to render a
+      // remediation plan; stale extraction below is best-effort for the same reason.
+    }
+  }
+
+  try {
+    staleExtractionPages = await engine.countStalePagesForExtraction({
+      sourceId,
+      versionTs: LINK_EXTRACTOR_VERSION_TS,
+    });
+  } catch {
+    staleExtractionPages = 0;
+  }
+
   let embeddingModel: string | undefined;
   let embeddingDimensions: number | undefined;
   try {
@@ -63,7 +111,10 @@ export async function loadRecommendationContext(
     return !!(process.env[envVar] || fromCfg);
   });
   return {
+    sourceId,
     repoPath: repoPath ?? undefined,
+    repoNeedsSync,
+    staleExtractionPages,
     embeddingModel,
     embeddingDimensions,
     embeddingProviderConfigured: embeddingConfigured,
