@@ -1,7 +1,8 @@
-import { describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
+import { describe, test, expect, beforeEach, afterAll } from 'bun:test';
 import { loadRecommendationContext } from '../src/core/remediation/context.ts';
 import { _setGitHeadProbeForTests, _setGitCleanProbeForTests } from '../src/core/git-head.ts';
 import { CHUNKER_VERSION } from '../src/core/chunkers/code.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 function makeEngine(sourceRow: Record<string, unknown>, staleExtractionPages = 0): any {
   return {
@@ -16,18 +17,9 @@ function hoursAgo(hours: number): Date {
 }
 
 describe('loadRecommendationContext sync freshness', () => {
-  let oldWarnHours: string | undefined;
-
   beforeEach(() => {
-    oldWarnHours = process.env.GBRAIN_SYNC_FRESHNESS_WARN_HOURS;
-    delete process.env.GBRAIN_SYNC_FRESHNESS_WARN_HOURS;
     _setGitHeadProbeForTests(() => 'new-head');
     _setGitCleanProbeForTests(() => true);
-  });
-
-  afterEach(() => {
-    if (oldWarnHours === undefined) delete process.env.GBRAIN_SYNC_FRESHNESS_WARN_HOURS;
-    else process.env.GBRAIN_SYNC_FRESHNESS_WARN_HOURS = oldWarnHours;
   });
 
   afterAll(() => {
@@ -86,14 +78,15 @@ describe('loadRecommendationContext sync freshness', () => {
   });
 
   test('honors configured sync freshness warning threshold', async () => {
-    process.env.GBRAIN_SYNC_FRESHNESS_WARN_HOURS = '1';
-    const ctx = await loadRecommendationContext(makeEngine({
-      id: 'gbrain',
-      local_path: '/brain',
-      last_commit: 'old-head',
-      chunker_version: CHUNKER_VERSION,
-      last_sync_at: hoursAgo(2),
-    }));
+    const ctx = await withEnv({ GBRAIN_SYNC_FRESHNESS_WARN_HOURS: '1' }, () =>
+      loadRecommendationContext(makeEngine({
+        id: 'gbrain',
+        local_path: '/brain',
+        last_commit: 'old-head',
+        chunker_version: CHUNKER_VERSION,
+        last_sync_at: hoursAgo(2),
+      })),
+    );
 
     expect(ctx.repoNeedsSync).toBe(true);
   });

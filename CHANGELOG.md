@@ -2,6 +2,30 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.45.3.0] - 2026-06-26
+
+**GBrain's own sync and doctor remediation paths now stay quieter around fresh repo changes and test-only calibration fixtures.** This release keeps synthetic prompt-tuning material out of the GBrain repo's own import/sync surface while preserving the same paths for normal user repos, and it stops remediation from immediately demanding a filesystem sync just because a source's commit changed moments ago.
+
+### To take advantage of v0.45.3.0
+`gbrain upgrade`. No migration or config change is required.
+
+For a local sync/readback check:
+
+```bash
+gbrain sync --dry-run
+gbrain doctor --remediation-plan --json
+```
+
+### Itemized changes
+
+### Changed
+- **Repo-local calibration fixtures stay out of GBrain self-sync.** The GBrain checkout now excludes `test/fixtures/calibration/**` from its own import/sync walks, without making that path globally unsyncable for other repositories.
+- **Full sync cleanup removes already-indexed calibration fixture pages.** A full reconcile now treats repo-local excluded fixture pages as stale so old synthetic corpus pages can be cleaned up instead of lingering.
+- **Remediation waits for the sync freshness window before demanding a repo sync.** If git moved recently but the chunker version is current, `doctor --remediation-plan` can proceed to stale DB extraction work without first rerunning filesystem sync.
+
+### Added
+- **Focused regression coverage for fixture excludes and sync freshness.** New tests pin the GBrain-only fixture skip, non-GBrain repo behavior, full reconcile cleanup, and the configurable remediation freshness threshold.
+
 ## [0.45.2.0] - 2026-06-26
 
 **Autopilot now waits its turn when the brain is already busy, and `gbrain doctor` explains freshness problems in plain operational terms.** This release keeps the current Dream and remediation lane narrow: it ships the finished runtime-safety work, leaves the explicit spend-readback WIP out, and does not pull in unchecked upstream PRs.
