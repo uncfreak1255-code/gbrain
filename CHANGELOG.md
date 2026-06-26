@@ -34,6 +34,7 @@ gbrain eval dream-quality --json
 - **Autopilot global work respects source backpressure.** Global maintenance checks queue pressure before dispatching more background work, reducing duplicate or premature jobs.
 - **Doctor freshness messages are more specific.** Extraction and cycle freshness checks now better separate actionable stale work from state that needs a checkout, source, or operator decision first.
 - **Dream quality readbacks include clearer status fields.** `gbrain eval dream-quality` exposes the signals needed to decide whether a bounded Dream pass helped.
+- **The local Docker CI guard compiles its WASM smoketest off the bind mount.** `scripts/check-wasm-embedded.sh` now avoids Bun's container rename failure while keeping the same semantic chunking check.
 
 ### Excluded from this release
 - **WIP spend readbacks.** The local `WIP: add dream spend readbacks` commit was reviewed and intentionally left out.
