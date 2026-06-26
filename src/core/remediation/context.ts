@@ -12,6 +12,9 @@ import { CHUNKER_VERSION } from '../chunkers/code.ts';
 import { isSourceUnchangedSinceSync } from '../git-head.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 
+const DEFAULT_SYNC_REMEDIATION_WARN_HOURS = 24;
+const SYNC_FRESHNESS_WARN_HOURS_ENV = 'GBRAIN_SYNC_FRESHNESS_WARN_HOURS';
+
 // Re-export so consumers can `import { RecommendationContext } from '../remediation'`
 // — the canonical RecommendationContext type still lives in
 // brain-score-recommendations.ts (it's also the input to computeRecommendations).
@@ -47,8 +50,9 @@ export async function loadRecommendationContext(
         local_path: string | null;
         last_commit: string | null;
         chunker_version: string | number | null;
+        last_sync_at: string | Date | null;
       }>(
-        `SELECT id, local_path, last_commit, chunker_version
+        `SELECT id, local_path, last_commit, chunker_version, last_sync_at
            FROM sources
           WHERE local_path = $1
           ORDER BY id
@@ -62,7 +66,7 @@ export async function loadRecommendationContext(
           requireCleanWorkingTree: 'ignore-untracked',
         });
         const chunkerFresh = String(source.chunker_version ?? '') === String(CHUNKER_VERSION);
-        repoNeedsSync = !(gitFresh && chunkerFresh);
+        repoNeedsSync = !chunkerFresh || (!gitFresh && isPastSyncRemediationWindow(source.last_sync_at));
       } else {
         repoNeedsSync = true;
       }
@@ -121,4 +125,20 @@ export async function loadRecommendationContext(
     embeddingProviderConfigured: embeddingConfigured,
     hasChatApiKey: !!(process.env.ANTHROPIC_API_KEY || fileCfg?.anthropic_api_key),
   };
+}
+
+function isPastSyncRemediationWindow(lastSyncAt: string | Date | null): boolean {
+  if (!lastSyncAt) return true;
+  const lastSyncMs = lastSyncAt instanceof Date ? lastSyncAt.getTime() : Date.parse(lastSyncAt);
+  if (!Number.isFinite(lastSyncMs)) return true;
+  const ageMs = Date.now() - lastSyncMs;
+  if (ageMs < 0) return true;
+  return ageMs >= syncRemediationWarnHours() * 60 * 60 * 1000;
+}
+
+function syncRemediationWarnHours(): number {
+  const raw = process.env[SYNC_FRESHNESS_WARN_HOURS_ENV];
+  if (raw === undefined || raw === '') return DEFAULT_SYNC_REMEDIATION_WARN_HOURS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_SYNC_REMEDIATION_WARN_HOURS;
 }
