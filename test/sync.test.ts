@@ -877,9 +877,10 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
     const repo = mkRepo({
       'package.json': JSON.stringify({ name: 'gbrain', version: '0.0.0' }, null, 2),
       'people/alice.md': personMd('Alice', 'Alice is a person.'),
-      [fixturePath]: ['---', 'type: person', 'title: Alice Example', '---', '', 'fixture only'].join('\n'),
+      [fixturePath]: ['---', 'type: person', 'title: Alice Example', 'slug: people/alice-example', '---', '', 'fixture only'].join('\n'),
     });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
+    expect(await engine.getPage('people/alice-example')).toBeNull();
 
     // Simulate a fixture page that was indexed before the repo-local exclude existed.
     await engine.putPage('people/alice-example', {
