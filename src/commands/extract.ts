@@ -1666,9 +1666,8 @@ async function extractStaleFromDB(
   // Batch mode = pg_trgm + exact only, NO per-name search fallback. The
   // resolution map sees ALL sources so qualified cross-source wikilinks resolve
   // even when --source-id scopes the stale SCAN.
-  const resolver = makeResolver(engine, { mode: 'batch' });
-  const nullResolver = { resolve: async () => null as string | null };
-  const activeResolver = includeFrontmatter ? resolver : nullResolver;
+  const resolver = makeResolver(engine, { mode: 'batch', sourceId: sourceIdFilter });
+  const globalBasename = await isGlobalBasenameEnabled(engine);
   const allRefs = await engine.listAllPageRefs();
   const allSlugs = new Set<string>();
   const slugToSources = new Map<string, string[]>();
@@ -1700,7 +1699,8 @@ async function extractStaleFromDB(
     for (const page of rows) {
       const fullContent = page.compiled_truth + '\n' + page.timeline;
       const extracted = await extractPageLinks(
-        page.slug, fullContent, page.frontmatter, page.type, activeResolver,
+        page.slug, fullContent, page.frontmatter, page.type, resolver,
+        { skipFrontmatter: !includeFrontmatter, globalBasename },
       );
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(c, page.slug, page.source_id, allSlugs, slugToSources);
