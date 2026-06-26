@@ -762,7 +762,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       // poll-only deployments.
       try {
         const { MinionQueue } = await import('../core/minions/queue.ts');
-        const { computeRecommendations, embeddingProviderConfigured, HOSTED_EMBED_KEY_CONFIG } = await import('../core/brain-score-recommendations.ts');
+        const { computeRecommendations } = await import('../core/brain-score-recommendations.ts');
         const queue = new MinionQueue(engine);
         const slotMs = Math.floor(Date.now() / (baseInterval * 1000)) * baseInterval * 1000;
         const slot = new Date(slotMs).toISOString();
@@ -953,30 +953,9 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         // Cheap path: engine.getHealth() is a single SQL count query.
         const health = await engine.getHealth();
         const score = health.brain_score;
-        // v0.40.x: recipe-aware embedding-provider check shared with doctor.ts.
-        // Resolve the configured model (gateway → DB fallback), then pre-await
-        // the handful of hosted-key config values so the resolveKey closure
-        // passed to embeddingProviderConfigured() can stay synchronous.
-        let embeddingModel: string | undefined;
-        try {
-          const gw = await import('../core/ai/gateway.ts');
-          embeddingModel = gw.getEmbeddingModel();
-        } catch {
-          embeddingModel = (await engine.getConfig('embedding_model')) ?? undefined;
-        }
-        const embedKeyCfg: Record<string, string | null> = {};
-        for (const field of Object.values(HOSTED_EMBED_KEY_CONFIG)) {
-          embedKeyCfg[field] = await engine.getConfig(field);
-        }
-        const ctx = {
-          repoPath,
-          embeddingModel,
-          embeddingProviderConfigured: embeddingProviderConfigured(embeddingModel, (envVar) => {
-            const cfgField = HOSTED_EMBED_KEY_CONFIG[envVar];
-            return !!(process.env[envVar] || (cfgField ? embedKeyCfg[cfgField] : undefined));
-          }),
-          hasChatApiKey: !!(process.env.ANTHROPIC_API_KEY || await engine.getConfig('anthropic_api_key')),
-        };
+        const { loadRecommendationContext } = await import('../core/remediation/context.ts');
+        const loadedCtx = await loadRecommendationContext(engine);
+        const ctx = { ...loadedCtx, repoPath: loadedCtx.repoPath ?? repoPath };
         // v0.41.18.0 (A5 + A19 + A22, T15): consult onboard recommendations
         // ALONGSIDE doctor's brain-score recommendations. Onboard's 4 new
         // checks (embed_staleness, link_coverage, timeline_coverage,
