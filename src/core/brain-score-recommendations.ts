@@ -314,13 +314,39 @@ export function computeRecommendations(
   const sevRank: Record<RemediationSeverity, number> = {
     critical: 0, high: 1, medium: 2, low: 3,
   };
-  out.sort((a, b) => {
+  const ranked = (a: RemediationStep, b: RemediationStep) => {
     const sd = sevRank[a.severity] - sevRank[b.severity];
     if (sd !== 0) return sd;
     return a.est_seconds - b.est_seconds;
-  });
+  };
+  out.sort(ranked);
 
-  return out;
+  // Dependency ordering is load-bearing for remediate execution. The runner
+  // submits the list sequentially and uses depends_on only for cascade skips,
+  // so dependents must appear after their prerequisites in the plan itself.
+  return orderRemediationsByDependencies(out, ranked);
+}
+
+function orderRemediationsByDependencies(
+  steps: RemediationStep[],
+  ranked: (a: RemediationStep, b: RemediationStep) => number,
+): RemediationStep[] {
+  const byId = new Map(steps.map((s) => [s.id, s]));
+  const remaining = new Map(steps.map((s) => [s.id, s]));
+  const ordered: RemediationStep[] = [];
+  const completed = new Set<string>();
+
+  while (remaining.size > 0) {
+    const ready = [...remaining.values()]
+      .filter((s) => (s.depends_on ?? []).every((dep) => !byId.has(dep) || completed.has(dep)))
+      .sort(ranked);
+    const next = ready[0] ?? [...remaining.values()].sort(ranked)[0];
+    ordered.push(next);
+    remaining.delete(next.id);
+    completed.add(next.id);
+  }
+
+  return ordered;
 }
 
 /**

@@ -158,6 +158,23 @@ describe('computeRecommendations', () => {
     expect(extract?.depends_on).toContain('sync.repo');
   });
 
+  test('dependencies are ordered before their dependents', () => {
+    const health = makeHealth({
+      missing_embeddings: 100,
+    });
+    const recs = computeRecommendations(health, {
+      repoPath: '/brain',
+      repoNeedsSync: true,
+      staleExtractionPages: 10,
+      embeddingProviderConfigured: true,
+    });
+    const ids = recs.map((r) => r.id);
+    const syncIdx = ids.indexOf('sync.repo');
+    expect(syncIdx).toBeGreaterThanOrEqual(0);
+    expect(syncIdx).toBeLessThan(ids.indexOf('extract.stale'));
+    expect(syncIdx).toBeLessThan(ids.indexOf('embed.stale'));
+  });
+
   test('extract.stale does not need sync when only DB extraction watermark lags', () => {
     const health = makeHealth();
     const recs = computeRecommendations(health, {
