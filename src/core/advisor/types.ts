@@ -11,6 +11,7 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
+import type { WritebackCandidate } from '../writeback-candidate.ts';
 
 export type AdvisorSeverity = 'critical' | 'warn' | 'info';
 
@@ -49,6 +50,7 @@ export interface AdvisorFinding {
    * server side) — runAdvisor drops them when ctx.remote !== false.
    */
   workspace_dependent?: boolean;
+  writeback_candidate?: WritebackCandidate;
 }
 
 export interface AdvisorContext {

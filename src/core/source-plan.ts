@@ -1,4 +1,5 @@
 import { isSourceFederated, parseSourceConfig, type SourceRow } from './sources-load.ts';
+import { matchSeascapeLaneForSource } from './seascape-lanes.ts';
 
 export type SourceRole =
   | 'company_knowledge'
@@ -20,6 +21,8 @@ export interface SourcePlanEntry {
   id: string;
   name: string;
   local_path: string | null;
+  display_name: string;
+  operator_alias: string;
   role: SourceRole;
   label: string;
   responsibility: string;
@@ -98,6 +101,11 @@ const ROLE_INFO: Record<SourceRole, Omit<RoleInfo, 'role'>> = {
 };
 
 export function classifySourceRole(source: Pick<SourcePlanInput, 'id' | 'name' | 'local_path'>): RoleInfo {
+  const lane = matchSeascapeLaneForSource(source);
+  if (lane) {
+    return { role: lane.source_role, label: ROLE_INFO[lane.source_role].label, responsibility: lane.responsibility };
+  }
+
   const haystack = `${source.id} ${source.name} ${source.local_path ?? ''}`.toLowerCase();
   let role: SourceRole = 'repo_memory';
 
@@ -121,14 +129,19 @@ export function classifySourceRole(source: Pick<SourcePlanInput, 'id' | 'name' |
 export function buildSourcePlanReport(sources: SourcePlanInput[]): SourcePlanReport {
   const entries = sources.map((source) => {
     const config = parseSourceConfig(source.config);
+    const lane = matchSeascapeLaneForSource(source);
     const role = classifySourceRole(source);
     const federated = isSourceFederated(config);
     const lastSync = source.last_sync_at ? new Date(source.last_sync_at).toISOString() : null;
+    const displayName = lane?.display_name ?? fallbackDisplayName(source, role.role);
+    const operatorAlias = lane?.operator_alias ?? role.label.toLowerCase();
 
     return {
       id: source.id,
       name: source.name,
       local_path: source.local_path,
+      display_name: displayName,
+      operator_alias: operatorAlias,
       role: role.role,
       label: role.label,
       responsibility: role.responsibility,
@@ -229,4 +242,13 @@ function buildNextActions(entries: SourcePlanEntry[], gaps: string[]): string[] 
 
   actions.push('Use doctor/status as the proof gate before trusting broader automation.');
   return actions;
+}
+
+function fallbackDisplayName(source: Pick<SourcePlanInput, 'id' | 'name' | 'local_path'>, role: SourceRole): string {
+  if (role === 'memory_engine') return 'GBrain';
+  if (role === 'agent_runtime') return 'Hermes';
+  if (role === 'workflow_lab') return 'Codex Quality Lab';
+  if (role === 'default_inbox') return 'Default inbox';
+  if (source.name && source.name.trim()) return source.name;
+  return source.id;
 }
