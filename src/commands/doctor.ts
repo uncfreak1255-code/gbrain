@@ -728,6 +728,10 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   // see the same signal local doctor surfaces.
   checks.push(await checkBatchRetryHealth(engine));
 
+  // TODO-LR-2 — lock_renewal_health (cross-surface parity with buildChecks).
+  // Surfaces per-job lock renewal audit faults and stale-active queue rows.
+  checks.push(await checkLockRenewalHealth(engine));
+
   // v0.41.2.1 — embedding_env_override (cross-surface parity with
   // buildChecks). Surfaces when GBRAIN_EMBEDDING_* env vars disagree
   // with DB config; closes the silent-override class that caused the
@@ -1748,6 +1752,135 @@ export async function checkBatchRetryHealth(_engine: BrainEngine): Promise<Check
       name: 'batch_retry_health',
       status: 'warn',
       message: `Could not check batch_retry audit: ${msg}`,
+    };
+  }
+}
+
+/**
+ * TODO-LR-2 — lock_renewal_health doctor check.
+ *
+ * The lock-renewal audit is the durable signal for Supavisor / PgBouncer
+ * renewal trouble. The queue probe catches the quieter active-row shape:
+ * a job still appears active with a future lock_until, but updated_at has not
+ * moved for long enough that renewal is no longer trustworthy.
+ */
+export async function checkLockRenewalHealth(engine: BrainEngine): Promise<Check> {
+  try {
+    const { readRecentLockRenewalEvents } = await import('../core/audit/lock-renewal-audit.ts');
+    const result = readRecentLockRenewalEvents(24);
+
+    if (result.files_unreadable > 0) {
+      return {
+        name: 'lock_renewal_health',
+        status: 'warn',
+        message: `${result.files_unreadable} lock-renewal audit file(s) unreadable. Fix: check ~/.gbrain/audit/ (or $GBRAIN_AUDIT_DIR if set).`,
+      };
+    }
+
+    const failures = result.events.filter((e) => e.outcome === 'failure');
+    const gaveUp = result.events.filter((e) => e.outcome === 'gave_up');
+    const recovered = result.events.filter((e) => e.outcome === 'success_after_failure');
+    const executeRejected = result.events.filter((e) => e.outcome === 'executeJob_rejected');
+    const staleSeconds = _resolveEnvNumber('GBRAIN_LOCK_RENEWAL_STALE_SECONDS', 120);
+
+    let staleActiveRows: Array<{
+      id: number | string;
+      name: string;
+      queue: string;
+      updated_age_seconds: number | string;
+      lock_remaining_seconds: number | string;
+    }> = [];
+    let activeProbeSkipped = '';
+
+    if (engine.kind === 'postgres') {
+      try {
+        staleActiveRows = await engine.executeRaw<typeof staleActiveRows[number]>(
+          `SELECT id, name, queue,
+                  EXTRACT(EPOCH FROM (now() - updated_at)) AS updated_age_seconds,
+                  EXTRACT(EPOCH FROM (lock_until - now())) AS lock_remaining_seconds
+             FROM minion_jobs
+            WHERE status = 'active'
+              AND lock_until > now()
+              AND updated_at < now() - ($1::double precision * interval '1 second')
+            ORDER BY updated_at ASC
+            LIMIT 5`,
+          [staleSeconds],
+        );
+      } catch (e) {
+        activeProbeSkipped = ` Active-row probe skipped: ${e instanceof Error ? e.message : String(e)}.`;
+      }
+    } else {
+      activeProbeSkipped = ' Active-row probe skipped on PGLite.';
+    }
+
+    const notes: string[] = [];
+    const details: Record<string, unknown> = {
+      window_hours: 24,
+      failures: failures.length,
+      gave_up: gaveUp.length,
+      recovered: recovered.length,
+      executeJob_rejected: executeRejected.length,
+      corrupted_lines: result.corrupted_lines,
+      stale_active_jobs: staleActiveRows.length,
+      stale_seconds: staleSeconds,
+    };
+
+    if (staleActiveRows.length > 0) {
+      const sample = staleActiveRows
+        .map((r) => {
+          const age = Math.round(Number(r.updated_age_seconds ?? 0));
+          const remaining = Math.round(Number(r.lock_remaining_seconds ?? 0));
+          return `#${r.id}(${r.name}@${r.queue}, updated ${age}s ago, lock ${remaining}s left)`;
+        })
+        .join(', ');
+      notes.push(
+        `${staleActiveRows.length} active job(s) have future locks but no renewal update for >${staleSeconds}s: ${sample}. ` +
+        `Fix: inspect with \`gbrain jobs get <id>\`; restart the supervisor if the worker is stale: \`gbrain jobs supervisor stop && gbrain jobs supervisor start\`.`,
+      );
+    }
+
+    if (gaveUp.length >= 5 || failures.length >= 20) {
+      const byName = new Map<string, number>();
+      for (const e of [...gaveUp, ...failures]) byName.set(e.job_name, (byName.get(e.job_name) ?? 0) + 1);
+      const worst = [...byName.entries()].sort((a, b) => b[1] - a[1])[0];
+      notes.push(
+        `${gaveUp.length} gave_up and ${failures.length} failure lock-renewal event(s) in last 24h` +
+        (worst ? ` (worst job type: ${worst[0]}=${worst[1]})` : '') +
+        `. Fix: check pooler/session pool health; if jobs are piling up, restart the supervisor to rebuild worker pools.`,
+      );
+    }
+
+    if (executeRejected.length > 0) {
+      notes.push(`${executeRejected.length} executeJob promise rejection(s) after lock-renewal failure in last 24h; inspect the audit JSONL before retrying affected jobs.`);
+    }
+
+    if (result.corrupted_lines > 0) {
+      notes.push(`${result.corrupted_lines} corrupt lock-renewal audit JSONL line(s) skipped.`);
+    }
+
+    if (notes.length > 0) {
+      return {
+        name: 'lock_renewal_health',
+        status: 'warn',
+        message: notes.join(' ') + activeProbeSkipped,
+        details,
+      };
+    }
+
+    return {
+      name: 'lock_renewal_health',
+      status: 'ok',
+      message:
+        `No unsafe lock-renewal pattern in last 24h ` +
+        `(${failures.length} failures, ${gaveUp.length} gave_up, ${recovered.length} recovered).` +
+        activeProbeSkipped,
+      details,
+    };
+  } catch (e) {
+    return {
+      name: 'lock_renewal_health',
+      status: 'warn',
+      message: `Could not check lock-renewal health: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
 }
@@ -7324,6 +7457,9 @@ export async function buildChecks(
     // surfacing via the batch-retry audit JSONL. Codex H-9 thresholds.
     progress.heartbeat('batch_retry_health');
     checks.push(await checkBatchRetryHealth(engine));
+    // TODO-LR-2 lock_renewal_health — worker renewal audit + stale-active rows.
+    progress.heartbeat('lock_renewal_health');
+    checks.push(await checkLockRenewalHealth(engine));
     // issue #1801 wedged_queue — alive-but-wedged worker (claimable work
     // waiting, zero live-lock active, stale completions) as a health error.
     progress.heartbeat('wedged_queue');

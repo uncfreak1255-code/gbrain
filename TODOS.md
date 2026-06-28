@@ -911,15 +911,17 @@ instrumentation collects.
     parse downstream and dropping rows.
   - **Source:** community PR #1567, contributor `@garrytan-agents`.
 
-- **TODO-LR-2 (P2): doctor check `lock_renewal_health`.**
+- [x] **TODO-LR-2 (P2): doctor check `lock_renewal_health`.**
   v0.41.26.1 ships the audit JSONL primitive without a doctor read
   surface. For now, `tail -F ~/.gbrain/audit/lock-renewal-*.jsonl` is
   the operator UX.
   - **What:** add `checkLockRenewalHealth` in `src/commands/doctor.ts`
     mirroring `checkBatchRetryHealth` shape. Reads
     `readRecentLockRenewalEvents(24)`. Warns at >=5 `gave_up` events
-    or >=20 `failure` events in the last 24h. Wired into both
-    `runDoctor` (local) and `doctorReportRemote` (thin-client).
+    or >=20 `failure` events in the last 24h, and also warns on active
+    minion jobs whose future lock has stopped receiving renewal updates.
+    Wired into both `runDoctor` (local) and `doctorReportRemote`
+    (thin-client).
   - **Why:** operators on production Supabase want a single `gbrain
     doctor` line to know whether their pool is flapping.
   - **Pros:** structurally matches the v0.41.18 batch-retry health

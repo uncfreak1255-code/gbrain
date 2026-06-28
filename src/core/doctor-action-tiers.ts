@@ -21,6 +21,7 @@ const RED_RUNTIME_CHECKS = new Set([
   'embeddings',
   'facts_embedding_width_consistency',
   'jsonb_integrity',
+  'lock_renewal_health',
   'markdown_body_completeness',
   'minions_migration',
   'oauth_confidential_client_health',
