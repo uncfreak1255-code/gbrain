@@ -19,14 +19,16 @@ import { withEnv } from './helpers/with-env.ts';
 import { checkHiddenBySearchPolicy } from '../src/commands/doctor.ts';
 import { categorizeCheck } from '../src/core/doctor-categories.ts';
 import { buildQuarantineMarker } from '../src/core/quarantine.ts';
+import { readContentChunksEmbeddingDim } from '../src/core/embedding-dim-check.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { ChunkInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
+let embeddingDim = 1536;
 
-function basisEmbedding(idx: number, dim = 1536): Float32Array {
-  const emb = new Float32Array(dim);
-  emb[idx % dim] = 1.0;
+function basisEmbedding(idx: number): Float32Array {
+  const emb = new Float32Array(embeddingDim);
+  emb[idx % embeddingDim] = 1.0;
   return emb;
 }
 
@@ -61,6 +63,8 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  const dim = await readContentChunksEmbeddingDim(engine);
+  embeddingDim = dim.dims ?? embeddingDim;
 }, 60_000);
 
 afterAll(async () => {
