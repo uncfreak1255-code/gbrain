@@ -20,6 +20,24 @@ Direct provider paths that bypass the gateway must use their own ledger before
 the API call and commit or roll back after it. New paid provider code should
 prefer the gateway unless there is a strong reason not to.
 
+External provider consoles are still the final billing truth. Use
+`gbrain budget reconcile --external-receipts <file>` to compare GBrain's local
+ledger with a local provider export. For Z.AI, the importer accepts the billing
+history table shape from the API Platform (`Billing Date`, `Code`,
+`Charge Type`, `Usage`, `Amount`) and maps `INPUT`, `OUTPUT`, and `CACHE`
+rows into input, output, and cache-read token totals:
+
+```bash
+gbrain budget reconcile \
+  --provider zai \
+  --days 7 \
+  --external-receipts ~/Downloads/zai-billing-history.json \
+  --json
+```
+
+This is read-only. It does not call Z.AI, read API keys, recharge balance, or
+change rate limits.
+
 ## `spend.posture` — one switch for "cost is not my constraint"
 
 ```bash
