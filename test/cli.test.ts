@@ -34,6 +34,7 @@ describe('CLI structure', () => {
     expect(cliSource).toContain("'export'");
     expect(cliSource).toContain("'embed'");
     expect(cliSource).toContain("'files'");
+    expect(cliSource).toContain("'operator-brief'");
   });
 
   // v0.41.11 #1451 regression — `reindex` had a `case 'reindex':` handler

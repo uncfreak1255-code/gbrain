@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { detectInstallTarget } from '../src/commands/autopilot.ts';
+import { detectInstallTarget, readAutopilotSchedule } from '../src/commands/autopilot.ts';
 
 let tmp: string;
 const envSnapshot: Record<string, string | undefined> = {};
@@ -97,5 +97,26 @@ describe('autopilot wrapper script — env source order (v0.36.1.x #966)', () =>
     // Both should appear inside writeWrapperScript's heredoc as `source ~/.foo`
     expect(src).toMatch(/source\s+~\/\.zshenv/);
     expect(src).toMatch(/source\s+~\/\.zshrc/);
+  });
+});
+
+describe('autopilot schedule readback', () => {
+  test('reports generated launchd schedule files as installed', () => {
+    const plistDir = join(tmp, 'Library', 'LaunchAgents');
+    mkdirSync(plistDir, { recursive: true });
+    writeFileSync(join(plistDir, 'com.gbrain.autopilot.plist'), '<plist></plist>');
+
+    const schedule = readAutopilotSchedule();
+    expect(schedule.installed).toBe(true);
+    expect(schedule.targets.find((target) => target.target === 'macos')).toMatchObject({
+      installed: true,
+      path: join(plistDir, 'com.gbrain.autopilot.plist'),
+    });
+  });
+
+  test('reports no installed schedule on a clean home', () => {
+    const schedule = readAutopilotSchedule();
+    expect(schedule.installed).toBe(false);
+    expect(schedule.targets.every((target) => target.installed === false)).toBe(true);
   });
 });
