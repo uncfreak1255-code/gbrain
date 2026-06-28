@@ -4,6 +4,7 @@ set -u
 REPO_DIR="${GBRAIN_OPERATOR_BRIEF_REPO:-/Users/sawbeck/gbrain}"
 RECEIPT_DIR="${GBRAIN_OPERATOR_BRIEF_DIR:-$HOME/.gbrain/operator-briefs}"
 SOURCE_DRIFT_DIR="${GBRAIN_SOURCE_DRIFT_DIR:-$HOME/.gstack/projects/garrytan-gbrain/source-drift-previews}"
+GBRAIN_BIN="${GBRAIN_OPERATOR_BRIEF_BIN:-gbrain}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RECEIPT="$RECEIPT_DIR/gbrain-operator-brief-$STAMP.md"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gbrain-operator-brief.XXXXXX")"
@@ -58,12 +59,13 @@ latest_file() {
 
 run_capture git_status git -C "$REPO_DIR" status --short --branch
 run_capture git_head git -C "$REPO_DIR" log --oneline --decorate -1
-run_capture current_source gbrain sources current --json
-run_capture status gbrain status --json --fast
-run_capture supervisor gbrain jobs supervisor status --json
-run_capture active_jobs gbrain jobs list --status active
-run_capture doctor_plan gbrain doctor --remediation-plan --json
-run_capture budget_daily gbrain budget daily --json
+run_capture current_source bash -lc "$GBRAIN_BIN sources current --json"
+run_capture status bash -lc "$GBRAIN_BIN status --json --fast"
+run_capture supervisor bash -lc "$GBRAIN_BIN jobs supervisor status --json"
+run_capture active_jobs bash -lc "$GBRAIN_BIN jobs list --status active"
+run_capture doctor_plan bash -lc "$GBRAIN_BIN doctor --remediation-plan --json"
+run_capture budget_daily bash -lc "$GBRAIN_BIN budget daily --json"
+run_capture autopilot_status bash -lc "$GBRAIN_BIN autopilot --status --json"
 
 latest_drift_json="$(latest_file "$SOURCE_DRIFT_DIR" 'rehome-preview-*.json' || true)"
 latest_drift_md="$(latest_file "$SOURCE_DRIFT_DIR" 'rehome-preview-*.md' || true)"
@@ -77,6 +79,8 @@ queue_active="$(json_get "$TMP_DIR/status.out" 'data.queue && data.queue.active'
 queue_waiting="$(json_get "$TMP_DIR/status.out" 'data.queue && data.queue.waiting' || printf '?')"
 queue_failed="$(json_get "$TMP_DIR/status.out" 'data.queue && data.queue.failed' || printf '?')"
 autopilot_running="$(json_get "$TMP_DIR/status.out" 'data.autopilot && data.autopilot.running' || printf 'unknown')"
+autopilot_schedule_installed="$(json_get "$TMP_DIR/autopilot_status.out" 'data.installed' || printf 'unknown')"
+autopilot_schedule_targets="$(json_get "$TMP_DIR/autopilot_status.out" 'data.schedule && Array.isArray(data.schedule.targets) ? data.schedule.targets.filter((t) => t.installed).map((t) => `${t.target}: ${t.detail}`).join(" | ") : ""' || printf '')"
 worker_crashes="$(json_get "$TMP_DIR/status.out" 'data.workers && data.workers.crashes_24h' || printf '?')"
 supervisor_running="$(json_get "$TMP_DIR/supervisor.out" 'data.running' || printf 'unknown')"
 manual_workers="$(json_get "$TMP_DIR/supervisor.out" 'Array.isArray(data.workers) ? data.workers.length : 0' || printf '?')"
@@ -104,6 +108,12 @@ fi
   printf -- '- Active queue: `%s`; waiting: `%s`; failed: `%s`\n' "$queue_active" "$queue_waiting" "$queue_failed"
   printf -- '- Supervisor running: `%s`; manual workers listed: `%s`\n' "$supervisor_running" "$manual_workers"
   printf -- '- Autopilot running: `%s`\n' "$autopilot_running"
+  printf -- '- Autopilot schedule installed: `%s`\n' "$autopilot_schedule_installed"
+  if [ -n "$autopilot_schedule_targets" ]; then
+    printf -- '- Autopilot schedule readback: %s\n' "$autopilot_schedule_targets"
+  else
+    printf -- '- Autopilot schedule readback: none installed on this host\n'
+  fi
   printf -- '- Worker crashes in 24h: `%s`\n' "$worker_crashes"
   printf -- '- Doctor preview: score `%s/%s`, max reachable `%s`, estimated spend `$%s`\n' "$doctor_score" "$doctor_target" "$doctor_reachable" "$doctor_cost"
   if [ -n "$doctor_steps" ]; then
@@ -160,6 +170,11 @@ fi
   printf '## Status JSON\n\n'
   printf '```json\n'
   cat "$TMP_DIR/status.out"
+  printf '\n```\n'
+
+  printf '\n\n## Autopilot Schedule JSON\n\n'
+  printf '```json\n'
+  cat "$TMP_DIR/autopilot_status.out"
   printf '\n```\n'
 } >"$RECEIPT"
 

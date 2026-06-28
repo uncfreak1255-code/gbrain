@@ -17,7 +17,7 @@ import {
   type BudgetAuditAccountingKind,
 } from '../core/budget/monthly-cap.ts';
 
-export type BudgetProviderFilter = 'anthropic' | 'deepseek' | 'all';
+export type BudgetProviderFilter = 'anthropic' | 'deepseek' | 'zai' | 'all';
 
 export interface BudgetReconcileArgs {
   days: number;
@@ -96,10 +96,10 @@ export interface BudgetReconcileReport {
 const HELP = `gbrain budget reconcile - local budget ledger readback
 
 USAGE
-  gbrain budget reconcile [--days N] [--provider anthropic|deepseek|all]
+  gbrain budget reconcile [--days N] [--provider anthropic|deepseek|zai|all]
                            [--external-receipts PATH] [--max-delta-usd N]
                            [--out PATH] [--json]
-  gbrain budget daily [--date YYYY-MM-DD] [--provider anthropic|deepseek|all]
+  gbrain budget daily [--date YYYY-MM-DD] [--provider anthropic|deepseek|zai|all]
                       [--out PATH] [--json]
   gbrain budget dream-run --since ISO --until ISO [--out PATH] [--json]
 
@@ -107,7 +107,7 @@ WHAT IT DOES
   Reads ~/.gbrain/audit/budget-*.jsonl (or GBRAIN_AUDIT_DIR), separates provider
   billed-candidate usage from estimates, fallback/error accounting, and test or
   simulated rows. With --external-receipts, compares billed candidates against a
-  local JSON/JSONL provider receipt export. It never calls Anthropic or any provider.
+  local JSON/JSONL/CSV provider receipt export. It never calls any provider.
 
 EXAMPLES
   gbrain budget reconcile --days 7
@@ -179,8 +179,8 @@ export function parseBudgetReconcileArgs(args: string[], now = new Date()): Budg
       }
       case '--provider': {
         const raw = args[++i];
-        if (raw !== 'anthropic' && raw !== 'deepseek' && raw !== 'all') {
-          throw new Error('--provider must be anthropic, deepseek, or all');
+        if (raw !== 'anthropic' && raw !== 'deepseek' && raw !== 'zai' && raw !== 'all') {
+          throw new Error('--provider must be anthropic, deepseek, zai, or all');
         }
         provider = raw;
         break;
@@ -413,35 +413,106 @@ function readExternalReceiptRecords(
   const fullPath = isAbsolute(path) ? path : resolve(path);
   if (!existsSync(fullPath)) throw new Error(`External receipt file not found: ${fullPath}`);
   const records: SpendRecord[] = [];
-  for (const row of readJsonRecords(fullPath)) {
-    const ts = timestampInWindow(row.ts ?? row.timestamp ?? row.created_at ?? row.date ?? row.time, since, until);
+  for (const row of readExternalReceiptRows(fullPath)) {
+    const ts = timestampInWindow(getAny(row, ['ts', 'timestamp', 'created_at', 'date', 'time', 'Billing Date', 'billing_date']), since, until);
     if (!ts) continue;
-    const model = stringFrom(row.model ?? row.model_id ?? row.modelId);
-    const explicitProvider = stringFrom(row.provider ?? row.provider_id ?? row.providerId);
-    const rowProvider = explicitProvider ?? (model ? providerForMonthlyBudget(model) : null);
+    const model = stringFrom(getAny(row, ['model', 'model_id', 'modelId', 'Code', 'code', 'Model name', 'model_name']));
+    const explicitProvider = stringFrom(getAny(row, ['provider', 'provider_id', 'providerId']));
+    const rowProvider = explicitProvider ?? inferReceiptProvider(model);
     if (!providerMatches(rowProvider, provider, true)) continue;
-    const costUsd = firstNumber(row.actual_cost_usd, row.cost_usd, row.amount_usd, row.total_usd, row.usd, row.amount);
+    const costUsd = firstNumber(
+      getAny(row, ['actual_cost_usd', 'cost_usd', 'amount_usd', 'total_usd', 'usd', 'amount', 'Amount']),
+    );
     if (costUsd === null) continue;
+    const usageTokens = tokenCountFrom(getAny(row, ['Usage', 'usage', 'tokens']));
+    const chargeType = stringFrom(getAny(row, ['Charge Type', 'charge_type', 'type']));
+    const inputTokens = firstNumber(getAny(row, ['input_tokens', 'inputTokens'])) ?? (chargeType === 'INPUT' ? usageTokens : 0);
+    const outputTokens = firstNumber(getAny(row, ['output_tokens', 'outputTokens'])) ?? (chargeType === 'OUTPUT' ? usageTokens : 0);
+    const cacheReadTokens = firstNumber(
+      getAny(row, ['cache_read_tokens', 'cacheReadTokens', 'cache_read_input_tokens']),
+    ) ?? (chargeType === 'CACHE' ? usageTokens : 0);
     const record = {
       ts,
       event: stringFrom(row.event),
       model,
       provider: rowProvider,
-      label: stringFrom(row.label ?? row.operation ?? row.event),
-      subLabel: stringFrom(row.sub_label ?? row.subLabel),
+      label: stringFrom(getAny(row, ['label', 'operation', 'event'])) ?? externalReceiptLabel(rowProvider, chargeType),
+      subLabel: stringFrom(getAny(row, ['sub_label', 'subLabel', 'API Key', 'api_key'])),
       costUsd,
       projectedCostUsd: 0,
-      inputTokens: firstNumber(row.input_tokens, row.inputTokens) ?? 0,
-      outputTokens: firstNumber(row.output_tokens, row.outputTokens) ?? 0,
+      inputTokens,
+      outputTokens,
       estimatedInputTokens: 0,
       maxOutputTokens: 0,
-      cacheReadTokens: firstNumber(row.cache_read_tokens, row.cacheReadTokens, row.cache_read_input_tokens) ?? 0,
-      cacheCreationTokens: firstNumber(row.cache_creation_tokens, row.cacheCreationTokens, row.cache_creation_input_tokens) ?? 0,
+      cacheReadTokens,
+      cacheCreationTokens: firstNumber(getAny(row, ['cache_creation_tokens', 'cacheCreationTokens', 'cache_creation_input_tokens'])) ?? 0,
       sourceFile: fullPath,
     };
     if (labelMatchesPrefixes(record.label, labelPrefixes)) records.push(record);
   }
   return records;
+}
+
+function readExternalReceiptRows(path: string): Array<Record<string, unknown>> {
+  const text = readFileSync(path, 'utf-8').trim();
+  if (!text) return [];
+  if (text.startsWith('[')) {
+    const parsed = JSON.parse(text) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    if (parsed.every(isObjectRecord)) return parsed;
+    if (parsed.every(Array.isArray)) return tableRowsToObjects(parsed);
+    return [];
+  }
+  if (text.startsWith('{')) {
+    return readJsonRecords(path);
+  }
+  const lines = text.split('\n').filter((line) => line.trim().length > 0);
+  if (lines.length < 2) return [];
+  const header = parseDelimitedLine(lines[0]!);
+  return lines.slice(1)
+    .map((line) => rowArrayToObject(header, parseDelimitedLine(line)))
+    .filter((row) => Object.keys(row).length > 0);
+}
+
+function tableRowsToObjects(rows: unknown[][]): Array<Record<string, unknown>> {
+  if (rows.length === 0) return [];
+  const header = rows[0]?.map((cell) => String(cell ?? '').trim()) ?? [];
+  if (header.length === 0 || header.some((cell) => cell.length === 0)) return [];
+  return rows.slice(1).map((row) => rowArrayToObject(header, row));
+}
+
+function rowArrayToObject(header: string[], row: unknown[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (let i = 0; i < header.length; i++) {
+    const key = header[i];
+    if (!key) continue;
+    out[key] = row[i] ?? '';
+  }
+  return out;
+}
+
+function parseDelimitedLine(line: string): string[] {
+  const cells: string[] = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (quoted && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (ch === ',' && !quoted) {
+      cells.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
 }
 
 function readJsonRecords(path: string): Array<Record<string, unknown>> {
@@ -598,6 +669,32 @@ function providerMatches(rowProvider: string | null, filter: BudgetProviderFilte
   return allowUnknownExternal && rowProvider === null;
 }
 
+function inferReceiptProvider(model: string | null): string | null {
+  if (!model) return null;
+  const provider = providerForMonthlyBudget(model);
+  if (provider) return provider;
+  const normalized = model.toLowerCase();
+  if (normalized.startsWith('glm-') || normalized.startsWith('autoglm-')) return 'zai';
+  return null;
+}
+
+function externalReceiptLabel(provider: string | null, chargeType: string | null): string | null {
+  if (!provider && !chargeType) return null;
+  return [provider, chargeType].filter(Boolean).join('.');
+}
+
+function getAny(row: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(row, key)) return row[key];
+  }
+  const lowerMap = new Map(Object.keys(row).map((key) => [key.toLowerCase(), key]));
+  for (const key of keys) {
+    const actual = lowerMap.get(key.toLowerCase());
+    if (actual) return row[actual];
+  }
+  return undefined;
+}
+
 function timestampInWindow(value: unknown, since: Date, until: Date): string | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   const d = new Date(value);
@@ -617,11 +714,20 @@ function firstNumber(...values: unknown[]): number | null {
 function numberFrom(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
-    const cleaned = value.trim().replace(/^\$/, '');
+    const cleaned = value.trim().replace(/,/g, '').replace(/^\-\$/, '-').replace(/^\$/, '');
     const n = Number(cleaned);
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+function tokenCountFrom(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return 0;
+  const match = value.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  if (!match) return 0;
+  const n = Number(match[0]);
+  return Number.isFinite(n) ? n : 0;
 }
 
 function stringFrom(value: unknown): string | null {

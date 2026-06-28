@@ -116,6 +116,144 @@ describe('budget reconcile readback', () => {
     });
   });
 
+  test('parses Z.AI billing history table exports with input output and cache tokens', async () => {
+    const external = join(tmp, 'zai-billing-history.json');
+    writeFileSync(external, JSON.stringify([
+      [
+        'ID',
+        'Billing Date',
+        'Billing Type',
+        'API Key',
+        'User',
+        'Service',
+        'Product',
+        'Code',
+        'Charge Type',
+        'Listed Price',
+        'Discount',
+        'Usage',
+        'Exempt Usage',
+        'Deducted Usage',
+        'Package ID',
+        'Package Name',
+        'Package Remaining Usage',
+        'API Calls',
+        'Amount',
+        'credits Amount',
+        'Cash Amount',
+        'Third-party',
+        'Promotion name',
+        'Unpaid Amount',
+        'Status',
+      ],
+      [
+        'DAY-input',
+        '2026-06-26',
+        'Postpaid',
+        '292d...fcd3',
+        '-',
+        'inference',
+        'std',
+        'glm-5.2',
+        'INPUT',
+        '$0.0014/kToken',
+        '1',
+        '9757006 token',
+        '0 token',
+        '0 token',
+        '-',
+        '-',
+        '-',
+        '835',
+        '$13.6598084',
+        '$0',
+        '$0',
+        '$0',
+        'none',
+        '$0',
+        'Paid',
+      ],
+      [
+        'DAY-output',
+        '2026-06-26',
+        'Postpaid',
+        '292d...fcd3',
+        '-',
+        'inference',
+        'std',
+        'glm-5.2',
+        'OUTPUT',
+        '$0.0044/kToken',
+        '1',
+        '2177127 token',
+        '0 token',
+        '0 token',
+        '-',
+        '-',
+        '-',
+        '835',
+        '$9.5793588',
+        '$0',
+        '$0',
+        '$0',
+        'none',
+        '$0',
+        'Paid',
+      ],
+      [
+        'DAY-cache',
+        '2026-06-26',
+        'Postpaid',
+        '292d...fcd3',
+        '-',
+        'inference',
+        'std',
+        'glm-5.2',
+        'CACHE',
+        '$0.00026/kToken',
+        '1',
+        '26925440 token',
+        '0 token',
+        '0 token',
+        '-',
+        '-',
+        '-',
+        '816',
+        '$7.0006144',
+        '$0',
+        '$0',
+        '$0',
+        'none',
+        '$0',
+        'Paid',
+      ],
+    ]) + '\n', 'utf-8');
+
+    await withEnv({ GBRAIN_AUDIT_DIR: tmp }, async () => {
+      const args = parseBudgetReconcileArgs(
+        ['--provider', 'zai', '--days', '7', '--external-receipts', external],
+        new Date('2026-06-27T00:00:00.000Z'),
+      );
+      const report = buildBudgetReconcileReport(args);
+      expect(report.external?.records).toBe(3);
+      expect(report.external?.cost_usd).toBe(30.239782);
+      expect(report.external?.input_tokens).toBe(9_757_006);
+      expect(report.external?.output_tokens).toBe(2_177_127);
+      expect(report.external?.cache_read_tokens).toBe(26_925_440);
+      expect(report.external?.by_model[0]).toEqual({
+        model: 'glm-5.2',
+        records: 3,
+        cost_usd: 30.239782,
+      });
+      expect(report.external?.by_label.map((row) => row.label)).toEqual([
+        'zai.INPUT',
+        'zai.OUTPUT',
+        'zai.CACHE',
+      ]);
+      expect(report.comparison.delta_usd).toBe(-30.239782);
+    });
+  });
+
   test('separates provider candidates from estimates, fallback rows, and test rows', async () => {
     const legacyFixtureRow = {
       ts: '2026-06-20T12:02:00.000Z',
@@ -246,7 +384,8 @@ describe('budget reconcile readback', () => {
     await withEnv({ GBRAIN_AUDIT_DIR: tmp }, async () => {
       const rc = await runBudget([
         'reconcile',
-        '--days', '7',
+        '--since', '2026-06-20T00:00:00.000Z',
+        '--until', '2026-06-21T00:00:00.000Z',
         '--external-receipts', external,
         '--max-delta-usd', '0.05',
       ]);
@@ -279,7 +418,8 @@ describe('budget reconcile readback', () => {
     await withEnv({ GBRAIN_AUDIT_DIR: tmp }, async () => {
       const rc = await runBudget([
         'reconcile',
-        '--days', '7',
+        '--since', '2026-06-20T00:00:00.000Z',
+        '--until', '2026-06-21T00:00:00.000Z',
         '--external-receipts', external,
         '--max-delta-usd', '0.01',
       ]);

@@ -4286,8 +4286,12 @@ cat ~/.gbrain/preferences.json
 cat ~/.gbrain/migrations/completed.jsonl
 
 # 3. Autopilot is supervising a Minions worker child
-gbrain autopilot --status
+gbrain autopilot --status --json   # includes installed launchd/systemd/cron/start-script readback
 ps aux | grep 'jobs work'
+
+# Full operator receipt: queue, doctor preview, budget, active jobs, source
+# drift, and whether the installed autopilot schedule is wired on this host.
+gbrain operator-brief
 
 # 4. Jobs show up in the queue
 gbrain jobs list

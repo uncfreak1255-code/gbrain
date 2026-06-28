@@ -1267,6 +1267,20 @@ function ephemeralStartScriptPath(): string {
 
 export type InstallTarget = 'macos' | 'linux-systemd' | 'ephemeral-container' | 'linux-cron';
 
+export interface AutopilotScheduleTargetReadback {
+  target: InstallTarget;
+  installed: boolean;
+  path?: string;
+  active?: boolean | null;
+  enabled?: boolean | null;
+  detail: string;
+}
+
+export interface AutopilotScheduleReadback {
+  installed: boolean;
+  targets: AutopilotScheduleTargetReadback[];
+}
+
 /**
  * Detect the right supervisor for this host.
  *
@@ -1734,6 +1748,93 @@ function uninstallDaemon() {
   }
 }
 
+export function readAutopilotSchedule(): AutopilotScheduleReadback {
+  const targets: AutopilotScheduleTargetReadback[] = [];
+  const home = process.env.HOME || '';
+
+  const plist = plistPath();
+  let launchdActive: boolean | null = null;
+  if (existsSync(plist)) {
+    try {
+      const out = execSync('launchctl list 2>/dev/null || true', { encoding: 'utf-8' });
+      launchdActive = out.includes('com.gbrain.autopilot');
+    } catch {
+      launchdActive = null;
+    }
+  }
+  targets.push({
+    target: 'macos',
+    installed: existsSync(plist),
+    path: plist,
+    active: existsSync(plist) ? launchdActive : false,
+    detail: existsSync(plist)
+      ? `launchd plist present${launchdActive === null ? '' : launchdActive ? ' and loaded' : ' but not loaded'}`
+      : 'launchd plist absent',
+  });
+
+  const unit = systemdUnitPath();
+  let systemdEnabled: boolean | null = null;
+  let systemdActive: boolean | null = null;
+  if (existsSync(unit)) {
+    try {
+      execSync('systemctl --user is-enabled --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: 3000 });
+      systemdEnabled = true;
+    } catch {
+      systemdEnabled = false;
+    }
+    try {
+      execSync('systemctl --user is-active --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: 3000 });
+      systemdActive = true;
+    } catch {
+      systemdActive = false;
+    }
+  }
+  targets.push({
+    target: 'linux-systemd',
+    installed: existsSync(unit),
+    path: unit,
+    active: existsSync(unit) ? systemdActive : false,
+    enabled: existsSync(unit) ? systemdEnabled : false,
+    detail: existsSync(unit)
+      ? `systemd user unit present${systemdEnabled === null ? '' : systemdEnabled ? ', enabled' : ', not enabled'}${systemdActive === null ? '' : systemdActive ? ', active' : ', inactive'}`
+      : 'systemd user unit absent',
+  });
+
+  const startScript = ephemeralStartScriptPath();
+  targets.push({
+    target: 'ephemeral-container',
+    installed: existsSync(startScript),
+    path: startScript,
+    active: null,
+    detail: existsSync(startScript)
+      ? 'ephemeral start script present; host bootstrap must invoke it'
+      : 'ephemeral start script absent',
+  });
+
+  let cronInstalled = false;
+  let cronDetail = 'crontab unavailable or no autopilot entry';
+  try {
+    const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
+    const lines = crontab.split('\n').filter((line) => line.includes('gbrain autopilot') || line.includes('autopilot-run.sh'));
+    cronInstalled = lines.length > 0;
+    cronDetail = cronInstalled ? lines.map((line) => line.trim()).join(' | ') : 'no crontab autopilot entry';
+  } catch {
+    /* leave unavailable detail */
+  }
+  targets.push({
+    target: 'linux-cron',
+    installed: cronInstalled,
+    path: join(home, '.gbrain', 'autopilot-run.sh'),
+    active: cronInstalled ? null : false,
+    detail: cronDetail,
+  });
+
+  return {
+    installed: targets.some((target) => target.installed),
+    targets,
+  };
+}
+
 function showStatus(json: boolean) {
   const logFile = join(process.env.HOME || '', '.gbrain', 'autopilot.log');
   let lastLine = '';
@@ -1743,20 +1844,15 @@ function showStatus(json: boolean) {
     lastLine = lines[lines.length - 1] || '';
   } catch { /* no log */ }
 
-  let installed = false;
-  if (process.platform === 'darwin') {
-    installed = existsSync(plistPath());
-  } else {
-    try {
-      const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
-      installed = crontab.includes('gbrain autopilot');
-    } catch { /* no crontab */ }
-  }
+  const schedule = readAutopilotSchedule();
 
   if (json) {
-    console.log(JSON.stringify({ installed, last_log: lastLine }));
+    console.log(JSON.stringify({ installed: schedule.installed, schedule, last_log: lastLine }));
   } else {
-    console.log(`Autopilot: ${installed ? 'installed' : 'not installed'}`);
+    console.log(`Autopilot: ${schedule.installed ? 'installed' : 'not installed'}`);
+    for (const target of schedule.targets.filter((t) => t.installed)) {
+      console.log(`Schedule: ${target.target} — ${target.detail}`);
+    }
     if (lastLine) console.log(`Last log: ${lastLine}`);
   }
 }
