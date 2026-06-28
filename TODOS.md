@@ -911,22 +911,6 @@ instrumentation collects.
     parse downstream and dropping rows.
   - **Source:** community PR #1567, contributor `@garrytan-agents`.
 
-- [x] **TODO-LR-2 (P2): doctor check `lock_renewal_health`.**
-  v0.41.26.1 ships the audit JSONL primitive without a doctor read
-  surface. For now, `tail -F ~/.gbrain/audit/lock-renewal-*.jsonl` is
-  the operator UX.
-  - **What:** add `checkLockRenewalHealth` in `src/commands/doctor.ts`
-    mirroring `checkBatchRetryHealth` shape. Reads
-    `readRecentLockRenewalEvents(24)`. Warns at >=5 `gave_up` events
-    or >=20 `failure` events in the last 24h, and also warns on active
-    minion jobs whose future lock has stopped receiving renewal updates.
-    Wired into both `runDoctor` (local) and `doctorReportRemote`
-    (thin-client).
-  - **Why:** operators on production Supabase want a single `gbrain
-    doctor` line to know whether their pool is flapping.
-  - **Pros:** structurally matches the v0.41.18 batch-retry health
-    check. ~50 LOC.
-
 - **TODO-LR-3 (P3): wire `pruneOldLockRenewalAuditFiles(30)` into
   `gbrain dream --phase purge`.**
   - **What:** one-line addition at the existing purge handler where
@@ -3805,6 +3789,15 @@ keeping both skills' triggers intact for chaining.
 **Found:** 2026-04-24 during v0.19.0 production-readiness review.
 
 ## Completed
+
+### ~~TODO-LR-2 (P2): doctor check `lock_renewal_health`~~
+**Completed:** v0.45.4.0 (2026-06-28)
+
+`gbrain doctor` and thin-client doctor reports now include
+`lock_renewal_health`, backed by `readRecentLockRenewalEvents(24)` and active
+`minion_jobs` rows. The check warns on repeated renewal failures, repeated
+`gave_up` loops, corrupt audit readback, and active jobs whose future lock is
+no longer receiving safe renewal updates.
 
 ### ~~(v0.42.20.0 follow-up) Decouple the op-dispatch force-exit timer~~
 **Completed:** v0.42.39.0 (2026-06-10)
