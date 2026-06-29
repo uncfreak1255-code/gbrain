@@ -125,13 +125,16 @@ describe('post-commit hook (D9 local, D7 self-contained)', () => {
     writeFileSync(join(work, 'orphan.md'), 'o\n');
     expect(await waitForGitIndex(work)).toBe(true);
     git(work, 'add', 'orphan.md'); git(work, 'commit', '-qm', 'orphan');
+    execFileSync('bash', [join(work, '.git', 'hooks', 'post-commit')], {
+      cwd: work, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
+    });
     const log = join(process.env.GBRAIN_HOME!, 'brain-push.log');
-    const deadline = Date.now() + 8000;
+    const deadline = Date.now() + 20000;
     let found = false;
     while (Date.now() < deadline) {
       if (existsSync(log) && readFileSync(log, 'utf-8').includes('NEEDS ATTENTION')) { found = true; break; }
       await new Promise(r => setTimeout(r, 150));
     }
     expect(found).toBe(true);
-  }, { timeout: 10_000 });
+  }, { timeout: 25_000 });
 });

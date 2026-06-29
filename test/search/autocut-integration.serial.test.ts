@@ -25,13 +25,21 @@ import {
 } from '../../src/core/ai/gateway.ts';
 import type { PageInput, SearchOpts } from '../../src/core/types.ts';
 import type { RerankInput, RerankResult } from '../../src/core/ai/gateway.ts';
+import { emptyHome } from '../helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+let savedGbrainHome: string | undefined;
+let savedOpenaiKey: string | undefined;
 
 const DIMS = 1536;
 const FAKE_EMB = Array.from({ length: DIMS }, (_, j) => (j === 0 ? 1 : 0.01));
 
 beforeAll(async () => {
+  savedGbrainHome = process.env.GBRAIN_HOME;
+  savedOpenaiKey = process.env.OPENAI_API_KEY;
+  process.env.GBRAIN_HOME = emptyHome();
+  process.env.OPENAI_API_KEY = 'sk-test';
+
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -65,6 +73,10 @@ afterAll(async () => {
   __setEmbedTransportForTests(null);
   resetGateway();
   await engine.disconnect();
+  if (savedGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = savedGbrainHome;
+  if (savedOpenaiKey === undefined) delete process.env.OPENAI_API_KEY;
+  else process.env.OPENAI_API_KEY = savedOpenaiKey;
 });
 
 // A reranker that assigns descending scores from a fixed array (by index).
