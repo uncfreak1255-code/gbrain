@@ -4,8 +4,13 @@
  * workspace-dependent findings over MCP via runAdvisor's remote filter).
  */
 import { describe, test, expect } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { operationsByName, OperationError, type OperationContext } from '../src/core/operations.ts';
 import type { Page } from '../src/core/types.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const advisor = operationsByName['advisor']!;
 
@@ -40,10 +45,21 @@ Seascape Hub strategy canon update.
   };
 }
 
+function memoryOnlyPage(): Page {
+  return page({
+    compiled_truth: `# Seascape strategy dream
+
+Session: 019example
+
+Seascape Hub strategy canon update without independent confirmation yet.
+`,
+  });
+}
+
 function ctx(
   over: Partial<OperationContext>,
   cfg: Record<string, string | null> = {},
-  opts: { candidate?: boolean } = {},
+  opts: { candidate?: boolean; memoryOnlyReject?: boolean } = {},
 ): OperationContext {
   return {
     engine: ({
@@ -66,7 +82,7 @@ function ctx(
         }
         throw new Error('no');
       },
-      listPages: async () => (opts.candidate ? [page()] : []),
+      listPages: async () => (opts.memoryOnlyReject ? [memoryOnlyPage()] : opts.candidate ? [page()] : []),
     }) as unknown as OperationContext['engine'],
     config: {} as OperationContext['config'],
     logger: { info() {}, warn() {}, error() {}, debug() {} } as unknown as OperationContext['logger'],
@@ -114,5 +130,20 @@ describe('advisor op gate', () => {
     expect(candidateFinding?.writeback_candidate?.draft?.writes).toBe(false);
     expect(candidateFinding?.fix.command_argv).toBeNull();
     expect(candidateFinding?.fix.dispatch_id).toBeUndefined();
+  });
+
+  test('remote advisor does not persist Seascape suppression state for rejected memory-only residue', async () => {
+    const gbHome = mkdtempSync(join(tmpdir(), 'gbrain-advisor-remote-readonly-'));
+    try {
+      await withEnv({ GBRAIN_HOME: gbHome }, async () => {
+        await advisor.handler(
+          ctx({ remote: true }, { 'mcp.publish_advisor': 'true' }, { candidate: true, memoryOnlyReject: true }),
+          {},
+        );
+        expect(existsSync(join(gbHome, '.gbrain', 'writeback-suppression-state.json'))).toBe(false);
+      });
+    } finally {
+      rmSync(gbHome, { recursive: true, force: true });
+    }
   });
 });

@@ -1,12 +1,12 @@
 /**
  * advisor/types.ts — shared types for `gbrain advisor`.
  *
- * The advisor is a read-only, brain-state-aware recommender: it computes a
- * ranked list of high-leverage actions for THIS brain right now, each with a
- * severity, a one-line why-it-matters, and the exact fix command. It never
- * mutates (the CLI `--apply` path runs a fix only behind an explicit, local-only
- * confirm; see commands/advisor.ts). Same print-never-execute discipline as
- * post-install-advisory.ts.
+ * The advisor is a brain-state-aware recommender: it computes a ranked list of
+ * high-leverage actions for THIS brain right now, each with a severity, a
+ * one-line why-it-matters, and the exact fix command. It never runs fixes or
+ * canon writes without the local CLI `--apply` path; trusted local collectors
+ * may persist bounded housekeeping state, while remote calls stay read-only.
+ * Same print-never-execute discipline as post-install-advisory.ts.
  */
 
 import type { BrainEngine } from '../engine.ts';

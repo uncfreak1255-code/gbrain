@@ -68,7 +68,7 @@ export const collectSeascapeWritebacks: AdvisorCollector = {
       }
     }
 
-    if (suppressionDirty) {
+    if (!ctx.remote && suppressionDirty) {
       saveWritebackSuppressionState(suppressionState);
     }
 
