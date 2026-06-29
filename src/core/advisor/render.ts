@@ -40,6 +40,18 @@ export function renderAdvisorReport(report: AdvisorReport): string {
   for (const f of report.findings) {
     lines.push(`[${SEV_LABEL[f.severity]}] ${f.title}`);
     if (f.detail) for (const wl of wrap(f.detail, 68, '    ')) lines.push(wl);
+    if (f.writeback_candidate) {
+      const candidate = f.writeback_candidate;
+      lines.push(`    owner: ${candidate.owner_display_name} (${candidate.owner_operator_alias})`);
+      lines.push(`    proof: ${candidate.proof.summary}`);
+      lines.push(`    next: ${candidate.next_step}`);
+      if (candidate.draft) {
+        lines.push(`    draft: ${candidate.draft.title} [writes=false]`);
+        for (const line of candidate.draft.body.split('\n')) {
+          lines.push(line.length > 0 ? `      ${line}` : '');
+        }
+      }
+    }
     const fl = fixLine(f);
     if (fl) lines.push(`    fix: ${fl}`);
     lines.push('');

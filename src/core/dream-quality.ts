@@ -2,14 +2,10 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Page } from './types.ts';
+import { evaluateSeascapeWritebackCandidate } from './writeback-candidate.ts';
+import { getSeascapeLane, isSeascapeLaneId, type SeascapeLaneId } from './seascape-lanes.ts';
 
-export type DreamPromotionOwner =
-  | 'seascape-hub'
-  | 'sawyer-hub'
-  | 'seascape-ops'
-  | 'seascape-vacations-site'
-  | 'gbrain'
-  | 'unknown';
+export type DreamPromotionOwner = SeascapeLaneId | 'gbrain' | 'unknown';
 
 export interface DreamQualityPageScore {
   slug: string;
@@ -109,8 +105,8 @@ export function scoreDreamPage(page: Page): DreamQualityPageScore {
 
   const passedCount = Object.values(checks).filter(Boolean).length;
   const score = Math.round((passedCount / Object.keys(checks).length) * 100);
-  const owner = inferPromotionOwner(text);
-  const needsPromotion = owner.owner !== 'gbrain' && owner.owner !== 'unknown';
+  const owner = inferPromotionOwner(page, text);
+  const needsPromotion = owner.needs_promotion_review;
   const reasons = Object.entries(checks)
     .filter(([, ok]) => !ok)
     .map(([name]) => name);
@@ -138,14 +134,32 @@ function formatFrontmatterValue(value: unknown): string {
   return String(value);
 }
 
-function inferPromotionOwner(text: string): { owner: DreamPromotionOwner; reason: string | null; next: string | null } {
+function inferPromotionOwner(page: Page, text: string): {
+  owner: DreamPromotionOwner;
+  reason: string | null;
+  next: string | null;
+  needs_promotion_review: boolean;
+} {
+  const evaluation = evaluateSeascapeWritebackCandidate(page);
+  if (evaluation.verdict === 'candidate' && evaluation.candidate) {
+    return {
+      owner: evaluation.candidate.owner,
+      reason: evaluation.candidate.reason,
+      next: evaluation.candidate.next_step,
+      needs_promotion_review: true,
+    };
+  }
+  if (evaluation.verdict === 'memory_only' || evaluation.verdict === 'ambiguous_owner' || evaluation.verdict === 'stale') {
+    const owner = evaluation.matched_owners[0] ?? 'unknown';
+    return { owner, reason: evaluation.reason, next: null, needs_promotion_review: false };
+  }
   for (const p of OWNER_PATTERNS) {
-    if (p.re.test(text)) return { owner: p.owner, reason: p.reason, next: p.next };
+    if (p.re.test(text)) return { owner: p.owner, reason: p.reason, next: p.next, needs_promotion_review: true };
   }
   if (/\bgbrain|dream|memory|retrieval|agent|workflow|loop\b/i.test(text)) {
-    return { owner: 'gbrain', reason: null, next: null };
+    return { owner: 'gbrain', reason: null, next: null, needs_promotion_review: false };
   }
-  return { owner: 'unknown', reason: null, next: null };
+  return { owner: 'unknown', reason: null, next: null, needs_promotion_review: false };
 }
 
 export function buildDreamQualityReceipt(input: {
@@ -163,12 +177,12 @@ export function buildDreamQualityReceipt(input: {
   const promotionQueue = scores
     .filter((p) => p.needs_promotion_review && p.promotion_reason)
     .map((p) => {
-      const owner = OWNER_PATTERNS.find((o) => o.owner === p.promotion_owner);
+      const owner = isSeascapeLaneId(p.promotion_owner) ? getSeascapeLane(p.promotion_owner) : null;
       return {
         slug: p.slug,
         owner: p.promotion_owner,
         reason: p.promotion_reason!,
-        next_step: owner?.next ?? 'Verify against the owning repo/proof surface before writing any update.',
+        next_step: owner?.default_next_step ?? 'Verify against the owning repo/proof surface before writing any update.',
       };
     });
 

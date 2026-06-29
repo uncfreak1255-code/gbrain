@@ -64,6 +64,7 @@ describe('dream quality receipt', () => {
     expect(receipt.verdict).toBe('pass');
     expect(receipt.pages_scored).toBe(1);
     expect(receipt.promotion_candidates).toBe(1);
+    expect(receipt.promotion_queue[0].owner).toBe('seascape-hub');
     expect(receipt.promotion_queue[0].next_step).toContain('Verify');
     expect(receipt.receipt_sha8).toHaveLength(8);
   });

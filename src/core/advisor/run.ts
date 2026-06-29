@@ -13,6 +13,7 @@ import { collectMigration } from './collect-migration.ts';
 import { collectSchemaPack } from './collect-schema-pack.ts';
 import { collectStalledJobs } from './collect-stalled-jobs.ts';
 import { collectUsageShape } from './collect-usage-shape.ts';
+import { collectSeascapeWritebacks } from './collect-seascape-writebacks.ts';
 import { collectSetupSmells } from './collect-setup-smells.ts';
 import { collectUninstalledBrainPack } from './collect-uninstalled-brain-pack.ts';
 import { collectUninstalledBundled } from './collect-uninstalled-bundled.ts';
@@ -24,6 +25,7 @@ export const COLLECTORS: AdvisorCollector[] = [
   collectSchemaPack,
   collectStalledJobs,
   collectUsageShape,
+  collectSeascapeWritebacks,
   collectSetupSmells,
   collectUninstalledBrainPack,
   collectUninstalledBundled,
@@ -59,9 +61,13 @@ export function rankFindings(findings: AdvisorFinding[], opts: { infoCap?: numbe
  * Run every collector and return a ranked report. Resilient: a collector that
  * throws contributes nothing and never aborts the others.
  */
-export async function runAdvisor(ctx: AdvisorContext): Promise<AdvisorReport> {
+export async function runAdvisor(
+  ctx: AdvisorContext,
+  opts: { collectors?: AdvisorCollector[] } = {},
+): Promise<AdvisorReport> {
   const all: AdvisorFinding[] = [];
-  for (const c of COLLECTORS) {
+  const collectors = opts.collectors ?? COLLECTORS;
+  for (const c of collectors) {
     try {
       const found = await c.collect(ctx);
       for (const f of found) {
@@ -69,8 +75,16 @@ export async function runAdvisor(ctx: AdvisorContext): Promise<AdvisorReport> {
         if (ctx.remote && f.workspace_dependent) continue;
         all.push(f);
       }
-    } catch {
-      // one collector failing must not kill the report
+    } catch (err) {
+      all.push({
+        id: `collector_failed:${c.id}`,
+        severity: 'warn',
+        title: `Advisor collector "${c.id}" failed; this is not a trustworthy all-clear.`,
+        detail: `Collector error: ${(err as Error).message || 'unknown error'}`,
+        fix: { command_argv: null },
+        collector: c.id,
+        ask_user: true,
+      });
     }
   }
   const ranked = rankFindings(all);

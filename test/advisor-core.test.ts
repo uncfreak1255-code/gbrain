@@ -167,4 +167,37 @@ describe('renderAdvisorReport', () => {
     const txt = renderAdvisorReport({ version: '0.43.0.0', generated_at: 'x', findings: [], worst: null });
     expect(txt).toContain('looks healthy');
   });
+
+  test('writeback findings render owner, proof, and dry-run draft details', () => {
+    const txt = renderAdvisorReport({
+      version: '0.43.0.0',
+      generated_at: 'x',
+      worst: 'info',
+      findings: [
+        finding({
+          id: 'wb1',
+          title: 'Writeback candidate',
+          writeback_candidate: {
+            schema_version: 1,
+            candidate_id: 'seascape-hub:default:wiki/x',
+            owner: 'seascape-hub',
+            owner_display_name: 'Seascape Hub',
+            owner_operator_alias: 'company knowledge',
+            source: { slug: 'wiki/x', title: 'Example', source_id: 'default' },
+            proof: { qualified: true, summary: 'Traceable residue with explicit proof markers.', markers: ['traceability', 'proof'] },
+            reason: 'Traceable company knowledge residue is ready for human review in Seascape Hub.',
+            next_step: 'Verify against Hub packet/canon and source runtime proof before writing a Hub update.',
+            draft: {
+              writes: false,
+              title: 'Seascape Hub draft from Example',
+              body: '# Seascape Hub Draft\n\n## Proposed writeback\nTraceable company knowledge residue.',
+            },
+          },
+        }),
+      ],
+    });
+    expect(txt).toContain('owner: Seascape Hub');
+    expect(txt).toContain('proof: Traceable residue');
+    expect(txt).toContain('[writes=false]');
+  });
 });

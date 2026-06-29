@@ -2,6 +2,28 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.45.4.0] - 2026-06-28
+
+**`gbrain doctor` now catches lock-renewal loops that still look active but have stopped renewing safely.** The new `lock_renewal_health` check turns the lock-renewal audit trail and stale active worker rows into one operator-readable doctor line, so production operators do not have to tail JSONL files to spot a flapping pool or a stuck refresh loop.
+
+### To take advantage of v0.45.4.0
+`gbrain upgrade`. No migration or config change is required.
+
+For a local readback:
+
+```bash
+gbrain doctor --json
+```
+
+Check the `lock_renewal_health` entry for recent renewal failures, gave-up loops, corrupt audit lines, and active jobs whose future lock stopped receiving safe renewal updates.
+
+### Itemized changes
+
+### Added
+- **Lock-renewal doctor health.** `gbrain doctor` and thin-client doctor reports now include `lock_renewal_health`, backed by the existing lock-renewal audit JSONL and active `minion_jobs` rows.
+- **Operator-usable renewal diagnostics.** The check warns on repeated renewal failures, repeated `gave_up` outcomes, corrupt audit readback, and active jobs whose lock is still in the future while `updated_at` has gone stale.
+- **Focused doctor and queue coverage.** Tests pin the warning thresholds, below-threshold behavior, stale active jobs, corrupt audit lines, doctorReportRemote parity, category mapping, and action-tier mapping.
+
 ## [0.45.3.0] - 2026-06-26
 
 **GBrain's own sync and doctor remediation paths now stay quieter around fresh repo changes and test-only calibration fixtures.** This release keeps synthetic prompt-tuning material out of the GBrain repo's own import/sync surface while preserving the same paths for normal user repos, and it stops remediation from immediately demanding a filesystem sync just because a source's commit changed moments ago.

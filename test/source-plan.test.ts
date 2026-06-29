@@ -48,6 +48,9 @@ describe('source plan report', () => {
     expect(report.counts).toEqual({ sources: 3, federated: 2, isolated: 1, pages: 160 });
     expect(report.sources.map((s) => s.role)).toContain('company_knowledge');
     expect(report.sources.map((s) => s.role)).toContain('daily_front_door');
+    const hub = report.sources.find((s) => s.role === 'company_knowledge');
+    expect(hub?.display_name).toBe('Seascape Hub');
+    expect(hub?.operator_alias).toBe('company knowledge');
     expect(report.gaps).toContain('No runtime/ops source detected.');
     expect(report.next_actions.join('\n')).toContain('daily Needs Attention brief');
   });
