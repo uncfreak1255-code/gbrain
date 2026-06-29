@@ -2997,6 +2997,8 @@ import {
   shouldWarnForExtractionLag,
 } from '../core/extraction-lag.ts';
 
+const extractionLagFailEnvWarned = new Set<string>();
+
 /**
  * v0.42.7 (#1696): single source of truth for the extraction-lag warn
  * threshold (percent). Both the `links_extraction_lag` doctor check AND the
@@ -3294,8 +3296,8 @@ export async function checkLinksExtractionLag(
       const n = Number(failRaw);
       if (Number.isFinite(n) && n > 0) {
         failPct = n;
-      } else if (!_envNumberWarned.has('GBRAIN_EXTRACTION_LAG_FAIL_PCT')) {
-        _envNumberWarned.add('GBRAIN_EXTRACTION_LAG_FAIL_PCT');
+      } else if (!extractionLagFailEnvWarned.has('GBRAIN_EXTRACTION_LAG_FAIL_PCT')) {
+        extractionLagFailEnvWarned.add('GBRAIN_EXTRACTION_LAG_FAIL_PCT');
         console.warn(`[gbrain doctor] Ignoring invalid GBRAIN_EXTRACTION_LAG_FAIL_PCT=${failRaw}; hard-fail stays disabled.`);
       }
     }
