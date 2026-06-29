@@ -150,6 +150,18 @@ export interface RecommendationContext {
   chatModel?: string;
   /** Whether the chat provider has a usable API key. */
   hasChatApiKey?: boolean;
+  /** True when the active schema pack already runs extract_atoms in routine cycles. */
+  extractAtomsPackDeclaresPhase?: boolean;
+  /** Per-source DB page backlog for atom extraction. Transcript files are not included. */
+  extractAtomsBacklogBySource?: Array<{
+    sourceId: string;
+    backlog: number;
+    repoPath?: string | null;
+  }>;
+  /** Doctor warning threshold for the brain-wide DB page backlog. */
+  extractAtomsWarnThreshold?: number;
+  /** Bounded runtime window passed to extract-atoms-drain jobs. */
+  extractAtomsDrainWindowSeconds?: number;
 }
 
 /** Triage result for one check. */
@@ -299,6 +311,37 @@ export function computeRecommendations(
     });
   }
 
+  // ---------------------------------------------------------------------
+  // extract_atoms.drain — DB page atom extraction when the active pack does
+  // not run extract_atoms itself. The job already exists as a protected,
+  // budget-bounded runtime lane; this makes the doctor remediation planner
+  // see the same backlog doctor reports.
+  // ---------------------------------------------------------------------
+  const atomBacklogs = ctx.extractAtomsBacklogBySource ?? [];
+  const atomBacklogTotal = atomBacklogs.reduce((sum, row) => sum + Math.max(0, row.backlog), 0);
+  const atomWarnThreshold = ctx.extractAtomsWarnThreshold ?? 10;
+  if (ctx.extractAtomsPackDeclaresPhase === false && atomBacklogTotal > atomWarnThreshold) {
+    const window = ctx.extractAtomsDrainWindowSeconds ?? 120;
+    for (const row of atomBacklogs) {
+      if (row.backlog <= 0) continue;
+      const params: Record<string, unknown> = { sourceId: row.sourceId, window };
+      if (row.repoPath) params.repoPath = row.repoPath;
+      out.push({
+        id: `extract_atoms.drain.${row.sourceId}`,
+        job: 'extract-atoms-drain',
+        params,
+        idempotency_key: idemKey(row.sourceId, 'extract-atoms-drain', params),
+        severity: 'medium',
+        est_seconds: window,
+        est_usd_cost: 0.3,
+        depends_on: repoNeedsSync ? ['sync.repo'] : [],
+        rationale: `${row.backlog} page${row.backlog === 1 ? '' : 's'} eligible for atom extraction in source ${row.sourceId}`,
+        protected: true,
+        status: 'remediable',
+      });
+    }
+  }
+
   // v0.41.18.0 (A2 + codex #3): merge caller-supplied extras. Hardcoded
   // entries win on id collision so legacy behavior is preserved when an
   // extra accidentally duplicates a hardcoded id.
@@ -386,6 +429,14 @@ function classifyOne(check: Check, ctx: RecommendationContext): CheckClassificat
         return { check: check.name, status: 'blocked', reason: 'no repo configured' };
       }
       return { check: check.name, status: 'remediable' };
+    case 'extract_atoms_backlog':
+      if (ctx.extractAtomsPackDeclaresPhase === true) {
+        return { check: check.name, status: 'human_only', reason: 'active pack runs extract_atoms' };
+      }
+      if ((ctx.extractAtomsBacklogBySource ?? []).some((row) => row.backlog > 0)) {
+        return { check: check.name, status: 'remediable' };
+      }
+      return { check: check.name, status: 'human_only', reason: 'no backlog to drain' };
 
     // --- human_only paths ---
     case 'orphan_pages':        // archive is product judgment, not maintenance

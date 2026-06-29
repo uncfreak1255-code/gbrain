@@ -7958,7 +7958,8 @@ export async function runRemediationPlan(
   const targetScore = parseIntFlag(args, '--target-score') ?? 90;
   const jsonOutput = args.includes('--json');
 
-  const plan = await computeRemediationPlan(engine, { targetScore });
+  const extraRemediations = await loadDoctorExtraRemediations(engine);
+  const plan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
 
   if (jsonOutput) {
     console.log(JSON.stringify(plan, null, 2));
@@ -8027,6 +8028,7 @@ export async function runRemediate(
 
   const { runRemediation, computeRemediationPlan } =
     await import('../core/remediation/index.ts');
+  const extraRemediations = await loadDoctorExtraRemediations(engine);
 
   // TTY confirmation gate (stays in CLI; library doesn't render).
   // Compute the plan once for the confirmation prompt, then hand off
@@ -8034,7 +8036,7 @@ export async function runRemediate(
   // own plan internally — we accept the second computation cost for
   // a cleaner CLI/library separation.
   if (!skipConfirm && !dryRun && process.stdout.isTTY && !resumeMode) {
-    const plan = await computeRemediationPlan(engine, { targetScore });
+    const plan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
     if (plan.target_unreachable) {
       console.error(
         `[remediate] target ${targetScore} unreachable; max autonomous = ${plan.max_reachable_score}/100. ` +
@@ -8070,6 +8072,7 @@ export async function runRemediate(
       dryRun,
       resume: resumeMode,
       resumePlanHash,
+      extraRemediations,
     },
     {
       onTargetUnreachable: (target, ceiling) => {
@@ -8134,6 +8137,18 @@ export async function runRemediate(
     (s) => s.status !== 'completed' && s.status !== 'submitted' && s.status !== 'dry_run',
   );
   if (result.budget_exhausted || anyFailed) process.exit(1);
+}
+
+async function loadDoctorExtraRemediations(engine: BrainEngine) {
+  try {
+    const { runAllOnboardChecks } = await import('../core/onboard/checks.ts');
+    const { filterRunnableOnboardRemediations } = await import('../core/onboard/render.ts');
+    const onboardResults = await runAllOnboardChecks(engine);
+    const extras = onboardResults.flatMap((r) => r.remediations);
+    return filterRunnableOnboardRemediations(extras, 'auto-with-prompt');
+  } catch {
+    return [];
+  }
 }
 
 // v0.41.18.0 (A1, codex finding #2): loadRecommendationContext moved to

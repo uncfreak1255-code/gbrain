@@ -206,6 +206,47 @@ describe('computeRecommendations', () => {
     expect(embed?.depends_on).toEqual([]);
   });
 
+  test('extract_atoms backlog emits protected per-source drain jobs when pack does not run the phase', () => {
+    const health = makeHealth({ brain_score: 54 });
+    const recs = computeRecommendations(health, {
+      repoPath: '/brain',
+      embeddingProviderConfigured: true,
+      extractAtomsPackDeclaresPhase: false,
+      extractAtomsWarnThreshold: 10,
+      extractAtomsDrainWindowSeconds: 120,
+      extractAtomsBacklogBySource: [
+        { sourceId: 'default', backlog: 44, repoPath: '/brain' },
+        { sourceId: 'gbrain', backlog: 8, repoPath: '/Users/sawbeck/gbrain' },
+      ],
+    });
+
+    const drainRecs = recs.filter((r) => r.job === 'extract-atoms-drain');
+    expect(drainRecs.map((r) => r.id)).toEqual([
+      'extract_atoms.drain.default',
+      'extract_atoms.drain.gbrain',
+    ]);
+    for (const rec of drainRecs) {
+      expect(rec.protected).toBe(true);
+      expect(rec.est_usd_cost).toBe(0.3);
+      expect(rec.params.window).toBe(120);
+    }
+    expect(drainRecs[0]?.params.repoPath).toBe('/brain');
+    expect(drainRecs[1]?.params.sourceId).toBe('gbrain');
+  });
+
+  test('extract_atoms backlog stays out of the plan below the doctor warning threshold', () => {
+    const health = makeHealth({ brain_score: 95 });
+    const recs = computeRecommendations(health, {
+      embeddingProviderConfigured: true,
+      extractAtomsPackDeclaresPhase: false,
+      extractAtomsWarnThreshold: 10,
+      extractAtomsBacklogBySource: [
+        { sourceId: 'small-source', backlog: 10 },
+      ],
+    });
+    expect(recs.find((r) => r.job === 'extract-atoms-drain')).toBeUndefined();
+  });
+
   test('severity ordering: critical before high before medium', () => {
     const health = makeHealth({
       missing_embeddings: 100,  // critical
@@ -298,6 +339,22 @@ describe('classifyChecks (D13)', () => {
 
   test('human_only: orphan_pages (archive is product judgment)', () => {
     const result = classifyChecks([{ name: 'orphan_pages', status: 'warn' }], { repoPath: '/brain' });
+    expect(result[0]?.status).toBe('human_only');
+  });
+
+  test('remediable: extract_atoms_backlog when pack does not run phase and backlog exists', () => {
+    const result = classifyChecks([{ name: 'extract_atoms_backlog', status: 'warn' }], {
+      extractAtomsPackDeclaresPhase: false,
+      extractAtomsBacklogBySource: [{ sourceId: 'default', backlog: 11 }],
+    });
+    expect(result[0]?.status).toBe('remediable');
+  });
+
+  test('human_only: extract_atoms_backlog when active pack already runs phase', () => {
+    const result = classifyChecks([{ name: 'extract_atoms_backlog', status: 'warn' }], {
+      extractAtomsPackDeclaresPhase: true,
+      extractAtomsBacklogBySource: [{ sourceId: 'default', backlog: 11 }],
+    });
     expect(result[0]?.status).toBe('human_only');
   });
 
