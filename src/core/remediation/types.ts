@@ -20,10 +20,10 @@ export interface RemediationPlanOpts {
   /**
    * v0.41.18.0 (A2 + codex #3): caller-supplied RemediationStep entries
    * threaded into the planner via the third arg of computeRecommendations.
-   * Onboard wires the 4 new check helpers (embed_staleness,
-   * entity_link_coverage, timeline_coverage, takes_count) here. doctor's
-   * existing --remediation-plan call passes empty (preserving legacy
-   * behavior).
+   * Onboard wires the check helpers (embed_staleness,
+   * entity_link_coverage, timeline_coverage, takes_count, and type-unification
+   * checks) here. Doctor filters those extras through the onboard runnable
+   * policy before previewing or executing them.
    */
   extraRemediations?: RemediationStep[];
 }

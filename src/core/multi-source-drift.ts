@@ -18,8 +18,11 @@
  * accordingly.
  *
  * Implementation notes:
- *  - FS walk handles `.md` AND `.mdx` (codex OV13: matches `src/core/sync.ts`
- *    which treats both as markdown).
+ *  - Git worktrees enumerate candidates via `git ls-files --cached --others
+ *    --exclude-standard` and the shared syncability gate, matching import/sync
+ *    instead of raw local residue.
+ *  - Non-git fallback FS walk handles `.md` AND `.mdx` (codex OV13: matches
+ *    `src/core/sync.ts` which treats both as markdown).
  *  - Batched single-query DB lookup (D17): collect all candidate slugs from
  *    the FS walk into one array, then run ONE SELECT against pages with a
  *    VALUES clause. NOT a per-file loop (which would be 20K round trips on
@@ -31,10 +34,11 @@
  *    run.
  */
 
+import { execFileSync } from 'child_process';
 import { readdirSync, lstatSync, statSync } from 'fs';
 import { join, relative } from 'path';
 import type { BrainEngine } from './engine.ts';
-import { pathToSlug } from './sync.ts';
+import { isSyncable, pathToSlug, resolveRepoLocalSyncExcludes } from './sync.ts';
 
 export interface SourceWithPath {
   id: string;
@@ -143,6 +147,49 @@ function walkMarkdownAndMdxFiles(
   return { files, truncated };
 }
 
+function gitListMarkdownAndMdxFiles(
+  root: string,
+  limit: number,
+  deadlineMs: number,
+): { files: { relPath: string }[]; truncated: boolean } | null {
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      'git',
+      ['-C', root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+      { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+  } catch {
+    return null;
+  }
+
+  const files: { relPath: string }[] = [];
+  let truncated = false;
+  const exclude = resolveRepoLocalSyncExcludes(root);
+  for (const relPath of stdout.split('\0')) {
+    if (!relPath) continue;
+    if (Date.now() >= deadlineMs) {
+      truncated = true;
+      break;
+    }
+    if (!isSyncable(relPath, { strategy: 'markdown', exclude })) continue;
+    const full = join(root, relPath);
+    let st;
+    try {
+      st = lstatSync(full);
+    } catch {
+      continue;
+    }
+    if (st.isSymbolicLink() || !st.isFile()) continue;
+    files.push({ relPath });
+    if (files.length >= limit) {
+      truncated = true;
+      break;
+    }
+  }
+  return { files, truncated };
+}
+
 /**
  * For a list of slugs, query DB for existence at (default, slug) AND at
  * (sourceId, slug) in ONE batched query. Returns a Map<slug, Set<source_id>>.
@@ -212,7 +259,9 @@ export async function findMisroutedPages(
       walkTruncated = true;
       break;
     }
-    const { files, truncated } = walkMarkdownAndMdxFiles(src.local_path, limit, deadlineMs);
+    const { files, truncated } =
+      gitListMarkdownAndMdxFiles(src.local_path, limit, deadlineMs) ??
+      walkMarkdownAndMdxFiles(src.local_path, limit, deadlineMs);
     if (truncated) walkTruncated = true;
     if (files.length === 0) continue;
 

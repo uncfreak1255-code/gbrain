@@ -140,6 +140,15 @@ describe('doctor command', () => {
     expect(source).toContain('extraRemediations: filterRunnableOnboardRemediations(');
   });
 
+  test('doctor remediation surfaces filtered onboard extras in preview and execution paths', async () => {
+    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    expect(source).toContain('async function loadDoctorExtraRemediations');
+    expect(source).toContain('runAllOnboardChecks');
+    expect(source).toContain("filterRunnableOnboardRemediations(extras, 'auto-with-prompt')");
+    expect(source).toContain('computeRemediationPlan(engine, { targetScore, extraRemediations })');
+    expect(source).toContain('extraRemediations,');
+  });
+
   test('run_onboard operation filters extra remediations by mode before protected-scope gating', async () => {
     const source = await Bun.file(new URL('../src/core/operations.ts', import.meta.url)).text();
     expect(source).toContain('const runnableExtras = filterRunnableOnboardRemediations(');

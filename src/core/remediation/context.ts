@@ -14,6 +14,8 @@ import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 
 const DEFAULT_SYNC_REMEDIATION_WARN_HOURS = 24;
 const SYNC_FRESHNESS_WARN_HOURS_ENV = 'GBRAIN_SYNC_FRESHNESS_WARN_HOURS';
+const DEFAULT_EXTRACT_ATOMS_WARN_THRESHOLD = 10;
+const DEFAULT_EXTRACT_ATOMS_DRAIN_WINDOW_SECONDS = 120;
 
 // Re-export so consumers can `import { RecommendationContext } from '../remediation'`
 // — the canonical RecommendationContext type still lives in
@@ -42,6 +44,9 @@ export async function loadRecommendationContext(
   let sourceId: string | undefined;
   let repoNeedsSync = false;
   let staleExtractionPages = 0;
+  let extractAtomsPackDeclaresPhase: boolean | undefined;
+  let extractAtomsBacklogBySource: RecommendationContext['extractAtomsBacklogBySource'];
+  let extractAtomsDrainWindowSeconds = DEFAULT_EXTRACT_ATOMS_DRAIN_WINDOW_SECONDS;
 
   if (repoPath) {
     try {
@@ -85,6 +90,52 @@ export async function loadRecommendationContext(
     staleExtractionPages = 0;
   }
 
+  try {
+    const configuredWindow = await engine.getConfig('autopilot.auto_drain.window_seconds');
+    extractAtomsDrainWindowSeconds = parsePositiveInt(
+      configuredWindow,
+      DEFAULT_EXTRACT_ATOMS_DRAIN_WINDOW_SECONDS,
+    );
+  } catch {
+    extractAtomsDrainWindowSeconds = DEFAULT_EXTRACT_ATOMS_DRAIN_WINDOW_SECONDS;
+  }
+
+  try {
+    const { packDeclaresPhase } = await import('../cycle.ts');
+    extractAtomsPackDeclaresPhase = await packDeclaresPhase(engine, 'extract_atoms');
+  } catch {
+    extractAtomsPackDeclaresPhase = false;
+  }
+
+  if (extractAtomsPackDeclaresPhase === false) {
+    try {
+      const { countExtractAtomsBacklog } = await import('../cycle/extract-atoms.ts');
+      const sources = await engine.executeRaw<{ id: string; local_path: string | null }>(
+        `SELECT id, local_path
+           FROM sources
+          ORDER BY id`,
+        [],
+      );
+      const scopedSources = sources.length > 0
+        ? sources
+        : [{ id: sourceId ?? 'default', local_path: repoPath ?? null }];
+      const backlogs: NonNullable<RecommendationContext['extractAtomsBacklogBySource']> = [];
+      for (const src of scopedSources) {
+        const backlog = await countExtractAtomsBacklog(engine, src.id);
+        if (backlog !== null && backlog > 0) {
+          backlogs.push({
+            sourceId: src.id,
+            backlog,
+            repoPath: src.local_path ?? undefined,
+          });
+        }
+      }
+      extractAtomsBacklogBySource = backlogs;
+    } catch {
+      extractAtomsBacklogBySource = [];
+    }
+  }
+
   let embeddingModel: string | undefined;
   let embeddingDimensions: number | undefined;
   try {
@@ -124,7 +175,17 @@ export async function loadRecommendationContext(
     embeddingDimensions,
     embeddingProviderConfigured: embeddingConfigured,
     hasChatApiKey: !!(process.env.ANTHROPIC_API_KEY || fileCfg?.anthropic_api_key),
+    extractAtomsPackDeclaresPhase,
+    extractAtomsBacklogBySource,
+    extractAtomsWarnThreshold: DEFAULT_EXTRACT_ATOMS_WARN_THRESHOLD,
+    extractAtomsDrainWindowSeconds,
   };
+}
+
+function parsePositiveInt(raw: string | null, fallback: number): number {
+  if (raw == null || raw === '') return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function isPastSyncRemediationWindow(lastSyncAt: string | Date | null): boolean {

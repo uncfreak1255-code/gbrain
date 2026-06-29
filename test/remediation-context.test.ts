@@ -4,10 +4,34 @@ import { _setGitHeadProbeForTests, _setGitCleanProbeForTests } from '../src/core
 import { CHUNKER_VERSION } from '../src/core/chunkers/code.ts';
 import { withEnv } from './helpers/with-env.ts';
 
-function makeEngine(sourceRow: Record<string, unknown>, staleExtractionPages = 0): any {
+function makeEngine(
+  sourceRow: Record<string, unknown>,
+  staleExtractionPages = 0,
+  opts: {
+    sourceRows?: Array<{ id: string; local_path: string | null }>;
+    atomBacklogs?: Record<string, number>;
+    config?: Record<string, string | null>;
+  } = {},
+): any {
+  const sourceRows = opts.sourceRows ?? [{
+    id: String(sourceRow.id ?? 'default'),
+    local_path: typeof sourceRow.local_path === 'string' ? sourceRow.local_path : null,
+  }];
   return {
-    getConfig: async (key: string) => key === 'sync.repo_path' ? '/brain' : null,
-    executeRaw: async () => [sourceRow],
+    getConfig: async (key: string) => {
+      if (key in (opts.config ?? {})) return opts.config![key] ?? null;
+      return key === 'sync.repo_path' ? '/brain' : null;
+    },
+    executeRaw: async (sql: string, params: unknown[]) => {
+      if (sql.includes('COUNT(*) AS cnt FROM pages p')) {
+        const sourceId = typeof params[0] === 'string' ? params[0] : undefined;
+        return [{ cnt: sourceId ? (opts.atomBacklogs?.[sourceId] ?? 0) : 0 }];
+      }
+      if (sql.includes('FROM sources') && sql.includes('ORDER BY id') && !sql.includes('WHERE local_path')) {
+        return sourceRows;
+      }
+      return [sourceRow];
+    },
     countStalePagesForExtraction: async () => staleExtractionPages,
   };
 }
@@ -89,5 +113,30 @@ describe('loadRecommendationContext sync freshness', () => {
     );
 
     expect(ctx.repoNeedsSync).toBe(true);
+  });
+
+  test('loads per-source extract_atoms backlog when active pack does not declare the phase', async () => {
+    const ctx = await loadRecommendationContext(makeEngine({
+      id: 'gbrain',
+      local_path: '/brain',
+      last_commit: 'new-head',
+      chunker_version: CHUNKER_VERSION,
+      last_sync_at: hoursAgo(1),
+    }, 0, {
+      sourceRows: [
+        { id: 'default', local_path: '/brain' },
+        { id: 'gbrain', local_path: '/Users/sawbeck/gbrain' },
+        { id: 'empty', local_path: '/tmp/empty' },
+      ],
+      atomBacklogs: { default: 44, gbrain: 8, empty: 0 },
+      config: { 'autopilot.auto_drain.window_seconds': '90' },
+    }));
+
+    expect(ctx.extractAtomsPackDeclaresPhase).toBe(false);
+    expect(ctx.extractAtomsDrainWindowSeconds).toBe(90);
+    expect(ctx.extractAtomsBacklogBySource).toEqual([
+      { sourceId: 'default', backlog: 44, repoPath: '/brain' },
+      { sourceId: 'gbrain', backlog: 8, repoPath: '/Users/sawbeck/gbrain' },
+    ]);
   });
 });

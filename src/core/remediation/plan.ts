@@ -16,7 +16,7 @@ import type { RemediationPlan, RemediationPlanOpts } from './types.ts';
  * Synthetic check list for classification. computeRecommendations operates
  * on BrainHealth + context alone; we don't need full doctor output, just
  * the check names the recommendations care about. Same five names doctor
- * has used since v0.36.4.0; do not extend without also updating
+ * used since v0.36.4.0 plus extract_atoms_backlog; do not extend without also updating
  * brain-score-recommendations.ts.
  */
 export const SYNTHETIC_CHECK_NAMES = [
@@ -25,6 +25,7 @@ export const SYNTHETIC_CHECK_NAMES = [
   'missing_embeddings',
   'dead_links',
   'orphan_pages',
+  'extract_atoms_backlog',
 ] as const;
 
 /**
