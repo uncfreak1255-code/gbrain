@@ -87,6 +87,14 @@ function withDryRunDraft(candidate: WritebackCandidate, page: Page): WritebackCa
     draft: {
       writes: false,
       title: `${candidate.owner_display_name} draft from ${candidate.source.title}`,
+      review_command_argv: [
+        'gbrain',
+        'call',
+        '--source',
+        page.source_id,
+        'get_page',
+        JSON.stringify({ slug: page.slug }),
+      ],
       body: [
         `# ${candidate.owner_display_name} Draft`,
         '',

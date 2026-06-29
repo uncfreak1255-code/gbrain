@@ -2990,9 +2990,12 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
 const checkSubagentProvider = checkSubagentCapability;
 void checkSubagentProvider;
 
-// Module-scoped set so each invalid-env-var warning fires once per process,
-// per variable name (v0.42.7 #1696: was a single bool shared across all vars).
-const _envNumberWarned = new Set<string>();
+import {
+  EXTRACTION_LAG_MIN_PAGES,
+  EXTRACTION_LAG_WARN_PCT_DEFAULT,
+  resolveEnvNumber as resolveExtractionLagEnvNumber,
+  shouldWarnForExtractionLag,
+} from '../core/extraction-lag.ts';
 
 /**
  * v0.42.7 (#1696): single source of truth for the extraction-lag warn
@@ -3000,11 +3003,10 @@ const _envNumberWarned = new Set<string>();
  * end-of-sync nudge (`sync.ts:maybeExtractionNudge`) resolve through this +
  * `_resolveEnvNumber` so "the nudge fires iff doctor would warn" can't drift.
  */
-export const EXTRACTION_LAG_WARN_PCT_DEFAULT = 20;
 /** Min non-deleted page count below which extraction-lag is vacuous-skipped
  *  (unless an explicit --source scope is set). Shared by doctor + the sync
  *  nudge (D6/C4) so their skip predicates match exactly. */
-export const EXTRACTION_LAG_MIN_PAGES = 100;
+export { EXTRACTION_LAG_MIN_PAGES, EXTRACTION_LAG_WARN_PCT_DEFAULT };
 
 /**
  * v0.42.7 (#1696, C1): generic "read a positive number from an env var, warn
@@ -3014,19 +3016,10 @@ export const EXTRACTION_LAG_MIN_PAGES = 100;
  * Exported (D3) so the sync nudge resolves the threshold the same way.
  */
 export function _resolveEnvNumber(varName: string, fallback: number, opts?: { unit?: string }): number {
-  const raw = process.env[varName];
-  if (raw === undefined || raw === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) {
-    if (!_envNumberWarned.has(varName)) {
-      _envNumberWarned.add(varName);
-      console.warn(
-        `[gbrain doctor] Ignoring invalid ${varName}=${raw}; using default ${fallback}${opts?.unit ?? ''}.`,
-      );
-    }
-    return fallback;
-  }
-  return n;
+  return resolveExtractionLagEnvNumber(varName, fallback, {
+    ...opts,
+    warnPrefix: '[gbrain doctor]',
+  });
 }
 
 function _resolveSyncFreshnessHours(varName: string, fallback: number): number {
@@ -3311,7 +3304,7 @@ export async function checkLinksExtractionLag(
     if (failPct !== undefined && pct > failPct) {
       return { name, status: 'fail', message: `${stale}/${total} pages (${pctStr}%)${scope} need link/timeline extraction (> ${failPct}% fail threshold). ${fix}`, details };
     }
-    if (pct > warnPct) {
+    if (shouldWarnForExtractionLag({ totalPages: total, stalePages: stale, sourceScoped: !!sourceId, warnPct })) {
       return { name, status: 'warn', message: `${stale}/${total} pages (${pctStr}%)${scope} have un-extracted edges. ${fix}`, details };
     }
     return { name, status: 'ok', message: `Extraction current: ${stale}/${total} pages (${pctStr}%) stale${scope}`, details };

@@ -130,6 +130,7 @@ describe('computeRecommendations', () => {
       repoPath: '/brain',
       repoNeedsSync: true,
       staleExtractionPages: 25,
+      staleExtractionTotalPages: 100,
       embeddingProviderConfigured: true,
     });
     const ids = recs.map((r) => r.id);
@@ -152,6 +153,7 @@ describe('computeRecommendations', () => {
       repoPath: '/brain',
       repoNeedsSync: true,
       staleExtractionPages: 10,
+      staleExtractionTotalPages: 100,
       embeddingProviderConfigured: true,
     });
     const extract = recs.find((r) => r.id === 'extract.stale');
@@ -166,6 +168,7 @@ describe('computeRecommendations', () => {
       repoPath: '/brain',
       repoNeedsSync: true,
       staleExtractionPages: 10,
+      staleExtractionTotalPages: 100,
       embeddingProviderConfigured: true,
     });
     const ids = recs.map((r) => r.id);
@@ -175,15 +178,27 @@ describe('computeRecommendations', () => {
     expect(syncIdx).toBeLessThan(ids.indexOf('embed.stale'));
   });
 
-  test('extract.stale does not need sync when only DB extraction watermark lags', () => {
+  test('extract.stale does not need sync when only DB extraction watermark lag exceeds doctor threshold', () => {
     const health = makeHealth();
     const recs = computeRecommendations(health, {
-      staleExtractionPages: 10,
+      staleExtractionPages: 25,
+      staleExtractionTotalPages: 100,
       embeddingProviderConfigured: true,
     });
     const extract = recs.find((r) => r.id === 'extract.stale');
     expect(extract?.depends_on).toEqual([]);
     expect(extract?.params.stale).toBe(true);
+  });
+
+  test('extract.stale stays out of the plan below the doctor warning threshold', () => {
+    const health = makeHealth({ page_count: 5546, brain_score: 54 });
+    const recs = computeRecommendations(health, {
+      staleExtractionPages: 22,
+      staleExtractionTotalPages: 5546,
+      extractionLagWarnPct: 20,
+      embeddingProviderConfigured: true,
+    });
+    expect(recs.find((r) => r.id === 'extract.stale')).toBeUndefined();
   });
 
   test('embed.stale depends on sync.repo when sync also needed', () => {
@@ -268,6 +283,7 @@ describe('computeRecommendations', () => {
       repoPath: '/brain',
       repoNeedsSync: true,
       staleExtractionPages: 10,
+      staleExtractionTotalPages: 100,
       embeddingProviderConfigured: true,
       sourceId: 'default',
     };

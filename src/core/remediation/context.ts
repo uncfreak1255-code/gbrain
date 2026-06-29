@@ -11,6 +11,10 @@ import type { RecommendationContext } from '../brain-score-recommendations.ts';
 import { CHUNKER_VERSION } from '../chunkers/code.ts';
 import { isSourceUnchangedSinceSync } from '../git-head.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
+import {
+  EXTRACTION_LAG_WARN_PCT_DEFAULT,
+  resolveEnvNumber,
+} from '../extraction-lag.ts';
 
 const DEFAULT_SYNC_REMEDIATION_WARN_HOURS = 24;
 const SYNC_FRESHNESS_WARN_HOURS_ENV = 'GBRAIN_SYNC_FRESHNESS_WARN_HOURS';
@@ -44,6 +48,7 @@ export async function loadRecommendationContext(
   let sourceId: string | undefined;
   let repoNeedsSync = false;
   let staleExtractionPages = 0;
+  let staleExtractionTotalPages = 0;
   let extractAtomsPackDeclaresPhase: boolean | undefined;
   let extractAtomsBacklogBySource: RecommendationContext['extractAtomsBacklogBySource'];
   let extractAtomsDrainWindowSeconds = DEFAULT_EXTRACT_ATOMS_DRAIN_WINDOW_SECONDS;
@@ -82,12 +87,20 @@ export async function loadRecommendationContext(
   }
 
   try {
+    const totalRows = await engine.executeRaw<{ count: number }>(
+      sourceId
+        ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
+        : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
+      sourceId ? [sourceId] : [],
+    );
+    staleExtractionTotalPages = Number(totalRows[0]?.count ?? 0);
     staleExtractionPages = await engine.countStalePagesForExtraction({
       sourceId,
       versionTs: LINK_EXTRACTOR_VERSION_TS,
     });
   } catch {
     staleExtractionPages = 0;
+    staleExtractionTotalPages = 0;
   }
 
   try {
@@ -171,6 +184,13 @@ export async function loadRecommendationContext(
     repoPath: repoPath ?? undefined,
     repoNeedsSync,
     staleExtractionPages,
+    staleExtractionTotalPages,
+    staleExtractionSourceScoped: opts.sourceScoped === true,
+    extractionLagWarnPct: resolveEnvNumber(
+      'GBRAIN_EXTRACTION_LAG_WARN_PCT',
+      EXTRACTION_LAG_WARN_PCT_DEFAULT,
+      { unit: '%', warnPrefix: '[gbrain doctor]' },
+    ),
     embeddingModel,
     embeddingDimensions,
     embeddingProviderConfigured: embeddingConfigured,

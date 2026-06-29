@@ -125,7 +125,9 @@ gbrain config set budget.monthly.mode block   # or: warn
 `~/.gbrain/audit/budget-*.jsonl` and `~/.gbrain/audit/budget.jsonl`, then adds the
 next projected chat call. It counts native Anthropic/Claude and DeepSeek model ids.
 OpenRouter-wrapped Claude is not counted because OpenRouter pricing is not native
-Anthropic pricing.
+Anthropic pricing. Z.AI / GLM calls, including `zai:glm-5.2`, are priced and written
+to the same ledger, but they are not part of this monthly cap; inspect them with
+`gbrain budget daily --provider zai` or reconcile against Z.AI exports as shown above.
 
 In `block` mode, a projected overage writes `monthly_budget_denied` and refuses the
 call before provider spend. In `warn` mode, the same projected overage writes
