@@ -4,6 +4,10 @@ import { canonicalLookup } from './model-pricing.ts';
 import { lookupEmbeddingPrice, estimateCostFromChars } from './embedding-pricing.ts';
 import { getRecipe } from './ai/recipes/index.ts';
 import { parseModelId } from './ai/model-resolver.ts';
+import {
+  EXTRACTION_LAG_WARN_PCT_DEFAULT,
+  shouldWarnForExtractionLag,
+} from './extraction-lag.ts';
 
 /**
  * v0.40.x: env-var name → file/DB config field, for hosted embedding providers
@@ -135,6 +139,12 @@ export interface RecommendationContext {
   repoNeedsSync?: boolean;
   /** Pages whose DB extraction watermark is stale. */
   staleExtractionPages?: number;
+  /** Non-deleted pages in the same scope as staleExtractionPages. */
+  staleExtractionTotalPages?: number;
+  /** True when stale extraction was explicitly source-scoped. */
+  staleExtractionSourceScoped?: boolean;
+  /** Doctor warning threshold for stale link/timeline extraction. */
+  extractionLagWarnPct?: number;
   /** Configured embedding model id (e.g. 'openai:text-embedding-3-large'). */
   embeddingModel?: string;
   /** Configured embedding dimension (3072 / 1536 / 1024 / etc.). */
@@ -288,11 +298,17 @@ export function computeRecommendations(
 
   // ---------------------------------------------------------------------
   // extract.stale — DB-backed incremental link + timeline extraction.
-  // Runs for actual extraction watermark lag, and after sync because fresh
-  // page writes can create new stale extraction work.
+  // Runs for actual extraction watermark lag only when doctor would warn, and
+  // after sync because fresh page writes can create new stale extraction work.
   // ---------------------------------------------------------------------
   const staleExtractionPages = Math.max(0, ctx.staleExtractionPages ?? 0);
-  if (staleExtractionPages > 0 || repoNeedsSync) {
+  const extractionLagNeedsWork = shouldWarnForExtractionLag({
+    totalPages: ctx.staleExtractionTotalPages ?? health.page_count,
+    stalePages: staleExtractionPages,
+    sourceScoped: ctx.staleExtractionSourceScoped,
+    warnPct: ctx.extractionLagWarnPct ?? EXTRACTION_LAG_WARN_PCT_DEFAULT,
+  });
+  if (extractionLagNeedsWork || repoNeedsSync) {
     const params: Record<string, unknown> = { stale: true, catchUp: true };
     if (ctx.sourceId) params.sourceId = ctx.sourceId;
     out.push({
@@ -304,7 +320,7 @@ export function computeRecommendations(
       est_seconds: Math.min(600, 30 + Math.max(staleExtractionPages, health.page_count) * 0.01),
       est_usd_cost: 0,
       depends_on: repoNeedsSync ? ['sync.repo'] : [],
-      rationale: staleExtractionPages > 0
+      rationale: extractionLagNeedsWork
         ? `${staleExtractionPages} page${staleExtractionPages === 1 ? '' : 's'} need link/timeline extraction`
         : 'Extract stale edges after sync',
       status: 'remediable',

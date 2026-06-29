@@ -122,12 +122,19 @@ describe('advisor op gate', () => {
     )) as {
       findings: Array<{
         fix: { command_argv: string[] | null; dispatch_id?: string };
-        writeback_candidate?: { draft?: { writes: boolean } | null };
+        writeback_candidate?: { draft?: { writes: boolean; review_command_argv?: string[] } | null };
       }>;
     };
     const candidateFinding = report.findings.find((finding) => finding.writeback_candidate);
     expect(candidateFinding).toBeDefined();
     expect(candidateFinding?.writeback_candidate?.draft?.writes).toBe(false);
+    expect(candidateFinding?.writeback_candidate?.draft?.review_command_argv?.slice(0, 5)).toEqual([
+      'gbrain',
+      'call',
+      '--source',
+      'default',
+      'get_page',
+    ]);
     expect(candidateFinding?.fix.command_argv).toBeNull();
     expect(candidateFinding?.fix.dispatch_id).toBeUndefined();
   });

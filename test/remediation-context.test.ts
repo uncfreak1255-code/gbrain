@@ -23,6 +23,9 @@ function makeEngine(
       return key === 'sync.repo_path' ? '/brain' : null;
     },
     executeRaw: async (sql: string, params: unknown[]) => {
+      if (sql.includes('count(*)::int AS count FROM pages')) {
+        return [{ count: 120 }];
+      }
       if (sql.includes('COUNT(*) AS cnt FROM pages p')) {
         const sourceId = typeof params[0] === 'string' ? params[0] : undefined;
         return [{ cnt: sourceId ? (opts.atomBacklogs?.[sourceId] ?? 0) : 0 }];
@@ -62,6 +65,8 @@ describe('loadRecommendationContext sync freshness', () => {
 
     expect(ctx.repoNeedsSync).toBe(false);
     expect(ctx.staleExtractionPages).toBe(10);
+    expect(ctx.staleExtractionTotalPages).toBe(120);
+    expect(ctx.extractionLagWarnPct).toBe(20);
   });
 
   test('old commit mismatch still recommends sync', async () => {

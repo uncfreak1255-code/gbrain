@@ -96,6 +96,14 @@ describe('collectSeascapeWritebacks', () => {
         expect(candidate?.owner).toBe('seascape-hub');
         expect(candidate?.proof.qualified).toBe(true);
         expect(candidate?.draft?.writes).toBe(false);
+        expect(candidate?.draft?.review_command_argv).toEqual([
+          'gbrain',
+          'call',
+          '--source',
+          'default',
+          'get_page',
+          JSON.stringify({ slug: 'wiki/originals/ideas/seascape-strategy-dream' }),
+        ]);
         expect(candidate?.draft?.body).toContain('## Proposed writeback');
       });
     } finally {

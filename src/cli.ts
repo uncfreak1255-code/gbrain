@@ -1118,7 +1118,22 @@ async function handleCliOnly(command: string, args: string[]) {
   if (command === 'providers') {
     const { runProviders } = await import('./commands/providers.ts');
     const [sub, ...rest] = args;
-    await runProviders(sub, rest);
+    const baseConfig = loadConfig();
+    let mergedConfig: GBrainConfig | null | undefined = baseConfig;
+    let engine: BrainEngine | null = null;
+    if (baseConfig) {
+      try {
+        engine = await connectEngine({ probeOnly: true });
+        mergedConfig = await loadConfigWithEngine(engine, baseConfig);
+      } catch {
+        mergedConfig = baseConfig;
+      }
+    }
+    try {
+      await runProviders(sub, rest, { config: mergedConfig });
+    } finally {
+      if (engine) await finishCliTeardown({ engine });
+    }
     return;
   }
   if (command === 'budget') {

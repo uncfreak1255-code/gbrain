@@ -47,6 +47,9 @@ export function renderAdvisorReport(report: AdvisorReport): string {
       lines.push(`    next: ${candidate.next_step}`);
       if (candidate.draft) {
         lines.push(`    draft: ${candidate.draft.title} [writes=false]`);
+        if (candidate.draft.review_command_argv) {
+          lines.push(`    readback: ${formatArgv(candidate.draft.review_command_argv)}`);
+        }
         for (const line of candidate.draft.body.split('\n')) {
           lines.push(line.length > 0 ? `      ${line}` : '');
         }
@@ -136,4 +139,13 @@ function wrap(text: string, width: number, indent: string): string[] {
   }
   if (current.trim().length > 0) lines.push(current.trimEnd());
   return lines;
+}
+
+function formatArgv(argv: string[]): string {
+  return argv.map(shellQuote).join(' ');
+}
+
+function shellQuote(arg: string): string {
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
 }

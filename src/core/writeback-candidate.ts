@@ -24,6 +24,8 @@ export interface WritebackDraft {
   writes: false;
   title: string;
   body: string;
+  /** Structured local readback command for inspecting the source residue. */
+  review_command_argv?: string[];
 }
 
 export interface WritebackCandidateSource {

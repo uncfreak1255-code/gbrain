@@ -9,6 +9,7 @@ import { listRecipes, getRecipe } from '../core/ai/recipes/index.ts';
 import { configureGateway, embedOne, isAvailable as gwIsAvailable, chat as gwChat } from '../core/ai/gateway.ts';
 import { probeOllama, probeLMStudio } from '../core/ai/probes.ts';
 import { loadConfig } from '../core/config.ts';
+import type { GBrainConfig } from '../core/config.ts';
 import { buildGatewayConfig } from '../core/ai/build-gateway-config.ts';
 import { AIConfigError, AITransientError } from '../core/ai/errors.ts';
 import type { Recipe } from '../core/ai/types.ts';
@@ -32,12 +33,12 @@ interface ProviderOption {
   cons: string[];
 }
 
-function configureFromEnv(): void {
-  configureGateway(loadGatewayConfig());
+function configureFromEnv(config?: GBrainConfig | null): void {
+  configureGateway(loadGatewayConfig(config));
 }
 
-function loadGatewayConfig() {
-  return buildGatewayConfig(loadConfig() ?? { engine: 'pglite' });
+function loadGatewayConfig(config?: GBrainConfig | null) {
+  return buildGatewayConfig(config ?? loadConfig() ?? { engine: 'pglite' });
 }
 
 export function envReady(recipe: Recipe, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -84,18 +85,22 @@ export function formatRecipeTable(recipes: Recipe[], env: NodeJS.ProcessEnv = pr
   return rows.join('\n');
 }
 
-export async function runProviders(subcommand: string | undefined, args: string[]): Promise<void> {
-  configureFromEnv();
+export async function runProviders(
+  subcommand: string | undefined,
+  args: string[],
+  opts: { config?: GBrainConfig | null } = {},
+): Promise<void> {
+  configureFromEnv(opts.config);
 
   switch (subcommand) {
     case 'list':
-      return runList(args);
+      return runList(args, opts.config);
     case 'test':
-      return runTest(args);
+      return runTest(args, opts.config);
     case 'env':
-      return runEnv(args);
+      return runEnv(args, opts.config);
     case 'explain':
-      return runExplain(args);
+      return runExplain(args, opts.config);
     case undefined:
     case '--help':
     case '-h':
@@ -131,12 +136,12 @@ EXAMPLES
 `);
 }
 
-function runList(_args: string[]): void {
-  console.log(formatRecipeTable(listRecipes(), loadGatewayConfig().env));
+function runList(_args: string[], config?: GBrainConfig | null): void {
+  console.log(formatRecipeTable(listRecipes(), loadGatewayConfig(config).env));
 }
 
-async function runTest(args: string[]): Promise<void> {
-  const baseGatewayConfig = loadGatewayConfig();
+async function runTest(args: string[], config?: GBrainConfig | null): Promise<void> {
+  const baseGatewayConfig = loadGatewayConfig(config);
   const modelIdx = args.indexOf('--model');
   const modelArg = modelIdx >= 0 ? args[modelIdx + 1] : undefined;
 
@@ -232,7 +237,7 @@ async function runTest(args: string[]): Promise<void> {
   }
 }
 
-function runEnv(args: string[]): void {
+function runEnv(args: string[], config?: GBrainConfig | null): void {
   const id = args[0];
   if (!id) {
     console.error('Usage: gbrain providers env <id>');
@@ -245,12 +250,13 @@ function runEnv(args: string[]): void {
   }
   console.log(`${recipe.name} (${recipe.id})`);
   console.log('');
+  const effectiveEnv = loadGatewayConfig(config).env;
   const required = recipe.auth_env?.required ?? [];
   const optional = recipe.auth_env?.optional ?? [];
   if (required.length > 0) {
     console.log('Required:');
     for (const k of required) {
-      const set = !!process.env[k];
+      const set = !!effectiveEnv[k];
       console.log(`  ${k.padEnd(32)} ${set ? '✓ set' : '✗ not set'}`);
     }
   } else {
@@ -259,7 +265,7 @@ function runEnv(args: string[]): void {
   if (optional.length > 0) {
     console.log('\nOptional:');
     for (const k of optional) {
-      const set = !!process.env[k];
+      const set = !!effectiveEnv[k];
       console.log(`  ${k.padEnd(32)} ${set ? '✓ set' : '✗ not set'}`);
     }
   }
@@ -271,11 +277,11 @@ function runEnv(args: string[]): void {
   }
 }
 
-async function runExplain(args: string[]): Promise<void> {
+async function runExplain(args: string[], config?: GBrainConfig | null): Promise<void> {
   const asJson = args.includes('--json') || args.includes('-j');
 
   const recipes = listRecipes();
-  const effectiveEnv = loadGatewayConfig().env;
+  const effectiveEnv = loadGatewayConfig(config).env;
   const env_detected = {
     OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
     GOOGLE_GENERATIVE_AI_API_KEY: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY,

@@ -190,6 +190,7 @@ describe('renderAdvisorReport', () => {
             draft: {
               writes: false,
               title: 'Seascape Hub draft from Example',
+              review_command_argv: ['gbrain', 'call', '--source', 'default', 'get_page', '{"slug":"wiki/x"}'],
               body: '# Seascape Hub Draft\n\n## Proposed writeback\nTraceable company knowledge residue.',
             },
           },
@@ -199,5 +200,6 @@ describe('renderAdvisorReport', () => {
     expect(txt).toContain('owner: Seascape Hub');
     expect(txt).toContain('proof: Traceable residue');
     expect(txt).toContain('[writes=false]');
+    expect(txt).toContain("readback: gbrain call --source default get_page '{\"slug\":\"wiki/x\"}'");
   });
 });
