@@ -101,6 +101,37 @@ describe('onboard E2E — runAllOnboardChecks', () => {
       .reduce((s, r) => s + r.remediations.length, 0);
     expect(takesRemediations).toBe(0);
   });
+
+  test('low graph coverage does not emit no-op extraction jobs without handler inputs', async () => {
+    const local = new PGLiteEngine();
+    await local.connect({});
+    try {
+      await local.initSchema();
+      await local.putPage('people/alice-example', {
+        type: 'person',
+        title: 'Alice Example',
+        compiled_truth: 'No inbound links or dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('companies/acme-example', {
+        type: 'company',
+        title: 'Acme Example',
+        compiled_truth: 'No inbound links or dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+
+      const results = await runAllOnboardChecks(local);
+      const byName = Object.fromEntries(results.map((r) => [r.check.name, r]));
+      expect(byName.entity_link_coverage?.check.status).toBe('warn');
+      expect(byName.timeline_coverage?.check.status).toBe('warn');
+      expect(byName.entity_link_coverage?.remediations.map((r) => r.job)).not.toContain('extract-ner');
+      expect(byName.timeline_coverage?.remediations.map((r) => r.job)).not.toContain('extract-timeline-from-meetings');
+    } finally {
+      await local.disconnect();
+    }
+  });
 });
 
 describe('onboard E2E — computeRemediationPlan with extras', () => {

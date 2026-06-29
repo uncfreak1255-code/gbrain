@@ -4,6 +4,10 @@ import { canonicalLookup } from './model-pricing.ts';
 import { lookupEmbeddingPrice, estimateCostFromChars } from './embedding-pricing.ts';
 import { getRecipe } from './ai/recipes/index.ts';
 import { parseModelId } from './ai/model-resolver.ts';
+import {
+  EXTRACTION_LAG_WARN_PCT_DEFAULT,
+  shouldWarnForExtractionLag,
+} from './extraction-lag.ts';
 
 /**
  * v0.40.x: env-var name → file/DB config field, for hosted embedding providers
@@ -135,6 +139,12 @@ export interface RecommendationContext {
   repoNeedsSync?: boolean;
   /** Pages whose DB extraction watermark is stale. */
   staleExtractionPages?: number;
+  /** Non-deleted pages in the same scope as staleExtractionPages. */
+  staleExtractionTotalPages?: number;
+  /** True when stale extraction was explicitly source-scoped. */
+  staleExtractionSourceScoped?: boolean;
+  /** Doctor warning threshold for stale link/timeline extraction. */
+  extractionLagWarnPct?: number;
   /** Configured embedding model id (e.g. 'openai:text-embedding-3-large'). */
   embeddingModel?: string;
   /** Configured embedding dimension (3072 / 1536 / 1024 / etc.). */
@@ -150,6 +160,18 @@ export interface RecommendationContext {
   chatModel?: string;
   /** Whether the chat provider has a usable API key. */
   hasChatApiKey?: boolean;
+  /** True when the active schema pack already runs extract_atoms in routine cycles. */
+  extractAtomsPackDeclaresPhase?: boolean;
+  /** Per-source DB page backlog for atom extraction. Transcript files are not included. */
+  extractAtomsBacklogBySource?: Array<{
+    sourceId: string;
+    backlog: number;
+    repoPath?: string | null;
+  }>;
+  /** Doctor warning threshold for the brain-wide DB page backlog. */
+  extractAtomsWarnThreshold?: number;
+  /** Bounded runtime window passed to extract-atoms-drain jobs. */
+  extractAtomsDrainWindowSeconds?: number;
 }
 
 /** Triage result for one check. */
@@ -276,11 +298,17 @@ export function computeRecommendations(
 
   // ---------------------------------------------------------------------
   // extract.stale — DB-backed incremental link + timeline extraction.
-  // Runs for actual extraction watermark lag, and after sync because fresh
-  // page writes can create new stale extraction work.
+  // Runs for actual extraction watermark lag only when doctor would warn, and
+  // after sync because fresh page writes can create new stale extraction work.
   // ---------------------------------------------------------------------
   const staleExtractionPages = Math.max(0, ctx.staleExtractionPages ?? 0);
-  if (staleExtractionPages > 0 || repoNeedsSync) {
+  const extractionLagNeedsWork = shouldWarnForExtractionLag({
+    totalPages: ctx.staleExtractionTotalPages ?? health.page_count,
+    stalePages: staleExtractionPages,
+    sourceScoped: ctx.staleExtractionSourceScoped,
+    warnPct: ctx.extractionLagWarnPct ?? EXTRACTION_LAG_WARN_PCT_DEFAULT,
+  });
+  if (extractionLagNeedsWork || repoNeedsSync) {
     const params: Record<string, unknown> = { stale: true, catchUp: true };
     if (ctx.sourceId) params.sourceId = ctx.sourceId;
     out.push({
@@ -292,11 +320,42 @@ export function computeRecommendations(
       est_seconds: Math.min(600, 30 + Math.max(staleExtractionPages, health.page_count) * 0.01),
       est_usd_cost: 0,
       depends_on: repoNeedsSync ? ['sync.repo'] : [],
-      rationale: staleExtractionPages > 0
+      rationale: extractionLagNeedsWork
         ? `${staleExtractionPages} page${staleExtractionPages === 1 ? '' : 's'} need link/timeline extraction`
         : 'Extract stale edges after sync',
       status: 'remediable',
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // extract_atoms.drain — DB page atom extraction when the active pack does
+  // not run extract_atoms itself. The job already exists as a protected,
+  // budget-bounded runtime lane; this makes the doctor remediation planner
+  // see the same backlog doctor reports.
+  // ---------------------------------------------------------------------
+  const atomBacklogs = ctx.extractAtomsBacklogBySource ?? [];
+  const atomBacklogTotal = atomBacklogs.reduce((sum, row) => sum + Math.max(0, row.backlog), 0);
+  const atomWarnThreshold = ctx.extractAtomsWarnThreshold ?? 10;
+  if (ctx.extractAtomsPackDeclaresPhase === false && atomBacklogTotal > atomWarnThreshold) {
+    const window = ctx.extractAtomsDrainWindowSeconds ?? 120;
+    for (const row of atomBacklogs) {
+      if (row.backlog <= 0) continue;
+      const params: Record<string, unknown> = { sourceId: row.sourceId, window };
+      if (row.repoPath) params.repoPath = row.repoPath;
+      out.push({
+        id: `extract_atoms.drain.${row.sourceId}`,
+        job: 'extract-atoms-drain',
+        params,
+        idempotency_key: idemKey(row.sourceId, 'extract-atoms-drain', params),
+        severity: 'medium',
+        est_seconds: window,
+        est_usd_cost: 0.3,
+        depends_on: repoNeedsSync ? ['sync.repo'] : [],
+        rationale: `${row.backlog} page${row.backlog === 1 ? '' : 's'} eligible for atom extraction in source ${row.sourceId}`,
+        protected: true,
+        status: 'remediable',
+      });
+    }
   }
 
   // v0.41.18.0 (A2 + codex #3): merge caller-supplied extras. Hardcoded
@@ -386,6 +445,14 @@ function classifyOne(check: Check, ctx: RecommendationContext): CheckClassificat
         return { check: check.name, status: 'blocked', reason: 'no repo configured' };
       }
       return { check: check.name, status: 'remediable' };
+    case 'extract_atoms_backlog':
+      if (ctx.extractAtomsPackDeclaresPhase === true) {
+        return { check: check.name, status: 'human_only', reason: 'active pack runs extract_atoms' };
+      }
+      if ((ctx.extractAtomsBacklogBySource ?? []).some((row) => row.backlog > 0)) {
+        return { check: check.name, status: 'remediable' };
+      }
+      return { check: check.name, status: 'human_only', reason: 'no backlog to drain' };
 
     // --- human_only paths ---
     case 'orphan_pages':        // archive is product judgment, not maintenance

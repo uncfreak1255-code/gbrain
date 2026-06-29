@@ -704,11 +704,12 @@ describe('BudgetTracker.snapshot', () => {
 });
 
 describe('monthly Claude+DeepSeek budget helpers', () => {
-  test('scope includes native Claude and DeepSeek but not OpenAI or OpenRouter-wrapped Claude', () => {
+  test('scope includes native Claude and DeepSeek but not OpenAI, GLM, or OpenRouter-wrapped Claude', () => {
     expect(isModelInMonthlyBudgetScope('claude-opus-4-8')).toBe(true);
     expect(isModelInMonthlyBudgetScope('anthropic:claude-sonnet-4-6')).toBe(true);
     expect(isModelInMonthlyBudgetScope('deepseek:deepseek-v4-flash')).toBe(true);
     expect(isModelInMonthlyBudgetScope('openai:gpt-5')).toBe(false);
+    expect(isModelInMonthlyBudgetScope('zai:glm-5.2')).toBe(false);
     expect(isModelInMonthlyBudgetScope('openrouter:anthropic/claude-sonnet-4-6')).toBe(false);
   });
 

@@ -2990,9 +2990,14 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
 const checkSubagentProvider = checkSubagentCapability;
 void checkSubagentProvider;
 
-// Module-scoped set so each invalid-env-var warning fires once per process,
-// per variable name (v0.42.7 #1696: was a single bool shared across all vars).
-const _envNumberWarned = new Set<string>();
+import {
+  EXTRACTION_LAG_MIN_PAGES,
+  EXTRACTION_LAG_WARN_PCT_DEFAULT,
+  resolveEnvNumber as resolveExtractionLagEnvNumber,
+  shouldWarnForExtractionLag,
+} from '../core/extraction-lag.ts';
+
+const extractionLagFailEnvWarned = new Set<string>();
 
 /**
  * v0.42.7 (#1696): single source of truth for the extraction-lag warn
@@ -3000,11 +3005,10 @@ const _envNumberWarned = new Set<string>();
  * end-of-sync nudge (`sync.ts:maybeExtractionNudge`) resolve through this +
  * `_resolveEnvNumber` so "the nudge fires iff doctor would warn" can't drift.
  */
-export const EXTRACTION_LAG_WARN_PCT_DEFAULT = 20;
 /** Min non-deleted page count below which extraction-lag is vacuous-skipped
  *  (unless an explicit --source scope is set). Shared by doctor + the sync
  *  nudge (D6/C4) so their skip predicates match exactly. */
-export const EXTRACTION_LAG_MIN_PAGES = 100;
+export { EXTRACTION_LAG_MIN_PAGES, EXTRACTION_LAG_WARN_PCT_DEFAULT };
 
 /**
  * v0.42.7 (#1696, C1): generic "read a positive number from an env var, warn
@@ -3014,19 +3018,10 @@ export const EXTRACTION_LAG_MIN_PAGES = 100;
  * Exported (D3) so the sync nudge resolves the threshold the same way.
  */
 export function _resolveEnvNumber(varName: string, fallback: number, opts?: { unit?: string }): number {
-  const raw = process.env[varName];
-  if (raw === undefined || raw === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) {
-    if (!_envNumberWarned.has(varName)) {
-      _envNumberWarned.add(varName);
-      console.warn(
-        `[gbrain doctor] Ignoring invalid ${varName}=${raw}; using default ${fallback}${opts?.unit ?? ''}.`,
-      );
-    }
-    return fallback;
-  }
-  return n;
+  return resolveExtractionLagEnvNumber(varName, fallback, {
+    ...opts,
+    warnPrefix: '[gbrain doctor]',
+  });
 }
 
 function _resolveSyncFreshnessHours(varName: string, fallback: number): number {
@@ -3301,8 +3296,8 @@ export async function checkLinksExtractionLag(
       const n = Number(failRaw);
       if (Number.isFinite(n) && n > 0) {
         failPct = n;
-      } else if (!_envNumberWarned.has('GBRAIN_EXTRACTION_LAG_FAIL_PCT')) {
-        _envNumberWarned.add('GBRAIN_EXTRACTION_LAG_FAIL_PCT');
+      } else if (!extractionLagFailEnvWarned.has('GBRAIN_EXTRACTION_LAG_FAIL_PCT')) {
+        extractionLagFailEnvWarned.add('GBRAIN_EXTRACTION_LAG_FAIL_PCT');
         console.warn(`[gbrain doctor] Ignoring invalid GBRAIN_EXTRACTION_LAG_FAIL_PCT=${failRaw}; hard-fail stays disabled.`);
       }
     }
@@ -3311,7 +3306,7 @@ export async function checkLinksExtractionLag(
     if (failPct !== undefined && pct > failPct) {
       return { name, status: 'fail', message: `${stale}/${total} pages (${pctStr}%)${scope} need link/timeline extraction (> ${failPct}% fail threshold). ${fix}`, details };
     }
-    if (pct > warnPct) {
+    if (shouldWarnForExtractionLag({ totalPages: total, stalePages: stale, sourceScoped: !!sourceId, warnPct })) {
       return { name, status: 'warn', message: `${stale}/${total} pages (${pctStr}%)${scope} have un-extracted edges. ${fix}`, details };
     }
     return { name, status: 'ok', message: `Extraction current: ${stale}/${total} pages (${pctStr}%) stale${scope}`, details };
@@ -7958,7 +7953,8 @@ export async function runRemediationPlan(
   const targetScore = parseIntFlag(args, '--target-score') ?? 90;
   const jsonOutput = args.includes('--json');
 
-  const plan = await computeRemediationPlan(engine, { targetScore });
+  const extraRemediations = await loadDoctorExtraRemediations(engine);
+  const plan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
 
   if (jsonOutput) {
     console.log(JSON.stringify(plan, null, 2));
@@ -8027,6 +8023,7 @@ export async function runRemediate(
 
   const { runRemediation, computeRemediationPlan } =
     await import('../core/remediation/index.ts');
+  const extraRemediations = await loadDoctorExtraRemediations(engine);
 
   // TTY confirmation gate (stays in CLI; library doesn't render).
   // Compute the plan once for the confirmation prompt, then hand off
@@ -8034,7 +8031,7 @@ export async function runRemediate(
   // own plan internally — we accept the second computation cost for
   // a cleaner CLI/library separation.
   if (!skipConfirm && !dryRun && process.stdout.isTTY && !resumeMode) {
-    const plan = await computeRemediationPlan(engine, { targetScore });
+    const plan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
     if (plan.target_unreachable) {
       console.error(
         `[remediate] target ${targetScore} unreachable; max autonomous = ${plan.max_reachable_score}/100. ` +
@@ -8070,6 +8067,7 @@ export async function runRemediate(
       dryRun,
       resume: resumeMode,
       resumePlanHash,
+      extraRemediations,
     },
     {
       onTargetUnreachable: (target, ceiling) => {
@@ -8134,6 +8132,18 @@ export async function runRemediate(
     (s) => s.status !== 'completed' && s.status !== 'submitted' && s.status !== 'dry_run',
   );
   if (result.budget_exhausted || anyFailed) process.exit(1);
+}
+
+async function loadDoctorExtraRemediations(engine: BrainEngine) {
+  try {
+    const { runAllOnboardChecks } = await import('../core/onboard/checks.ts');
+    const { filterRunnableOnboardRemediations } = await import('../core/onboard/render.ts');
+    const onboardResults = await runAllOnboardChecks(engine);
+    const extras = onboardResults.flatMap((r) => r.remediations);
+    return filterRunnableOnboardRemediations(extras, 'auto-with-prompt');
+  } catch {
+    return [];
+  }
 }
 
 // v0.41.18.0 (A1, codex finding #2): loadRecommendationContext moved to

@@ -18,6 +18,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { RemediationStep } from '../remediation-step.ts';
 import { makeRemediationStep } from '../remediation-step.ts';
+import { loadActivePackBestEffort } from '../schema-pack/best-effort.ts';
 
 /** Shared shape returned by all four checks. */
 export interface OnboardCheckResult {
@@ -42,6 +43,18 @@ async function safeCount(engine: BrainEngine, sql: string, params: unknown[] = [
     return Number.isFinite(n) ? n : 0;
   } catch {
     return 0;
+  }
+}
+
+async function hasNerInferencePack(engine: BrainEngine): Promise<boolean> {
+  try {
+    const pack = await loadActivePackBestEffort({ engine } as never);
+    const linkTypes = pack?.manifest?.link_types ?? [];
+    return linkTypes.some(
+      (lt) => lt.inference && typeof lt.inference === 'object' && 'regex' in lt.inference,
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -160,6 +173,7 @@ export async function checkEntityLinkCoverage(
   const sampleNote = useSample ? ` (sampled ${samplePct.toFixed(1)}%)` : '';
 
   const remediations: RemediationStep[] = [];
+  const canRunNer = await hasNerInferencePack(engine);
   let status: 'ok' | 'warn' | 'fail' = 'ok';
   let message: string;
 
@@ -173,29 +187,33 @@ export async function checkEntityLinkCoverage(
   } else if (coverage >= 0.4) {
     status = 'warn';
     message = `Coverage ${pct}% ± ${ciPct}% (target 70%)${sampleNote}`;
-    remediations.push(makeRemediationStep({
-      id: 'onboard.extract_ner_links',
-      job: 'extract-ner',
-      params: {},
-      severity: 'medium',
-      est_seconds: 300,
-      est_usd_cost: 0,
-      rationale: `Entity link coverage at ${pct}%; NER extraction lifts typed-link density`,
-      status: 'remediable',
-    }));
+    if (canRunNer) {
+      remediations.push(makeRemediationStep({
+        id: 'onboard.extract_ner_links',
+        job: 'extract-ner',
+        params: {},
+        severity: 'medium',
+        est_seconds: 300,
+        est_usd_cost: 0,
+        rationale: `Entity link coverage at ${pct}%; NER extraction lifts typed-link density`,
+        status: 'remediable',
+      }));
+    }
   } else {
     status = 'warn';
     message = `Coverage ${pct}% ± ${ciPct}% (target 70%)${sampleNote}`;
-    remediations.push(makeRemediationStep({
-      id: 'onboard.extract_ner_links',
-      job: 'extract-ner',
-      params: {},
-      severity: 'high',
-      est_seconds: 600,
-      est_usd_cost: 0,
-      rationale: `Entity link coverage at ${pct}%; NER extraction lifts typed-link density`,
-      status: 'remediable',
-    }));
+    if (canRunNer) {
+      remediations.push(makeRemediationStep({
+        id: 'onboard.extract_ner_links',
+        job: 'extract-ner',
+        params: {},
+        severity: 'high',
+        est_seconds: 600,
+        est_usd_cost: 0,
+        rationale: `Entity link coverage at ${pct}%; NER extraction lifts typed-link density`,
+        status: 'remediable',
+      }));
+    }
   }
   return {
     check: { name: 'entity_link_coverage', status, message },
@@ -251,6 +269,12 @@ export async function checkTimelineCoverage(
   const sampleNote = useSample ? ` (sampled ${samplePct.toFixed(1)}%)` : '';
 
   const remediations: RemediationStep[] = [];
+  const meetingCount = await safeCount(
+    engine,
+    `SELECT COUNT(*) AS count FROM pages
+       WHERE type = 'meeting'
+         AND deleted_at IS NULL`,
+  );
   let status: 'ok' | 'warn' | 'fail' = 'ok';
   let message: string;
 
@@ -262,29 +286,33 @@ export async function checkTimelineCoverage(
   } else if (coverage >= 0.7) {
     status = 'warn';
     message = `Coverage ${pct}% ± ${ciPct}% (target 90%)${sampleNote}`;
-    remediations.push(makeRemediationStep({
-      id: 'onboard.extract_timeline_from_meetings',
-      job: 'extract-timeline-from-meetings',
-      params: {},
-      severity: 'medium',
-      est_seconds: 240,
-      est_usd_cost: 0,
-      rationale: `Timeline coverage at ${pct}%; meeting-derived entries lift it`,
-      status: 'remediable',
-    }));
+    if (meetingCount > 0) {
+      remediations.push(makeRemediationStep({
+        id: 'onboard.extract_timeline_from_meetings',
+        job: 'extract-timeline-from-meetings',
+        params: {},
+        severity: 'medium',
+        est_seconds: 240,
+        est_usd_cost: 0,
+        rationale: `Timeline coverage at ${pct}%; meeting-derived entries lift it`,
+        status: 'remediable',
+      }));
+    }
   } else {
     status = 'warn';
     message = `Coverage ${pct}% ± ${ciPct}% (target 90%)${sampleNote}`;
-    remediations.push(makeRemediationStep({
-      id: 'onboard.extract_timeline_from_meetings',
-      job: 'extract-timeline-from-meetings',
-      params: {},
-      severity: 'high',
-      est_seconds: 480,
-      est_usd_cost: 0,
-      rationale: `Timeline coverage at ${pct}%; meeting-derived entries lift it`,
-      status: 'remediable',
-    }));
+    if (meetingCount > 0) {
+      remediations.push(makeRemediationStep({
+        id: 'onboard.extract_timeline_from_meetings',
+        job: 'extract-timeline-from-meetings',
+        params: {},
+        severity: 'high',
+        est_seconds: 480,
+        est_usd_cost: 0,
+        rationale: `Timeline coverage at ${pct}%; meeting-derived entries lift it`,
+        status: 'remediable',
+      }));
+    }
   }
   return {
     check: { name: 'timeline_coverage', status, message },

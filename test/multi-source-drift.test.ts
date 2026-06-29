@@ -17,6 +17,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -232,5 +233,39 @@ describe('findMisroutedPages — heuristic correctness', () => {
       ['people/rehome-eve', 'people/rehome-finn'],
     );
     expect(after).toEqual(before);
+  });
+
+  test('case 9: git-ignored markdown is not counted as drift', async () => {
+    const root = makeTmpRoot('case9');
+    execFileSync('git', ['init', '-q'], { cwd: root, stdio: 'ignore' });
+    seedFile(root, '.gitignore', 'ignored/\n');
+    seedFile(root, 'ignored/default-only.md');
+    seedFile(root, 'included/default-only.md');
+
+    await runSources(engine, ['add', 'src-case9', '--no-federated']);
+    await engine.executeRaw(
+      `UPDATE sources SET local_path = $1 WHERE id = $2`,
+      [root, 'src-case9'],
+    );
+    await engine.putPage('ignored/default-only', {
+      type: 'concept',
+      title: 'Ignored default only',
+      compiled_truth: '.',
+    });
+    await engine.putPage('included/default-only', {
+      type: 'concept',
+      title: 'Included default only',
+      compiled_truth: '.',
+    });
+
+    const result = await findMisroutedPages(engine, [{ id: 'src-case9', local_path: root }]);
+    expect(result.count).toBe(1);
+    expect(result.sources).toEqual([
+      {
+        source_id: 'src-case9',
+        local_path: root,
+        slugs: ['included/default-only'],
+      },
+    ]);
   });
 });

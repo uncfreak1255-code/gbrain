@@ -112,7 +112,10 @@ describe('post-commit hook (D9 local, D7 self-contained)', () => {
 
   test('the hook works even with the committed helper deleted (self-contained)', async () => {
     rmSync(join(work, 'scripts', 'brain-commit-push.sh'));
-    git(work, 'add', '-A'); git(work, 'commit', '-qm', 'remove helper');
+    expect(await waitForGitIndex(work)).toBe(true);
+    git(work, 'add', '-A');
+    expect(await waitForGitIndex(work)).toBe(true);
+    git(work, 'commit', '-qm', 'remove helper');
     const head = git(work, 'rev-parse', 'HEAD');
     expect(await waitForOrigin(bare, head)).toBe(true);
   });
