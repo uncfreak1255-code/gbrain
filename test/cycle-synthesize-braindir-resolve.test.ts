@@ -19,11 +19,11 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runPhaseSynthesize } from '../src/core/cycle/synthesize.ts';
+import { runPhaseSynthesize, __testing as synthTesting } from '../src/core/cycle/synthesize.ts';
 
 let engine: PGLiteEngine;
 let tmpDir: string;
@@ -75,5 +75,53 @@ describe('runPhaseSynthesize brainDir resolution (regression)', () => {
     await runPhaseSynthesize(engine, opts);
     // Already absolute → no mutation.
     expect(opts.brainDir).toBe(tmpDir);
+  });
+
+  test('default-source Dream summaries still dual-write to disk', async () => {
+    const brainDir = mkdtempSync(join(tmpdir(), 'synth-summary-default-'));
+    try {
+      await synthTesting.writeSummaryPage(engine, {
+        brainDir,
+        sourceId: 'default',
+        summarySlug: 'dream-cycle-summaries/2026-06-28',
+        summaryDate: '2026-06-28',
+        writtenSlugs: [],
+        childOutcomes: [{ jobId: 1, status: 'no_write_acknowledged' }],
+      });
+
+      expect(existsSync(join(brainDir, 'dream-cycle-summaries', '2026-06-28.md'))).toBe(true);
+      const page = await engine.getPage('dream-cycle-summaries/2026-06-28', { sourceId: 'default' });
+      expect(page?.frontmatter?.dream_generated).toBe(true);
+    } finally {
+      rmSync(brainDir, { recursive: true, force: true });
+    }
+  });
+
+  test('non-default source Dream summaries stay in DB and do not dirty source roots', async () => {
+    const publicSourceRoot = mkdtempSync(join(tmpdir(), 'synth-summary-site-'));
+    try {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config, created_at)
+         VALUES ('site', 'site', $1, '{}'::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+        [publicSourceRoot],
+      );
+
+      await synthTesting.writeSummaryPage(engine, {
+        brainDir: publicSourceRoot,
+        sourceId: 'site',
+        summarySlug: 'dream-cycle-summaries/2026-06-29',
+        summaryDate: '2026-06-29',
+        writtenSlugs: [],
+        childOutcomes: [{ jobId: 10, status: 'no_write_acknowledged' }],
+      });
+
+      expect(existsSync(join(publicSourceRoot, 'dream-cycle-summaries'))).toBe(false);
+      const page = await engine.getPage('dream-cycle-summaries/2026-06-29', { sourceId: 'site' });
+      expect(page?.frontmatter?.dream_generated).toBe(true);
+      expect(page?.compiled_truth).toContain('**Pages written:** 0.');
+    } finally {
+      rmSync(publicSourceRoot, { recursive: true, force: true });
+    }
   });
 });
