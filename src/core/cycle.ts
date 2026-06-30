@@ -1669,6 +1669,7 @@ export async function runCycle(
         const { result, duration_ms } = await timePhase(() => runPhaseSynthesize(engine, {
           brainDir,
           dryRun,
+          sourceId: opts.sourceId,
           yieldDuringPhase: opts.yieldDuringPhase,
           inputFile: opts.synthInputFile,
           date: opts.synthDate,

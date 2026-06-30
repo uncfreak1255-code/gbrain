@@ -250,6 +250,12 @@ export function rewriteChunkedSlug(slug: string, hash6: string, idx: number): st
 export interface SynthesizePhaseOpts {
   brainDir: string;
   dryRun: boolean;
+  /**
+   * Explicit source cycle target. Non-default source roots are often product
+   * or code checkouts; keep Dream's summary receipt in DB without dropping
+   * `dream-cycle-summaries/` into those repositories.
+   */
+  sourceId?: string;
   /** Generic in-cycle keepalive for cycle-lock TTL renewal during long waits. */
   yieldDuringPhase?: () => Promise<void>;
   /**
@@ -662,7 +668,14 @@ export async function runPhaseSynthesize(
     // Back-compat: writeSummaryPage takes string[] for display; map refs back to slugs.
     const writtenSlugs = writtenRefs.map(r => r.slug);
     if (SUMMARY_SLUG_RE.test(summarySlug)) {
-      await writeSummaryPage(engine, opts.brainDir, summarySlug, summaryDate, writtenSlugs, childOutcomes);
+      await writeSummaryPage(engine, {
+        brainDir: opts.brainDir,
+        sourceId: opts.sourceId,
+        summarySlug,
+        summaryDate,
+        writtenSlugs,
+        childOutcomes,
+      });
     }
 
     const ms = Date.now() - start;
@@ -1471,14 +1484,20 @@ export function renderPageToMarkdown(page: Page, tags: string[]): string {
 
 // ── Summary index page ───────────────────────────────────────────────
 
+interface WriteSummaryPageOpts {
+  brainDir: string;
+  sourceId?: string;
+  summarySlug: string;
+  summaryDate: string;
+  writtenSlugs: string[];
+  childOutcomes: Array<{ jobId: number; status: string }>;
+}
+
 async function writeSummaryPage(
   engine: BrainEngine,
-  brainDir: string,
-  summarySlug: string,
-  summaryDate: string,
-  writtenSlugs: string[],
-  childOutcomes: Array<{ jobId: number; status: string }>,
+  opts: WriteSummaryPageOpts,
 ): Promise<void> {
+  const { brainDir, sourceId, summarySlug, summaryDate, writtenSlugs, childOutcomes } = opts;
   const completed = childOutcomes.filter(
     c => c.status === 'completed' || c.status === 'no_write_acknowledged',
   ).length;
@@ -1523,7 +1542,11 @@ async function writeSummaryPage(
     compiled_truth: parsed.compiled_truth,
     timeline: parsed.timeline,
     frontmatter: parsed.frontmatter,
-  });
+  }, sourceId ? { sourceId } : undefined);
+
+  if (sourceId && sourceId !== 'default') {
+    return;
+  }
 
   // Also write to disk (orchestrator dual-write).
   try {
@@ -1594,4 +1617,5 @@ export const __testing = {
   buildTranscriptAllowedSlugPrefixes,
   collectChildPutPageSlugs,
   collectChildPutPageWriterJobIds,
+  writeSummaryPage,
 };
