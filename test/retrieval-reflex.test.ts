@@ -9,7 +9,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { withEnv } from './helpers/with-env.ts';
+import { emptyHome, withEnv } from './helpers/with-env.ts';
 import { normalizeAlias } from '../src/core/search/alias-normalize.ts';
 import { resolveEntitiesToPointers } from '../src/core/context/retrieval-reflex.ts';
 import { extractCandidates } from '../src/core/context/entity-salience.ts';
@@ -133,7 +133,12 @@ describe('context-engine assemble() — Retrieval Reflex integration', () => {
   });
 
   test('no resolver available (PGLite, no serve/host) → no throw, live context still present', async () => {
-    await withEnv(REFLEX_ON, async () => {
+    await withEnv({
+      ...REFLEX_ON,
+      GBRAIN_HOME: emptyHome(),
+      GBRAIN_DATABASE_URL: undefined,
+      DATABASE_URL: undefined,
+    }, async () => {
       const ce = createGBrainContextEngine({ workspaceDir: '/tmp/rr-test-ws-2' });
       const res = await ce.assemble({
         sessionId: 's2',

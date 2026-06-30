@@ -40,6 +40,7 @@ CHECKS=(
   "check:jsonb"
   "check:source-id-projection"
   "check:source-config-leak"
+  "check:no-raw-nul-source"
   "check:progress"
   "check:test-isolation"
   "check:wasm"

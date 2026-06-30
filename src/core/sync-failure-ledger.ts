@@ -216,7 +216,7 @@ export function syncFailuresPath(): string {
 
 function _ledgerKey(f: { source_id: string; path: string }): string {
   // NUL separator can't appear in a source id or path.
-  return `${f.source_id} ${f.path}`;
+  return `${f.source_id}\0${f.path}`;
 }
 
 // ─── State mirror ───────────────────────────────────────────────────

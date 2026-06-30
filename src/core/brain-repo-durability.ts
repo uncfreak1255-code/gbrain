@@ -34,6 +34,7 @@ import { join, dirname, relative, isAbsolute } from 'path';
 import { execFileSync, execSync } from 'child_process';
 import {
   GIT_ENV, GIT_ENV_AUTH, divergenceSafePull, detectDefaultBranch, pushProbe,
+  durableSsrfFlags,
   type PullOutcome, type PushProbeResult,
 } from './git-remote.ts';
 import { findResolverFile, RESOLVER_FILENAMES } from './resolver-filenames.ts';
@@ -681,11 +682,14 @@ function commitScaffolding(repoPath: string, branch: string, redact: (s: string)
     execFileSync('git', ['-C', repoPath, 'commit', '-m', 'chore(gbrain): install brain durability scaffolding'], {
       stdio: 'ignore', timeout: 30_000, env: { ...process.env, ...GIT_ENV },
     });
-    execFileSync('git', ['-C', repoPath, ...['-c', 'http.followRedirects=false'], 'push', 'origin', `HEAD:${branch}`], {
+    execFileSync('git', ['-C', repoPath, ...durableSsrfFlags(), 'push', 'origin', `HEAD:${branch}`], {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, env: { ...process.env, ...GIT_ENV_AUTH },
     });
     return { status: 'fixed', detail: 'committed + pushed durability scaffolding' };
   } catch (e) {
+    if (headMatchesOrigin(repoPath, branch)) {
+      return { status: 'fixed', detail: 'committed + pushed durability scaffolding' };
+    }
     return { status: 'needs_attention', detail: redact(`scaffolding commit/push failed: ${(e as Error).message.slice(0, 140)}`) };
   }
 }
