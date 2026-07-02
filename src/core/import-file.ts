@@ -271,13 +271,13 @@ export async function importFromContent(
     /**
      * v0.42 (#1699 trust boundary). When `true` (untrusted caller — remote MCP
      * put_page), gate-owned frontmatter markers (`quarantine`, `content_flag`,
-     * `embed_skip`) are STRIPPED from the incoming content before the content-
-     * sanity gate runs, so only the gate itself can set them. Without this, a
-     * write-scoped OAuth client could `put_page` clean content carrying a
-     * hand-crafted `quarantine` marker to hide arbitrary pages from search, or
-     * a `content_flag.detail` to inject text into the agent-trusted warning
-     * channel. `put_page` passes `ctx.remote !== false` (fail-closed: anything
-     * not strictly local is untrusted, matching the v0.26.9 F7b posture).
+     * `embed_skip`, `facts_backstop_skip`) are STRIPPED from incoming content
+     * before the content-sanity/facts gates run, so only local trusted code can
+     * set them. Without this, a write-scoped OAuth client could `put_page` clean
+     * content carrying a hand-crafted marker to hide arbitrary pages from search
+     * or suppress downstream safety checks. `put_page` passes `ctx.remote !==
+     * false` (fail-closed: anything not strictly local is untrusted, matching
+     * the v0.26.9 F7b posture).
      * Local/trusted callers (sync, capture, dream, `quarantine clear/scan`)
      * leave it unset → markers preserved (the gate + CLI own them).
      */
@@ -308,15 +308,14 @@ export async function importFromContent(
   // v0.42 (#1699 trust boundary): strip gate-owned markers from UNTRUSTED
   // input. parseMarkdown preserves every frontmatter key except type/title/
   // tags/slug, so a remote MCP put_page (ctx.remote !== false, threaded as
-  // opts.remote) could otherwise plant `quarantine` (hide a page from search +
-  // suppress chunks) or `content_flag.detail` (inject text into the agent's
-  // trusted "this looks odd" channel) on clean content. Only the content-
-  // sanity gate (below) and trusted local CLIs may set these. Fail-closed:
-  // strip whenever opts.remote === true.
+  // opts.remote) could otherwise plant gate-owned markers on clean content.
+  // Only the content-sanity/facts gates and trusted local CLIs may set these.
+  // Fail-closed: strip whenever opts.remote === true.
   if (opts.remote === true && parsed.frontmatter) {
     delete parsed.frontmatter[QUARANTINE_KEY];
     delete parsed.frontmatter[CONTENT_FLAG_KEY];
     delete parsed.frontmatter[EMBED_SKIP_KEY];
+    delete parsed.frontmatter.facts_backstop_skip;
   }
 
   // Vendor-neutral guardrail seam (observe-only, fail-open). Runs AFTER

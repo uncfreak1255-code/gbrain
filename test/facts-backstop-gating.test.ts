@@ -35,9 +35,13 @@ afterAll(async () => {
   await engine.disconnect();
 });
 
-async function putAndReadBackstop(slug: string, content: string): Promise<{ queued: boolean } | { skipped: string } | undefined> {
+async function putAndReadBackstop(
+  slug: string,
+  content: string,
+  opts: { remote?: boolean } = {},
+): Promise<{ queued: boolean } | { skipped: string } | undefined> {
   const r = await dispatchToolCall(engine, 'put_page', { slug, content }, {
-    remote: false,
+    remote: opts.remote ?? false,
     sourceId: 'default',
   });
   // Diagnostic: print the actual error content when the call fails, so CI
@@ -76,6 +80,27 @@ describe('put_page facts backstop', () => {
       `---\ntype: note\ntitle: Dream\ndream_generated: true\n---\n${'this is some content. '.repeat(20)}`,
     );
     expect(result).toEqual({ skipped: 'dream_generated' });
+  });
+
+  test('skipped on facts_backstop_skip:true frontmatter', async () => {
+    const result = await putAndReadBackstop(
+      'note/rollup',
+      `---\ntype: note\ntitle: Rollup\nfacts_backstop_skip: true\n---\n${'this is some operating summary content. '.repeat(20)}`,
+    );
+    expect(result).toEqual({ skipped: 'facts_backstop_skip' });
+  });
+
+  test('remote caller cannot suppress facts backstop with facts_backstop_skip:true', async () => {
+    const result = await putAndReadBackstop(
+      'note/remote-rollup',
+      `---\ntype: note\ntitle: Remote Rollup\nfacts_backstop_skip: true\n---\n${'this is some operating summary content. '.repeat(20)}`,
+      { remote: true },
+    );
+    expect(result).toBeDefined();
+    if (result && 'skipped' in result) {
+      expect(result.skipped).not.toBe('facts_backstop_skip');
+      expect(result.skipped).not.toMatch(/^eligibility_failed:facts_backstop_skip$/);
+    }
   });
 
   test('queued for an eligible substantive note', async () => {

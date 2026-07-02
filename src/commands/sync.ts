@@ -2912,6 +2912,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
             source: 'sync:import',
             mode: 'queue',
             notabilityFilter: 'high-only',
+            remote: false,
           },
         );
       } catch { /* per-page enqueue is best-effort */ }

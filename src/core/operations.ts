@@ -1036,6 +1036,7 @@ const put_page: Operation = {
               date: e.date,
               summary: e.summary,
               detail: e.detail || '',
+              source_id: ctx.sourceId ?? 'default',
             }));
             // v0.41.18.0: engine self-retries on Supavisor circuit-breaker
             // recovery. auditSite label routes the audit JSONL emission so
@@ -1078,6 +1079,7 @@ const put_page: Operation = {
           sessionId: (ctx as { source_session?: string }).source_session ?? null,
           source: 'mcp:put_page',
           mode: 'queue',
+          remote: ctx.remote,
         },
       );
       if (r.mode === 'queue' && r.enqueued) {
