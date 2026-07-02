@@ -46,6 +46,63 @@ async function safeCount(engine: BrainEngine, sql: string, params: unknown[] = [
   }
 }
 
+async function hasRecentExhaustedMeetingTimelineExtraction(engine: BrainEngine): Promise<boolean> {
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const result = await engine.executeRaw(
+      `WITH latest_extraction_input AS (
+         SELECT GREATEST(
+           COALESCE((
+             SELECT MAX(updated_at)
+               FROM pages
+              WHERE type = 'meeting'
+                AND deleted_at IS NULL
+           ), '-infinity'::timestamptz),
+           COALESCE((
+             SELECT MAX(updated_at)
+               FROM pages
+              WHERE type IN ('person', 'company', 'organization', 'entity')
+                AND deleted_at IS NULL
+           ), '-infinity'::timestamptz),
+           COALESCE((
+             SELECT MAX(l.created_at)
+               FROM links l
+               JOIN pages pf ON pf.id = l.from_page_id
+              WHERE l.link_type = 'attended'
+                AND pf.type = 'meeting'
+                AND pf.deleted_at IS NULL
+           ), '-infinity'::timestamptz)
+         ) AS updated_at
+       ),
+       latest_exhausted AS (
+         SELECT MAX(finished_at) AS finished_at
+           FROM minion_jobs
+         WHERE name = 'extract-timeline-from-meetings'
+            AND status = 'completed'
+            AND NOT (data ? 'sourceId')
+            AND NOT (data ? 'sourceIdFilter')
+            AND COALESCE((result->>'batch_errors')::int, 0) = 0
+            AND COALESCE((result->>'entries_created')::int, 0) = 0
+            AND finished_at >= $1::timestamptz
+       )
+       SELECT CASE
+         WHEN latest_exhausted.finished_at IS NOT NULL
+          AND latest_exhausted.finished_at >= latest_extraction_input.updated_at
+         THEN 1 ELSE 0
+       END AS count
+       FROM latest_extraction_input, latest_exhausted`,
+      [cutoff],
+    );
+    const rows = (result as { rows?: Array<Record<string, unknown>> } | undefined)?.rows
+      ?? (result as Array<Record<string, unknown>> | undefined)
+      ?? [];
+    const n = Number(rows[0]?.count ?? 0);
+    return Number.isFinite(n) && n > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function hasNerInferencePack(engine: BrainEngine): Promise<boolean> {
   try {
     const pack = await loadActivePackBestEffort({ engine } as never);
@@ -275,6 +332,9 @@ export async function checkTimelineCoverage(
        WHERE type = 'meeting'
          AND deleted_at IS NULL`,
   );
+  const meetingTimelineExtractionExhausted = meetingCount > 0
+    ? await hasRecentExhaustedMeetingTimelineExtraction(engine)
+    : false;
   let status: 'ok' | 'warn' | 'fail' = 'ok';
   let message: string;
 
@@ -286,7 +346,9 @@ export async function checkTimelineCoverage(
   } else if (coverage >= 0.7) {
     status = 'warn';
     message = `Coverage ${pct}% ± ${ciPct}% (target 90%)${sampleNote}`;
-    if (meetingCount > 0) {
+    if (meetingTimelineExtractionExhausted) {
+      message += '; recent meeting timeline extraction created 0 entries, so add new meeting content or fix parsing before rerunning it';
+    } else if (meetingCount > 0) {
       remediations.push(makeRemediationStep({
         id: 'onboard.extract_timeline_from_meetings',
         job: 'extract-timeline-from-meetings',
@@ -301,7 +363,9 @@ export async function checkTimelineCoverage(
   } else {
     status = 'warn';
     message = `Coverage ${pct}% ± ${ciPct}% (target 90%)${sampleNote}`;
-    if (meetingCount > 0) {
+    if (meetingTimelineExtractionExhausted) {
+      message += '; recent meeting timeline extraction created 0 entries, so add new meeting content or fix parsing before rerunning it';
+    } else if (meetingCount > 0) {
       remediations.push(makeRemediationStep({
         id: 'onboard.extract_timeline_from_meetings',
         job: 'extract-timeline-from-meetings',
