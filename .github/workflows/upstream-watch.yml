@@ -67,6 +67,12 @@ jobs:
               "$@"
           }
 
+          issues_enabled="$(gh_api "$api" | jq -r '.has_issues // false')"
+          if [ "$issues_enabled" != "true" ]; then
+            echo "Repository issues are disabled; skipping upstream drift issue sync."
+            exit 0
+          fi
+
           search_issue_number() {
             local state="$1"
             local query
