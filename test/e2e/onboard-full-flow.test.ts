@@ -132,6 +132,188 @@ describe('onboard E2E — runAllOnboardChecks', () => {
       await local.disconnect();
     }
   });
+
+  test('recent zero-entry meeting timeline extraction suppresses repeat remediation', async () => {
+    const local = new PGLiteEngine();
+    await local.connect({});
+    try {
+      await local.initSchema();
+      await local.putPage('people/alice-example', {
+        type: 'person',
+        title: 'Alice Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('companies/acme-example', {
+        type: 'company',
+        title: 'Acme Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('meetings/weekly-sync', {
+        type: 'meeting',
+        title: 'Weekly Sync',
+        compiled_truth: 'Attendees discussed status.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.executeRaw(
+        `INSERT INTO minion_jobs (name, status, result, finished_at)
+         VALUES ('extract-timeline-from-meetings', 'completed', '{"batch_errors":0,"entries_created":0,"entities_touched":5,"meetings_scanned":2}'::jsonb, now())`,
+      );
+
+      const results = await runAllOnboardChecks(local);
+      const timeline = results.find((result) => result.check.name === 'timeline_coverage');
+      expect(timeline?.check.status).toBe('warn');
+      expect(timeline?.check.message).toContain('created 0 entries');
+      expect(timeline?.remediations.map((r) => r.job)).not.toContain('extract-timeline-from-meetings');
+    } finally {
+      await local.disconnect();
+    }
+  });
+
+  test('meeting updates after zero-entry extraction re-enable timeline remediation', async () => {
+    const local = new PGLiteEngine();
+    await local.connect({});
+    try {
+      await local.initSchema();
+      await local.putPage('people/alice-example', {
+        type: 'person',
+        title: 'Alice Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('companies/acme-example', {
+        type: 'company',
+        title: 'Acme Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('meetings/weekly-sync', {
+        type: 'meeting',
+        title: 'Weekly Sync',
+        compiled_truth: 'Attendees discussed status.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.executeRaw(
+        `INSERT INTO minion_jobs (name, status, result, finished_at)
+         VALUES ('extract-timeline-from-meetings', 'completed', '{"batch_errors":0,"entries_created":0,"entities_touched":5,"meetings_scanned":2}'::jsonb, now() - interval '1 hour')`,
+      );
+      await local.executeRaw(
+        `UPDATE pages
+            SET updated_at = now()
+          WHERE slug = 'meetings/weekly-sync'`,
+      );
+
+      const results = await runAllOnboardChecks(local);
+      const timeline = results.find((result) => result.check.name === 'timeline_coverage');
+      expect(timeline?.check.status).toBe('warn');
+      expect(timeline?.check.message).not.toContain('created 0 entries');
+      expect(timeline?.remediations.map((r) => r.job)).toContain('extract-timeline-from-meetings');
+    } finally {
+      await local.disconnect();
+    }
+  });
+
+  test('source-scoped zero-entry timeline extraction does not suppress global remediation', async () => {
+    const local = new PGLiteEngine();
+    await local.connect({});
+    try {
+      await local.initSchema();
+      await local.putPage('people/alice-example', {
+        type: 'person',
+        title: 'Alice Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('companies/acme-example', {
+        type: 'company',
+        title: 'Acme Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('meetings/weekly-sync', {
+        type: 'meeting',
+        title: 'Weekly Sync',
+        compiled_truth: 'Attendees discussed status.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.executeRaw(
+        `INSERT INTO minion_jobs (name, status, data, result, finished_at)
+         VALUES (
+           'extract-timeline-from-meetings',
+           'completed',
+           '{"sourceId":"meeting-source-a"}'::jsonb,
+           '{"batch_errors":0,"entries_created":0,"entities_touched":0,"meetings_scanned":1}'::jsonb,
+           now()
+         )`,
+      );
+
+      const results = await runAllOnboardChecks(local);
+      const timeline = results.find((result) => result.check.name === 'timeline_coverage');
+      expect(timeline?.check.status).toBe('warn');
+      expect(timeline?.check.message).not.toContain('created 0 entries');
+      expect(timeline?.remediations.map((r) => r.job)).toContain('extract-timeline-from-meetings');
+    } finally {
+      await local.disconnect();
+    }
+  });
+
+  test('new entity and attendee inputs after zero-entry extraction re-enable timeline remediation', async () => {
+    const local = new PGLiteEngine();
+    await local.connect({});
+    try {
+      await local.initSchema();
+      await local.putPage('companies/acme-example', {
+        type: 'company',
+        title: 'Acme Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.putPage('meetings/weekly-sync', {
+        type: 'meeting',
+        title: 'Weekly Sync',
+        compiled_truth: 'Attendees discussed Alice Example.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.executeRaw(
+        `INSERT INTO minion_jobs (name, status, result, finished_at)
+         VALUES ('extract-timeline-from-meetings', 'completed', '{"batch_errors":0,"entries_created":0,"entities_touched":0,"meetings_scanned":1}'::jsonb, now() - interval '1 hour')`,
+      );
+      await local.putPage('people/alice-example', {
+        type: 'person',
+        title: 'Alice Example',
+        compiled_truth: 'No dated timeline yet.',
+        timeline: '',
+        frontmatter: {},
+      });
+      await local.executeRaw(
+        `INSERT INTO links (from_page_id, to_page_id, link_type, created_at)
+         SELECT meeting.id, person.id, 'attended', now()
+           FROM pages meeting, pages person
+          WHERE meeting.slug = 'meetings/weekly-sync'
+            AND person.slug = 'people/alice-example'`,
+      );
+
+      const results = await runAllOnboardChecks(local);
+      const timeline = results.find((result) => result.check.name === 'timeline_coverage');
+      expect(timeline?.check.status).toBe('warn');
+      expect(timeline?.check.message).not.toContain('created 0 entries');
+      expect(timeline?.remediations.map((r) => r.job)).toContain('extract-timeline-from-meetings');
+    } finally {
+      await local.disconnect();
+    }
+  });
 });
 
 describe('onboard E2E — computeRemediationPlan with extras', () => {
