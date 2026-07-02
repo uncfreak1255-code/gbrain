@@ -21,6 +21,9 @@
  *     own world; not user-meaningful for hot memory)
  *   - frontmatter.dream_generated is NOT `true` (anti-loop: never extract
  *     from dream-generated pages — they're already a digest)
+ *   - frontmatter.facts_backstop_skip is NOT `true` when the caller is trusted
+ *     local code (explicit opt-out for operational rollups or receipts that
+ *     should stay searchable but should not enqueue the facts pipeline)
  *   - body length >= 80 chars (skip TODO-style snippets)
  *   - parsed.type ∈ {note, meeting, slack, email, calendar-event, source, writing}
  *     OR slug.startsWith('meetings/' | 'personal/' | 'daily/')
@@ -37,6 +40,14 @@
 import type { PageType } from '../types.ts';
 
 export type EligibilityResult = { ok: true } | { ok: false; reason: string };
+export type EligibilityOptions = {
+  /**
+   * Only trusted local writers may opt a page out of the facts backstop using
+   * frontmatter. Remote callers can write content, but they do not control this
+   * gate-owned marker.
+   */
+  trustFrontmatterOptOut?: boolean;
+};
 
 /**
  * Path prefixes that rescue a page even when frontmatter type is not
@@ -80,11 +91,15 @@ const MIN_BODY_CHARS = 80;
 export function isFactsBackstopEligible(
   slug: string,
   parsed: { type: PageType; compiled_truth: string; frontmatter: Record<string, unknown> } | null | undefined,
+  options: EligibilityOptions = {},
 ): EligibilityResult {
   if (!parsed) return { ok: false, reason: 'no_parsed_page' };
   if (slug.startsWith('wiki/agents/')) return { ok: false, reason: 'subagent_namespace' };
   if (parsed.frontmatter && parsed.frontmatter.dream_generated === true) {
     return { ok: false, reason: 'dream_generated' };
+  }
+  if (options.trustFrontmatterOptOut === true && parsed.frontmatter && parsed.frontmatter.facts_backstop_skip === true) {
+    return { ok: false, reason: 'facts_backstop_skip' };
   }
 
   const body = (parsed.compiled_truth ?? '').trim();

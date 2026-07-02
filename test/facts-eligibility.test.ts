@@ -6,7 +6,8 @@
  *   - Slug-only branch: meetings/, personal/, daily/ rescue mistyped pages.
  *   - Both branches: typed AND slug-prefixed → still ok.
  *   - Neither: rejected with kind:<type> reason.
- *   - Negative paths: null parsed, wiki/agents/, dream_generated, too_short.
+ *   - Negative paths: null parsed, wiki/agents/, dream_generated,
+ *     facts_backstop_skip when trusted, too_short.
  *
  * Pure-function tests; no DB.
  */
@@ -96,6 +97,16 @@ describe('isFactsBackstopEligible — guards', () => {
       frontmatter: { dream_generated: false },
     });
     expect(isFactsBackstopEligible(f.slug, f.parsed)).toEqual({ ok: true });
+  });
+
+  test('facts_backstop_skip:true frontmatter is ignored unless the caller is trusted', () => {
+    const f = fixture({
+      slug: 'notes/operating-rollup',
+      type: 'note',
+      frontmatter: { facts_backstop_skip: true },
+    });
+    expect(isFactsBackstopEligible(f.slug, f.parsed)).toEqual({ ok: true });
+    expect(isFactsBackstopEligible(f.slug, f.parsed, { trustFrontmatterOptOut: true })).toEqual({ ok: false, reason: 'facts_backstop_skip' });
   });
 
   test('body < 80 chars → too_short', () => {

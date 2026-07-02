@@ -147,7 +147,9 @@ export async function runFactsBackstop(
       : { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped: 'extraction_disabled' };
   }
 
-  const eligible = isFactsBackstopEligible(parsedPage.slug, parsedPage);
+  const eligible = isFactsBackstopEligible(parsedPage.slug, parsedPage, {
+    trustFrontmatterOptOut: ctx.remote === false,
+  });
   if (!eligible.ok) {
     const skipped = `eligibility_failed:${eligible.reason}` as const;
     return mode === 'queue'
