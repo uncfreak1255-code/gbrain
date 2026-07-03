@@ -7,9 +7,15 @@ import type { Page } from '../types.ts';
  * coverage warnings or bulk conversation-facts extraction.
  */
 export function isConversationFactsCandidatePage(page: Page): boolean {
+  const slug = page.slug.toLowerCase();
+
+  // Repo test fixtures can be indexed into Sawyer's multi-source brain as
+  // ordinary pages. They are useful for search, but they are not operator
+  // conversation data and should not count against parser coverage.
+  if (slug.startsWith('test/')) return false;
+
   if (page.type !== 'email') return true;
 
-  const slug = page.slug.toLowerCase();
   if (
     slug.startsWith('skills/email/') ||
     slug.startsWith('optional-skills/email/') ||
