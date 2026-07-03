@@ -63,4 +63,29 @@ describe('collectSyncableFiles', () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+
+  test('shared sync gate excludes metafiles during git-backed full-sync collection', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'metafile-collect-syncable-'));
+    try {
+      gitInit(repo);
+      mkdirSync(join(repo, 'people'), { recursive: true });
+      mkdirSync(join(repo, 'website/docs'), { recursive: true });
+      writeFileSync(
+        join(repo, 'package.json'),
+        JSON.stringify({ name: 'example-repo', version: '0.0.0' }, null, 2),
+      );
+      writeFileSync(join(repo, 'README.md'), '# Repo\n');
+      writeFileSync(join(repo, 'website/docs/index.md'), '---\nslug: /\n---\n');
+      writeFileSync(join(repo, 'people/alice.md'), '---\ntype: person\ntitle: Alice\n---\n');
+      execSync('git add -A && git commit -m "seed metafiles"', { cwd: repo, stdio: 'pipe' });
+
+      const files = collectSyncableFiles(repo, { strategy: 'markdown' })
+        .map((p) => p.replace(`${repo}/`, ''))
+        .sort();
+
+      expect(files).toEqual(['people/alice.md']);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });

@@ -11,6 +11,7 @@ import {
   isCodeFilePath,
   isMarkdownFilePath,
   isImageFilePath as isImageFilePathFromSync,
+  isSyncable,
   matchesSyncGlobs,
   pruneDir,
   resolveRepoLocalSyncExcludes,
@@ -503,21 +504,13 @@ function isCollectibleForWalker(
   multimodalOn: boolean,
   exclude?: string[],
 ): boolean {
-  if (exclude && exclude.length > 0 && matchesSyncGlobs(path, exclude)) {
-    return false;
+  // Keep the historical markdown+multimodal image carve-out, but route
+  // markdown/code paths through the shared syncability gate so full sync
+  // can't drift from incremental sync on metafiles like index.md.
+  if (strategy === 'markdown' && multimodalOn && isImageFilePathFromSync(path)) {
+    return !(exclude && exclude.length > 0 && matchesSyncGlobs(path, exclude));
   }
-  switch (strategy) {
-    case 'code':
-      return isCodeFilePath(path);
-    case 'markdown':
-      return isMarkdownFilePath(path) || (multimodalOn && isImageFilePathFromSync(path));
-    case 'auto':
-      return (
-        isMarkdownFilePath(path) ||
-        isCodeFilePath(path) ||
-        (multimodalOn && isImageFilePathFromSync(path))
-      );
-  }
+  return isSyncable(path, { strategy, exclude });
 }
 
 /**

@@ -446,7 +446,7 @@ describe('maxReachableScoreFromRecommendations', () => {
     expect(maxReachableScoreFromRecommendations(health, recs)).toBe(87);
   });
 
-  test('extra timeline remediation lifts the timeline component', () => {
+  test('narrow meeting timeline remediation does not inflate the whole-brain timeline ceiling', () => {
     const health = makeHealth({
       embed_coverage_score: 35,
       link_density_score: 25,
@@ -466,7 +466,7 @@ describe('maxReachableScoreFromRecommendations', () => {
         status: 'remediable',
       }),
     ];
-    expect(maxReachableScoreFromRecommendations(health, recs)).toBe(95);
+    expect(maxReachableScoreFromRecommendations(health, recs)).toBe(80);
   });
 
   test('no recommendations leaves the current score ceiling intact', () => {
