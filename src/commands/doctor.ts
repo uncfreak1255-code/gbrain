@@ -1965,12 +1965,49 @@ export async function checkGraphSignalsCoverage(engine: BrainEngine): Promise<Ch
     const linkedPages = Number((linkedRows as any)[0]?.n ?? 0);
     const pct = (linkedPages / totalPages) * 100;
     const pctStr = pct.toFixed(1);
+    const coverageDetails: Record<string, unknown> = {
+      total_pages: totalPages,
+      inbound_linked_pages: linkedPages,
+      coverage_pct: Number(pctStr),
+    };
+
+    try {
+      const sourceRows = await engine.executeRaw(
+        `SELECT p.source_id,
+                COUNT(DISTINCT p.id)::int AS total_pages,
+                COUNT(DISTINCT l.to_page_id)::int AS inbound_linked_pages
+           FROM pages p
+      LEFT JOIN links l ON l.to_page_id = p.id
+          WHERE p.deleted_at IS NULL
+       GROUP BY p.source_id
+       ORDER BY total_pages DESC, p.source_id ASC
+          LIMIT 5`
+      );
+      coverageDetails.sources = (sourceRows as any[]).map((r) => {
+        const sourceTotal = Number(r.total_pages ?? 0);
+        const sourceLinked = Number(r.inbound_linked_pages ?? 0);
+        const sourcePct = sourceTotal > 0 ? (sourceLinked / sourceTotal) * 100 : 0;
+        return {
+          source_id: String(r.source_id ?? 'default'),
+          total_pages: sourceTotal,
+          inbound_linked_pages: sourceLinked,
+          coverage_pct: Number(sourcePct.toFixed(1)),
+        };
+      });
+    } catch {
+      // Source breakdown is an operator aid. Keep the core coverage check alive
+      // on older or unusual engines where the grouped read is unavailable.
+    }
 
     if (pct < 10) {
       return {
         name: 'graph_signals_coverage',
         status: 'warn',
         message: `graph_signals enabled but only ${pctStr}% of pages have inbound links (<10%). Signal will rarely fire. Run \`gbrain extract all\` after adding wikilinks/frontmatter links; if extraction is already current, this is a corpus-shape issue, not a stale-job issue.`,
+        details: {
+          ...coverageDetails,
+          bucket: 'rarely_fire',
+        },
       };
     }
 
@@ -1980,6 +2017,10 @@ export async function checkGraphSignalsCoverage(engine: BrainEngine): Promise<Ch
       message: pct >= 30
         ? `${pctStr}% of pages have inbound links (>=30% — graph signals fire on most queries)`
         : `${pctStr}% of pages have inbound links (10-29% — graph signals fire occasionally)`,
+      details: {
+        ...coverageDetails,
+        bucket: pct >= 30 ? 'most_queries' : 'occasionally_fire',
+      },
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
