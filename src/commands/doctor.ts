@@ -1,4 +1,9 @@
 import type { BrainEngine } from '../core/engine.ts';
+import type { Page } from '../core/types.ts';
+import type {
+  ParseConversationOpts,
+  ParseResult,
+} from '../core/conversation-parser/parse.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import * as db from '../core/db.ts';
 import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
@@ -165,6 +170,96 @@ function _penaltyScore(checks: Check[]): number {
     else if (c.status === 'warn') score -= 5;
   }
   return Math.max(0, score);
+}
+
+type ConversationFormatCoverageDetails = {
+  total_pages: number;
+  matched_pages: number;
+  unmatched_pages: number;
+  unmatched_pct: number;
+  pattern_counts: Record<string, number>;
+  unmatched_examples: Array<{ slug: string; title?: string }>;
+};
+
+type ConversationParserFn = (
+  body: string,
+  opts?: ParseConversationOpts,
+) => ParseResult;
+
+export function buildConversationFormatCoverageCheck(
+  sample: Page[],
+  parseConversation: ConversationParserFn,
+): Check {
+  if (sample.length === 0) {
+    return {
+      name: 'conversation_format_coverage',
+      status: 'ok',
+      message: 'No conversation-type pages — coverage check not applicable',
+    };
+  }
+
+  const hitsByPattern: Record<string, number> = {};
+  const unmatchedExamples: Array<{ slug: string; title?: string }> = [];
+
+  for (const page of sample) {
+    const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
+    const result = parseConversation(body, { page, noPolish: true, noFallback: true });
+    const id = result.matched_pattern_id ?? '_no_match';
+    hitsByPattern[id] = (hitsByPattern[id] ?? 0) + 1;
+    if (result.phase === 'no_match') {
+      const example: { slug: string; title?: string } = { slug: page.slug };
+      if (page.title) example.title = page.title;
+      unmatchedExamples.push(example);
+    }
+  }
+
+  const patternCounts = Object.fromEntries(
+    Object.entries(hitsByPattern).sort(([aKey, aVal], [bKey, bVal]) =>
+      bVal - aVal || aKey.localeCompare(bKey),
+    ),
+  );
+  const unmatched = hitsByPattern._no_match ?? 0;
+  const unmatchedPct = Number(((unmatched / sample.length) * 100).toFixed(1));
+  const examples = unmatchedExamples
+    .sort((a, b) => a.slug.localeCompare(b.slug) || (a.title ?? '').localeCompare(b.title ?? ''))
+    .slice(0, 5);
+  const details: ConversationFormatCoverageDetails = {
+    total_pages: sample.length,
+    matched_pages: sample.length - unmatched,
+    unmatched_pages: unmatched,
+    unmatched_pct: unmatchedPct,
+    pattern_counts: patternCounts,
+    unmatched_examples: examples,
+  };
+  const breakdown = Object.entries(patternCounts)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(', ');
+
+  if (unmatchedPct > 10) {
+    const firstExample = examples[0]?.slug;
+    return {
+      name: 'conversation_format_coverage',
+      status: 'warn',
+      message:
+        `${unmatched}/${sample.length} conversation pages (${unmatchedPct.toFixed(1)}%) match no built-in pattern. ` +
+        (firstExample
+          ? `Example: gbrain conversation-parser scan ${shellQuoteArg(firstExample)}`
+          : 'Examples unavailable.'),
+      details,
+    };
+  }
+
+  return {
+    name: 'conversation_format_coverage',
+    status: 'ok',
+    message: `${sample.length} pages: ${breakdown}`,
+    details,
+  };
+}
+
+function shellQuoteArg(arg: string): string {
+  if (/^[A-Za-z0-9_.:/@-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
 /**
@@ -5108,45 +5203,7 @@ export async function buildChecks(
         const slice = await engine.listPages({ limit: 50, type: t as import('../core/types.ts').PageType });
         sample.push(...slice.filter(isConversationFactsCandidatePage));
       }
-      if (sample.length === 0) {
-        checks.push({
-          name: 'conversation_format_coverage',
-          status: 'ok',
-          message: 'No conversation-type pages — coverage check not applicable',
-        });
-      } else {
-        const hitsByPattern: Record<string, number> = {};
-        let unmatched = 0;
-        for (const page of sample) {
-          const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
-          const result = parseConversation(body, { page, noPolish: true, noFallback: true });
-          const id = result.matched_pattern_id ?? '_no_match';
-          hitsByPattern[id] = (hitsByPattern[id] ?? 0) + 1;
-          if (result.phase === 'no_match') unmatched++;
-        }
-        const unmatchedPct = (unmatched / sample.length) * 100;
-        const breakdown = Object.entries(hitsByPattern)
-          .sort(([, a], [, b]) => b - a)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(', ');
-        if (unmatchedPct > 10) {
-          checks.push({
-            name: 'conversation_format_coverage',
-            status: 'warn',
-            message:
-              `${unmatched}/${sample.length} conversation pages (${unmatchedPct.toFixed(1)}%) match NO built-in pattern. ` +
-              `Breakdown: ${breakdown}. ` +
-              `Investigate: gbrain conversation-parser scan <slug> | ` +
-              `Enable LLM fallback (opt-in): gbrain config set conversation_parser.llm_fallback_enabled true`,
-          });
-        } else {
-          checks.push({
-            name: 'conversation_format_coverage',
-            status: 'ok',
-            message: `${sample.length} pages: ${breakdown}`,
-          });
-        }
-      }
+      checks.push(buildConversationFormatCoverageCheck(sample, parseConversation));
     } catch (err) {
       checks.push({
         name: 'conversation_format_coverage',
