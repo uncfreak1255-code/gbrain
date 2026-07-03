@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildConversationFormatCoverageCheck,
 } from '../src/commands/doctor.ts';
+import { isConversationFactsCandidatePage } from '../src/core/conversation-parser/candidates.ts';
 import type { Page } from '../src/core/types.ts';
 import type {
   ParseConversationOpts,
@@ -42,6 +43,15 @@ function parserFor(unmatchedSlugs: Set<string>) {
 }
 
 describe('conversation_format_coverage doctor check', () => {
+  test('conversation candidate filter excludes indexed repo test fixtures', () => {
+    expect(
+      isConversationFactsCandidatePage(page('test/e2e/fixtures/meetings/weekly-sync-mar28', 'Fixture')),
+    ).toBe(false);
+    expect(
+      isConversationFactsCandidatePage(page('conversations/weekly-sync-mar28', 'Real import')),
+    ).toBe(true);
+  });
+
   test('warns with deterministic details and concrete unmatched examples', () => {
     const sample = [
       page('conversations/zeta', 'Zeta call'),
