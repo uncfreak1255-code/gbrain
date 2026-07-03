@@ -68,6 +68,14 @@ describe('shouldRunNightly (pure function, rate-limit logic)', () => {
     expect(r).toEqual({ run: false, reason: 'rate_limited' });
   });
 
+  test('recent rate_limited skip does not reset cadence by itself', () => {
+    const r = shouldRunNightly(
+      new Date('2026-05-22T00:00:00Z'),
+      [{ outcome: 'rate_limited', ts: '2026-05-21T23:00:00Z' }],
+    );
+    expect(r).toEqual({ run: true });
+  });
+
   test('corrupt timestamp → ignored (does not rate-limit)', () => {
     const r = shouldRunNightly(
       new Date('2026-05-22T00:00:00Z'),
@@ -353,7 +361,7 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
     ];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/3 non-PASS runs/);
+    expect(check.message).toMatch(/3 warning-worthy runs/);
     expect(check.message).toMatch(/pass=1/);
     expect(check.message).toMatch(/fail=1/);
     expect(check.message).toMatch(/error=1/);
@@ -373,12 +381,12 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
     expect(check.message).toContain('no embedding provider');
   });
 
-  test('single non-PASS event uses singular grammar', async () => {
+  test('single warning-worthy event uses singular grammar', async () => {
     const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
     const events = [{ outcome: 'fail', ts: '2026-05-22T03:00:00Z' }];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/1 non-PASS run /); // "run " not "runs "
+    expect(check.message).toMatch(/1 warning-worthy run /); // "run " not "runs "
   });
 
   test('single PASS event uses singular grammar', async () => {
@@ -391,11 +399,11 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
 });
 
 // ---------------------------------------------------------------------------
-// 4. Codex CDX-5 — doctor flags ALL non-PASS outcomes (no_embedding_key,
-// rate_limited, inconclusive must trip warn, not get silently reported as PASS)
+// 4. Codex CDX-5 — doctor flags quality/config warning outcomes while keeping
+// cadence-only rate limiting informational.
 // ---------------------------------------------------------------------------
 
-describe('codex CDX-5 — doctor health: every non-PASS outcome surfaces', () => {
+describe('codex CDX-5 — doctor health: warning outcomes surface without cadence noise', () => {
   test('no_embedding_key outcome → warn (was silently PASS before CDX-5 fix)', async () => {
     const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
     const events = [{ outcome: 'no_embedding_key', ts: '2026-05-22T03:00:00Z' }];
@@ -404,12 +412,25 @@ describe('codex CDX-5 — doctor health: every non-PASS outcome surfaces', () =>
     expect(check.message).toMatch(/no_embed_key=1/);
   });
 
-  test('rate_limited outcome → warn', async () => {
+  test('rate_limited-only outcome → warn liveness issue', async () => {
     const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
     const events = [{ outcome: 'rate_limited', ts: '2026-05-22T03:00:00Z' }];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
+    expect(check.message).toMatch(/no real probe result/);
     expect(check.message).toMatch(/rate_limited=1/);
+  });
+
+  test('mixed pass and rate_limited reports latest actual skip', async () => {
+    const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
+    const events = [
+      { outcome: 'rate_limited', ts: '2026-05-22T03:00:00Z' },
+      { outcome: 'pass', ts: '2026-05-22T04:00:00Z' },
+    ];
+    const check = computeNightlyQualityProbeHealthCheck(true, events);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('latest skip at 2026-05-22T03:00:00Z');
+    expect(check.message).not.toContain('latest skip at 2026-05-22T04:00:00Z');
   });
 
   test('inconclusive outcome → warn', async () => {
@@ -418,6 +439,15 @@ describe('codex CDX-5 — doctor health: every non-PASS outcome surfaces', () =>
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
     expect(check.message).toMatch(/inconclusive=1/);
+  });
+
+  test('unknown non-pass outcome → warn', async () => {
+    const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
+    const events = [{ outcome: 'future_outcome', ts: '2026-05-22T03:00:00Z' }];
+    const check = computeNightlyQualityProbeHealthCheck(true, events);
+    expect(check.status).toBe('warn');
+    expect(check.message).toMatch(/unknown=1/);
+    expect(check.message).toContain('Latest: future_outcome at 2026-05-22T03:00:00Z');
   });
 
   test('counts include the new outcome buckets when mixed with pass/fail/error', async () => {
@@ -433,7 +463,7 @@ describe('codex CDX-5 — doctor health: every non-PASS outcome surfaces', () =>
     ];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/6 non-PASS runs/); // 7 total, 1 pass, 6 bad
+    expect(check.message).toMatch(/5 warning-worthy runs/); // rate_limited is cadence-only
     expect(check.message).toMatch(/pass=1/);
     expect(check.message).toMatch(/fail=1/);
     expect(check.message).toMatch(/error=1/);

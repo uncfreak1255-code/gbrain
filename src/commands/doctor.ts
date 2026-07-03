@@ -3194,7 +3194,7 @@ function _resolveSyncFreshnessHours(varName: string, fallback: number): number {
 /**
  * v0.40.1.0 Track D / T7 — pure function form of the nightly_quality_probe_health
  * check. Extracted from the inline runDoctor block so tests can drive every
- * branch (disabled / enabled-no-events / enabled-all-pass / enabled-with-failures)
+ * branch (disabled / enabled-no-events / enabled-all-pass / enabled-with-warnings)
  * without spinning up the audit JSONL or a real config file.
  */
 export function computeNightlyQualityProbeHealthCheck(
@@ -3217,25 +3217,44 @@ export function computeNightlyQualityProbeHealthCheck(
       message: `enabled but no probe events in the last 7 days (next run by autopilot).`,
     };
   }
-  // v0.40.1.0 Track D (codex CDX-5): any non-PASS outcome is bad signal.
-  // Previously only fail / error / budget_exceeded triggered warn —
-  // no_embedding_key / rate_limited / inconclusive were silently reported
-  // as PASS, hiding real misconfigurations.
-  const bad = events.filter(e => e.outcome !== 'pass');
+  // rate_limited means the probe is installed but skipped by cadence; keep it
+  // visible in counts without treating a rate-limit-only window as degraded.
+  const bad = events.filter(e => e.outcome !== 'pass' && e.outcome !== 'rate_limited');
   const latest = events[events.length - 1]!;
+  const unknownWarning = bad.filter(e =>
+    !['fail', 'error', 'budget_exceeded', 'no_embedding_key', 'inconclusive'].includes(e.outcome),
+  ).length;
+  const counts =
+    `pass=${events.filter(e => e.outcome === 'pass').length} ` +
+    `fail=${events.filter(e => e.outcome === 'fail').length} ` +
+    `error=${events.filter(e => e.outcome === 'error').length} ` +
+    `inconclusive=${events.filter(e => e.outcome === 'inconclusive').length} ` +
+    `budget=${events.filter(e => e.outcome === 'budget_exceeded').length} ` +
+    `no_embed_key=${events.filter(e => e.outcome === 'no_embedding_key').length} ` +
+    `rate_limited=${events.filter(e => e.outcome === 'rate_limited').length}` +
+    (unknownWarning > 0 ? ` unknown=${unknownWarning}` : '');
   if (bad.length > 0) {
-    const counts =
-      `pass=${events.filter(e => e.outcome === 'pass').length} ` +
-      `fail=${events.filter(e => e.outcome === 'fail').length} ` +
-      `error=${events.filter(e => e.outcome === 'error').length} ` +
-      `inconclusive=${events.filter(e => e.outcome === 'inconclusive').length} ` +
-      `budget=${events.filter(e => e.outcome === 'budget_exceeded').length} ` +
-      `no_embed_key=${events.filter(e => e.outcome === 'no_embedding_key').length} ` +
-      `rate_limited=${events.filter(e => e.outcome === 'rate_limited').length}`;
     return {
       name,
       status: 'warn',
-      message: `${bad.length} non-PASS run${bad.length === 1 ? '' : 's'} in last 7d (${counts}). Latest: ${latest.outcome} at ${latest.ts}${latest.detail ? ` (${latest.detail})` : ''}.`,
+      message: `${bad.length} warning-worthy run${bad.length === 1 ? '' : 's'} in last 7d (${counts}). Latest: ${latest.outcome} at ${latest.ts}${latest.detail ? ` (${latest.detail})` : ''}.`,
+    };
+  }
+  const rateLimitedEvents = events.filter(e => e.outcome === 'rate_limited');
+  if (rateLimitedEvents.length > 0) {
+    const latestRateLimited = rateLimitedEvents[rateLimitedEvents.length - 1]!;
+    const realProbeEvents = events.filter(e => e.outcome !== 'rate_limited');
+    if (realProbeEvents.length === 0) {
+      return {
+        name,
+        status: 'warn',
+        message: `${rateLimitedEvents.length} rate-limited probe skip${rateLimitedEvents.length === 1 ? '' : 's'} in last 7d and no real probe result (${counts}). Probe may be stuck skipping; latest skip at ${latestRateLimited.ts}.`,
+      };
+    }
+    return {
+      name,
+      status: 'ok',
+      message: `info: ${rateLimitedEvents.length} rate-limited probe skip${rateLimitedEvents.length === 1 ? '' : 's'} in last 7d (${counts}). Probe is installed; latest skip at ${latestRateLimited.ts}.`,
     };
   }
   return {
