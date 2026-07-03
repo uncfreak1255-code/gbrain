@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ingestCorpusInput, inspectCorpusInput, isLikelyYouTubePlaylist } from '../src/core/corpus.ts';
+import { briefCorpus, ingestCorpusInput, inspectCorpusInput, isLikelyYouTubePlaylist, reviewCorpus } from '../src/core/corpus.ts';
 
 describe('corpus inspect', () => {
   test('inspects local transcript directories with stable provenance fields', async () => {
@@ -154,5 +154,176 @@ describe('corpus inspect', () => {
       sourceId: 'briefs-test',
       outDir: '/tmp/unused',
     })).rejects.toThrow('local transcript directories only');
+  });
+
+  test('review fills source-backed review pages from local corpus transcripts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    try {
+      writeFileSync(join(root, 'agent-proof.json'), JSON.stringify({
+        title: 'Agent Proof Talk',
+        url: 'https://example.com/agent-proof',
+        segments: [
+          { start: 75, text: 'Agents need retrieval, evals, and proof receipts before workflow automation changes decisions.' },
+          { start: 130, text: 'Spend should stay bounded by small experiments.' },
+        ],
+      }));
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+
+      const review = await reviewCorpus(ingest.out_dir, {
+        sourceId: 'briefs-test',
+        now: new Date('2026-07-02T13:00:00.000Z'),
+      });
+
+      expect(review.review_pages_written).toHaveLength(1);
+      const page = readFileSync(review.review_pages_written[0], 'utf8');
+      expect(page).toContain('corpus_review_method: deterministic-transcript-heuristic');
+      expect(page).toContain('## Key Ideas');
+      expect(page).toContain('01:15 - Agents need retrieval');
+      expect(page).toContain('## Transcript Excerpt Pointers');
+      expect(page).not.toContain('TODO');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test('brief ranks reviewed items into Sawyer-specific required sections', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    try {
+      writeFileSync(join(root, 'gbrain-agents.txt'), 'GBrain agents need retrieval evals, proof receipts, spend budgets, and bounded workflow experiments before decisions change.\n');
+      writeFileSync(join(root, 'lightweight-general.txt'), 'A casual hallway update with no actionable technical detail.\n');
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+      await reviewCorpus(ingest.out_dir, {
+        sourceId: 'briefs-test',
+        now: new Date('2026-07-02T13:00:00.000Z'),
+      });
+
+      const brief = await briefCorpus(ingest.out_dir, {
+        profile: 'sawyer',
+        now: new Date('2026-07-02T14:00:00.000Z'),
+      });
+
+      const body = readFileSync(brief.brief_path, 'utf8');
+      expect(body).toContain('## Best use of your time');
+      expect(body).toContain('## Watch/read first');
+      expect(body).toContain('## Skip or skim');
+      expect(body).toContain('## Relevant to Seascape');
+      expect(body).toContain('## Relevant to GBrain / agents');
+      expect(body).toContain('## Relevant to Sawyer operating system');
+      expect(body).toContain('## Strong claims worth testing');
+      expect(body).toContain('## Caveats / likely hype');
+      expect(body).toContain('## Source gaps');
+      expect(body).toContain('## Next actions');
+      expect(body).toContain('Related GBrain context retrieval has not run yet');
+      expect(body.indexOf('gbrain agents')).toBeLessThan(body.indexOf('lightweight general'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test('review and brief do not trust writable paths from a crafted manifest', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    const outside = mkdtempSync(join(tmpdir(), 'gbrain-corpus-outside-'));
+    try {
+      writeFileSync(join(root, 'agent-proof.txt'), 'Agents need proof receipts and evals.\n');
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+      const manifest = JSON.parse(readFileSync(ingest.manifest_path, 'utf8'));
+      manifest.pages_dir = outside;
+      manifest.transcripts_written = [join(outside, 'outside.txt')];
+      writeFileSync(ingest.manifest_path, JSON.stringify(manifest, null, 2));
+
+      const review = await reviewCorpus(ingest.manifest_path, {
+        sourceId: 'briefs-test',
+        now: new Date('2026-07-02T13:00:00.000Z'),
+      });
+      const brief = await briefCorpus(ingest.manifest_path, {
+        profile: 'sawyer',
+        now: new Date('2026-07-02T14:00:00.000Z'),
+      });
+
+      expect(review.review_pages_written[0].startsWith(ingest.out_dir)).toBe(true);
+      expect(brief.brief_path.startsWith(ingest.out_dir)).toBe(true);
+      expect(existsSync(join(outside, 'analysis'))).toBe(false);
+      expect(existsSync(join(outside, 'media'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('review and brief reject unsafe manifest slug components', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    try {
+      writeFileSync(join(root, 'agent-proof.txt'), 'Agents need proof receipts and evals.\n');
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+      const manifest = JSON.parse(readFileSync(ingest.manifest_path, 'utf8'));
+      manifest.corpus_slug = '../../../../target';
+      writeFileSync(ingest.manifest_path, JSON.stringify(manifest, null, 2));
+
+      await expect(briefCorpus(ingest.manifest_path, { profile: 'sawyer' })).rejects.toThrow('Unsafe corpus manifest corpus_slug');
+
+      manifest.corpus_slug = 'safe-corpus';
+      manifest.items[0].id = '../target';
+      writeFileSync(ingest.manifest_path, JSON.stringify(manifest, null, 2));
+
+      await expect(reviewCorpus(ingest.manifest_path, { sourceId: 'briefs-test' })).rejects.toThrow('Unsafe corpus manifest item id');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test('brief does not linkify unsafe corpus metadata URLs', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    try {
+      writeFileSync(join(root, 'unsafe-link.json'), JSON.stringify({
+        title: 'Bad [link] title',
+        url: 'javascript:alert(1)',
+        text: 'Agents need proof receipts and evals before workflow decisions.',
+      }));
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+      await reviewCorpus(ingest.out_dir, {
+        sourceId: 'briefs-test',
+        now: new Date('2026-07-02T13:00:00.000Z'),
+      });
+      const brief = await briefCorpus(ingest.out_dir, {
+        profile: 'sawyer',
+        now: new Date('2026-07-02T14:00:00.000Z'),
+      });
+
+      const body = readFileSync(brief.brief_path, 'utf8');
+      expect(body).not.toContain('](javascript:alert(1))');
+      expect(body).toContain('Bad \\[link\\] title');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
   });
 });

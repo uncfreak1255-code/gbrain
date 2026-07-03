@@ -32,7 +32,13 @@ Layer 2 is source-backed review pages. The intended page path is:
 media/conferences/<corpus-slug>/<item-slug>.md
 ```
 
-Each page should include a summary, key ideas, best segment with timestamp, caveats, who should care, tags/topics, source URL, transcript excerpt pointers, and corpus metadata in frontmatter. Large transcript walls should stay as raw files or excerpt pointers unless the excerpt itself is needed as evidence.
+The deterministic review gate is:
+
+```bash
+gbrain corpus review <corpus-dir-or-manifest> --source <source-id> --json
+```
+
+Each page includes a summary, key ideas, best segment with timestamp when segments are available, caveats, who should care, tags/topics, source URL, transcript excerpt pointers, and corpus metadata in frontmatter. Large transcript walls stay as raw files or excerpt pointers unless the excerpt itself is needed as evidence. The v1 review method is a deterministic transcript heuristic, not a model review.
 
 Layer 3 is the Sawyer brief:
 
@@ -55,9 +61,17 @@ Required sections:
 
 The brief must rank items. It should not summarize every item equally.
 
+The deterministic v1 brief gate is:
+
+```bash
+gbrain corpus brief <corpus-dir-or-manifest> --profile sawyer --json
+```
+
+This writes the brief under the local corpus page tree and labels the output as deterministic. It explicitly states that Sawyer personalization retrieval has not run yet.
+
 ## Personalization Rule
 
-The ranking step should retrieve Sawyer context from GBrain instead of hardcoding prompt lore. It should query for current projects, active Seascape priorities, GBrain/runtime work, open loops, recent decisions, and preferences around proof, spend, and bounded experiments.
+The future model-backed ranking step should retrieve Sawyer context from GBrain instead of hardcoding prompt lore. It should query for current projects, active Seascape priorities, GBrain/runtime work, open loops, recent decisions, and preferences around proof, spend, and bounded experiments.
 
 The generated brief must label the reason for each recommendation:
 
@@ -67,16 +81,16 @@ The generated brief must label the reason for each recommendation:
 
 ## Command Contract
 
-Reserved v1 command shape:
+V1 command shape:
 
 ```bash
 gbrain corpus inspect <url-or-path> --json
 gbrain corpus ingest <url-or-path> --source <source-id> --out <dir> --json
-gbrain corpus review <corpus-id> --source <source-id> --json
-gbrain corpus brief <corpus-id> --profile sawyer --json
+gbrain corpus review <corpus-dir-or-manifest> --source <source-id> --json
+gbrain corpus brief <corpus-dir-or-manifest> --profile sawyer --json
 ```
 
-`inspect` is implemented for local transcript directories and YouTube playlist metadata. `ingest` is implemented for local transcript directories only. `review` and `brief` must fail loudly until they have real citation, spend, personalization, and eval gates.
+`inspect` is implemented for local transcript directories and YouTube playlist metadata. `ingest`, `review`, and `brief` are implemented for local transcript directories only. YouTube ingest still fails loudly until transcript capture exists. Model-backed citations, spend gates, and Sawyer-memory personalization remain future gates.
 
 ## Proof Gates
 
@@ -86,14 +100,20 @@ Inspect:
 - YouTube playlist metadata test with a mocked `yt-dlp` runner
 - CLI help/readback test that does not require a configured brain
 
-Future ingest:
+Ingest:
 
 - writes draft review pages into a source-like output tree
 - preserves raw transcript/source files
 - records source id, corpus id, content hash, extraction method, and source URL
 - future live-brain promotion should rerun `gbrain sync`/extract as needed so search and graph hooks see the pages
 
-Future brief:
+Review and brief:
+
+- fills review pages with summaries, key ideas, caveats, topics, source links, and excerpt pointers
+- ranks items into the required Sawyer brief sections
+- keeps "GBrain found related context" separate from heuristic inference by stating that retrieval has not run
+
+Future model-backed brief:
 
 - uses `gbrain search`/`gbrain think` style retrieval with citations
 - includes source gaps and caveats

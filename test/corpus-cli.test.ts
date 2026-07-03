@@ -23,7 +23,7 @@ describe('gbrain corpus CLI', () => {
     expect(status).toBe(0);
     expect(stderr).not.toContain('No brain configured');
     expect(stdout).toContain('gbrain corpus inspect <url-or-path>');
-    expect(stdout).toContain('ingest is implemented for local transcript directories only');
+    expect(stdout).toContain('ingest, review, and brief are implemented for local transcript');
   });
 
   test('main help lists corpus', () => {
@@ -53,6 +53,54 @@ describe('gbrain corpus CLI', () => {
       expect(json.source_id).toBe('cli-test');
       expect(json.pages_written).toHaveLength(1);
       expect(readFileSync(json.pages_written[0], 'utf8')).toContain('source_id: cli-test');
+    } finally {
+      rmSync(input, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test('review and brief write JSON receipts without a configured brain', () => {
+    const input = mkdtempSync(join(tmpdir(), 'gbrain-corpus-cli-in-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-cli-out-'));
+    try {
+      writeFileSync(join(input, 'agent-ops.txt'), 'Agents need retrieval, proof receipts, evals, and bounded workflow decisions.\n');
+      const ingest = runCli([
+        'corpus',
+        'ingest',
+        input,
+        '--source',
+        'cli-test',
+        '--out',
+        out,
+        '--json',
+      ]);
+      expect(ingest.status).toBe(0);
+      const ingestJson = JSON.parse(ingest.stdout);
+
+      const review = runCli([
+        'corpus',
+        'review',
+        ingestJson.out_dir,
+        '--source',
+        'cli-test',
+        '--json',
+      ]);
+      expect(review.status).toBe(0);
+      const reviewJson = JSON.parse(review.stdout);
+      expect(reviewJson.review_pages_written).toHaveLength(1);
+      expect(readFileSync(reviewJson.review_pages_written[0], 'utf8')).toContain('## Key Ideas');
+
+      const brief = runCli([
+        'corpus',
+        'brief',
+        ingestJson.out_dir,
+        '--profile',
+        'sawyer',
+        '--json',
+      ]);
+      expect(brief.status).toBe(0);
+      const briefJson = JSON.parse(brief.stdout);
+      expect(readFileSync(briefJson.brief_path, 'utf8')).toContain('## Best use of your time');
     } finally {
       rmSync(input, { recursive: true, force: true });
       rmSync(out, { recursive: true, force: true });

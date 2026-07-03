@@ -1,5 +1,5 @@
 import type { BrainEngine } from '../core/engine.ts';
-import { ingestCorpusInput, inspectCorpusInput } from '../core/corpus.ts';
+import { briefCorpus, ingestCorpusInput, inspectCorpusInput, reviewCorpus } from '../core/corpus.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 
 const HELP = `gbrain corpus — inspect and prepare large source corpora for Sawyer-shaped briefs
@@ -7,14 +7,14 @@ const HELP = `gbrain corpus — inspect and prepare large source corpora for Saw
 USAGE
   gbrain corpus inspect <url-or-path> [--json] [--limit N]
   gbrain corpus ingest <url-or-path> --source <source-id> --out <dir> --json
-  gbrain corpus review <corpus-id> --source <source-id> --json
-  gbrain corpus brief <corpus-id> --profile sawyer --json
+  gbrain corpus review <corpus-dir-or-manifest> --source <source-id> --json
+  gbrain corpus brief <corpus-dir-or-manifest> --profile sawyer --json
 
 V1 STATUS
   inspect is implemented for local transcript directories and YouTube playlist
-  metadata. ingest is implemented for local transcript directories only.
-  review/brief are reserved command shapes and currently return a clear
-  not-implemented error instead of doing partial hidden work.
+  metadata. ingest, review, and brief are implemented for local transcript
+  directories only. review/brief are deterministic local artifact passes; they
+  do not call an LLM or mutate the live brain.
 
 EXAMPLES
   gbrain corpus inspect ./ai-engineer-fair-transcripts --json
@@ -26,6 +26,7 @@ interface ParsedFlags {
   limit?: number;
   source?: string;
   out?: string;
+  profile?: string;
 }
 
 export async function runCorpus(_engine: BrainEngine | null, args: string[]): Promise<void> {
@@ -35,10 +36,10 @@ export async function runCorpus(_engine: BrainEngine | null, args: string[]): Pr
   }
 
   const [subcommand, input] = args;
-  if (subcommand !== 'inspect' && subcommand !== 'ingest') {
+  if (subcommand !== 'inspect' && subcommand !== 'ingest' && subcommand !== 'review' && subcommand !== 'brief') {
     console.error(
       `gbrain corpus ${subcommand ?? ''} is not implemented yet. ` +
-        'Use "gbrain corpus inspect <url-or-path> --json" or local-directory "gbrain corpus ingest".',
+        'Use inspect, ingest, review, or brief.',
     );
     setCliExitVerdict(2);
     return;
@@ -50,6 +51,46 @@ export async function runCorpus(_engine: BrainEngine | null, args: string[]): Pr
   }
 
   const flags = parseFlags(args.slice(2));
+  if (subcommand === 'review') {
+    if (!flags.source) {
+      console.error('Usage: gbrain corpus review <corpus-dir-or-manifest> --source <source-id> [--json]');
+      setCliExitVerdict(2);
+      return;
+    }
+    try {
+      const result = await reviewCorpus(input, { sourceId: flags.source });
+      if (flags.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      printHumanReview(result);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      setCliExitVerdict(1);
+    }
+    return;
+  }
+
+  if (subcommand === 'brief') {
+    if ((flags.profile ?? 'sawyer') !== 'sawyer') {
+      console.error('Usage: gbrain corpus brief <corpus-dir-or-manifest> --profile sawyer [--json]');
+      setCliExitVerdict(2);
+      return;
+    }
+    try {
+      const result = await briefCorpus(input, { profile: 'sawyer' });
+      if (flags.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      printHumanBrief(result);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      setCliExitVerdict(1);
+    }
+    return;
+  }
+
   if (subcommand === 'ingest') {
     if (!flags.source || !flags.out) {
       console.error('Usage: gbrain corpus ingest <url-or-path> --source <source-id> --out <dir> [--json] [--limit N]');
@@ -106,6 +147,10 @@ function parseFlags(args: string[]): ParsedFlags {
     }
     if (arg === '--out') {
       flags.out = args[++i];
+      continue;
+    }
+    if (arg === '--profile') {
+      flags.profile = args[++i];
     }
   }
   return flags;
@@ -144,4 +189,18 @@ function printHumanIngest(result: Awaited<ReturnType<typeof ingestCorpusInput>>)
   console.log(`manifest: ${result.manifest_path}`);
   console.log(`pages: ${result.pages_written.length}`);
   console.log(`transcripts: ${result.transcripts_written.length}`);
+}
+
+function printHumanReview(result: Awaited<ReturnType<typeof reviewCorpus>>): void {
+  console.log(`corpus: ${result.corpus_id}`);
+  console.log(`source: ${result.source_id}`);
+  console.log(`reviewed: ${result.review_pages_written.length}`);
+  console.log(`corpus dir: ${result.corpus_dir}`);
+}
+
+function printHumanBrief(result: Awaited<ReturnType<typeof briefCorpus>>): void {
+  console.log(`corpus: ${result.corpus_id}`);
+  console.log(`profile: ${result.profile}`);
+  console.log(`items: ${result.item_count}`);
+  console.log(`brief: ${result.brief_path}`);
 }
