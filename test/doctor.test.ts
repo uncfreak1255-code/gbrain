@@ -1501,6 +1501,9 @@ describe('v0.42 (#1699) — quarantined_pages + flagged_pages checks', () => {
     // Each emits a named check.
     expect(source).toMatch(/name: 'quarantined_pages'/);
     expect(source).toMatch(/name: 'flagged_pages'/);
+    // The JSON doctor receipt includes concrete examples for operator triage.
+    expect(source).toContain('examples');
+    expect(source).toContain('content_flag');
   });
 });
 

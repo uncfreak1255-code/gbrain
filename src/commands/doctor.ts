@@ -6599,8 +6599,22 @@ export async function buildChecks(
     // engine.executeRaw (NOT db.getConnection() — that's the postgres singleton,
     // dead on the default PGLite engine). The JSONB `?` existence operator is
     // literal SQL through executeRaw on both engines.
-    const rows = await engine.executeRaw<{ n: string | number }>(
-      `SELECT COUNT(*)::int AS n FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'quarantine'`,
+    const rows = await engine.executeRaw<{ n: string | number; examples?: unknown }>(
+      `WITH marked AS (
+         SELECT p.slug, p.source_id
+           FROM pages p
+          WHERE p.deleted_at IS NULL AND p.frontmatter ? 'quarantine'
+          ORDER BY p.updated_at DESC, p.slug ASC
+       )
+       SELECT counts.total::int AS n,
+              COALESCE(
+                json_agg(json_build_object('slug', slug, 'source_id', source_id))
+                  FILTER (WHERE slug IS NOT NULL),
+                '[]'::json
+              ) AS examples
+         FROM (SELECT * FROM marked LIMIT 5) limited
+        RIGHT JOIN (SELECT COUNT(*)::int AS total FROM marked) counts ON TRUE
+        GROUP BY counts.total`,
     );
     const n = Number(rows[0]?.n ?? 0);
     checks.push({
@@ -6609,6 +6623,7 @@ export async function buildChecks(
       message: n > 0
         ? `${n} page(s) quarantined as junk (hidden from search). Review with 'gbrain quarantine list'; clear a false positive with 'gbrain quarantine clear <slug>'.`
         : 'No quarantined pages',
+      details: n > 0 ? { count: n, examples: rows[0]?.examples ?? [] } : { count: 0 },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -6617,8 +6632,22 @@ export async function buildChecks(
 
   progress.heartbeat('flagged_pages');
   try {
-    const rows = await engine.executeRaw<{ n: string | number }>(
-      `SELECT COUNT(*)::int AS n FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'content_flag'`,
+    const rows = await engine.executeRaw<{ n: string | number; examples?: unknown }>(
+      `WITH marked AS (
+         SELECT p.slug, p.source_id, p.frontmatter->'content_flag' AS content_flag
+           FROM pages p
+          WHERE p.deleted_at IS NULL AND p.frontmatter ? 'content_flag'
+          ORDER BY p.updated_at DESC, p.slug ASC
+       )
+       SELECT counts.total::int AS n,
+              COALESCE(
+                json_agg(json_build_object('slug', slug, 'source_id', source_id, 'content_flag', content_flag))
+                  FILTER (WHERE slug IS NOT NULL),
+                '[]'::json
+              ) AS examples
+         FROM (SELECT * FROM marked LIMIT 5) limited
+        RIGHT JOIN (SELECT COUNT(*)::int AS total FROM marked) counts ON TRUE
+        GROUP BY counts.total`,
     );
     const n = Number(rows[0]?.n ?? 0);
     // Flagged pages are "examine me", not "broken" — warn so they're visible
@@ -6629,6 +6658,7 @@ export async function buildChecks(
       message: n > 0
         ? `${n} page(s) flagged (markup-heavy or oversize) — still searchable, agent warned on retrieval. Review with 'gbrain quarantine list --include-flagged'.`
         : 'No flagged pages',
+      details: n > 0 ? { count: n, examples: rows[0]?.examples ?? [] } : { count: 0 },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
