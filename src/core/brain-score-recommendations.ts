@@ -185,7 +185,10 @@ export interface CheckClassification {
 const REACHABILITY_JOB_CAPABILITIES = {
   embed_coverage: new Set(['embed', 'embed-catch-up']),
   link_density: new Set(['extract', 'extract-ner']),
-  timeline_coverage: new Set(['extract', 'extract-timeline-from-meetings']),
+  // `extract-timeline-from-meetings` improves entity timeline coverage, but
+  // brain_score's timeline component is whole-brain pages-with-timeline.
+  // Do not let that narrow onboard remediation inflate the autonomous ceiling.
+  timeline_coverage: new Set(['extract']),
   no_dead_links: new Set(['backlinks']),
 } as const;
 
