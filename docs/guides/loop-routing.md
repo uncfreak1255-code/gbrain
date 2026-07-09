@@ -79,6 +79,9 @@ Proof gate:
   failures or spend
 
 Act:
+- pause autopilot before any manual Dream run, verify it is stopped, and restore
+  it after scoring; manual `gbrain dream` and the daemon share the cycle lock,
+  workers, write targets, and spend budget
 - change one Dream parameter at a time
 - keep `zai:glm-5.2` for synth and
   `anthropic:claude-haiku-4-5-20251001` for verdicts unless new proof says

@@ -85,6 +85,13 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
   PROTECTED — only trusted local callers can submit them; MCP cannot.
   Reference: [`docs/architecture/topologies.md`](./docs/architecture/topologies.md)
   and the CHANGELOG entry for v0.36.4.0.
+- **Manual Dream runs:** pause autopilot first, verify it is stopped, run one
+  bounded `gbrain dream` invocation, score written slugs with
+  `gbrain eval dream-quality`, then restore any temporary model/cap changes and
+  restart autopilot. Manual Dream and the daemon share the cycle lock, workers,
+  write targets, and spend budget; see
+  [`docs/guides/loop-routing.md`](./docs/guides/loop-routing.md) and
+  [`skills/maintain/SKILL.md`](./skills/maintain/SKILL.md).
 - **Track a founder/company over time (v0.35.7):** when an entity has
   typed metric claims in its `## Facts` fence (`metric: mrr`, `value: 50000`,
   `unit: USD`, `period: monthly` columns), run

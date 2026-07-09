@@ -5,15 +5,18 @@ aliases:
   - Sarah L. Chen
   - sarahchen
   - sarah@novamind.ai
+ingested_at: '2026-07-03T11:53:37.328Z'
+source_kind: put_page
+ingested_via: put_page
 tags:
+  - ai-agents
   - founder
   - yc-w25
-  - ai-agents
 ---
 
 # Sarah Chen
 
-Founder and CEO of NovaMind (YC W25). Building autonomous AI agents for enterprise
+Founder and CEO of [[novamind|NovaMind]] (YC W25). Building autonomous AI agents for enterprise
 workflow automation. Previously ML engineer at Anthropic (2022-2024), where she worked
 on tool-use and agentic behaviors in large language models. Stanford CS class of 2020.
 
@@ -24,8 +27,8 @@ the agent-native enterprise stack replacing SaaS dashboards.
 
 ## Key People
 
-- Priya Patel is CTO and co-founder. They overlapped at Stanford.
-- Marcus Reid at Threshold Ventures led their seed round.
+- [[priya-patel|Priya Patel]] is CTO and co-founder. They overlapped at Stanford.
+- [[marcus-reid|Marcus Reid]] at [[threshold-ventures|Threshold Ventures]] led their seed round.
 
 ## Beliefs
 
@@ -38,9 +41,9 @@ the agent-native enterprise stack replacing SaaS dashboards.
 
 - Revisit her thoughts on agent memory architecture. She hinted at something novel during the 1:1 after Demo Day but we ran out of time.
 - She is looking for design partners in procurement and supply chain. Could intro to relevant YC alumni.
-- Follow up on potential collab between NovaMind agent infra and GBrain knowledge layer.
+- Follow up on potential collab between [[novamind|NovaMind]] agent infra and GBrain knowledge layer.
 
----
+<!-- timeline -->
 
 ## Timeline
 
@@ -63,6 +66,6 @@ Google Brain research on emergent communication.
 ### 2025-03-28 — Seed Round Closed
 
 Sarah confirmed NovaMind closed their $4M seed round led by Threshold Ventures with
-Marcus Reid on the board. Angels include several YC partners. She plans to use the
+[[marcus-reid|Marcus Reid]] on the board. Angels include several YC partners. She plans to use the
 capital primarily for hiring: 3 senior engineers and 1 design partner lead. Launch
 target is Q3 2025 with 2 enterprise design partners already signed.

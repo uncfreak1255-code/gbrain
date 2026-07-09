@@ -3066,8 +3066,10 @@ export function computeNightlyQualityProbeHealthCheck(
   events: ReadonlyArray<{ outcome: string; ts: string; detail?: string }>,
 ): Check {
   const name = 'nightly_quality_probe_health';
-  if (!probeEnabled && events.length === 0) {
-    // Quiet skip — surface enable hint only when explicitly asked to.
+  if (!probeEnabled) {
+    // Disabled really means disabled. Old audit rows may still exist in the
+    // 7-day window, but while the feature flag is off they should not keep
+    // the doctor surface noisy.
     return {
       name,
       status: 'ok',

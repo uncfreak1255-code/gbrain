@@ -1,10 +1,13 @@
 ---
 type: company
 title: Threshold Ventures
+ingested_at: '2026-07-03T11:53:39.411Z'
+source_kind: put_page
+ingested_via: put_page
 tags:
-  - vc
-  - early-stage
   - ai-focus
+  - early-stage
+  - vc
 ---
 
 # Threshold Ventures
@@ -21,33 +24,33 @@ Series A stages. Current fund size is approximately $200M.
 
 ## Key Partners
 
-- Marcus Reid — GP. Former Stripe engineer. Leads AI/ML investments.
+- [[marcus-reid|Marcus Reid]] — GP. Former Stripe engineer. Leads AI/ML investments.
 - Elena Torres — GP. Focuses on developer tools and infrastructure.
 - James Wu — GP. Covers data and analytics.
 
 ## Investment Style
 
-Threshold is known for moving quickly on conviction-driven deals. Marcus Reid issued
-the NovaMind term sheet 3 days after Demo Day. The fund prefers technical founders with
+Threshold is known for moving quickly on conviction-driven deals. [[marcus-reid|Marcus Reid]] issued
+the [[novamind|NovaMind]] term sheet 3 days after Demo Day. The fund prefers technical founders with
 deep domain expertise and a clear vertical wedge. Typical check size is $2-5M at seed,
 $5-15M at Series A.
 
 ## Notable Portfolio Companies
 
-- NovaMind (AI agents, YC W25) — $4M seed, Marcus Reid led
+- [[novamind|NovaMind]] (AI agents, YC W25) — $4M seed, [[marcus-reid|Marcus Reid]] led
 - Several other AI infrastructure and developer tools companies
 
----
+<!-- timeline -->
 
 ## Timeline
 
 ### 2025-03-18 — NovaMind Term Sheet
 
-Marcus Reid issued a seed term sheet to NovaMind: $4M at $20M post-money. Fast
+[[marcus-reid|Marcus Reid]] issued a seed term sheet to [[novamind|NovaMind]]: $4M at $20M post-money. Fast
 turnaround after W25 Demo Day. Marcus cited the 94% task completion rate and the
-strength of the Sarah Chen and Priya Patel founding team as key factors.
+strength of the [[sarah-chen|Sarah Chen]] and [[priya-patel|Priya Patel]] founding team as key factors.
 
 ### 2025-03-28 — NovaMind Seed Closed
 
-NovaMind seed round officially closed. Marcus takes board seat. This is Threshold's
+[[novamind|NovaMind]] seed round officially closed. Marcus takes board seat. This is Threshold's
 first investment from their current fund in the AI agents category.

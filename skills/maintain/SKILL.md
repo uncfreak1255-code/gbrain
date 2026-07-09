@@ -174,6 +174,14 @@ ONLY on successful runs (not on skipped/failed). Explicit `--input` /
 **`--dry-run` semantics:** runs the cheap Haiku significance filter (caches
 verdicts) but skips the Sonnet synthesis pass. NOT zero LLM calls.
 
+**Manual-run safety:** before any manual paid Dream run (`gbrain dream`,
+`--phase synthesize`, `--input`, `--date`, `--from`, or `--to`), pause
+autopilot and verify it is stopped. Manual Dream and autopilot share the same
+cycle lock, workers, write targets, and spend budget, so running both at once
+can waste API money or hide the real owner of a write. After the run, score the
+written slugs with `gbrain eval dream-quality`, restore any temporary model/cap
+changes, and restart autopilot only after the queue is clear.
+
 **Configure synthesize on a fresh brain:**
 ```bash
 gbrain config set dream.synthesize.session_corpus_dir /path/to/transcripts
