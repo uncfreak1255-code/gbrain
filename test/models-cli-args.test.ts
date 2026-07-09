@@ -69,4 +69,17 @@ describe('runModels CLI arg normalization', () => {
       resetGateway();
     }
   });
+
+  test('text output reports env as the winning tier source', async () => {
+    const originalEnv = process.env.GBRAIN_MODEL;
+    try {
+      process.env.GBRAIN_MODEL = 'haiku';
+      const out = await captureStdout(() => runModels(makeEngineStub(), []));
+      expect(out).toContain(`tier.utility    anthropic:claude-haiku-4-5-20251001`);
+      expect(out).toContain('[env:GBRAIN_MODEL]');
+    } finally {
+      if (originalEnv === undefined) delete process.env.GBRAIN_MODEL;
+      else process.env.GBRAIN_MODEL = originalEnv;
+    }
+  });
 });

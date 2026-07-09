@@ -3006,10 +3006,11 @@ async function checkEmbeddingEnvOverride(engine: BrainEngine): Promise<Check> {
 export async function checkSubagentCapability(engine: BrainEngine): Promise<Check> {
   try {
     const { classifyCapabilities } = await import('../core/ai/capabilities.ts');
-    const { isAnthropicProvider, resolveAlias, TIER_DEFAULTS } = await import('../core/model-config.ts');
-    const modelsSubagent = await engine.getConfig('models.subagent');
-    const tierSubagent = await engine.getConfig('models.tier.subagent');
-    const modelsDefault = await engine.getConfig('models.default');
+    const {
+      isAnthropicProvider,
+      resolveModelWithSource,
+      TIER_DEFAULTS,
+    } = await import('../core/model-config.ts');
     const gatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
     const gatewayLoopEnabled = typeof gatewayLoopRaw === 'string'
       && ['true', '1'].includes(gatewayLoopRaw.trim().toLowerCase());
@@ -3066,24 +3067,13 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       return null;
     };
 
-    const candidates: Array<{ source: string; raw: string | null | undefined }> = [
-      { source: 'models.subagent', raw: modelsSubagent },
-      { source: 'models.default', raw: modelsDefault },
-      { source: 'models.tier.subagent', raw: tierSubagent },
-      { source: 'env:GBRAIN_MODEL', raw: process.env.GBRAIN_MODEL },
-      { source: 'models.tier.subagent', raw: TIER_DEFAULTS.subagent },
-    ];
-    let resolvedSource = 'models.tier.subagent';
-    let resolvedModel = TIER_DEFAULTS.subagent;
-    for (const candidate of candidates) {
-      if (!candidate.raw?.trim()) continue;
-      const resolved = await resolveAlias(engine, candidate.raw.trim());
-      resolvedSource = candidate.source;
-      resolvedModel = resolved;
-      const issue = explain(resolved, candidate.source);
-      if (issue) return issue;
-      break;
-    }
+    const { resolved: resolvedModel, source: resolvedSource } = await resolveModelWithSource(engine, {
+      configKey: 'models.subagent',
+      tier: 'subagent',
+      fallback: TIER_DEFAULTS.subagent,
+    });
+    const issue = explain(resolvedModel, resolvedSource);
+    if (issue) return issue;
     // v0.37 (T10 / D7) + v0.38 (D7 capability rename): warn when the configured
     // chat_model is non-Anthropic AND ANTHROPIC_API_KEY isn't set. With
     // agent.use_gateway_loop=false (the v0.38 default), subagent jobs still
