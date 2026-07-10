@@ -139,6 +139,7 @@ export function inspectManualDreamAutopilotSafety(
 
 function manualDreamRequiresAutopilotPause(opts: DreamArgs, phases: readonly CyclePhase[]): boolean {
   if (opts.drain) return !opts.dryRun;
+  if (opts.source && !opts.dryRun) return true;
   if (opts.dryRun) return phases.some(p => !DRY_RUN_AUTOPILOT_SAFE_PHASES.has(p));
   return phases.some(p => MANUAL_DREAM_WRITE_OR_SPEND_PHASES.has(p));
 }
