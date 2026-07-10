@@ -97,7 +97,6 @@ const DRY_RUN_AUTOPILOT_SAFE_PHASES: ReadonlySet<CyclePhase> = new Set([
 ]);
 const MANUAL_DREAM_WRITE_OR_SPEND_PHASES: ReadonlySet<CyclePhase> = new Set([
   'lint',
-  'backlinks',
   'sync',
   'synthesize',
   'extract',
