@@ -79,6 +79,11 @@ Proof gate:
   failures or spend
 
 Act:
+- keep autopilot enabled as the normal background mode; pause it only before a
+  manual `gbrain dream` run that writes or spends, verify it is stopped, and
+  restore it after scoring; read-only or dry inspection paths that avoid
+  spend-capable phases can run while autopilot is alive, but dry synthesize/atom
+  synthesis still needs the pause because it can spend or cache verdicts
 - change one Dream parameter at a time
 - keep `zai:glm-5.2` for synth and
   `anthropic:claude-haiku-4-5-20251001` for verdicts unless new proof says

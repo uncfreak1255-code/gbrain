@@ -22,7 +22,11 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runDream } from '../src/commands/dream.ts';
+import {
+  inspectManualDreamAutopilotSafety,
+  runDream,
+} from '../src/commands/dream.ts';
+import { gbrainPath } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -47,7 +51,209 @@ function makeGitRepo(): string {
   return dir;
 }
 
+let savedGbrainHome: string | undefined;
+let isolatedGbrainHome: string;
+
+beforeEach(() => {
+  savedGbrainHome = process.env.GBRAIN_HOME;
+  isolatedGbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-dream-home-'));
+  process.env.GBRAIN_HOME = isolatedGbrainHome;
+});
+
+afterEach(() => {
+  if (savedGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = savedGbrainHome;
+  if (isolatedGbrainHome) rmSync(isolatedGbrainHome, { recursive: true, force: true });
+});
+
 // ─── brainDir resolution ───────────────────────────────────────────
+
+describe('runDream — manual/autopilot overlap safety', () => {
+  let repo: string;
+  let engine: InstanceType<typeof PGLiteEngine>;
+
+  beforeEach(async () => {
+    repo = makeGitRepo();
+    engine = await makePGLite();
+  }, 60_000);
+
+  afterEach(async () => {
+    if (engine) await engine.disconnect();
+    rmSync(repo, { recursive: true, force: true });
+  }, 60_000);
+
+  test('pure guard blocks live autopilot locks even when the lock mtime is stale', () => {
+    const lockPath = join(isolatedGbrainHome, '.gbrain', 'autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, '12345');
+
+    const live = inspectManualDreamAutopilotSafety(lockPath, Date.now(), (pid) => pid === 12345);
+    expect(live).toEqual({
+      ok: false,
+      lockPath,
+      pid: 12345,
+      reason: 'autopilot_running',
+    });
+
+    const oldLockTime = Date.now() + 11 * 60 * 1000;
+    const liveButStale = inspectManualDreamAutopilotSafety(lockPath, oldLockTime, (pid) => pid === 12345);
+    expect(liveButStale).toEqual({
+      ok: false,
+      lockPath,
+      pid: 12345,
+      reason: 'autopilot_running',
+    });
+
+    const dead = inspectManualDreamAutopilotSafety(lockPath, Date.now(), () => false);
+    expect(dead.ok).toBe(true);
+    expect(dead.pid).toBe(12345);
+  });
+
+  test('refuses a mutating manual dream run when autopilot is alive for this GBRAIN_HOME', async () => {
+    const lockPath = gbrainPath('autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      try {
+        await runDream(engine, ['--dir', repo, '--phase', 'lint', '--json']);
+      } catch (e: any) {
+        expect(e.message).toBe('EXIT');
+      }
+
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      const errOut = errSpy.mock.calls.flat().join(' ');
+      expect(errOut).toMatch(/Autopilot is already maintaining this brain/);
+      expect(errOut).toMatch(/Pause it only for a manual Dream run that writes or spends/);
+      expect(errOut).toContain(lockPath);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('allows read-only and dry inspection runs while autopilot is alive', async () => {
+    const lockPath = gbrainPath('autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const readOnly = await runDream(engine, ['--dir', repo, '--phase', 'orphans', '--json']);
+      expect(readOnly?.phases.map((p) => p.phase)).toEqual(['orphans']);
+
+      const dryInspection = await runDream(engine, ['--dir', repo, '--phase', 'lint', '--dry-run', '--json']);
+      expect(dryInspection?.phases.map((p) => p.phase)).toEqual(['lint']);
+
+      const backlinksAudit = await runDream(engine, ['--dir', repo, '--phase', 'backlinks', '--json']);
+      expect(backlinksAudit?.phases.map((p) => p.phase)).toEqual(['backlinks']);
+
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  test('refuses source-scoped non-dry inspection runs because they write freshness', async () => {
+    const lockPath = gbrainPath('autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      try {
+        await runDream(engine, ['--dir', repo, '--source', 'default', '--phase', 'orphans', '--json']);
+      } catch (e: any) {
+        expect(e.message).toBe('EXIT');
+      }
+
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      const errOut = errSpy.mock.calls.flat().join(' ');
+      expect(errOut).toMatch(/manual Dream run that writes or spends/);
+      expect(errOut).toContain(lockPath);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('refuses dry synthesize because it can still spend and cache verdicts', async () => {
+    const lockPath = gbrainPath('autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      try {
+        await runDream(engine, ['--dir', repo, '--phase', 'synthesize', '--dry-run', '--json']);
+      } catch (e: any) {
+        expect(e.message).toBe('EXIT');
+      }
+
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      const errOut = errSpy.mock.calls.flat().join(' ');
+      expect(errOut).toMatch(/manual Dream run that writes or spends/);
+      expect(errOut).toContain(lockPath);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('refuses dry atom extraction because dry-run can still spend', async () => {
+    const lockPath = gbrainPath('autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      try {
+        await runDream(engine, ['--dir', repo, '--phase', 'extract_atoms', '--dry-run', '--json']);
+      } catch (e: any) {
+        expect(e.message).toBe('EXIT');
+      }
+
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      const errOut = errSpy.mock.calls.flat().join(' ');
+      expect(errOut).toMatch(/manual Dream run that writes or spends/);
+      expect(errOut).toContain(lockPath);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('refuses non-dry schema suggestion because it writes audit state', async () => {
+    const lockPath = gbrainPath('autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      try {
+        await runDream(engine, ['--dir', repo, '--phase', 'schema-suggest', '--json']);
+      } catch (e: any) {
+        expect(e.message).toBe('EXIT');
+      }
+
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      const errOut = errSpy.mock.calls.flat().join(' ');
+      expect(errOut).toMatch(/manual Dream run that writes or spends/);
+      expect(errOut).toContain(lockPath);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+});
 
 describe('runDream — brainDir resolution', () => {
   let repo: string;
