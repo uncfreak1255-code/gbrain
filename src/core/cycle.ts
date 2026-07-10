@@ -307,6 +307,10 @@ const NEEDS_LOCK_PHASES: ReadonlySet<CyclePhase> = new Set([
   'purge',
 ]);
 
+export function cyclePhasesNeedLock(phases: readonly CyclePhase[]): boolean {
+  return phases.some(p => NEEDS_LOCK_PHASES.has(p));
+}
+
 export type PhaseStatus = 'ok' | 'warn' | 'fail' | 'skipped';
 
 export interface PhaseError {
@@ -1444,7 +1448,7 @@ export async function runCycle(
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
 
   // Decide if we need the cycle lock: any state-mutating phase in the selection.
-  const needsLock = phases.some(p => NEEDS_LOCK_PHASES.has(p));
+  const needsLock = cyclePhasesNeedLock(phases);
 
   let lock: LockHandle | null = null;
   if (needsLock) {

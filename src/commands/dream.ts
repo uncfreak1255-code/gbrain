@@ -34,6 +34,8 @@ import { resolveSourceId } from '../core/source-resolver.ts';
 import { fetchSource } from '../core/sources-load.ts';
 import { existsSync } from 'fs';
 import { resolve } from 'node:path';
+import { gbrainPath } from '../core/config.ts';
+import { inspectAutopilotLock } from './autopilot.ts';
 import {
   buildBudgetReconcileReport,
   parseBudgetDreamRunArgs,
@@ -87,6 +89,73 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_DRAIN_WINDOW_SECONDS = 300;
 /** Exit code for "drain ran but the backlog isn't empty — run again". */
 const EXIT_DRAIN_INCOMPLETE = 3;
+const EXIT_AUTOPILOT_RUNNING = 2;
+const DRY_RUN_AUTOPILOT_SAFE_PHASES: ReadonlySet<CyclePhase> = new Set([
+  'lint',
+  'backlinks',
+  'orphans',
+]);
+const MANUAL_DREAM_WRITE_OR_SPEND_PHASES: ReadonlySet<CyclePhase> = new Set([
+  'lint',
+  'backlinks',
+  'sync',
+  'synthesize',
+  'extract',
+  'extract_facts',
+  'extract_atoms',
+  'resolve_symbol_edges',
+  'patterns',
+  'synthesize_concepts',
+  'recompute_emotional_weight',
+  'consolidate',
+  'propose_takes',
+  'grade_takes',
+  'calibration_profile',
+  'conversation_facts_backfill',
+  'enrich_thin',
+  'skillopt',
+  'embed',
+  'schema-suggest',
+  'purge',
+]);
+
+export interface ManualDreamAutopilotSafety {
+  ok: boolean;
+  lockPath: string;
+  pid: number | null;
+  reason?: 'autopilot_running';
+}
+
+export function inspectManualDreamAutopilotSafety(
+  lockPath: string = gbrainPath('autopilot.lock'),
+  nowMs: number = Date.now(),
+  isAlive?: (pid: number) => boolean,
+): ManualDreamAutopilotSafety {
+  const lock = inspectAutopilotLock(lockPath, nowMs, isAlive);
+  if (lock.exists && lock.running) {
+    return { ok: false, lockPath, pid: lock.pid, reason: 'autopilot_running' };
+  }
+  return { ok: true, lockPath, pid: lock.pid };
+}
+
+function manualDreamRequiresAutopilotPause(opts: DreamArgs, phases: readonly CyclePhase[]): boolean {
+  if (opts.drain) return !opts.dryRun;
+  if (opts.dryRun) return phases.some(p => !DRY_RUN_AUTOPILOT_SAFE_PHASES.has(p));
+  return phases.some(p => MANUAL_DREAM_WRITE_OR_SPEND_PHASES.has(p));
+}
+
+function enforceManualDreamAutopilotSafety(): void {
+  const safety = inspectManualDreamAutopilotSafety();
+  if (safety.ok) return;
+  const pidText = safety.pid === null ? 'unknown pid' : `pid ${safety.pid}`;
+  console.error(
+    'gbrain dream refused: Autopilot is already maintaining this brain. ' +
+    'Pause it only for a manual Dream run that writes or spends. ' +
+    `Active autopilot: ${pidText}. ` +
+    `Lock: ${safety.lockPath}`,
+  );
+  process.exit(EXIT_AUTOPILOT_RUNNING);
+}
 
 /**
  * Collect every occurrence of `--<flag> <value>` in argv. Used to
@@ -524,6 +593,11 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     return;
   }
 
+  const selectedPhases = opts.phase ? [opts.phase] : ALL_PHASES;
+  if (manualDreamRequiresAutopilotPause(opts, selectedPhases)) {
+    enforceManualDreamAutopilotSafety();
+  }
+
   // v0.41.13: --source <id> resolution. Three guards in order:
   //   1. engine null → exit 1 (the writeback in cycle.ts requires a
   //      DB connection; without engine we'd silently fail the same way
@@ -593,7 +667,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     return runDrain(engine, opts, resolvedSourceId, brainDir);
   }
 
-  const phases: CyclePhase[] | undefined = opts.phase ? [opts.phase] : undefined;
+  const phases: CyclePhase[] | undefined = opts.phase ? selectedPhases : undefined;
   const runStartedAt = new Date();
 
   const report = await runCycle(engine, {
