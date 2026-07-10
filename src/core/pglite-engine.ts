@@ -5183,8 +5183,8 @@ export class PGLiteEngine implements BrainEngine {
       `INSERT INTO eval_candidates (
          tool_name, query, retrieved_slugs, retrieved_chunk_ids, source_ids,
          expand_enabled, detail, detail_resolved, vector_enabled, expansion_applied,
-         latency_ms, remote, job_id, subagent_id, embedding_column
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         latency_ms, remote, job_id, subagent_id, embedding_column, replay_surface
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING id`,
       [
         input.tool_name,
@@ -5202,6 +5202,7 @@ export class PGLiteEngine implements BrainEngine {
         input.job_id,
         input.subagent_id,
         input.embedding_column ?? null,
+        input.replay_surface ? JSON.stringify(input.replay_surface) : null,
       ]
     );
     return rows[0]!.id;
@@ -5228,7 +5229,15 @@ export class PGLiteEngine implements BrainEngine {
            ORDER BY created_at DESC, id DESC LIMIT $2`,
           [since, limit]
         );
-    return rows as unknown as EvalCandidate[];
+    return rows.map((rawRow: unknown) => {
+      const row = rawRow as Record<string, unknown>;
+      return {
+        ...row,
+        replay_surface: typeof row.replay_surface === 'string'
+          ? JSON.parse(row.replay_surface)
+          : row.replay_surface,
+      };
+    }) as unknown as EvalCandidate[];
   }
 
   async deleteEvalCandidatesBefore(date: Date): Promise<number> {

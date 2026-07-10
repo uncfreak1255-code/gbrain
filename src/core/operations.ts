@@ -8,7 +8,7 @@ import { resolve, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
-import type { PageType } from './types.ts';
+import type { EvalReplaySurface, PageType } from './types.ts';
 import { importFromContent } from './import-file.ts';
 import { writePageThrough } from './write-through.ts';
 import { parseMarkdown } from './markdown.ts';
@@ -608,6 +608,12 @@ function stampEvidenceSafe(results: SearchResult[]): void {
 }
 
 /** T4 — shared eval-capture for the `search` op (keyword-only + cheap-hybrid paths). */
+function compactReplaySurface(surface: EvalReplaySurface): EvalReplaySurface {
+  return Object.fromEntries(
+    Object.entries(surface).filter(([, value]) => value !== undefined),
+  ) as EvalReplaySurface;
+}
+
 function maybeCaptureSearch(
   ctx: OperationContext,
   queryText: string,
@@ -615,6 +621,7 @@ function maybeCaptureSearch(
   latency_ms: number,
   vectorEnabled: boolean,
   meta?: HybridSearchMeta | null,
+  replaySurface?: EvalReplaySurface,
 ): void {
   if (!isEvalCaptureEnabled(ctx.config)) return;
   void captureEvalCandidate(
@@ -630,6 +637,7 @@ function maybeCaptureSearch(
       detail: null,
       job_id: ctx.jobId ?? null,
       subagent_id: ctx.subagentId ?? null,
+      replay_surface: replaySurface ? compactReplaySurface(replaySurface) : null,
     },
     { scrub_pii: isEvalScrubEnabled(ctx.config) },
   );
@@ -1486,7 +1494,15 @@ const search: Operation = {
       // hybridSearch, so stamp explicitly). Fail-open inside the helper.
       await stampContentFlags(ctx.engine, results);
       bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
-      maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false);
+      maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false, null, {
+        schema_version: 1,
+        pipeline: 'search_op_v1',
+        limit,
+        offset,
+        ...scope,
+        ...(perCallMode ? { mode: perCallMode } : {}),
+        keywordOnly: true,
+      });
       return results;
     }
 
@@ -1503,7 +1519,20 @@ const search: Operation = {
     });
     const latency_ms = Date.now() - startedAt;
     bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
-    maybeCaptureSearch(ctx, queryText, results, latency_ms, true, capturedMeta);
+    const capturedReplayMeta = capturedMeta as HybridSearchMeta | null;
+    const replayMode = capturedReplayMeta?.mode ?? perCallMode;
+    const capturedEmbeddingColumn = capturedReplayMeta?.embedding_column;
+    maybeCaptureSearch(ctx, queryText, results, latency_ms, true, capturedMeta, {
+      schema_version: 1,
+      pipeline: 'search_op_v1',
+      limit,
+      offset,
+      expansion: false,
+      embeddingColumn: capturedEmbeddingColumn,
+      ...scope,
+      ...(replayMode ? { mode: replayMode } : {}),
+      keywordOnly: false,
+    });
     return results;
   },
   scope: 'read',
@@ -1664,6 +1693,7 @@ const query: Operation = {
     // search). When the param is the literal '__all__', force-allow
     // cross-source mode (matches SearchOpts.sourceId contract).
     let capturedMeta: HybridSearchMeta | null = null;
+    const perCallMode = resolvePerCallMode(ctx, p.mode);
     // v0.32.x search-lite: route the query op through hybridSearchCached so
     // semantic cache + token budget + intent weighting fire automatically.
     // Plain hybridSearch remains the bare API for callers that opt out.
@@ -1673,7 +1703,7 @@ const query: Operation = {
       expansion: expand,
       expandFn: expand ? expandQuery : undefined,
       // T4/D5 — per-call mode (local/trusted only; remote ignored).
-      ...((): { mode?: string } => { const m = resolvePerCallMode(ctx, p.mode); return m ? { mode: m } : {}; })(),
+      ...(perCallMode ? { mode: perCallMode } : {}),
       detail,
       language: (p.lang as string) || undefined,
       symbolKind: (p.symbol_kind as string) || undefined,
@@ -1721,6 +1751,8 @@ const query: Operation = {
       const meta: HybridSearchMeta = capturedMeta ?? {
         vector_enabled: false, detail_resolved: detail ?? null, expansion_applied: false,
       };
+      const replayMode = meta.mode ?? perCallMode;
+      const replayDetail = meta.detail_resolved ?? detail;
       void captureEvalCandidate(
         ctx.engine,
         {
@@ -1734,6 +1766,32 @@ const query: Operation = {
           detail: detail ?? null,
           job_id: ctx.jobId ?? null,
           subagent_id: ctx.subagentId ?? null,
+          replay_surface: compactReplaySurface({
+            schema_version: 1,
+            pipeline: 'query_op_v1',
+            limit: (p.limit as number) || 20,
+            offset: (p.offset as number) || 0,
+            expansion: meta.expansion_applied,
+            ...(replayMode ? { mode: replayMode } : {}),
+            detail: replayDetail ?? undefined,
+            language: (p.lang as string) || undefined,
+            symbolKind: (p.symbol_kind as string) || undefined,
+            nearSymbol: (p.near_symbol as string) || undefined,
+            walkDepth: typeof p.walk_depth === 'number' ? (p.walk_depth as number) : undefined,
+            ...querySourceScope,
+            salience: p.salience as 'off' | 'on' | 'strong' | undefined,
+            recency: p.recency as 'off' | 'on' | 'strong' | undefined,
+            since: typeof p.since === 'string' ? p.since : undefined,
+            until: typeof p.until === 'string' ? p.until : undefined,
+            tokenBudget: typeof p.token_budget === 'number' ? (p.token_budget as number) : undefined,
+            useCache: typeof p.use_cache === 'boolean' ? (p.use_cache as boolean) : undefined,
+            intentWeighting: typeof p.intent_weighting === 'boolean' ? (p.intent_weighting as boolean) : undefined,
+            crossModal: p.cross_modal as 'text' | 'image' | 'both' | 'auto' | undefined,
+            embeddingColumn: embeddingColumnParam,
+            adaptiveReturn: typeof p.adaptive_return === 'boolean' ? (p.adaptive_return as boolean) : undefined,
+            autocut: typeof p.autocut === 'boolean' ? (p.autocut as boolean) : undefined,
+            relationalRetrieval: typeof p.relational === 'boolean' ? (p.relational as boolean) : undefined,
+          }),
         },
         { scrub_pii: isEvalScrubEnabled(ctx.config) },
       );

@@ -738,6 +738,10 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // only via the eval-replay CLI, not via SQL filters that would force a
   // bootstrap probe.
   'eval_candidates.schema_pack_per_source',
+  // v0.43.x — column-only replay-surface snapshot used by eval replay. No
+  // indexes or SQL filters reference it, so fresh schema + migration coverage
+  // is enough.
+  'eval_candidates.replay_surface',
   // v0.41 (migration v94) — minions cathedral budget columns. Same precedent
   // as facts.claim_metric and friends: column-only additions on `minion_jobs`,
   // no forward-reference index in PGLITE_SCHEMA_SQL (the partial indexes

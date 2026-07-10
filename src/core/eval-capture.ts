@@ -38,6 +38,7 @@ import type { BrainEngine } from './engine.ts';
 import type {
   EvalCandidateInput,
   EvalCaptureFailureReason,
+  EvalReplaySurface,
   HybridSearchMeta,
   SearchResult,
 } from './types.ts';
@@ -72,6 +73,8 @@ export interface CaptureContext {
   job_id: number | null;
   /** OperationContext.subagentId if present. */
   subagent_id: number | null;
+  /** Versioned retrieval-surface contract used by eval replay. */
+  replay_surface?: EvalReplaySurface | null;
 }
 
 /**
@@ -89,6 +92,7 @@ export function buildEvalCandidateInput(
 ): EvalCandidateInput {
   const shouldScrub = opts.scrub_pii !== false;
   const query = shouldScrub ? scrubPii(ctx.query) : ctx.query;
+  const replaySurface = sanitizeReplaySurface(ctx.replay_surface ?? null, shouldScrub);
 
   // Deduplicate + preserve order for slug + source_id extraction.
   // Both arrays are small (hybridSearch clamps at 100 results) so the
@@ -121,7 +125,60 @@ export function buildEvalCandidateInput(
     // keyword-only `search` (meta.embedding_column omitted), preserving
     // back-compat with rows captured before the column tracking landed.
     embedding_column: ctx.meta.embedding_column ?? null,
+    replay_surface: replaySurface,
   };
+}
+
+function scrubOptionalString(value: string | undefined): { value: string | undefined; changed: boolean } {
+  if (value === undefined) return { value, changed: false };
+  const scrubbed = scrubPii(value);
+  return { value: scrubbed, changed: scrubbed !== value };
+}
+
+/**
+ * Keep replay surfaces export-safe when eval scrubbing is enabled. Exact source
+ * ids and symbol anchors can be private names, so they are only persisted when
+ * the operator explicitly disables eval PII scrubbing for local benchmarking.
+ */
+function sanitizeReplaySurface(
+  surface: EvalReplaySurface | null,
+  shouldScrub: boolean,
+): EvalReplaySurface | null {
+  if (!surface || !shouldScrub) return surface;
+
+  const safe: EvalReplaySurface = { ...surface };
+  const omittedFields: string[] = [];
+
+  if (safe.sourceId && safe.sourceId !== 'default') {
+    delete safe.sourceId;
+    omittedFields.push('sourceId');
+  }
+  if (safe.sourceIds?.some((id) => id !== 'default')) {
+    const defaultOnly = safe.sourceIds.filter((id) => id === 'default');
+    if (defaultOnly.length > 0) {
+      safe.sourceIds = defaultOnly;
+    } else {
+      delete safe.sourceIds;
+    }
+    omittedFields.push('sourceIds');
+  }
+  if (safe.nearSymbol) {
+    delete safe.nearSymbol;
+    omittedFields.push('nearSymbol');
+  }
+
+  let scrubbed = omittedFields.length > 0;
+  for (const field of ['language', 'symbolKind', 'since', 'until', 'embeddingColumn'] as const) {
+    const result = scrubOptionalString(safe[field]);
+    safe[field] = result.value;
+    scrubbed ||= result.changed;
+  }
+
+  if (scrubbed) {
+    safe.privacy_scrubbed = true;
+    if (omittedFields.length > 0) safe.omittedFields = omittedFields;
+  }
+  return safe;
 }
 
 /**
