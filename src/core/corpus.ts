@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { serializeMarkdown } from './markdown.ts';
+import { parseMarkdown, serializeMarkdown } from './markdown.ts';
 
 export type CorpusInputKind = 'local_transcript_dir' | 'youtube_playlist';
 
@@ -410,19 +410,25 @@ function localFileToItem(root: string, file: string): CorpusItem {
   const text = readFileSync(file, 'utf8');
   const rel = relative(root, file);
   const parsedJson = extname(file).toLowerCase() === '.json' ? safeJson(text) : null;
+  const parsedMarkdown = extname(file).toLowerCase() === '.md' ? parseMarkdown(text, file) : null;
   const metadata = parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)
     ? parsedJson as Record<string, unknown>
-    : {};
+    : parsedMarkdown
+      ? parsedMarkdown.frontmatter
+      : {};
   return {
     id: `${slugify(rel.replace(/\.[^.]+$/, ''))}-${hashShort(rel)}`,
-    title: stringField(metadata.title) ?? titleFromFilename(file),
-    canonical_url: stringField(metadata.url) ?? stringField(metadata.canonical_url) ?? null,
+    title: parsedMarkdown?.title ?? stringField(metadata.title) ?? titleFromFilename(file),
+    canonical_url: stringField(metadata.url)
+      ?? stringField(metadata.canonical_url)
+      ?? stringField(metadata.source_url)
+      ?? null,
     local_path: file,
     duration_seconds: numberField(metadata.duration_seconds) ?? numberField(metadata.duration),
     transcript_path: file,
     content_hash: sha256(text),
     extraction_method: 'local-transcript',
-    segments_available: Array.isArray(metadata.segments),
+    segments_available: parsedJson !== null && Array.isArray(metadata.segments),
     metadata: {
       relative_path: rel,
       bytes: Buffer.byteLength(text, 'utf8'),
@@ -457,8 +463,8 @@ function buildReviewPageDraft(
     '## Key Ideas',
     '- TODO',
     '',
-    '## Best Segment',
-    'TODO: Add timestamp and reason.',
+    `## ${bestSegmentHeading(item)}`,
+    item.segments_available ? 'TODO: Add timestamp and reason.' : 'TODO: Add excerpt and reason.',
     '',
     '## Caveats',
     '- TODO',
@@ -510,7 +516,7 @@ function buildReviewedPage(
     '## Key Ideas',
     ...digest.keyIdeas.map((idea) => `- ${idea}`),
     '',
-    '## Best Segment',
+    `## ${bestSegmentHeading(item)}`,
     digest.bestSegment,
     '',
     '## Caveats',
@@ -562,7 +568,7 @@ function buildSawyerBrief(
     ...bulletRank(top, ({ item, digest }, index) => `${index + 1}. ${sourceLink(item)} - ${digest.summary} (${scoreLabel(digest.score)})`),
     '',
     '## Watch/read first',
-    ...bulletRank(top.slice(0, 3), ({ item, digest }) => `${sourceLink(item)} - Best segment: ${digest.bestSegment}`),
+    ...bulletRank(top.slice(0, 3), ({ item, digest }) => `${sourceLink(item)} - ${bestSegmentInlineLabel(item)}: ${digest.bestSegment}`),
     '',
     '## Skip or skim',
     ...(skip.length > 0
@@ -673,7 +679,7 @@ function isInside(root: string, path: string): boolean {
 }
 
 function digestTranscript(raw: string, item: CorpusItem): TranscriptDigest {
-  const text = normalizeTranscriptText(raw);
+  const text = normalizeTranscriptText(raw, item);
   const sentences = splitSentences(text);
   const scored = sentences
     .map((sentence, index) => ({ sentence, index, score: scoreText(sentence) }))
@@ -705,7 +711,7 @@ function digestTranscript(raw: string, item: CorpusItem): TranscriptDigest {
   };
 }
 
-function normalizeTranscriptText(raw: string): string {
+function normalizeTranscriptText(raw: string, item: CorpusItem): string {
   const parsed = safeJson(raw);
   if (parsed && typeof parsed === 'object') {
     const record = parsed as Record<string, unknown>;
@@ -720,7 +726,33 @@ function normalizeTranscriptText(raw: string): string {
         .trim();
     }
   }
+  if (isMarkdownCorpusItem(item) && /^\s*---\s*\n/.test(raw)) {
+    const parsedMarkdown = parseMarkdown(raw);
+    const body = [parsedMarkdown.compiled_truth, parsedMarkdown.timeline]
+      .filter((part) => part.trim().length > 0)
+      .join(' ');
+    return markdownBodyToReviewText(body);
+  }
   return raw.replace(/\s+/g, ' ').trim();
+}
+
+function isMarkdownCorpusItem(item: CorpusItem): boolean {
+  const path = item.transcript_path ?? item.local_path ?? '';
+  return extname(path).toLowerCase() === '.md';
+}
+
+function markdownBodyToReviewText(markdown: string): string {
+  const lines = markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !/^#\s+/.test(line))
+    .filter((line) => !/^(Source|Author\/date|Capture note):/i.test(line))
+    .filter((line) => !/^#{2,}\s+/.test(line))
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, ''))
+    .map((line) => line.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'))
+    .map((line) => line.replace(/`([^`]+)`/g, '$1'));
+  return lines.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 function splitSentences(text: string): string[] {
@@ -750,6 +782,9 @@ function bestSegment(raw: string, fallback: string, item: CorpusItem): string {
       const start = numberField(best.start) ?? 0;
       return `${formatTimestamp(start)} - ${stringField(best.text)}`;
     }
+  }
+  if (!item.segments_available) {
+    return fallback;
   }
   const timestamp = item.duration_seconds && item.duration_seconds > 0 ? '00:00' : 'n/a';
   return `${timestamp} - ${fallback}`;
@@ -876,6 +911,14 @@ function sourceLink(item: CorpusItem): string {
   const label = escapeMarkdownInline(item.title);
   const url = safeMarkdownUrl(item.canonical_url);
   return url ? `[${label}](${url})` : label;
+}
+
+function bestSegmentHeading(item: CorpusItem): string {
+  return item.segments_available ? 'Best Segment' : 'Best Excerpt';
+}
+
+function bestSegmentInlineLabel(item: CorpusItem): string {
+  return item.segments_available ? 'Best segment' : 'Best excerpt';
 }
 
 function scoreLabel(score: number): string {
