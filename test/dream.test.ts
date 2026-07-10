@@ -158,6 +158,30 @@ describe('runDream — manual/autopilot overlap safety', () => {
     }
   });
 
+  test('refuses source-scoped non-dry inspection runs because they write freshness', async () => {
+    const lockPath = gbrainPath('autopilot.lock');
+    mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(lockPath, String(process.pid));
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      try {
+        await runDream(engine, ['--dir', repo, '--source', 'default', '--phase', 'orphans', '--json']);
+      } catch (e: any) {
+        expect(e.message).toBe('EXIT');
+      }
+
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      const errOut = errSpy.mock.calls.flat().join(' ');
+      expect(errOut).toMatch(/manual Dream run that writes or spends/);
+      expect(errOut).toContain(lockPath);
+    } finally {
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
   test('refuses dry synthesize because it can still spend and cache verdicts', async () => {
     const lockPath = gbrainPath('autopilot.lock');
     mkdirSync(join(isolatedGbrainHome, '.gbrain'), { recursive: true });
