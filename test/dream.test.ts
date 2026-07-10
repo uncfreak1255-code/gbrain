@@ -148,6 +148,9 @@ describe('runDream — manual/autopilot overlap safety', () => {
       const dryInspection = await runDream(engine, ['--dir', repo, '--phase', 'lint', '--dry-run', '--json']);
       expect(dryInspection?.phases.map((p) => p.phase)).toEqual(['lint']);
 
+      const backlinksAudit = await runDream(engine, ['--dir', repo, '--phase', 'backlinks', '--json']);
+      expect(backlinksAudit?.phases.map((p) => p.phase)).toEqual(['backlinks']);
+
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       exitSpy.mockRestore();
