@@ -1442,11 +1442,54 @@ export interface EvalCandidateInput {
    * so capture and replay run in the same embedding space.
    */
   embedding_column?: string | null;
+  /**
+   * v0.43.x: versioned replay contract for reproducing the same retrieval
+   * surface that produced the captured row. Older rows leave this NULL and
+   * `gbrain eval replay` labels them as legacy deterministic-bare replay.
+   */
+  replay_surface?: EvalReplaySurface | null;
 }
 
 export interface EvalCandidate extends EvalCandidateInput {
   id: number;
   created_at: Date;
+}
+
+export interface EvalReplaySurface {
+  schema_version: 1;
+  pipeline: 'query_op_v1' | 'search_op_v1';
+  limit?: number;
+  offset?: number;
+  sourceId?: string;
+  sourceIds?: string[];
+  expansion?: boolean;
+  detail?: 'low' | 'medium' | 'high';
+  mode?: string;
+  language?: string;
+  symbolKind?: string;
+  nearSymbol?: string;
+  walkDepth?: number;
+  salience?: 'off' | 'on' | 'strong';
+  recency?: 'off' | 'on' | 'strong';
+  since?: string;
+  until?: string;
+  tokenBudget?: number;
+  useCache?: boolean;
+  intentWeighting?: boolean;
+  crossModal?: 'text' | 'image' | 'both' | 'auto';
+  embeddingColumn?: string;
+  adaptiveReturn?: boolean;
+  autocut?: boolean;
+  relationalRetrieval?: boolean;
+  keywordOnly?: boolean;
+  /**
+   * True when eval PII scrubbing removed caller-controlled replay fields.
+   * Replay labels these rows separately because the surface may be less
+   * comparable than a raw local capture.
+   */
+  privacy_scrubbed?: boolean;
+  /** Field names omitted from the surface for privacy. Values are never stored. */
+  omittedFields?: string[];
 }
 
 export type EvalCaptureFailureReason =

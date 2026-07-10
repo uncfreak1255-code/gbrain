@@ -128,6 +128,82 @@ describe('buildEvalCandidateInput', () => {
     expect(input.expansion_applied).toBe(true);
   });
 
+  test('carries replay surface metadata for faithful eval replay', () => {
+    const input = buildEvalCandidateInput(
+      makeCtx({
+        replay_surface: {
+          schema_version: 1,
+          pipeline: 'query_op_v1',
+          limit: 7,
+          offset: 0,
+          sourceId: 'default',
+          expansion: true,
+          mode: 'balanced',
+          embeddingColumn: 'embedding',
+        },
+      }),
+    );
+    expect(input.replay_surface).toEqual({
+      schema_version: 1,
+      pipeline: 'query_op_v1',
+      limit: 7,
+      offset: 0,
+      sourceId: 'default',
+      expansion: true,
+      mode: 'balanced',
+      embeddingColumn: 'embedding',
+    });
+  });
+
+  test('scrubs private replay surface routing fields by default', () => {
+    const input = buildEvalCandidateInput(
+      makeCtx({
+        replay_surface: {
+          schema_version: 1,
+          pipeline: 'query_op_v1',
+          limit: 7,
+          sourceId: 'private-customer-source',
+          sourceIds: ['default', 'private-customer-source'],
+          nearSymbol: 'alice@example.com.SecretThing',
+          expansion: true,
+        },
+      }),
+    );
+    expect(input.replay_surface).toEqual({
+      schema_version: 1,
+      pipeline: 'query_op_v1',
+      limit: 7,
+      sourceIds: ['default'],
+      expansion: true,
+      privacy_scrubbed: true,
+      omittedFields: ['sourceId', 'sourceIds', 'nearSymbol'],
+    });
+  });
+
+  test('preserves private replay surface routing fields when scrub_pii is false', () => {
+    const input = buildEvalCandidateInput(
+      makeCtx({
+        replay_surface: {
+          schema_version: 1,
+          pipeline: 'query_op_v1',
+          limit: 7,
+          sourceId: 'private-customer-source',
+          nearSymbol: 'alice@example.com.SecretThing',
+          expansion: true,
+        },
+      }),
+      { scrub_pii: false },
+    );
+    expect(input.replay_surface).toEqual({
+      schema_version: 1,
+      pipeline: 'query_op_v1',
+      limit: 7,
+      sourceId: 'private-customer-source',
+      nearSymbol: 'alice@example.com.SecretThing',
+      expansion: true,
+    });
+  });
+
   test('propagates jobId + subagentId when present (subagent tool-bridge path)', () => {
     const input = buildEvalCandidateInput(
       makeCtx({ job_id: 9001, subagent_id: 42 }),

@@ -28,8 +28,10 @@
 
 import { readFileSync, existsSync } from 'fs';
 import type { BrainEngine } from '../core/engine.ts';
-import type { SearchResult } from '../core/types.ts';
-import { hybridSearch } from '../core/search/hybrid.ts';
+import type { EvalReplaySurface, SearchResult } from '../core/types.ts';
+import { hybridSearch, hybridSearchCached } from '../core/search/hybrid.ts';
+import { expandQuery } from '../core/search/expansion.ts';
+import { dedupResults } from '../core/search/dedup.ts';
 
 interface ReplayOpts {
   help?: boolean;
@@ -70,6 +72,7 @@ export interface ReplayRowResult {
   /** True if the row threw during replay; current_slugs is empty. */
   errored?: boolean;
   error_message?: string;
+  replay_surface_label?: string;
 }
 
 export interface PrivacySafeReplayDrillRow {
@@ -217,6 +220,7 @@ interface CapturedRow {
    * missing means "use the current default."
    */
   embedding_column?: string | null;
+  replay_surface?: EvalReplaySurface | string | null;
 }
 
 /**
@@ -269,24 +273,100 @@ function jaccardSlugs(a: string[], b: string[]): number {
   return union === 0 ? 1.0 : intersection / union;
 }
 
+function normalizeReplaySurface(raw: CapturedRow['replay_surface']): EvalReplaySurface | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return normalizeReplaySurface(JSON.parse(raw) as EvalReplaySurface);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw !== 'object') return null;
+  if (raw.schema_version !== 1) return null;
+  if (raw.pipeline !== 'query_op_v1' && raw.pipeline !== 'search_op_v1') return null;
+  return raw;
+}
+
+function sourceScopeFromSurface(surface: EvalReplaySurface): { sourceId?: string; sourceIds?: string[] } {
+  if (surface.sourceIds && surface.sourceIds.length > 0) {
+    return { sourceIds: surface.sourceIds };
+  }
+  if (surface.sourceId) return { sourceId: surface.sourceId };
+  return {};
+}
+
+function replaySurfaceLabel(row: CapturedRow, surface: EvalReplaySurface | null): string {
+  if (surface) return surface.privacy_scrubbed ? `${surface.pipeline}_privacy_scrubbed` : surface.pipeline;
+  return row.tool_name === 'query' ? 'legacy_bare_hybrid' : 'legacy_keyword';
+}
+
 async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts = {}): Promise<ReplayRowResult> {
   const captured_slugs = row.retrieved_slugs ?? [];
   const startedAt = Date.now();
+  const replaySurface = normalizeReplaySurface(row.replay_surface);
+  const replay_surface_label = replaySurfaceLabel(row, replaySurface);
 
-  // Default replay limit matches hybridSearch's default (20).
+  // Default replay limit follows the captured replay surface when present.
+  // Legacy rows keep the historical bare replay default below.
   // v0.32.3 [CDX-13]: --compare-limit forces a constant K across modes so
   // Jaccard@k actually measures quality drift, not K-drift. When set, it
   // overrides the captured K and the mode's default searchLimit.
   const limit = opts.compareLimit === 'captured'
     ? Math.max(captured_slugs.length, 1)
-    : opts.compareLimit ?? Math.max(captured_slugs.length, 20);
+    : opts.compareLimit ?? replaySurface?.limit ?? Math.max(captured_slugs.length, 20);
 
   // search → bare keyword path. query → hybrid path (vector + keyword + RRF).
   // detail and expansion are threaded in from the captured row so the same
   // logic runs that produced the original retrieval.
   let current: SearchResult[];
   try {
-    if (row.tool_name === 'search') {
+    if (replaySurface?.pipeline === 'search_op_v1') {
+      if (replaySurface.keywordOnly) {
+        const raw = await engine.searchKeyword(row.query, {
+          limit,
+          offset: replaySurface.offset ?? 0,
+          ...sourceScopeFromSurface(replaySurface),
+        });
+        current = dedupResults(raw);
+      } else {
+        current = await hybridSearchCached(engine, row.query, {
+          limit,
+          offset: replaySurface.offset ?? 0,
+          expansion: false,
+          mode: opts.mode ?? replaySurface.mode,
+          embeddingColumn: replaySurface.embeddingColumn ?? row.embedding_column ?? undefined,
+          ...sourceScopeFromSurface(replaySurface),
+        });
+      }
+    } else if (replaySurface?.pipeline === 'query_op_v1') {
+      const expansion = replaySurface.expansion ?? row.expand_enabled ?? false;
+      current = await hybridSearchCached(engine, row.query, {
+        limit,
+        offset: replaySurface.offset ?? 0,
+        expansion,
+        expandFn: expansion ? expandQuery : undefined,
+        detail: replaySurface.detail ?? row.detail_resolved ?? row.detail ?? undefined,
+        mode: opts.mode ?? replaySurface.mode,
+        language: replaySurface.language,
+        symbolKind: replaySurface.symbolKind,
+        nearSymbol: replaySurface.nearSymbol,
+        walkDepth: replaySurface.walkDepth,
+        salience: replaySurface.salience,
+        recency: replaySurface.recency,
+        since: replaySurface.since,
+        until: replaySurface.until,
+        tokenBudget: replaySurface.tokenBudget,
+        useCache: replaySurface.useCache,
+        intentWeighting: replaySurface.intentWeighting,
+        crossModal: replaySurface.crossModal,
+        embeddingColumn: replaySurface.embeddingColumn ?? row.embedding_column ?? undefined,
+        adaptiveReturn: replaySurface.adaptiveReturn,
+        autocut: replaySurface.autocut,
+        relationalRetrieval: replaySurface.relationalRetrieval,
+        ...sourceScopeFromSurface(replaySurface),
+      });
+    } else if (row.tool_name === 'search') {
       const dedupedRaw = await engine.searchKeyword(row.query, { limit });
       current = dedupedRaw;
     } else {
@@ -314,6 +394,7 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
       latency_delta_ms: Date.now() - startedAt - row.latency_ms,
       errored: true,
       error_message: (err as Error).message ?? String(err),
+      replay_surface_label,
     };
   }
 
@@ -339,6 +420,7 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
     current_slugs,
     current_latency_ms,
     latency_delta_ms: current_latency_ms - row.latency_ms,
+    replay_surface_label,
   };
 }
 
@@ -353,6 +435,8 @@ export interface ReplaySummary {
   mean_latency_delta_ms: number;
   /** Rows where current latency is more than 2x captured (regression alarm). */
   rows_over_2x_latency: number;
+  /** Aggregate replay-surface labels, e.g. query_op_v1 or legacy_bare_hybrid. */
+  replay_surface_counts: Record<string, number>;
 }
 
 function summarize(results: ReplayRowResult[]): ReplaySummary {
@@ -370,6 +454,11 @@ function summarize(results: ReplayRowResult[]): ReplaySummary {
     const captured = results.find(x => x.id === r.id);
     return captured && captured.current_latency_ms > 2 * (captured.current_latency_ms - captured.latency_delta_ms);
   }).length;
+  const replaySurfaceCounts: Record<string, number> = {};
+  for (const r of results) {
+    const key = r.replay_surface_label ?? 'unknown';
+    replaySurfaceCounts[key] = (replaySurfaceCounts[key] ?? 0) + 1;
+  }
 
   return {
     rows_total: results.length,
@@ -380,6 +469,7 @@ function summarize(results: ReplayRowResult[]): ReplaySummary {
     top1_stability_rate: top1Rate,
     mean_latency_delta_ms: meanLatencyDelta,
     rows_over_2x_latency: over2x,
+    replay_surface_counts: replaySurfaceCounts,
   };
 }
 
@@ -468,6 +558,7 @@ export async function replayCore(
         latency_delta_ms: 0,
         skipped: true,
         skip_reason: 'empty query',
+        replay_surface_label: replaySurfaceLabel(row, normalizeReplaySurface(row.replay_surface)),
       });
       continue;
     }

@@ -1143,7 +1143,10 @@ CREATE TABLE IF NOT EXISTS eval_candidates (
   -- Nullable; pre-v0.36 rows have NULL and replay falls back to current
   -- default. Migration v68 (src/core/migrate.ts) adds the same column on
   -- upgrade brains.
-  embedding_column      TEXT
+  embedding_column      TEXT,
+  -- v0.43.x — versioned replay contract for reproducing the same retrieval
+  -- surface that produced the captured row. Nullable for legacy captures.
+  replay_surface        JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_eval_candidates_created_at ON eval_candidates(created_at DESC);
 
