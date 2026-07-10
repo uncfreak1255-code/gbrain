@@ -5367,6 +5367,19 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 120,
+    name: 'eval_candidates_replay_surface',
+    // v0.43.x — captured query/search rows need a versioned retrieval-surface
+    // snapshot so replay can compare against the same production surface that
+    // produced the row. Legacy rows keep NULL and eval replay labels them as
+    // deterministic-bare legacy comparisons.
+    idempotent: true,
+    sql: `
+      ALTER TABLE eval_candidates
+        ADD COLUMN IF NOT EXISTS replay_surface JSONB NULL;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

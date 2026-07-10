@@ -5335,15 +5335,18 @@ export class PostgresEngine implements BrainEngine {
   // Eval capture (v0.25.0). See BrainEngine interface docs.
   async logEvalCandidate(input: EvalCandidateInput): Promise<number> {
     const sql = this.sql;
+    const replaySurface = input.replay_surface
+      ? sql.json(input.replay_surface as unknown as Parameters<typeof sql.json>[0])
+      : null;
     const rows = await sql`
       INSERT INTO eval_candidates (
         tool_name, query, retrieved_slugs, retrieved_chunk_ids, source_ids,
         expand_enabled, detail, detail_resolved, vector_enabled, expansion_applied,
-        latency_ms, remote, job_id, subagent_id, embedding_column
+        latency_ms, remote, job_id, subagent_id, embedding_column, replay_surface
       ) VALUES (
         ${input.tool_name}, ${input.query}, ${input.retrieved_slugs}, ${input.retrieved_chunk_ids}, ${input.source_ids},
         ${input.expand_enabled}, ${input.detail}, ${input.detail_resolved}, ${input.vector_enabled}, ${input.expansion_applied},
-        ${input.latency_ms}, ${input.remote}, ${input.job_id}, ${input.subagent_id}, ${input.embedding_column ?? null}
+        ${input.latency_ms}, ${input.remote}, ${input.job_id}, ${input.subagent_id}, ${input.embedding_column ?? null}, ${replaySurface}
       )
       RETURNING id
     `;

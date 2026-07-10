@@ -88,6 +88,32 @@ describe('logEvalCandidate', () => {
     expect(row.remote).toBe(false);
   });
 
+  test('preserves replay_surface JSON through round-trip', async () => {
+    await engine.logEvalCandidate(
+      makeInput({
+        replay_surface: {
+          schema_version: 1,
+          pipeline: 'query_op_v1',
+          limit: 8,
+          sourceId: 'default',
+          expansion: true,
+          mode: 'balanced',
+          embeddingColumn: 'embedding',
+        },
+      }),
+    );
+    const rows = await engine.listEvalCandidates();
+    expect(rows[0]!.replay_surface).toEqual({
+      schema_version: 1,
+      pipeline: 'query_op_v1',
+      limit: 8,
+      sourceId: 'default',
+      expansion: true,
+      mode: 'balanced',
+      embeddingColumn: 'embedding',
+    });
+  });
+
   test('rejects oversize queries via CHECK constraint (50KB cap)', async () => {
     const bigQuery = 'x'.repeat(51201);
     await expect(engine.logEvalCandidate(makeInput({ query: bigQuery }))).rejects.toThrow();
