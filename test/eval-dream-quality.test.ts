@@ -69,6 +69,26 @@ describe('dream quality receipt', () => {
     expect(receipt.receipt_sha8).toHaveLength(8);
   });
 
+  test('quarantines a failed Dream page instead of surfacing it for promotion review', () => {
+    const failed = page({
+      title: 'Weak Strategy Decision',
+      compiled_truth: '# Weak Strategy Decision\n\nSession: 019weak\n\nDecision: strategy',
+      frontmatter: { dream_generated: true, session_id: '019weak' },
+    });
+    const scored = scoreDreamPage(failed);
+    const receipt = buildDreamQualityReceipt({
+      pages: [failed],
+      source: 'slugs',
+      now: new Date('2026-07-11T00:00:00Z'),
+    });
+
+    expect(scored.passed).toBe(false);
+    expect(scored.needs_promotion_review).toBe(false);
+    expect(receipt.verdict).toBe('fail');
+    expect(receipt.promotion_candidates).toBe(0);
+    expect(receipt.promotion_queue).toEqual([]);
+  });
+
   test('empty summary sets produce an inconclusive receipt', () => {
     const receipt = buildDreamQualityReceipt({
       pages: [],

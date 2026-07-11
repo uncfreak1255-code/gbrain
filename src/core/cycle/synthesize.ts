@@ -40,6 +40,7 @@ import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
 import type { MinionJobInput, SubagentHandlerData } from '../minions/types.ts';
+import { throwIfAborted } from '../abort-check.ts';
 import { discoverTranscripts, type DiscoveredTranscript } from './transcript-discovery.ts';
 import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
@@ -250,6 +251,8 @@ export function rewriteChunkedSlug(slug: string, hash6: string, idx: number): st
 export interface SynthesizePhaseOpts {
   brainDir: string;
   dryRun: boolean;
+  /** Cooperative cancellation from the enclosing Dream cycle or CLI. */
+  signal?: AbortSignal;
   /**
    * Explicit source cycle target. Non-default source roots are often product
    * or code checkouts; keep Dream's summary receipt in DB without dropping
@@ -280,6 +283,10 @@ export async function runPhaseSynthesize(
   opts: SynthesizePhaseOpts,
 ): Promise<PhaseResult> {
   const start = Date.now();
+  // These are deliberately outside the try block. A timeout must cancel only
+  // the children this invocation tracked, never perform a broad queue sweep.
+  let queue: MinionQueue | null = null;
+  const childIds: number[] = [];
   // Normalize brainDir to an absolute path BEFORE any reverse-write. Without
   // this, a relative or empty brainDir flows down to writeReversePages →
   // `join(brainDir, '${slug}.md')` → relative path → resolves against cwd at
@@ -298,6 +305,7 @@ export async function runPhaseSynthesize(
     opts.brainDir = resolve(opts.brainDir);
   }
   try {
+    throwIfAborted(opts.signal, 'synthesize');
     const config = await loadSynthConfig(engine);
 
     // Allow ad-hoc --input to run even when config is disabled.
@@ -390,6 +398,7 @@ export async function runPhaseSynthesize(
     // as the cheap pre-flight check).
     const judge = makeJudgeClient(config.verdictModel);
     for (const t of transcripts) {
+      throwIfAborted(opts.signal, 'synthesize');
       const cached = prefetchedVerdicts.has(t.filePath)
         ? prefetchedVerdicts.get(t.filePath)!
         : await engine.getDreamVerdict(t.filePath, t.contentHash);
@@ -414,6 +423,7 @@ export async function runPhaseSynthesize(
       }
       try {
         const verdict = await judgeSignificance(judge, t, config.verdictModel);
+        throwIfAborted(opts.signal, 'synthesize');
         await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
         verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
         if (verdict.worth_processing) worthProcessing.push(t);
@@ -475,8 +485,7 @@ export async function runPhaseSynthesize(
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
     }
 
-    const queue = new MinionQueue(engine);
-    const childIds: number[] = [];
+    queue = new MinionQueue(engine);
     /** Map child job_id → chunk metadata for D6 orchestrator-side slug rewrite. */
     const chunkInfo = new Map<number, { idx: number; hash6: string }>();
     /** Skip reasons for the cycle report (D5 cap hits, D8 legacy-key skips). */
@@ -485,6 +494,7 @@ export async function runPhaseSynthesize(
     const maxCharsPerChunk = computeChunkCharBudget(config.model, config.maxPromptTokens);
 
     for (const t of worthProcessing) {
+      throwIfAborted(opts.signal, 'synthesize');
       const hash16 = t.contentHash.slice(0, 16);
       const hash6 = t.contentHash.slice(0, 6);
 
@@ -546,6 +556,7 @@ export async function runPhaseSynthesize(
           ? `anthropic:${config.model}`
           : config.model;
       for (let i = 0; i < chunks.length; i++) {
+        throwIfAborted(opts.signal, 'synthesize');
         const childData: SubagentHandlerData = {
           prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock),
           model: subagentModel,
@@ -597,11 +608,14 @@ export async function runPhaseSynthesize(
     // every 5 min so the cycle lock TTL refreshes.
     const childJobs: Array<{ id: number; status: string; result: unknown }> = [];
     for (const jobId of childIds) {
+      throwIfAborted(opts.signal, 'synthesize');
       try {
         const job = await waitForCompletion(queue, jobId, {
           timeoutMs: DEFAULT_SYNTH_CHILD_WAIT_TIMEOUT_MS,
           pollMs: 5 * 1000,
+          signal: opts.signal,
         });
+        throwIfAborted(opts.signal, 'synthesize');
         childJobs.push({ id: job.id, status: job.status, result: job.result });
       } catch (e) {
         if (e instanceof TimeoutError) {
@@ -741,6 +755,23 @@ export async function runPhaseSynthesize(
 
     return ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s`, commonDetails);
   } catch (e) {
+    if (opts.signal?.aborted) {
+      const cleanup = await cancelSynthesizeChildren(queue, childIds);
+      return failed(
+        makeError(
+          'InternalError',
+          'SYNTH_PHASE_ABORTED',
+          e instanceof Error ? e.message : 'synthesize phase aborted',
+        ),
+        {
+          children_submitted: childIds.length,
+          children_cancelled: cleanup.cancelledIds.length,
+          child_ids_cancelled: cleanup.cancelledIds,
+          children_cancel_failed: cleanup.failedIds.length,
+          child_ids_cancel_failed: cleanup.failedIds,
+        },
+      );
+    }
     return failed(makeError('InternalError', 'SYNTH_PHASE_FAIL',
       e instanceof Error ? (e.message || 'synthesize phase threw') : String(e)));
   }
@@ -1594,15 +1625,41 @@ function warn(summary: string, details: Record<string, unknown> = {}): PhaseResu
   return { phase: 'synthesize', status: 'warn', duration_ms: 0, summary, details };
 }
 
-function failed(error: PhaseError): PhaseResult {
+function failed(error: PhaseError, details: Record<string, unknown> = {}): PhaseResult {
   return {
     phase: 'synthesize',
     status: 'fail',
     duration_ms: 0,
     summary: 'synthesize phase failed',
-    details: {},
+    details,
     error,
   };
+}
+
+/**
+ * Cancel only the subagent rows this synthesize invocation observed. The
+ * queue's cancellation semantics also clear an active child's lock token, so
+ * a worker cooperatively aborts on its next renewal. This is intentionally
+ * per-id rather than a queue-wide cancellation: unrelated Dream/manual work
+ * must remain untouched.
+ */
+async function cancelSynthesizeChildren(
+  queue: MinionQueue | null,
+  childIds: readonly number[],
+): Promise<{ cancelledIds: number[]; failedIds: number[] }> {
+  if (!queue || childIds.length === 0) return { cancelledIds: [], failedIds: [] };
+
+  const cancelledIds: number[] = [];
+  const failedIds: number[] = [];
+  for (const id of childIds) {
+    try {
+      const job = await queue.cancelJob(id);
+      if (job?.status === 'cancelled') cancelledIds.push(id);
+    } catch {
+      failedIds.push(id);
+    }
+  }
+  return { cancelledIds, failedIds };
 }
 
 function makeError(cls: string, code: string, message: string, hint?: string): PhaseError {

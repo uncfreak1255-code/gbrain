@@ -21,7 +21,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import { runCycle } from '../../src/core/cycle.ts';
 import { runPhaseSynthesize } from '../../src/core/cycle/synthesize.ts';
+import { MinionQueue } from '../../src/core/minions/queue.ts';
 
 interface TestRig {
   engine: PGLiteEngine;
@@ -131,7 +133,78 @@ function corpusPath(corpusDir: string, basename: string): string {
   return join(corpusDir, basename);
 }
 
+async function waitForWaitingSubagent(queue: MinionQueue, timeoutMs = 2_000): Promise<number> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const jobs = await queue.getJobs({ status: 'waiting', limit: 10 });
+    const job = jobs.find((candidate) => candidate.name === 'subagent');
+    if (job) return job.id;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('timed out waiting for synthesize child submission');
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms waiting for synthesize abort cleanup`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 describe('E2E synthesize chunking — D5 cap hit', () => {
+  test('cycle abort cancels its submitted synthesize child and preserves the partial report', async () => {
+    const rig = await setupRig();
+    const queue = new MinionQueue(rig.engine);
+    const controller = new AbortController();
+    let run: Promise<Awaited<ReturnType<typeof runCycle>>> | undefined;
+    let childId: number | undefined;
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_transcripts_per_cycle', '1');
+      await rig.engine.setConfig('dream.synthesize.max_chunks_per_transcript', '1');
+
+      const basename = '2026-06-23-abort-cleanup.txt';
+      const filePath = corpusPath(rig.corpusDir, basename);
+      const content = 'bounded abort cleanup transcript\n'.repeat(500);
+      writeFileSync(filePath, content);
+      await seedVerdict(rig.engine, filePath, content);
+
+      run = runCycle(rig.engine, {
+        brainDir: rig.brainDir,
+        dryRun: false,
+        // Extract normally follows synthesize in a Dream run. Keep it in the
+        // selection so an abort must preserve the synthesize cleanup receipt
+        // instead of throwing at the next phase boundary.
+        phases: ['synthesize', 'extract'],
+        signal: controller.signal,
+      });
+      childId = await waitForWaitingSubagent(queue);
+      controller.abort(new Error('test timeout'));
+
+      const report = await settleWithin(run, 1_000);
+      expect(report.status).toBe('partial');
+      expect(report.reason).toBe('aborted');
+      expect(report.phases[0].status).toBe('fail');
+      expect(report.phases[0].details.children_cancelled).toBe(1);
+      expect(report.phases[0].details.child_ids_cancelled).toEqual([childId]);
+      expect(report.phases).toHaveLength(1);
+      expect(report.phases.some((phase) => phase.phase === 'extract')).toBe(false);
+      expect((await queue.getJob(childId))?.status).toBe('cancelled');
+    } finally {
+      if (childId !== undefined) await queue.cancelJob(childId);
+      if (run) await run.catch(() => undefined);
+      await rig.cleanup();
+    }
+  }, 15_000);
+
   test('max_transcripts_per_cycle caps routine corpus scans but reports full discovery count', async () => {
     const rig = await setupRig();
     try {
