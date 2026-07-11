@@ -84,6 +84,13 @@ Act:
   restore it after scoring; read-only or dry inspection paths that avoid
   spend-capable phases can run while autopilot is alive, but dry synthesize/atom
   synthesis still needs the pause because it can spend or cache verdicts
+- for the bounded nightly wrapper, classify outcomes explicitly: no written
+  artifacts is a clean `skipped` run; a passing quality receipt makes an
+  artifact `review_eligible`; a valid failed or inconclusive receipt makes it
+  `quarantined`; child-limit, timeout, cleanup, or missing-quality-receipt
+  failures remain failed runs
+- a quality pass permits human review only. It does not write to an owning repo
+  or promote Dream material into canon
 - change one Dream parameter at a time
 - keep `zai:glm-5.2` for synth and
   `anthropic:claude-haiku-4-5-20251001` for verdicts unless new proof says

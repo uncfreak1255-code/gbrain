@@ -724,12 +724,19 @@ async function safeYield(hook?: () => Promise<void>) {
  * timed-out Minions job bails promptly instead of grinding through all
  * remaining phases while the worker thinks it's still at capacity.
  */
+class CycleAbortError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CycleAbortError';
+  }
+}
+
 function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     const reason = signal.reason instanceof Error
       ? signal.reason.message
       : String(signal.reason || 'aborted');
-    throw new Error(`[cycle] aborted between phases: ${reason}`);
+    throw new CycleAbortError(`[cycle] aborted between phases: ${reason}`);
   }
 }
 
@@ -1675,6 +1682,7 @@ export async function runCycle(
           dryRun,
           sourceId: opts.sourceId,
           yieldDuringPhase: opts.yieldDuringPhase,
+          signal: opts.signal,
           inputFile: opts.synthInputFile,
           date: opts.synthDate,
           from: opts.synthFrom,
@@ -2286,6 +2294,12 @@ export async function runCycle(
       }
       await safeYield(opts.yieldBetweenPhases);
     }
+  } catch (e) {
+    // A phase can return its own partial result after cooperative cleanup
+    // (notably synthesize cancelling its tracked children). The next phase
+    // boundary must stop iteration without throwing that completed receipt
+    // away; fall through to the common partial-report construction below.
+    if (!(e instanceof CycleAbortError)) throw e;
   } finally {
     if (lock) {
       try { await lock.release(); } catch { /* best-effort */ }

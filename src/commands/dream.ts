@@ -581,7 +581,11 @@ async function runDrain(
   if (result.remaining === null || result.remaining > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
 }
 
-export async function runDream(engine: BrainEngine | null, args: string[]): Promise<CycleReport | void> {
+export async function runDream(
+  engine: BrainEngine | null,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<CycleReport | void> {
   const opts = parseArgs(args);
 
   // ─── IRON RULE: --help short-circuits BEFORE any engine-bearing work ─
@@ -681,6 +685,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     synthFrom: opts.from ?? undefined,
     synthTo: opts.to ?? undefined,
     synthBypassDreamGuard: opts.bypassDreamGuard,
+    signal,
   });
   const runEndedAt = new Date();
 

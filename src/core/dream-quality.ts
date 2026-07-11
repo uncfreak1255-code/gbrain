@@ -105,8 +105,12 @@ export function scoreDreamPage(page: Page): DreamQualityPageScore {
 
   const passedCount = Object.values(checks).filter(Boolean).length;
   const score = Math.round((passedCount / Object.keys(checks).length) * 100);
+  const passed = score >= 72;
   const owner = inferPromotionOwner(page, text);
-  const needsPromotion = owner.needs_promotion_review;
+  // A routing match only makes a page eligible for human review after it clears
+  // the deterministic quality bar. Failed Dream residue stays searchable but
+  // cannot enter a promotion queue.
+  const needsPromotion = passed && owner.needs_promotion_review;
   const reasons = Object.entries(checks)
     .filter(([, ok]) => !ok)
     .map(([name]) => name);
@@ -114,7 +118,7 @@ export function scoreDreamPage(page: Page): DreamQualityPageScore {
   return {
     slug: page.slug,
     score,
-    passed: score >= 72,
+    passed,
     checks,
     reasons,
     promotion_owner: owner.owner,
