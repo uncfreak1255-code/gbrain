@@ -2,6 +2,18 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.45.5.1] - 2026-07-12
+
+**Plugin and skill installs now report the same release version as GBrain itself.** This small repair keeps the bundled OpenClaw plugin and skill manifest aligned with the CLI package, so install and update tools no longer describe an older release after upgrading.
+
+### Itemized changes
+
+### Fixed
+- **Aligned bundled manifest metadata.** `openclaw.plugin.json` and `skills/manifest.json` now carry the active release version.
+
+### Added
+- **Release-version regression guard.** The release workflow test now fails when either distributable manifest drifts from `VERSION`.
+
 ## [0.45.5.0] - 2026-07-11
 
 **Bounded Dream synthesis now stops its own work cleanly and keeps weak output out of the review lane.** If a `gbrain dream` synthesis run is interrupted or times out, it cancels only the children it created and returns a partial receipt instead of leaving work behind or touching another run's queue. Passing quality receipts make artifacts available for human review, while failed or inconclusive output stays quarantined.
