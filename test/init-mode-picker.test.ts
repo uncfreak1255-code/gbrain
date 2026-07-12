@@ -184,6 +184,22 @@ describe('runModePicker non-TTY surfaces full matrix + [AGENT] directive', () =>
 });
 
 describe('runModePicker — non-TTY auto-select + idempotent', () => {
+  test('--non-interactive bypasses the TTY prompt', async () => {
+    const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    const originalLog = console.log;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    console.log = () => {};
+    try {
+      const picked = await runModePicker(engine, { force: true, nonInteractive: true });
+      expect(['conservative', 'balanced', 'tokenmax']).toContain(picked);
+      expect(await engine.getConfig('search.mode')).toBe(picked);
+    } finally {
+      console.log = originalLog;
+      if (stdinDescriptor) Object.defineProperty(process.stdin, 'isTTY', stdinDescriptor);
+      else Reflect.deleteProperty(process.stdin, 'isTTY');
+    }
+  }, 1_000);
+
   test('non-TTY auto-selects + writes config + emits operator hint', async () => {
     // Bun test runs non-TTY by default.
     const picked = await runModePicker(engine);

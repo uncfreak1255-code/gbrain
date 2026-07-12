@@ -170,7 +170,7 @@ describeIfDB('Postgres parity — updateSourceConfig', () => {
         ${'mixed-array'},
         ${'/tmp/mixed-array'},
         jsonb_build_array(
-          to_jsonb(${'{"federated":true,"last_full_cycle_at":"2026-01-01T00:00:00.000Z'}::text),
+          to_jsonb(${'{"federated":true,"last_full_cycle_at":"2026-01-01T00:00:00.000Z"}'}::text),
           jsonb_build_object('remote_url', 'https://example.test'),
           to_jsonb(${'not json'}::text),
           jsonb_build_object('last_full_cycle_at', '2026-02-02T00:00:00.000Z')
@@ -188,16 +188,21 @@ describeIfDB('Postgres parity — updateSourceConfig', () => {
     expect(updated).toBe(true);
     const rows = await engine.executeRaw<{
       typeof: string;
-      config: Record<string, unknown>;
+      config: Record<string, unknown> | string;
       value: string | null;
     }>(
       `SELECT jsonb_typeof(config) AS typeof, config, config->>'last_full_cycle_at' AS value
          FROM sources WHERE id = 'mixed-array'`,
     );
+    // executeRaw exposes the postgres driver shape directly; JSONB may arrive
+    // as a string even though the engine's public row mapper normalizes it.
+    const config = typeof rows[0]?.config === 'string'
+      ? JSON.parse(rows[0].config) as Record<string, unknown>
+      : rows[0]?.config;
     expect(rows[0]?.typeof).toBe('object');
-    expect(rows[0]?.config.federated).toBe(true);
-    expect(rows[0]?.config.remote_url).toBe('https://example.test');
-    expect(rows[0]?.config.tracked_branch).toBe('main');
+    expect(config?.federated).toBe(true);
+    expect(config?.remote_url).toBe('https://example.test');
+    expect(config?.tracked_branch).toBe('main');
     expect(rows[0]?.value).toBe('2026-05-22T13:00:00.000Z');
   });
 });

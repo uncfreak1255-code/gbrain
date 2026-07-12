@@ -665,6 +665,273 @@ describe('E2E synthesize chunking — fan-out shape', () => {
       await rig.cleanup();
     }
   }, 30_000);
+
+  test('max_children_per_cycle skips a date-bounded multi-chunk transcript before queue submission', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_prompt_tokens', '100000');
+      await rig.engine.setConfig('dream.synthesize.max_children_per_cycle', '1');
+
+      const basename = '2026-05-08-child-budget.txt';
+      const filePath = corpusPath(rig.corpusDir, basename);
+      const content = 'bounded child budget transcript\n'.repeat(50_000); // ~1.55M chars → multiple chunks
+      writeFileSync(filePath, content);
+      await seedVerdict(rig.engine, filePath, content);
+
+      await withoutAnthropicKey(async () => {
+        await withSubagentAutoCancel(rig.engine, async () => {
+          const result = await runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+            from: '2026-05-08',
+            to: '2026-05-08',
+          });
+          expect(result.status).toBe('fail');
+          expect(result.error?.code).toBe('SYNTH_CHILD_LIMIT_REACHED');
+          const details = result.details as {
+            children_submitted: number;
+            children_not_submitted_due_to_limit: number;
+            max_children_per_cycle: number | null;
+            child_limit_reached: boolean;
+            skips: Array<{ filePath: string; reason: string }>;
+          };
+          expect(details.children_submitted).toBe(0);
+          expect(details.children_not_submitted_due_to_limit).toBeGreaterThan(1);
+          expect(details.max_children_per_cycle).toBe(1);
+          expect(details.child_limit_reached).toBe(true);
+          expect(details.skips).toContainEqual({
+            filePath,
+            reason: expect.stringMatching(/^max_children_per_cycle_exceeded:/),
+          });
+          expect(await rig.engine.getConfig('dream.synthesize.last_completion_ts')).toBeNull();
+        });
+      });
+
+      const rows = await rig.engine.executeRaw<{ count: number | string }>(
+        `SELECT COUNT(*) AS count FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(Number(rows[0]?.count)).toBe(0);
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('max_children_per_cycle permits one date-bounded single-chunk child', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_children_per_cycle', '1');
+
+      const basename = '2026-05-08-one-child.txt';
+      const filePath = corpusPath(rig.corpusDir, basename);
+      const content = 'one bounded child transcript\n'.repeat(120);
+      writeFileSync(filePath, content);
+      await seedVerdict(rig.engine, filePath, content);
+
+      await withoutAnthropicKey(async () => {
+        await withSubagentAutoCancel(rig.engine, async () => {
+          const result = await runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+            from: '2026-05-08',
+            to: '2026-05-08',
+          });
+          const details = result.details as {
+            children_submitted: number;
+            children_not_submitted_due_to_limit: number;
+            max_children_per_cycle: number | null;
+            child_limit_reached: boolean;
+          };
+          expect(details.children_submitted).toBe(1);
+          expect(details.children_not_submitted_due_to_limit).toBe(0);
+          expect(details.max_children_per_cycle).toBe(1);
+          expect(details.child_limit_reached).toBe(false);
+        });
+      });
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('max_children_per_cycle permits a multi-chunk transcript that exactly fits the budget', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_prompt_tokens', '100000');
+      // This corpus shape deterministically splits to five chunks under the
+      // 350K-character floor. Equality must pass; only an overage skips.
+      await rig.engine.setConfig('dream.synthesize.max_children_per_cycle', '5');
+
+      const filePath = corpusPath(rig.corpusDir, '2026-05-08-exact-child-budget.txt');
+      const content = 'exact child budget transcript\n'.repeat(50_000);
+      writeFileSync(filePath, content);
+      await seedVerdict(rig.engine, filePath, content);
+
+      await withoutAnthropicKey(async () => {
+        await withSubagentAutoCancel(rig.engine, async () => {
+          const result = await runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+            from: '2026-05-08',
+            to: '2026-05-08',
+          });
+          // The harness cancels submitted children, so this is a warned run;
+          // the assertions pin the pre-submit decision rather than synthesis.
+          expect(result.status).toBe('warn');
+          const details = result.details as {
+            children_submitted: number;
+            children_not_submitted_due_to_limit: number;
+            max_children_per_cycle: number | null;
+            child_limit_reached: boolean;
+          };
+          expect(details.children_submitted).toBe(5);
+          expect(details.children_not_submitted_due_to_limit).toBe(0);
+          expect(details.max_children_per_cycle).toBe(5);
+          expect(details.child_limit_reached).toBe(false);
+        });
+      });
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('max_children_per_cycle rejects malformed config before any queue submission', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_children_per_cycle', '1junk');
+
+      const filePath = corpusPath(rig.corpusDir, '2026-05-08-invalid-child-budget.txt');
+      const content = 'invalid child budget transcript\n'.repeat(120);
+      writeFileSync(filePath, content);
+      await seedVerdict(rig.engine, filePath, content);
+
+      const result = await runPhaseSynthesize(rig.engine, {
+        brainDir: rig.brainDir,
+        dryRun: false,
+        from: '2026-05-08',
+        to: '2026-05-08',
+      });
+      expect(result.status).toBe('fail');
+      expect(result.error?.code).toBe('SYNTH_PHASE_FAIL');
+      expect(result.error?.message).toContain('max_children_per_cycle must be a positive integer');
+
+      const rows = await rig.engine.executeRaw<{ count: number | string }>(
+        `SELECT COUNT(*) AS count FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(Number(rows[0]?.count)).toBe(0);
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('max_children_per_cycle applies to an explicit input before queue submission', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_prompt_tokens', '100000');
+      await rig.engine.setConfig('dream.synthesize.max_children_per_cycle', '1');
+
+      const basename = '2026-05-08-input-child-budget.txt';
+      const filePath = corpusPath(rig.corpusDir, basename);
+      const content = 'explicit input child budget transcript\n'.repeat(13_000); // > one 350K-char chunk
+      writeFileSync(filePath, content);
+      await seedVerdict(rig.engine, filePath, content);
+
+      await withoutAnthropicKey(async () => {
+        await withSubagentAutoCancel(rig.engine, async () => {
+          const result = await runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+            inputFile: filePath,
+          });
+          const details = result.details as {
+            children_submitted: number;
+            children_not_submitted_due_to_limit: number;
+            max_children_per_cycle: number | null;
+            child_limit_reached: boolean;
+          };
+          expect(result.status).toBe('fail');
+          expect(result.error?.code).toBe('SYNTH_CHILD_LIMIT_REACHED');
+          expect(details.children_submitted).toBe(0);
+          expect(details.children_not_submitted_due_to_limit).toBeGreaterThan(1);
+          expect(details.max_children_per_cycle).toBe(1);
+          expect(details.child_limit_reached).toBe(true);
+          expect(await rig.engine.getConfig('dream.synthesize.last_completion_ts')).toBeNull();
+        });
+      });
+
+      const rows = await rig.engine.executeRaw<{ count: number | string }>(
+        `SELECT COUNT(*) AS count FROM minion_jobs WHERE name = 'subagent'`,
+      );
+      expect(Number(rows[0]?.count)).toBe(0);
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
+  test('max_children_per_cycle fails a partial batch while skipping only the transcript that cannot fit', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_prompt_tokens', '100000');
+      await rig.engine.setConfig('dream.synthesize.max_children_per_cycle', '2');
+
+      const firstPath = corpusPath(rig.corpusDir, '2026-05-08-a-first.txt');
+      const middlePath = corpusPath(rig.corpusDir, '2026-05-08-b-too-large.txt');
+      const lastPath = corpusPath(rig.corpusDir, '2026-05-08-c-last.txt');
+      const smallContent = 'one child transcript\n'.repeat(120);
+      const middleContent = 'middle transcript that needs multiple children\n'.repeat(13_000);
+      writeFileSync(firstPath, smallContent);
+      writeFileSync(middlePath, middleContent);
+      writeFileSync(lastPath, smallContent);
+      await seedVerdict(rig.engine, firstPath, smallContent);
+      await seedVerdict(rig.engine, middlePath, middleContent);
+      await seedVerdict(rig.engine, lastPath, smallContent);
+
+      await withoutAnthropicKey(async () => {
+        await withSubagentAutoCancel(rig.engine, async () => {
+          const result = await runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: false,
+            from: '2026-05-08',
+            to: '2026-05-08',
+          });
+          const details = result.details as {
+            children_submitted: number;
+            children_not_submitted_due_to_limit: number;
+            child_limit_reached: boolean;
+            skips: Array<{ filePath: string; reason: string }>;
+          };
+          expect(result.status).toBe('fail');
+          expect(result.error?.code).toBe('SYNTH_CHILD_LIMIT_REACHED');
+          expect(details.children_submitted).toBe(2);
+          expect(details.children_not_submitted_due_to_limit).toBe(2);
+          expect(details.child_limit_reached).toBe(true);
+          expect(details.skips).toContainEqual({
+            filePath: middlePath,
+            reason: expect.stringMatching(/^max_children_per_cycle_exceeded:/),
+          });
+          expect(await rig.engine.getConfig('dream.synthesize.last_completion_ts')).toBeNull();
+        });
+      });
+
+      const rows = await rig.engine.executeRaw<{ idempotency_key: string }>(
+        `SELECT idempotency_key FROM minion_jobs WHERE name = 'subagent' ORDER BY id`,
+      );
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => !row.idempotency_key.includes(middlePath))).toBe(true);
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
 });
 
 function escapeRe(s: string): string {

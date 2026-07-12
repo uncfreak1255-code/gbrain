@@ -22,27 +22,34 @@ import {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIMENSIONS,
 } from '../../src/core/ai/gateway.ts';
+import { listRecipes } from '../../src/core/ai/recipes/index.ts';
+
+// A fresh-install test needs exactly the default provider visible. Derive the
+// environment keys from the recipe registry so new embedding providers cannot
+// make this test host-dependent.
+const EMBEDDING_PROVIDER_ENV_KEYS = Array.from(new Set(
+  listRecipes()
+    .filter(recipe => recipe.touchpoints?.embedding)
+    .flatMap(recipe => [
+      ...(recipe.auth_env?.required ?? []),
+      ...(recipe.auth_env?.optional ?? []),
+    ]),
+)).filter(key => key !== 'ZEROENTROPY_API_KEY');
 
 describe('E2E: fresh gbrain init --pglite → import → embed works end-to-end', () => {
   let tmpHome: string;
   let origHome: string | undefined;
   let origZeKey: string | undefined;
-  let origOpenaiKey: string | undefined;
-  let origVoyageKey: string | undefined;
+  let origEmbeddingProviderEnv: Map<string, string | undefined>;
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-e2e-fresh-'));
     origHome = process.env.GBRAIN_HOME;
     origZeKey = process.env.ZEROENTROPY_API_KEY;
-    // Save + clear OPENAI_API_KEY + VOYAGE_API_KEY so init only sees
-    // one provider as env-ready (ZE). Without this, dev machines with
-    // multi-provider env (Garry's setup) fail init's disambiguation gate
-    // ("Multiple embedding providers env-ready: openai, voyage,
-    // zeroentropyai") before the test body runs.
-    origOpenaiKey = process.env.OPENAI_API_KEY;
-    origVoyageKey = process.env.VOYAGE_API_KEY;
-    delete process.env.OPENAI_API_KEY;
-    delete process.env.VOYAGE_API_KEY;
+    origEmbeddingProviderEnv = new Map(
+      EMBEDDING_PROVIDER_ENV_KEYS.map(key => [key, process.env[key]]),
+    );
+    for (const key of EMBEDDING_PROVIDER_ENV_KEYS) delete process.env[key];
     process.env.GBRAIN_HOME = tmpHome;
     // Stub key so init's setup-hint check passes.
     process.env.ZEROENTROPY_API_KEY = 'sk-test-ze';
@@ -54,8 +61,10 @@ describe('E2E: fresh gbrain init --pglite → import → embed works end-to-end'
     else process.env.GBRAIN_HOME = origHome;
     if (origZeKey === undefined) delete process.env.ZEROENTROPY_API_KEY;
     else process.env.ZEROENTROPY_API_KEY = origZeKey;
-    if (origOpenaiKey !== undefined) process.env.OPENAI_API_KEY = origOpenaiKey;
-    if (origVoyageKey !== undefined) process.env.VOYAGE_API_KEY = origVoyageKey;
+    for (const [key, value] of origEmbeddingProviderEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     __setEmbedTransportForTests(null);
     // Restore legacy-preload gateway state.
     configureGateway({

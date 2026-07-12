@@ -65,6 +65,8 @@ interface ParsedFlags {
   asContext: boolean;
   json: boolean;
   source: string;
+  /** Whether the caller supplied --source, including the literal default. */
+  sourceExplicit: boolean;
   limit: number;
   // v0.32
   sinceLastRun: boolean;
@@ -93,6 +95,7 @@ function parseFlags(args: string[]): ParsedFlags {
     asContext: false,
     json: false,
     source: 'default',
+    sourceExplicit: false,
     limit: 50,
     sinceLastRun: false,
     pending: false,
@@ -110,7 +113,14 @@ function parseFlags(args: string[]): ParsedFlags {
     if (a === '--include-expired') { out.includeExpired = true; continue; }
     if (a === '--as-context') { out.asContext = true; continue; }
     if (a === '--json') { out.json = true; continue; }
-    if (a === '--source') { out.source = args[++i] ?? 'default'; continue; }
+    if (a === '--source') {
+      const source = args[++i];
+      if (source !== undefined) {
+        out.source = source;
+        out.sourceExplicit = true;
+      }
+      continue;
+    }
     if (a === '--limit') { out.limit = parseInt(args[++i] ?? '50', 10) || 50; continue; }
     if (a === '--since-last-run') { out.sinceLastRun = true; continue; }
     if (a === '--pending') { out.pending = true; continue; }
@@ -183,9 +193,10 @@ async function resolveSourceForRecall(
   engine: BrainEngine,
   flagValue: string,
   thinClient: boolean,
+  sourceExplicit: boolean,
 ): Promise<string> {
   if (thinClient) {
-    if (flagValue !== 'default') return flagValue;
+    if (sourceExplicit) return flagValue;
     const env = process.env.GBRAIN_SOURCE;
     if (env && env.length > 0 && SOURCE_ID_RE.test(env)) return env;
     return 'default';
@@ -198,7 +209,7 @@ async function resolveSourceForRecall(
   // empty" behavior so existing tests + scripts keep working while
   // recall still benefits from the env/dotfile resolution chain.
   try {
-    return await resolveSourceId(engine, flagValue !== 'default' ? flagValue : null);
+    return await resolveSourceId(engine, sourceExplicit ? flagValue : null);
   } catch (e) {
     process.stderr.write(
       `[recall] source not registered: ${flagValue}. Falling back to literal value.\n`,
@@ -221,7 +232,12 @@ export async function runRecall(engine: BrainEngine, args: string[]): Promise<vo
     );
   }
 
-  const sourceId = await resolveSourceForRecall(engine, flags.source, thinClient);
+  const sourceId = await resolveSourceForRecall(
+    engine,
+    flags.source,
+    thinClient,
+    flags.sourceExplicit,
+  );
 
   if (flags.watchSeconds !== null) {
     await runWatchLoop(engine, flags, sourceId, thinClient, flags.watchSeconds);

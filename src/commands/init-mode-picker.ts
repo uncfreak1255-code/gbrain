@@ -5,7 +5,8 @@
  * config writes work [CDX-7]. Idempotent: if `search.mode` is already set
  * (re-init / second run), the picker is skipped entirely.
  *
- * TTY flow shows the menu. Non-TTY (CI, scripted init, --mcp-only) writes
+ * TTY flow shows the menu. Non-interactive or non-TTY (CI, scripted init,
+ * --mcp-only) writes
  * `balanced` and prints the one-line hint pointing at `gbrain config set
  * search.mode`. The mode picker NEVER blocks an init run — readLineSafe
  * caps at 60s and falls back to `balanced` on timeout / EOF.
@@ -181,7 +182,7 @@ export function parseModeInput(raw: string): SearchMode | null {
  */
 export async function runModePicker(
   engine: BrainEngine,
-  opts: { jsonOutput?: boolean; force?: boolean } = {},
+  opts: { jsonOutput?: boolean; force?: boolean; nonInteractive?: boolean } = {},
 ): Promise<SearchMode> {
   // Idempotent: don't re-prompt if already chosen, unless --force.
   if (!opts.force) {
@@ -209,13 +210,14 @@ export async function runModePicker(
     return rec.mode;
   }
 
-  // Non-TTY (agent-driven install, CI, scripted init): print the FULL matrix
+  // Non-interactive / non-TTY (agent-driven install, CI, scripted init):
+  // print the FULL matrix
   // and emit an explicit [AGENT] directive. The previous version printed
   // 2 stderr lines that agents typically miss / don't relay to the human.
   // Now: the agent sees the same matrix the human-TTY picker shows, plus
   // a directive saying "show this to your operator and confirm before
   // moving on." Default-applied mode is tokenmax (preserves v0.31.x shape).
-  if (!process.stdin.isTTY) {
+  if (opts.nonInteractive || !process.stdin.isTTY) {
     try { await engine.setConfig(SEARCH_MODE_KEY, rec.mode); } catch { /* swallow */ }
     console.log('');
     console.log('═══════════════════════════════════════════════════════════════');

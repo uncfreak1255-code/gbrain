@@ -36,6 +36,10 @@ describe('KNOWN_CONFIG_KEYS', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('models.eval.cross_modal.slot_c');
   });
 
+  test('contains the Dream pre-submit child budget key', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('dream.synthesize.max_children_per_cycle');
+  });
+
   test('contains the spend-control keys (v0.42.42.0, #2139) — no --force archaeology', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('spend.posture');
     expect(KNOWN_CONFIG_KEYS).toContain('sync.cost_gate_min_usd');
