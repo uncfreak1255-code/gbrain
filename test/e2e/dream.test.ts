@@ -64,15 +64,28 @@ function captureLog<T>(fn: () => Promise<T>): Promise<{ result: T; output: strin
 
 describeE2E('E2E: gbrain dream CLI against real Postgres', () => {
   let repo: string;
+  let savedGbrainHome: string | undefined;
+  let isolatedGbrainHome: string;
 
   beforeAll(async () => {
+    // runDream's real manual-run guard consults gbrainPath('autopilot.lock').
+    // Keep this Postgres E2E independent of an operator's live autopilot.
+    savedGbrainHome = process.env.GBRAIN_HOME;
+    isolatedGbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-e2e-dream-home-'));
+    process.env.GBRAIN_HOME = isolatedGbrainHome;
     await setupDB();
     repo = makeGitRepo();
   }, 30_000);
 
   afterAll(async () => {
-    await teardownDB();
-    if (repo) rmSync(repo, { recursive: true, force: true });
+    try {
+      await teardownDB();
+    } finally {
+      if (repo) rmSync(repo, { recursive: true, force: true });
+      if (savedGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+      else process.env.GBRAIN_HOME = savedGbrainHome;
+      rmSync(isolatedGbrainHome, { recursive: true, force: true });
+    }
   });
 
   test('dream --dry-run --json emits a valid CycleReport + DB stays empty', async () => {

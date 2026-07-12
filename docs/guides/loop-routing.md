@@ -92,6 +92,11 @@ Act:
 - a quality pass permits human review only. It does not write to an owning repo
   or promote Dream material into canon
 - change one Dream parameter at a time
+- use `dream.synthesize.max_children_per_cycle` for a hard per-run child
+  budget: synthesize skips an entire transcript before any of its chunks are
+  enqueued when it cannot fit, returns a failed receipt, and leaves the
+  cooldown unstamped. A wrapper's post-run child-count check is defense in
+  depth, not the pre-submit guard.
 - keep `zai:glm-5.2` for synth and
   `anthropic:claude-haiku-4-5-20251001` for verdicts unless new proof says
   otherwise

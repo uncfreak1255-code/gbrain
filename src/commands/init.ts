@@ -125,7 +125,7 @@ export async function runInit(args: string[]) {
       }
     }
 
-    return initPGLite({ jsonOutput, apiKey, customPath, aiOpts, schemaPack, skipEmbedCheck });
+    return initPGLite({ jsonOutput, apiKey, customPath, aiOpts, schemaPack, skipEmbedCheck, nonInteractive: isNonInteractive });
   }
 
   // Supabase/Postgres mode
@@ -148,7 +148,7 @@ export async function runInit(args: string[]) {
     databaseUrl = await supabaseWizard();
   }
 
-  return initPostgres({ databaseUrl, jsonOutput, apiKey, aiOpts, schemaPack, skipEmbedCheck });
+  return initPostgres({ databaseUrl, jsonOutput, apiKey, aiOpts, schemaPack, skipEmbedCheck, nonInteractive: isNonInteractive });
 }
 
 interface ResolveAIOptionsArgs {
@@ -790,6 +790,8 @@ async function initPGLite(opts: {
   schemaPack?: string;
   /** v0.42 (#1780 Gap 2): skip the init-time embedding-key validation. */
   skipEmbedCheck?: boolean;
+  /** Honor `init --non-interactive` even if the caller owns a TTY. */
+  nonInteractive?: boolean;
 }) {
   const dbPath = opts.customPath || gbrainPath('brain.pglite');
   console.log(`Setting up local brain with PGLite (no server needed)...`);
@@ -966,9 +968,12 @@ async function initPGLite(opts: {
 
     // v0.32.3 search-lite install-time mode picker. Runs AFTER initSchema so
     // DB config writes are valid. Idempotent: skipped on re-init if already set.
-    // Non-TTY auto-selects; --json emits a structured event.
+    // --non-interactive/non-TTY auto-selects; --json emits a structured event.
     const { runModePicker } = await import('./init-mode-picker.ts');
-    await runModePicker(engine, { jsonOutput: opts.jsonOutput });
+    await runModePicker(engine, {
+      jsonOutput: opts.jsonOutput,
+      nonInteractive: opts.nonInteractive,
+    });
 
     const stats = await engine.getStats();
 
@@ -1012,6 +1017,8 @@ async function initPostgres(opts: {
   schemaPack?: string;
   /** v0.42 (#1780 Gap 2): skip the init-time embedding-key validation. */
   skipEmbedCheck?: boolean;
+  /** Honor `init --non-interactive` even if the caller owns a TTY. */
+  nonInteractive?: boolean;
 }) {
   const { databaseUrl } = opts;
 
@@ -1208,7 +1215,10 @@ async function initPostgres(opts: {
     // v0.32.3 search-lite install-time mode picker. Same shape as the
     // PGLite path above — runs AFTER initSchema, idempotent on re-init.
     const { runModePicker: runPostgresModePicker } = await import('./init-mode-picker.ts');
-    await runPostgresModePicker(engine, { jsonOutput: opts.jsonOutput });
+    await runPostgresModePicker(engine, {
+      jsonOutput: opts.jsonOutput,
+      nonInteractive: opts.nonInteractive,
+    });
 
     const stats = await engine.getStats();
 

@@ -79,6 +79,9 @@ describeIfDB('autopilot fan-out — Postgres E2E', () => {
       jsonMode: true,
       emit: () => {},
       log: () => {},
+      // This E2E owns DB/queue fan-out behavior; filesystem eligibility has
+      // focused unit coverage and is not part of this fixture's contract.
+      isSourceSyncable: () => true,
     });
 
     expect(result.legacy_fallback).toBe(false);
@@ -103,7 +106,7 @@ describeIfDB('autopilot fan-out — Postgres E2E', () => {
     expect(sources).toEqual(['alpha', 'beta', 'gamma']);
   });
 
-  test('re-dispatch within same slot dedupes via idempotency key', async () => {
+  test('re-dispatch within same slot recognizes the live source job', async () => {
     await seedSource('alpha');
     await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
     const queue = new MinionQueue(engine);
@@ -116,12 +119,16 @@ describeIfDB('autopilot fan-out — Postgres E2E', () => {
       jsonMode: true,
       emit: () => {},
       log: () => {},
+      isSourceSyncable: () => true,
     };
     const r1 = await dispatchPerSource(engine, queue, opts);
     const r2 = await dispatchPerSource(engine, queue, opts);
     expect(r1.dispatched).toEqual(['alpha']);
-    expect(r2.dispatched).toEqual(['alpha']);
-    // Only ONE row in minion_jobs (idempotency-key coalesce)
+    // The second tick sees the waiting source cycle and does not submit a
+    // duplicate; the idempotency key remains the storage-level backstop.
+    expect(r2.dispatched).toEqual([]);
+    expect(r2.skipped_active).toEqual(['alpha']);
+    // Only ONE row in minion_jobs.
     const jobs = await engine.executeRaw<{ id: number }>(
       `SELECT id FROM minion_jobs WHERE name = 'autopilot-cycle'`,
     );
@@ -180,6 +187,7 @@ describeIfDB('autopilot fan-out — Postgres E2E', () => {
       jsonMode: true,
       emit: () => {},
       log: () => {},
+      isSourceSyncable: () => true,
     });
     expect(result.dispatched.length).toBe(2);
     expect(result.skipped_cap.length).toBe(3);

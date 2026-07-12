@@ -2,6 +2,40 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.45.6.0] - 2026-07-12
+
+**Dream can now stop before a single transcript spills past the child limit.** Set an optional child budget for a synthesize run and GBrain will refuse a transcript whose complete set of chunks cannot fit. That keeps a one-child canary genuinely one child instead of quietly starting only the first part of a larger transcript.
+
+When the limit rules out all eligible work, the receipt is an explicit failure, no empty Dream summary is written, and the normal cooldown is left alone. If earlier transcripts fit but a later one does not, the run preserves its diagnostics but still fails rather than presenting a partial batch as a completed one. The result is a clearer handoff to the existing quality gate: review only artifacts with a passing quality receipt.
+
+### To take advantage of v0.45.6.0
+
+`gbrain upgrade`. No migration or required config change is needed.
+
+For an intentionally one-child synthesize run:
+
+```bash
+gbrain config set dream.synthesize.max_children_per_cycle 1
+gbrain dream --phase synthesize --json
+gbrain eval dream-quality --json
+```
+
+Dream output remains review material only. A passing quality result does not promote it into canon.
+
+### Itemized changes
+
+### Added
+- **Optional hard Dream child budget.** `dream.synthesize.max_children_per_cycle` limits child jobs before they are queued, including date-range and explicit-input runs. Multi-chunk transcripts are all-or-nothing.
+
+### Fixed
+- **Cap misses cannot look successful.** `SYNTH_CHILD_LIMIT_REACHED` now carries the child-limit details and leaves the synthesize cooldown unstamped. A zero-child cap miss does not create an empty summary.
+- **Headless initialization stays headless.** `gbrain init --non-interactive` no longer opens the search-mode picker merely because the caller owns a terminal.
+- **Explicit source selection wins in recall.** `gbrain recall --source default` now stays on the default source even when another source is the only non-default option.
+- **Admin app routes resolve in development.** Direct navigation to an admin client route now serves the app entry point instead of returning a missing-file response.
+
+### For contributors
+- **Hermetic E2E setup.** The suite clears source and cycle-lock state between files and isolates configured embedding-provider variables during fresh-install coverage.
+
 ## [0.45.5.1] - 2026-07-12
 
 **Plugin and skill installs now report the same release version as GBrain itself.** This small repair keeps the bundled OpenClaw plugin and skill manifest aligned with the CLI package, so install and update tools no longer describe an older release after upgrading.

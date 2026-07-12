@@ -57,6 +57,11 @@ const ALL_TABLES = [
   'minion_attachments',
   'minion_inbox',
   'minion_jobs',
+  // Sources and locks are not owned by the page cascade. Leaving either
+  // behind lets one E2E file silently change another file's resolver or
+  // lock behavior.
+  'gbrain_cycle_locks',
+  'sources',
 ];
 
 /**
@@ -99,6 +104,11 @@ export async function setupDB(): Promise<PostgresEngine> {
   await conn.unsafe(`
     INSERT INTO config (key, value) VALUES ('schema_version', '1')
     ON CONFLICT (key) DO NOTHING
+  `);
+  await conn.unsafe(`
+    INSERT INTO sources (id, name, config)
+    VALUES ('default', 'default', '{"federated": true}'::jsonb)
+    ON CONFLICT (id) DO NOTHING
   `);
 
   engine = new PostgresEngine();

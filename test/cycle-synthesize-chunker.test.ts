@@ -17,7 +17,9 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { splitTranscriptByBudget, rewriteChunkedSlug } from '../src/core/cycle/synthesize.ts';
+import { splitTranscriptByBudget, rewriteChunkedSlug, __testing as synthTesting } from '../src/core/cycle/synthesize.ts';
+
+const { parseMaxChildrenPerCycle } = synthTesting;
 
 describe('splitTranscriptByBudget — single chunk path', () => {
   test('returns single-element array when content <= maxChars', () => {
@@ -172,6 +174,21 @@ describe('rewriteChunkedSlug — D6 zero-Sonnet-trust slug rewrite', () => {
 
   test('empty slug passes through', () => {
     expect(rewriteChunkedSlug('', 'abc123', 0)).toBe('');
+  });
+});
+
+describe('parseMaxChildrenPerCycle', () => {
+  test('accepts only positive safe integer strings and preserves an absent cap', () => {
+    expect(parseMaxChildrenPerCycle(null)).toBeNull();
+    expect(parseMaxChildrenPerCycle('')).toBeNull();
+    expect(parseMaxChildrenPerCycle(' 1 ')).toBe(1);
+    expect(parseMaxChildrenPerCycle('9007199254740991')).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test('rejects malformed or unsafe configured child budgets before fan-out', () => {
+    for (const raw of ['0', '-1', '1.5', '1junk', '9007199254740992']) {
+      expect(() => parseMaxChildrenPerCycle(raw)).toThrow('dream.synthesize.max_children_per_cycle');
+    }
   });
 });
 
