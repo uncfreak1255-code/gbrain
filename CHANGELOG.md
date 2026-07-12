@@ -2,6 +2,30 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.45.5.0] - 2026-07-11
+
+**Bounded Dream synthesis now stops its own work cleanly and keeps weak output out of the review lane.** If a `gbrain dream` synthesis run is interrupted or times out, it cancels only the children it created and returns a partial receipt instead of leaving work behind or touching another run's queue. Passing quality receipts make artifacts available for human review, while failed or inconclusive output stays quarantined.
+
+### To take advantage of v0.45.5.0
+`gbrain upgrade`. No migration or config change is required.
+
+After a bounded Dream run, inspect the review receipt before acting on any output:
+
+```bash
+gbrain eval dream-quality --json
+```
+
+Passing output is review material only. It is never promoted into canon automatically.
+
+### Itemized changes
+
+### Changed
+- **Dream interruption cleanup.** `gbrain dream` now preserves an aborted partial receipt and cancels only its tracked synthesis children, without sweeping shared queue work.
+- **Quality-gated review artifacts.** Failed or inconclusive Dream pages are quarantined from the promotion-review queue; only passing pages can be presented for human review.
+
+### Added
+- **Focused Dream safety coverage.** Regression tests pin child cancellation, partial receipts, and fail/pass quality handling.
+
 ## [0.45.4.0] - 2026-06-28
 
 **`gbrain doctor` now catches lock-renewal loops that still look active but have stopped renewing safely.** The new `lock_renewal_health` check turns the lock-renewal audit trail and stale active worker rows into one operator-readable doctor line, so production operators do not have to tail JSONL files to spot a flapping pool or a stuck refresh loop.
