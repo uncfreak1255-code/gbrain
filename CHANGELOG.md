@@ -6,6 +6,9 @@ All notable changes to GBrain will be documented in this file.
 
 **Plugin and skill installs now report the same release version as GBrain itself.** This small repair keeps the bundled OpenClaw plugin and skill manifest aligned with the CLI package, so install and update tools no longer describe an older release after upgrading.
 
+### To take advantage of v0.45.5.1
+`gbrain upgrade`. No migration or config change is required.
+
 ### Itemized changes
 
 ### Fixed
