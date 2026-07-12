@@ -1385,9 +1385,24 @@ async function handleCliOnly(command: string, args: string[]) {
         `DB-dependent phases (sync, embed, synthesize, etc.) will report as skipped.\n`
       );
     }
+    // The nightly wrapper uses SIGINT for its wall-clock budget. SIGTERM is
+    // reserved for the process-cleanup layer, which exits after lock cleanup;
+    // SIGINT gives Dream time to cancel the exact child jobs it submitted.
+    const dreamAbortController = new AbortController();
+    const onDreamTimeout = () => {
+      if (dreamAbortController.signal.aborted) return;
+      process.stderr.write('[dream] received SIGINT; cancelling tracked synthesis children before exit.\n');
+      dreamAbortController.abort(new Error('SIGINT'));
+    };
+    process.once('SIGINT', onDreamTimeout);
     try {
-      await runDream(eng, args);
+      await runDream(eng, args, dreamAbortController.signal);
+      // Keep the partial JSON receipt, but do not report an operator abort as
+      // a successful one-shot CLI invocation. The nightly wrapper converts its
+      // own timeout to 124; direct Ctrl-C callers receive the conventional 130.
+      if (dreamAbortController.signal.aborted) setCliExitVerdict(130);
     } finally {
+      process.off('SIGINT', onDreamTimeout);
       // #1471 invariant tripwire (the dream-cycle owner): `eng` created the
       // module singleton (first module connector) and is torn down LAST,
       // here, after the whole cycle. The ownership fix relies on this owner's
