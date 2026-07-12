@@ -630,6 +630,12 @@ export async function runPhaseSynthesize(
       }
     }
 
+    // A signal can land after the final child becomes terminal but before the
+    // orchestrator performs its post-child writes. Do not reverse-render,
+    // summarize, or stamp the cooldown as a successful synthesis in that
+    // window; the enclosing cycle must retain the partial abort receipt.
+    throwIfAborted(opts.signal, 'synthesize');
+
     // Collect slugs from put_page tool executions across the children
     // (codex finding #2: deterministic provenance, NOT pages.updated_at).
     // D6 orchestrator slug rewrite: chunkInfo drives post-hoc rewrite of
@@ -673,6 +679,7 @@ export async function runPhaseSynthesize(
     ].sort((a, b) => a - b);
 
     // Dual-write: reverse-render each DB row → markdown file.
+    throwIfAborted(opts.signal, 'synthesize');
     const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs);
 
     // Summary index page (deterministic; orchestrator-written via direct
@@ -682,6 +689,7 @@ export async function runPhaseSynthesize(
     // Back-compat: writeSummaryPage takes string[] for display; map refs back to slugs.
     const writtenSlugs = writtenRefs.map(r => r.slug);
     if (SUMMARY_SLUG_RE.test(summarySlug)) {
+      throwIfAborted(opts.signal, 'synthesize');
       await writeSummaryPage(engine, {
         brainDir: opts.brainDir,
         sourceId: opts.sourceId,
@@ -751,6 +759,7 @@ export async function runPhaseSynthesize(
     }
 
     // Write completion timestamp ON SUCCESS only.
+    throwIfAborted(opts.signal, 'synthesize');
     await engine.setConfig('dream.synthesize.last_completion_ts', new Date().toISOString());
 
     return ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s`, commonDetails);

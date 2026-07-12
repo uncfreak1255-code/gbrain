@@ -1271,6 +1271,20 @@ describe('v0.40.4 — graph_signals_coverage check', () => {
     expect(check.message).toContain('0.0%');
     expect(check.message).toContain('gbrain extract all');
     expect(check.message).toContain('corpus-shape issue');
+    expect(check.details).toMatchObject({
+      total_pages: 10,
+      inbound_linked_pages: 0,
+      coverage_pct: 0,
+      bucket: 'rarely_fire',
+      sources: [
+        {
+          source_id: 'default',
+          total_pages: 10,
+          inbound_linked_pages: 0,
+          coverage_pct: 0,
+        },
+      ],
+    });
   });
 
   test('graph_signals enabled + >=30% coverage → ok with metric', async () => {
@@ -1280,6 +1294,7 @@ describe('v0.40.4 — graph_signals_coverage check', () => {
     // Add inbound links to 4/10 pages = 40%.
     await engine.addLinksBatch([
       { from_slug: 'page/0', to_slug: 'page/1', link_type: 'mentions' },
+      { from_slug: 'page/5', to_slug: 'page/1', link_type: 'mentions' },
       { from_slug: 'page/0', to_slug: 'page/2', link_type: 'mentions' },
       { from_slug: 'page/0', to_slug: 'page/3', link_type: 'mentions' },
       { from_slug: 'page/0', to_slug: 'page/4', link_type: 'mentions' },
@@ -1288,6 +1303,20 @@ describe('v0.40.4 — graph_signals_coverage check', () => {
     expect(check.status).toBe('ok');
     expect(check.message).toContain('40.0%');
     expect(check.message).toContain('fire on most queries');
+    expect(check.details).toMatchObject({
+      total_pages: 10,
+      inbound_linked_pages: 4,
+      coverage_pct: 40,
+      bucket: 'most_queries',
+      sources: [
+        {
+          source_id: 'default',
+          total_pages: 10,
+          inbound_linked_pages: 4,
+          coverage_pct: 40,
+        },
+      ],
+    });
   });
 
   test('graph_signals enabled + 10-29% coverage → ok with occasional-fire note', async () => {
@@ -1501,6 +1530,9 @@ describe('v0.42 (#1699) — quarantined_pages + flagged_pages checks', () => {
     // Each emits a named check.
     expect(source).toMatch(/name: 'quarantined_pages'/);
     expect(source).toMatch(/name: 'flagged_pages'/);
+    // The JSON doctor receipt includes concrete examples for operator triage.
+    expect(source).toContain('examples');
+    expect(source).toContain('content_flag');
   });
 });
 

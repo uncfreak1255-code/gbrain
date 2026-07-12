@@ -1,4 +1,9 @@
 import type { BrainEngine } from '../core/engine.ts';
+import type { Page } from '../core/types.ts';
+import type {
+  ParseConversationOpts,
+  ParseResult,
+} from '../core/conversation-parser/parse.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import * as db from '../core/db.ts';
 import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
@@ -165,6 +170,96 @@ function _penaltyScore(checks: Check[]): number {
     else if (c.status === 'warn') score -= 5;
   }
   return Math.max(0, score);
+}
+
+type ConversationFormatCoverageDetails = {
+  total_pages: number;
+  matched_pages: number;
+  unmatched_pages: number;
+  unmatched_pct: number;
+  pattern_counts: Record<string, number>;
+  unmatched_examples: Array<{ slug: string; title?: string }>;
+};
+
+type ConversationParserFn = (
+  body: string,
+  opts?: ParseConversationOpts,
+) => ParseResult;
+
+export function buildConversationFormatCoverageCheck(
+  sample: Page[],
+  parseConversation: ConversationParserFn,
+): Check {
+  if (sample.length === 0) {
+    return {
+      name: 'conversation_format_coverage',
+      status: 'ok',
+      message: 'No conversation-type pages — coverage check not applicable',
+    };
+  }
+
+  const hitsByPattern: Record<string, number> = {};
+  const unmatchedExamples: Array<{ slug: string; title?: string }> = [];
+
+  for (const page of sample) {
+    const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
+    const result = parseConversation(body, { page, noPolish: true, noFallback: true });
+    const id = result.matched_pattern_id ?? '_no_match';
+    hitsByPattern[id] = (hitsByPattern[id] ?? 0) + 1;
+    if (result.phase === 'no_match') {
+      const example: { slug: string; title?: string } = { slug: page.slug };
+      if (page.title) example.title = page.title;
+      unmatchedExamples.push(example);
+    }
+  }
+
+  const patternCounts = Object.fromEntries(
+    Object.entries(hitsByPattern).sort(([aKey, aVal], [bKey, bVal]) =>
+      bVal - aVal || aKey.localeCompare(bKey),
+    ),
+  );
+  const unmatched = hitsByPattern._no_match ?? 0;
+  const unmatchedPct = Number(((unmatched / sample.length) * 100).toFixed(1));
+  const examples = unmatchedExamples
+    .sort((a, b) => a.slug.localeCompare(b.slug) || (a.title ?? '').localeCompare(b.title ?? ''))
+    .slice(0, 5);
+  const details: ConversationFormatCoverageDetails = {
+    total_pages: sample.length,
+    matched_pages: sample.length - unmatched,
+    unmatched_pages: unmatched,
+    unmatched_pct: unmatchedPct,
+    pattern_counts: patternCounts,
+    unmatched_examples: examples,
+  };
+  const breakdown = Object.entries(patternCounts)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(', ');
+
+  if (unmatchedPct > 10) {
+    const firstExample = examples[0]?.slug;
+    return {
+      name: 'conversation_format_coverage',
+      status: 'warn',
+      message:
+        `${unmatched}/${sample.length} conversation pages (${unmatchedPct.toFixed(1)}%) match no built-in pattern. ` +
+        (firstExample
+          ? `Example: gbrain conversation-parser scan ${shellQuoteArg(firstExample)}`
+          : 'Examples unavailable.'),
+      details,
+    };
+  }
+
+  return {
+    name: 'conversation_format_coverage',
+    status: 'ok',
+    message: `${sample.length} pages: ${breakdown}`,
+    details,
+  };
+}
+
+function shellQuoteArg(arg: string): string {
+  if (/^[A-Za-z0-9_.:/@-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
 /**
@@ -1965,12 +2060,49 @@ export async function checkGraphSignalsCoverage(engine: BrainEngine): Promise<Ch
     const linkedPages = Number((linkedRows as any)[0]?.n ?? 0);
     const pct = (linkedPages / totalPages) * 100;
     const pctStr = pct.toFixed(1);
+    const coverageDetails: Record<string, unknown> = {
+      total_pages: totalPages,
+      inbound_linked_pages: linkedPages,
+      coverage_pct: Number(pctStr),
+    };
+
+    try {
+      const sourceRows = await engine.executeRaw(
+        `SELECT p.source_id,
+                COUNT(DISTINCT p.id)::int AS total_pages,
+                COUNT(DISTINCT l.to_page_id)::int AS inbound_linked_pages
+           FROM pages p
+      LEFT JOIN links l ON l.to_page_id = p.id
+          WHERE p.deleted_at IS NULL
+       GROUP BY p.source_id
+       ORDER BY total_pages DESC, p.source_id ASC
+          LIMIT 5`
+      );
+      coverageDetails.sources = (sourceRows as any[]).map((r) => {
+        const sourceTotal = Number(r.total_pages ?? 0);
+        const sourceLinked = Number(r.inbound_linked_pages ?? 0);
+        const sourcePct = sourceTotal > 0 ? (sourceLinked / sourceTotal) * 100 : 0;
+        return {
+          source_id: String(r.source_id ?? 'default'),
+          total_pages: sourceTotal,
+          inbound_linked_pages: sourceLinked,
+          coverage_pct: Number(sourcePct.toFixed(1)),
+        };
+      });
+    } catch {
+      // Source breakdown is an operator aid. Keep the core coverage check alive
+      // on older or unusual engines where the grouped read is unavailable.
+    }
 
     if (pct < 10) {
       return {
         name: 'graph_signals_coverage',
         status: 'warn',
         message: `graph_signals enabled but only ${pctStr}% of pages have inbound links (<10%). Signal will rarely fire. Run \`gbrain extract all\` after adding wikilinks/frontmatter links; if extraction is already current, this is a corpus-shape issue, not a stale-job issue.`,
+        details: {
+          ...coverageDetails,
+          bucket: 'rarely_fire',
+        },
       };
     }
 
@@ -1980,6 +2112,10 @@ export async function checkGraphSignalsCoverage(engine: BrainEngine): Promise<Ch
       message: pct >= 30
         ? `${pctStr}% of pages have inbound links (>=30% — graph signals fire on most queries)`
         : `${pctStr}% of pages have inbound links (10-29% — graph signals fire occasionally)`,
+      details: {
+        ...coverageDetails,
+        bucket: pct >= 30 ? 'most_queries' : 'occasionally_fire',
+      },
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -3058,7 +3194,7 @@ function _resolveSyncFreshnessHours(varName: string, fallback: number): number {
 /**
  * v0.40.1.0 Track D / T7 — pure function form of the nightly_quality_probe_health
  * check. Extracted from the inline runDoctor block so tests can drive every
- * branch (disabled / enabled-no-events / enabled-all-pass / enabled-with-failures)
+ * branch (disabled / enabled-no-events / enabled-all-pass / enabled-with-warnings)
  * without spinning up the audit JSONL or a real config file.
  */
 export function computeNightlyQualityProbeHealthCheck(
@@ -3083,25 +3219,44 @@ export function computeNightlyQualityProbeHealthCheck(
       message: `enabled but no probe events in the last 7 days (next run by autopilot).`,
     };
   }
-  // v0.40.1.0 Track D (codex CDX-5): any non-PASS outcome is bad signal.
-  // Previously only fail / error / budget_exceeded triggered warn —
-  // no_embedding_key / rate_limited / inconclusive were silently reported
-  // as PASS, hiding real misconfigurations.
-  const bad = events.filter(e => e.outcome !== 'pass');
+  // rate_limited means the probe is installed but skipped by cadence; keep it
+  // visible in counts without treating a rate-limit-only window as degraded.
+  const bad = events.filter(e => e.outcome !== 'pass' && e.outcome !== 'rate_limited');
   const latest = events[events.length - 1]!;
+  const unknownWarning = bad.filter(e =>
+    !['fail', 'error', 'budget_exceeded', 'no_embedding_key', 'inconclusive'].includes(e.outcome),
+  ).length;
+  const counts =
+    `pass=${events.filter(e => e.outcome === 'pass').length} ` +
+    `fail=${events.filter(e => e.outcome === 'fail').length} ` +
+    `error=${events.filter(e => e.outcome === 'error').length} ` +
+    `inconclusive=${events.filter(e => e.outcome === 'inconclusive').length} ` +
+    `budget=${events.filter(e => e.outcome === 'budget_exceeded').length} ` +
+    `no_embed_key=${events.filter(e => e.outcome === 'no_embedding_key').length} ` +
+    `rate_limited=${events.filter(e => e.outcome === 'rate_limited').length}` +
+    (unknownWarning > 0 ? ` unknown=${unknownWarning}` : '');
   if (bad.length > 0) {
-    const counts =
-      `pass=${events.filter(e => e.outcome === 'pass').length} ` +
-      `fail=${events.filter(e => e.outcome === 'fail').length} ` +
-      `error=${events.filter(e => e.outcome === 'error').length} ` +
-      `inconclusive=${events.filter(e => e.outcome === 'inconclusive').length} ` +
-      `budget=${events.filter(e => e.outcome === 'budget_exceeded').length} ` +
-      `no_embed_key=${events.filter(e => e.outcome === 'no_embedding_key').length} ` +
-      `rate_limited=${events.filter(e => e.outcome === 'rate_limited').length}`;
     return {
       name,
       status: 'warn',
-      message: `${bad.length} non-PASS run${bad.length === 1 ? '' : 's'} in last 7d (${counts}). Latest: ${latest.outcome} at ${latest.ts}${latest.detail ? ` (${latest.detail})` : ''}.`,
+      message: `${bad.length} warning-worthy run${bad.length === 1 ? '' : 's'} in last 7d (${counts}). Latest: ${latest.outcome} at ${latest.ts}${latest.detail ? ` (${latest.detail})` : ''}.`,
+    };
+  }
+  const rateLimitedEvents = events.filter(e => e.outcome === 'rate_limited');
+  if (rateLimitedEvents.length > 0) {
+    const latestRateLimited = rateLimitedEvents[rateLimitedEvents.length - 1]!;
+    const realProbeEvents = events.filter(e => e.outcome !== 'rate_limited');
+    if (realProbeEvents.length === 0) {
+      return {
+        name,
+        status: 'warn',
+        message: `${rateLimitedEvents.length} rate-limited probe skip${rateLimitedEvents.length === 1 ? '' : 's'} in last 7d and no real probe result (${counts}). Probe may be stuck skipping; latest skip at ${latestRateLimited.ts}.`,
+      };
+    }
+    return {
+      name,
+      status: 'ok',
+      message: `info: ${rateLimitedEvents.length} rate-limited probe skip${rateLimitedEvents.length === 1 ? '' : 's'} in last 7d (${counts}). Probe is installed; latest skip at ${latestRateLimited.ts}.`,
     };
   }
   return {
@@ -5069,45 +5224,7 @@ export async function buildChecks(
         const slice = await engine.listPages({ limit: 50, type: t as import('../core/types.ts').PageType });
         sample.push(...slice.filter(isConversationFactsCandidatePage));
       }
-      if (sample.length === 0) {
-        checks.push({
-          name: 'conversation_format_coverage',
-          status: 'ok',
-          message: 'No conversation-type pages — coverage check not applicable',
-        });
-      } else {
-        const hitsByPattern: Record<string, number> = {};
-        let unmatched = 0;
-        for (const page of sample) {
-          const body = `${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`.trim();
-          const result = parseConversation(body, { page, noPolish: true, noFallback: true });
-          const id = result.matched_pattern_id ?? '_no_match';
-          hitsByPattern[id] = (hitsByPattern[id] ?? 0) + 1;
-          if (result.phase === 'no_match') unmatched++;
-        }
-        const unmatchedPct = (unmatched / sample.length) * 100;
-        const breakdown = Object.entries(hitsByPattern)
-          .sort(([, a], [, b]) => b - a)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(', ');
-        if (unmatchedPct > 10) {
-          checks.push({
-            name: 'conversation_format_coverage',
-            status: 'warn',
-            message:
-              `${unmatched}/${sample.length} conversation pages (${unmatchedPct.toFixed(1)}%) match NO built-in pattern. ` +
-              `Breakdown: ${breakdown}. ` +
-              `Investigate: gbrain conversation-parser scan <slug> | ` +
-              `Enable LLM fallback (opt-in): gbrain config set conversation_parser.llm_fallback_enabled true`,
-          });
-        } else {
-          checks.push({
-            name: 'conversation_format_coverage',
-            status: 'ok',
-            message: `${sample.length} pages: ${breakdown}`,
-          });
-        }
-      }
+      checks.push(buildConversationFormatCoverageCheck(sample, parseConversation));
     } catch (err) {
       checks.push({
         name: 'conversation_format_coverage',
@@ -6601,8 +6718,22 @@ export async function buildChecks(
     // engine.executeRaw (NOT db.getConnection() — that's the postgres singleton,
     // dead on the default PGLite engine). The JSONB `?` existence operator is
     // literal SQL through executeRaw on both engines.
-    const rows = await engine.executeRaw<{ n: string | number }>(
-      `SELECT COUNT(*)::int AS n FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'quarantine'`,
+    const rows = await engine.executeRaw<{ n: string | number; examples?: unknown }>(
+      `WITH marked AS (
+         SELECT p.slug, p.source_id
+           FROM pages p
+          WHERE p.deleted_at IS NULL AND p.frontmatter ? 'quarantine'
+          ORDER BY p.updated_at DESC, p.slug ASC
+       )
+       SELECT counts.total::int AS n,
+              COALESCE(
+                json_agg(json_build_object('slug', slug, 'source_id', source_id))
+                  FILTER (WHERE slug IS NOT NULL),
+                '[]'::json
+              ) AS examples
+         FROM (SELECT * FROM marked LIMIT 5) limited
+        RIGHT JOIN (SELECT COUNT(*)::int AS total FROM marked) counts ON TRUE
+        GROUP BY counts.total`,
     );
     const n = Number(rows[0]?.n ?? 0);
     checks.push({
@@ -6611,6 +6742,7 @@ export async function buildChecks(
       message: n > 0
         ? `${n} page(s) quarantined as junk (hidden from search). Review with 'gbrain quarantine list'; clear a false positive with 'gbrain quarantine clear <slug>'.`
         : 'No quarantined pages',
+      details: n > 0 ? { count: n, examples: rows[0]?.examples ?? [] } : { count: 0 },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -6619,8 +6751,22 @@ export async function buildChecks(
 
   progress.heartbeat('flagged_pages');
   try {
-    const rows = await engine.executeRaw<{ n: string | number }>(
-      `SELECT COUNT(*)::int AS n FROM pages p WHERE p.deleted_at IS NULL AND p.frontmatter ? 'content_flag'`,
+    const rows = await engine.executeRaw<{ n: string | number; examples?: unknown }>(
+      `WITH marked AS (
+         SELECT p.slug, p.source_id, p.frontmatter->'content_flag' AS content_flag
+           FROM pages p
+          WHERE p.deleted_at IS NULL AND p.frontmatter ? 'content_flag'
+          ORDER BY p.updated_at DESC, p.slug ASC
+       )
+       SELECT counts.total::int AS n,
+              COALESCE(
+                json_agg(json_build_object('slug', slug, 'source_id', source_id, 'content_flag', content_flag))
+                  FILTER (WHERE slug IS NOT NULL),
+                '[]'::json
+              ) AS examples
+         FROM (SELECT * FROM marked LIMIT 5) limited
+        RIGHT JOIN (SELECT COUNT(*)::int AS total FROM marked) counts ON TRUE
+        GROUP BY counts.total`,
     );
     const n = Number(rows[0]?.n ?? 0);
     // Flagged pages are "examine me", not "broken" — warn so they're visible
@@ -6631,6 +6777,7 @@ export async function buildChecks(
       message: n > 0
         ? `${n} page(s) flagged (markup-heavy or oversize) — still searchable, agent warned on retrieval. Review with 'gbrain quarantine list --include-flagged'.`
         : 'No flagged pages',
+      details: n > 0 ? { count: n, examples: rows[0]?.examples ?? [] } : { count: 0 },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

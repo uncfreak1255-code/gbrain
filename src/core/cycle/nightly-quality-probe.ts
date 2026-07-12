@@ -105,11 +105,12 @@ export interface NightlyProbeDeps {
  */
 export function shouldRunNightly(
   now: Date,
-  recentEvents: ReadonlyArray<{ ts: string }>,
+  recentEvents: ReadonlyArray<{ ts: string; outcome?: string }>,
   windowMs: number = NIGHTLY_WINDOW_MS,
 ): { run: true } | { run: false; reason: 'rate_limited' } {
   const cutoff = now.getTime() - windowMs;
   for (const ev of recentEvents) {
+    if (ev.outcome === 'rate_limited') continue;
     const ts = Date.parse(ev.ts);
     if (Number.isFinite(ts) && ts >= cutoff) {
       return { run: false, reason: 'rate_limited' };
