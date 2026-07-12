@@ -111,6 +111,35 @@ async function withSubagentAutoCancel<T>(engine: PGLiteEngine, body: () => Promi
 }
 
 /**
+ * Complete submitted synth children without a worker. This lets an abort
+ * arrive in the narrow post-child window where the orchestrator would
+ * otherwise begin its reverse-write/summary/cooldown finalization.
+ */
+async function withSubagentAutoComplete<T>(engine: PGLiteEngine, body: () => Promise<T>): Promise<T> {
+  let stopped = false;
+  const loop = (async () => {
+    while (!stopped) {
+      await new Promise(r => setTimeout(r, 50));
+      try {
+        await engine.executeRaw(
+          `UPDATE minion_jobs
+              SET status = 'completed', result = '{}'::jsonb, finished_at = now()
+            WHERE name = 'subagent' AND status IN ('waiting', 'active')`,
+        );
+      } catch {
+        // Race against shutdown is fine; ignore.
+      }
+    }
+  })();
+  try {
+    return await body();
+  } finally {
+    stopped = true;
+    await loop;
+  }
+}
+
+/**
  * Pre-seed a `worth_processing=true` verdict so the synthesize phase skips
  * the Haiku call and proceeds directly to fan-out. Computes the hash the
  * same way `discoverTranscripts` does (sha256 of content).
@@ -227,6 +256,42 @@ describe('E2E synthesize chunking — D5 cap hit', () => {
     } finally {
       if (childId !== undefined) await queue.cancelJob(childId);
       if (run) await run.catch(() => undefined);
+      await rig.cleanup();
+    }
+  }, 15_000);
+
+  test('abort after a completed synth child fails without stamping the cooldown', async () => {
+    const rig = await setupRig();
+    const controller = new AbortController();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_transcripts_per_cycle', '1');
+      await rig.engine.setConfig('dream.synthesize.max_chunks_per_transcript', '1');
+
+      const basename = '2026-06-23-post-child-abort.txt';
+      const filePath = corpusPath(rig.corpusDir, basename);
+      const content = 'post-child abort guard transcript\n'.repeat(500);
+      writeFileSync(filePath, content);
+      await seedVerdict(rig.engine, filePath, content);
+
+      const result = await withSubagentAutoComplete(rig.engine, () =>
+        runPhaseSynthesize(rig.engine, {
+          brainDir: rig.brainDir,
+          dryRun: false,
+          signal: controller.signal,
+          // This callback runs after the child reaches its terminal state.
+          // It reproduces the precise race that must not look successful.
+          yieldDuringPhase: async () => { controller.abort(new Error('post-child test timeout')); },
+        }),
+      );
+
+      expect(result.status).toBe('fail');
+      expect(result.error?.code).toBe('SYNTH_PHASE_ABORTED');
+      expect(result.details.children_submitted).toBe(1);
+      expect(result.details.children_cancelled).toBe(0);
+      expect(await rig.engine.getConfig('dream.synthesize.last_completion_ts')).toBeNull();
+    } finally {
       await rig.cleanup();
     }
   }, 15_000);
