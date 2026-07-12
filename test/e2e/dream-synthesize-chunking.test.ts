@@ -126,6 +126,32 @@ async function seedVerdict(engine: PGLiteEngine, filePath: string, content: stri
 }
 
 /**
+ * A completed legacy synth only blocks a retry when it actually wrote a page.
+ * Keep the fixture aligned with `hasLegacySingleChunkCompletion`'s production
+ * contract: a terminal job alone is retryable residue, not completed output.
+ */
+async function seedCompletedLegacySynthesis(
+  engine: PGLiteEngine,
+  idempotencyKey: string,
+  slug: string,
+): Promise<void> {
+  const rows = await engine.executeRaw<{ id: number | string }>(
+    `INSERT INTO minion_jobs (name, queue, status, idempotency_key, finished_at)
+     VALUES ('subagent', 'default', 'completed', $1, now())
+     RETURNING id`,
+    [idempotencyKey],
+  );
+  const jobId = Number(rows[0]?.id);
+  if (!Number.isFinite(jobId)) throw new Error('failed to seed completed legacy synth job');
+  await engine.executeRaw(
+    `INSERT INTO subagent_tool_executions
+       (job_id, message_idx, tool_use_id, tool_name, input, status)
+     VALUES ($1, 0, 'legacy-put-page', 'brain_put_page', $2::jsonb, 'complete')`,
+    [jobId, JSON.stringify({ slug })],
+  );
+}
+
+/**
  * Resolve the absolute path the discover walker will see for a file in the
  * corpus dir, since `discoverTranscripts` joins corpus + name.
  */
@@ -262,10 +288,10 @@ describe('E2E synthesize chunking — D5 cap hit', () => {
       writeFileSync(secondPath, secondContent);
       await seedVerdict(rig.engine, secondPath, secondContent);
 
-      await rig.engine.executeRaw(
-        `INSERT INTO minion_jobs (name, queue, status, idempotency_key, finished_at)
-         VALUES ('subagent', 'default', 'completed', $1, now())`,
-        [`dream:synth:${firstPath}:${firstHash.slice(0, 16)}`],
+      await seedCompletedLegacySynthesis(
+        rig.engine,
+        `dream:synth:${firstPath}:${firstHash.slice(0, 16)}`,
+        'wiki/originals/ideas/already-synthesized',
       );
 
       await withoutAnthropicKey(async () => {
@@ -364,12 +390,12 @@ describe('E2E synthesize chunking — D8 legacy single-chunk migration', () => {
       writeFileSync(filePath, content);
       const contentHash = await seedVerdict(rig.engine, filePath, content);
 
-      // Pre-seed a completed `subagent` job at the legacy idempotency key.
+      // Pre-seed a completed legacy synthesis with its required page write.
       const legacyKey = `dream:synth:${filePath}:${contentHash.slice(0, 16)}`;
-      await rig.engine.executeRaw(
-        `INSERT INTO minion_jobs (name, queue, status, idempotency_key, finished_at)
-         VALUES ('subagent', 'default', 'completed', $1, now())`,
-        [legacyKey],
+      await seedCompletedLegacySynthesis(
+        rig.engine,
+        legacyKey,
+        'wiki/originals/ideas/already-synthesized',
       );
 
       await withoutAnthropicKey(async () => {
@@ -426,7 +452,9 @@ describe('E2E synthesize chunking — D8 legacy single-chunk migration', () => {
               dryRun: false,
             }),
           );
-          expect(result.status).toBe('ok');
+          // The harness deliberately cancels the new child after verifying
+          // submission, so the real phase must report its incomplete child.
+          expect(result.status).toBe('warn');
           const details = result.details as {
             children_submitted: number;
             skips: Array<{ reason: string }>;
@@ -469,7 +497,9 @@ describe('E2E synthesize chunking — fan-out shape', () => {
             brainDir: rig.brainDir,
             dryRun: false,
           });
-          expect(result.status).toBe('ok');
+          // The harness deliberately cancels the new child after verifying
+          // submission, so the real phase must report its incomplete child.
+          expect(result.status).toBe('warn');
           const details = result.details as {
             children_submitted: number;
             transcripts_processed: number;
