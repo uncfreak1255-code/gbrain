@@ -1332,6 +1332,64 @@ export async function extractTimelineForSlugs(
 // no local checkout (e.g. live MCP servers). Uses the typed link inference and
 // timeline parser from src/core/link-extraction.ts.
 
+async function linkBatchRowWouldInsert(engine: BrainEngine, row: LinkBatchInput): Promise<boolean> {
+  const rows = await engine.executeRaw(
+    `SELECT 1 AS would_insert
+     FROM pages f
+     JOIN pages t ON t.slug = $3 AND t.source_id = $4
+     LEFT JOIN pages o ON o.slug = $7 AND o.source_id = $8
+     WHERE f.slug = $1
+       AND f.source_id = $2
+       AND NOT EXISTS (
+         SELECT 1
+         FROM links l
+         WHERE l.from_page_id = f.id
+           AND l.to_page_id = t.id
+           AND l.link_type = $5
+           AND l.link_source = $6
+           AND l.origin_page_id IS NOT DISTINCT FROM o.id
+       )
+     LIMIT 1`,
+    [
+      row.from_slug,
+      row.from_source_id || 'default',
+      row.to_slug,
+      row.to_source_id || 'default',
+      row.link_type || '',
+      row.link_source || 'markdown',
+      row.origin_slug || null,
+      row.origin_source_id || 'default',
+    ],
+  );
+  return rows.length > 0;
+}
+
+async function timelineBatchRowWouldInsert(engine: BrainEngine, row: TimelineBatchInput): Promise<boolean> {
+  const rows = await engine.executeRaw(
+    `SELECT 1 AS would_insert
+     FROM pages p
+     WHERE p.slug = $1
+       AND p.source_id = $2
+       AND NOT EXISTS (
+         SELECT 1
+         FROM timeline_entries te
+         WHERE te.page_id = p.id
+           AND te.date = $3::date
+           AND te.summary = $4
+           AND te.source = $5
+       )
+     LIMIT 1`,
+    [
+      row.slug,
+      row.source_id || 'default',
+      row.date,
+      row.summary,
+      row.source || '',
+    ],
+  );
+  return rows.length > 0;
+}
+
 async function extractLinksFromDB(
   engine: BrainEngine,
   dryRun: boolean,
@@ -1455,11 +1513,27 @@ async function extractLinksFromDB(
       const resolved = resolveCandidateSources(c, slug, source_id, allSlugs, slugToSources);
       if (!resolved) continue;
       const { fromSlug, fromSourceId, toSourceId } = resolved;
+      const row = {
+        from_slug: fromSlug,
+        to_slug: c.targetSlug,
+        link_type: c.linkType,
+        context: c.context,
+        link_source: c.linkSource,
+        origin_slug: c.originSlug,
+        origin_field: c.originField,
+        // v0.32.8 F4: thread source ids so the batch JOIN doesn't fan out
+        // across sources. Default source_id='default' for back-compat with
+        // pre-v0.32.8 callers (the engine still accepts undefined).
+        from_source_id: fromSourceId,
+        to_source_id: toSourceId,
+        origin_source_id: source_id,
+      };
 
       if (dryRunSeen) {
-        const key = `${fromSourceId}::${fromSlug}::${toSourceId}::${c.targetSlug}::${c.linkType}::${c.linkSource ?? 'markdown'}`;
+        const key = `${fromSourceId}::${fromSlug}::${toSourceId}::${c.targetSlug}::${c.linkType}::${c.linkSource ?? 'markdown'}::${source_id}::${c.originSlug ?? ''}`;
         if (dryRunSeen.has(key)) continue;
         dryRunSeen.add(key);
+        if (!(await linkBatchRowWouldInsert(engine, row))) continue;
         if (jsonMode) {
           process.stdout.write(JSON.stringify({
             action: 'add_link', from: fromSlug, from_source_id: fromSourceId,
@@ -1471,21 +1545,7 @@ async function extractLinksFromDB(
         }
         created++;
       } else {
-        batch.push({
-          from_slug: fromSlug,
-          to_slug: c.targetSlug,
-          link_type: c.linkType,
-          context: c.context,
-          link_source: c.linkSource,
-          origin_slug: c.originSlug,
-          origin_field: c.originField,
-          // v0.32.8 F4: thread source ids so the batch JOIN doesn't fan out
-          // across sources. Default source_id='default' for back-compat with
-          // pre-v0.32.8 callers (the engine still accepts undefined).
-          from_source_id: fromSourceId,
-          to_source_id: toSourceId,
-          origin_source_id: source_id,
-        });
+        batch.push(row);
         if (batch.length >= BATCH_SIZE) await flush();
       }
     }
@@ -1585,10 +1645,18 @@ async function extractTimelineFromDB(
     const entries = parseTimelineEntries(fullContent);
 
     for (const entry of entries) {
+      const row = {
+        slug,
+        date: entry.date,
+        summary: entry.summary,
+        detail: entry.detail || '',
+        source_id,
+      };
       if (dryRunSeen) {
-        const key = `${source_id}::${slug}::${entry.date}::${entry.summary}`;
+        const key = `${source_id}::${slug}::${entry.date}::${entry.summary}::`;
         if (dryRunSeen.has(key)) continue;
         dryRunSeen.add(key);
+        if (!(await timelineBatchRowWouldInsert(engine, row))) continue;
         if (jsonMode) {
           process.stdout.write(JSON.stringify({
             action: 'add_timeline', slug, source_id, date: entry.date,
@@ -1601,7 +1669,7 @@ async function extractTimelineFromDB(
       } else {
         // v0.32.8 F4: thread source_id so the JOIN matches the right page
         // when two sources share the same slug.
-        batch.push({ slug, date: entry.date, summary: entry.summary, detail: entry.detail || '', source_id });
+        batch.push(row);
         if (batch.length >= BATCH_SIZE) await flush();
       }
     }

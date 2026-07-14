@@ -130,6 +130,36 @@ describe('gbrain extract links --source db', () => {
     expect(links.length).toBe(0);
   });
 
+  test('--dry-run --json suppresses links already created by a real run', async () => {
+    await engine.putPage('people/alice', personPage('Alice'));
+    await engine.putPage('companies/acme', companyPage(
+      'Acme',
+      '[Alice](people/alice) joined as CEO.',
+    ));
+
+    await runExtract(engine, ['links', '--source', 'db']);
+
+    const lines: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
+      lines.push(str);
+      return true;
+    }) as any;
+
+    try {
+      await runExtract(engine, ['links', '--source', 'db', '--dry-run', '--json']);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    const actions = lines
+      .filter(l => l.trim().startsWith('{'))
+      .map(l => JSON.parse(l.trim()))
+      .filter(row => row.action === 'add_link');
+    expect(actions).toEqual([]);
+  });
+
   test('--type filter only processes matching pages', async () => {
     await engine.putPage('people/alice', personPage('Alice'));
     await engine.putPage('people/bob', personPage('Bob', '[Alice](people/alice) is great.'));
@@ -227,6 +257,34 @@ describe('gbrain extract timeline --source db', () => {
 
     const entries = await engine.getTimeline('people/alice');
     expect(entries.length).toBe(0);
+  });
+
+  test('--dry-run --json suppresses timeline entries already created by a real run', async () => {
+    await engine.putPage('people/alice', {
+      type: 'person', title: 'Alice', compiled_truth: '',
+      timeline: '- **2026-01-15** | Test event',
+    });
+
+    await runExtract(engine, ['timeline', '--source', 'db']);
+
+    const lines: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
+      lines.push(str);
+      return true;
+    }) as any;
+    try {
+      await runExtract(engine, ['timeline', '--source', 'db', '--dry-run', '--json']);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    const actions = lines
+      .filter(l => l.trim().startsWith('{'))
+      .map(l => JSON.parse(l.trim()))
+      .filter(row => row.action === 'add_timeline');
+    expect(actions).toEqual([]);
   });
 });
 
