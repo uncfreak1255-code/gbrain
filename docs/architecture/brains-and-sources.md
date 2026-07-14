@@ -38,8 +38,9 @@ carries a `source_id`. Slugs are unique per source, not globally.
 Example: in one brain, the slug `topics/ai` can exist under `source=wiki`
 AND under `source=gstack` — they're different pages.
 
-Routing: `--source <id>`, `GBRAIN_SOURCE`, `.gbrain-source` dotfile, or
-registered `local_path` match in the `sources` table.
+Routing: `--source <id>`, `GBRAIN_SOURCE`, `.gbrain-source` dotfile,
+registered `local_path` match in the `sources` table, or a linked Git
+worktree whose common dir matches a registered `local_path`.
 
 ### When does each axis move?
 
@@ -195,6 +196,7 @@ WHICH BRAIN (DB)?                    WHICH SOURCE (repo in DB)?
  2. GBRAIN_BRAIN_ID env               2. GBRAIN_SOURCE env
  3. .gbrain-mount dotfile             3. .gbrain-source dotfile
  4. longest-prefix mount path match   4. longest-prefix source path match
+                                        or linked Git worktree common-dir match
  5. (reserved: brains.default v2)     5. sources.default config
  6. fallback: 'host'                  6. fallback: 'default'
 ```
