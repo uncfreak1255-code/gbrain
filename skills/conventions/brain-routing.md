@@ -56,7 +56,7 @@ Do NOT switch brain when:
 | 1 | `flag` | Explicit `--source <id>` CLI flag (or `--source-id <id>` on `gbrain extract` / `gbrain import`) |
 | 2 | `env` | `GBRAIN_SOURCE` environment variable |
 | 3 | `dotfile` | `.gbrain-source` file in CWD or any ancestor directory |
-| 4 | `local_path` | A registered source whose `local_path` contains CWD (longest prefix wins) |
+| 4 | `local_path` | A registered source whose `local_path` contains CWD (longest prefix wins), or whose git common-dir matches CWD's linked worktree family |
 | 5 | `brain_default` | Brain-level `sources.default` config key (explicit user intent) |
 | 5.5 | `sole_non_default` | When tiers 1–5 missed AND exactly one registered source has a `local_path` AND isn't `'default'`, auto-route to it. Fires a one-time stderr nudge per CLI invocation. Suppress with `GBRAIN_NO_SOLE_NON_DEFAULT_NUDGE=1`. |
 | 6 | `seed_default` | Literal `'default'` (always exists post-migration v16) |
@@ -72,6 +72,13 @@ still fall through to `seed_default` and require explicit `--source`.
 Placement AFTER `brain_default` is deliberate: a user who explicitly set
 `sources.default` via `gbrain sources default <id>` has stated intent that
 wins over the auto-route. Archived sources are excluded from the count.
+
+**Linked worktrees:** tier 4 also treats a Git linked worktree as the same
+source when its `git rev-parse --git-common-dir` matches a registered
+source's `local_path`. This is the durable propagation path for Codex or
+Conductor worktrees: register the canonical checkout once with
+`gbrain sources add <id> --path <main-checkout>`, and sibling linked worktrees
+resolve to that named source without per-worktree `.gbrain-source` files.
 
 **v0.37.7.0 tooling:**
 

@@ -1079,11 +1079,11 @@ async function runTrackedBranch(engine: BrainEngine, args: string[]): Promise<vo
 // ── `sources current` (v0.37.7.0) ──────────────────────────
 //
 // Verify which source the CLI would target before running a
-// destructive op. Walks the same 6-tier chain as `resolveSourceId()`
+// destructive op. Walks the same 7-tier chain as `resolveSourceId()`
 // and reports both the winning source id AND the tier label
 // ("flag" / "env" / "dotfile" / "local_path" / "brain_default" /
-// "seed_default"). Optional `--source <id>` shows what an explicit
-// flag WOULD resolve to without actually running anything.
+// "sole_non_default" / "seed_default"). Optional `--source <id>` shows
+// what an explicit flag WOULD resolve to without actually running anything.
 
 async function runCurrent(engine: BrainEngine, args: string[]): Promise<void> {
   const json = args.includes('--json');
@@ -1599,9 +1599,12 @@ Subcommands:
   detach                            Remove .gbrain-source from CWD.
   current [--source <id>] [--json]  Echo the resolved source id + which tier
                                     won (flag/env/dotfile/local_path/
-                                    brain_default/seed_default). Run this
-                                    before destructive ops to verify you're
-                                    targeting the brain you think you are.
+                                    brain_default/sole_non_default/
+                                    seed_default). local_path includes linked
+                                    git worktrees sharing a registered
+                                    checkout's common dir. Run this before
+                                    destructive ops to verify you're targeting
+                                    the brain you think you are.
   rehome [<id>] [--json] [--limit <n>] [--timeout-ms <ms>]
                                     Preview which slug rows appear misrouted
                                     at source "default" and would need a

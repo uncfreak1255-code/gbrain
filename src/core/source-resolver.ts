@@ -5,16 +5,19 @@
  *   1. Explicit --source <id> flag (caller passes this as `explicit`)
  *   2. GBRAIN_SOURCE env var
  *   3. .gbrain-source dotfile in CWD or any ancestor directory
- *   4. Registered source whose local_path contains CWD
+ *   4. Registered source whose local_path contains CWD, or whose git
+ *      common-dir matches CWD's linked worktree family
  *   5. Brain-level default via `gbrain sources default <id>`
+ *   5.5. Single non-default source with local_path, when unambiguous
  *   6. Literal 'default' (backward compat for pre-v0.17 brains)
  *
  * This helper is shared by the sources CLI, future sync/extract/query
  * commands (Steps 4/5), and the operation layer (Step 2+).
  */
 
-import { readFileSync, existsSync } from 'fs';
-import { join, dirname, resolve } from 'path';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, existsSync, realpathSync } from 'fs';
+import { join, dirname, relative, resolve } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { SOURCE_ID_RE, isValidSourceId } from './source-id.ts';
 
@@ -52,6 +55,106 @@ function readDotfileWalk(startDir: string): string | null {
     dir = parent;
   }
   return null;
+}
+
+interface RegisteredSourcePath {
+  id: string;
+  local_path: string;
+}
+
+interface SourcePathMatch {
+  id: string;
+  detail: string;
+  pathLen: number;
+}
+
+interface GitWorktreeInfo {
+  commonDir: string;
+  topLevel: string;
+  relativePath: string;
+}
+
+function gitCommonDir(startDir: string): string | null {
+  try {
+    return execFileSync(
+      'git',
+      ['-C', startDir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+  } catch {
+    return null;
+  }
+}
+
+function gitTopLevel(startDir: string): string | null {
+  try {
+    return execFileSync(
+      'git',
+      ['-C', startDir, 'rev-parse', '--path-format=absolute', '--show-toplevel'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+  } catch {
+    return null;
+  }
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function gitWorktreeInfo(startDir: string): GitWorktreeInfo | null {
+  const commonDir = gitCommonDir(startDir);
+  const topLevel = gitTopLevel(startDir);
+  if (!commonDir || !topLevel) return null;
+  const relativePath = relative(canonicalPath(topLevel), canonicalPath(startDir));
+  return { commonDir, topLevel, relativePath };
+}
+
+function pathIsWithin(baseRelativePath: string, candidateRelativePath: string): boolean {
+  if (!baseRelativePath || baseRelativePath === '.') return true;
+  return candidateRelativePath === baseRelativePath || candidateRelativePath.startsWith(baseRelativePath + '/');
+}
+
+function pickRegisteredPathMatch(
+  registered: RegisteredSourcePath[],
+  cwd: string,
+): SourcePathMatch | null {
+  const cwdResolved = canonicalPath(cwd);
+  let best: SourcePathMatch | null = null;
+
+  for (const r of registered) {
+    const p = canonicalPath(r.local_path);
+    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
+      if (!best || p.length > best.pathLen) {
+        best = { id: r.id, detail: p, pathLen: p.length };
+      }
+    }
+  }
+
+  if (best) return best;
+
+  // Linked git worktrees can live outside the registered local_path (for
+  // example Codex worktrees under ~/.codex/worktrees). They share the same
+  // git common dir as the registered checkout, so use that as a durable
+  // propagation signal instead of requiring per-worktree .gbrain-source files.
+  const cwdGit = gitWorktreeInfo(cwdResolved);
+  if (!cwdGit) return null;
+
+  for (const r of registered) {
+    const p = canonicalPath(r.local_path);
+    const sourceGit = gitWorktreeInfo(p);
+    if (!sourceGit || sourceGit.commonDir !== cwdGit.commonDir) continue;
+    if (!pathIsWithin(sourceGit.relativePath, cwdGit.relativePath)) continue;
+    if (!best || p.length > best.pathLen) {
+      best = { id: r.id, detail: `${p} (git worktree)`, pathLen: p.length };
+    }
+  }
+
+  return best;
 }
 
 /**
@@ -102,19 +205,10 @@ export async function resolveSourceId(
   // 4. Registered source whose local_path contains CWD.
   //    Uses longest-prefix match so nested-path configurations (e.g.
   //    gstack at ~/gstack + plans at ~/gstack/plans) pick the deepest.
-  const registered = await engine.executeRaw<{ id: string; local_path: string }>(
+  const registered = await engine.executeRaw<RegisteredSourcePath>(
     `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
   );
-  const cwdResolved = resolve(cwd);
-  let best: { id: string; pathLen: number } | null = null;
-  for (const r of registered) {
-    const p = resolve(r.local_path);
-    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
-      if (!best || p.length > best.pathLen) {
-        best = { id: r.id, pathLen: p.length };
-      }
-    }
-  }
+  const best = pickRegisteredPathMatch(registered, cwd);
   if (best) return best.id;
 
   // 5. Brain-level default.
@@ -300,20 +394,11 @@ export async function resolveSourceWithTier(
   }
 
   // 4. Registered source whose local_path contains CWD.
-  const registered = await engine.executeRaw<{ id: string; local_path: string }>(
+  const registered = await engine.executeRaw<RegisteredSourcePath>(
     `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
   );
-  const cwdResolved = resolve(cwd);
-  let best: { id: string; path: string; pathLen: number } | null = null;
-  for (const r of registered) {
-    const p = resolve(r.local_path);
-    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
-      if (!best || p.length > best.pathLen) {
-        best = { id: r.id, path: p, pathLen: p.length };
-      }
-    }
-  }
-  if (best) return { source_id: best.id, tier: 'local_path', detail: best.path };
+  const best = pickRegisteredPathMatch(registered, cwd);
+  if (best) return { source_id: best.id, tier: 'local_path', detail: best.detail };
 
   // 5. Brain-level default. Silent-fallback (P1-F) like tier 5 in resolveSourceId.
   const globalDefault = await engine.getConfig('sources.default');
@@ -341,5 +426,9 @@ export async function resolveSourceWithTier(
 /** Exposed for tests. */
 export const __testing = {
   readDotfileWalk,
+  pickRegisteredPathMatch,
+  gitCommonDir,
+  gitTopLevel,
+  gitWorktreeInfo,
   SOURCE_ID_RE,
 };
