@@ -862,7 +862,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
         IF NOT has_bypass THEN
           -- Fail the migration loudly instead of WARNING + version-bump.
           -- The runner unconditionally records schema_version on success,
@@ -1151,7 +1151,7 @@ export const MIGRATIONS: Migration[] = [
         DECLARE
           has_bypass BOOLEAN;
         BEGIN
-          SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+          SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
           IF NOT has_bypass THEN
             RAISE EXCEPTION 'v29 cathedral_ii_code_edges_rls: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
           END IF;
@@ -1239,7 +1239,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
         IF has_bypass THEN
           ALTER TABLE takes              ENABLE ROW LEVEL SECURITY;
           ALTER TABLE synthesis_evidence ENABLE ROW LEVEL SECURITY;
@@ -1341,7 +1341,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
         IF has_bypass THEN
           ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;
         END IF;
@@ -1380,7 +1380,7 @@ export const MIGRATIONS: Migration[] = [
         DECLARE
           has_bypass BOOLEAN;
         BEGIN
-          SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+          SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
           IF NOT has_bypass THEN
             RAISE EXCEPTION 'v31 eval_capture_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
           END IF;
@@ -1499,7 +1499,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
         IF has_bypass THEN
           ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
           ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
@@ -1720,7 +1720,7 @@ export const MIGRATIONS: Migration[] = [
           has_bypass BOOLEAN;
           r record;
         BEGIN
-          SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+          SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
           IF NOT has_bypass THEN
             -- Same posture as v24: raise to abort the migration so the runner
             -- leaves config.version unbumped and retries on the next call.
@@ -2112,7 +2112,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
         IF has_bypass THEN
           ALTER TABLE drift_decisions ENABLE ROW LEVEL SECURITY;
         END IF;
@@ -2365,7 +2365,7 @@ export const MIGRATIONS: Migration[] = [
           DECLARE
             has_bypass BOOLEAN;
           BEGIN
-            SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+            SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
             IF has_bypass THEN
               ALTER TABLE facts ENABLE ROW LEVEL SECURITY;
             END IF;
@@ -4389,7 +4389,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
         IF has_bypass THEN
           ALTER TABLE take_domain_assignments ENABLE ROW LEVEL SECURITY;
         END IF;
@@ -5378,6 +5378,129 @@ export const MIGRATIONS: Migration[] = [
     sql: `
       ALTER TABLE eval_candidates
         ADD COLUMN IF NOT EXISTS replay_surface JSONB NULL;
+    `,
+  },
+  {
+    version: 121,
+    name: 'schema_lint_hardening_search_path_security_invoker',
+    // Downstream backport of the upstream schema-lint hardening wave
+    // (#1647 / #171). The fork already owns migration v120, so this is v121.
+    //
+    //   (b) security_invoker on the page_links view: pre-fix the view ran with
+    //       the definer/owner's privileges, so the anon / PostgREST role could
+    //       read `links` (which has RLS) THROUGH the view, bypassing RLS. This
+    //       is the single ERROR-severity Supabase lint. Postgres-only — PGLite
+    //       is embedded/single-user with no anon role and no PostgREST, so the
+    //       view has no RLS-bypass surface there (and security_invoker carries
+    //       no benefit). Guarded with IF EXISTS for very old brains.
+    //
+    //   (a)/(#171) search_path on every gbrain-owned trigger/event function:
+    //       an unqualified reference (e.g. `FROM timeline_entries`) resolves
+    //       through the caller's search_path, so a same-named object in a
+    //       user-controlled schema could shadow it. Pinning search_path closes
+    //       that. ALTER FUNCTION (NOT CREATE OR REPLACE) leaves each body
+    //       untouched — lowest drift risk, and critically safe for the
+    //       load-bearing `auto_enable_rls` event-trigger function (codex #3).
+    //       The IF EXISTS loop is engine-agnostic and skips functions a given
+    //       brain never created (e.g. auto_enable_rls + the NOTIFY/chunk
+    //       trigger functions are Postgres-only — codex #4).
+    //
+    // Regression guard is a doctor probe (pg_proc.proconfig) + scripts/
+    // check-search-path.sh, NOT a migration verify-hook — hooks don't run on
+    // brains already stamped past this version (learning: migration-verify-hook-
+    // never-runs-on-stamped-brains). Fresh installs are born correct: the
+    // function defs in schema.sql / pglite-schema.ts carry SET search_path too.
+    idempotent: true,
+    sql: '', // engine-specific via sqlFor
+    sqlFor: {
+      postgres: `
+        -- GBrain's schema already requires PostgreSQL 15+ (migration v11
+        -- uses UNIQUE NULLS NOT DISTINCT). Keep the release boundary
+        -- explicit here so older self-hosted servers fail before attempting
+        -- the PG15-only security_invoker option, with an actionable error.
+        DO $$ BEGIN
+          IF current_setting('server_version_num')::int < 150000 THEN
+            RAISE EXCEPTION
+              'v0.46 migration requires PostgreSQL 15+. Current: %. Upgrade PostgreSQL before running gbrain upgrade.',
+              current_setting('server_version');
+          END IF;
+        END $$;
+
+        ALTER VIEW IF EXISTS page_links SET (security_invoker = on);
+
+        DO $$
+        DECLARE fn text;
+        BEGIN
+          FOREACH fn IN ARRAY ARRAY[
+            'bump_page_generation_fn','bump_page_generation_clock_fn',
+            'update_chunk_search_vector','update_page_search_vector',
+            'notify_minion_job_change','auto_enable_rls'
+          ] LOOP
+            IF EXISTS (
+              SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'public' AND p.proname = fn
+            ) THEN
+              EXECUTE format('ALTER FUNCTION public.%I() SET search_path = pg_catalog, public', fn);
+            END IF;
+          END LOOP;
+        END $$;
+      `,
+      pglite: `
+        DO $$
+        DECLARE fn text;
+        BEGIN
+          FOREACH fn IN ARRAY ARRAY[
+            'bump_page_generation_fn','bump_page_generation_clock_fn',
+            'update_chunk_search_vector','update_page_search_vector',
+            'notify_minion_job_change'
+          ] LOOP
+            IF EXISTS (
+              SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'public' AND p.proname = fn
+            ) THEN
+              EXECUTE format('ALTER FUNCTION public.%I() SET search_path = pg_catalog, public', fn);
+            END IF;
+          END LOOP;
+        END $$;
+      `,
+    },
+  },
+  {
+    version: 122,
+    name: 'files_source_storage_path_unique',
+    // File readers and import transactions already identify metadata by
+    // (source_id, storage_path). The legacy UNIQUE(storage_path) constraint
+    // made the writer disagree with that contract: importing the same relative
+    // path in a second source updated the first source's row instead of
+    // creating an isolated row. Existing data is safe to widen because the old
+    // global uniqueness is stricter than this composite key.
+    idempotent: true,
+    sql: `
+      ALTER TABLE files DROP CONSTRAINT IF EXISTS files_storage_path_key;
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+           WHERE conname = 'files_source_storage_path_key'
+             AND conrelid = 'files'::regclass
+        ) THEN
+          ALTER TABLE files
+            ADD CONSTRAINT files_source_storage_path_key
+            UNIQUE (source_id, storage_path);
+        END IF;
+      END $$;
+    `,
+  },
+  {
+    version: 123,
+    name: 'pages_takes_extracted_content_hash',
+    // A valid classifier result may contain zero claims. Without a page-level
+    // completion marker, those pages remain at the head of every bounded
+    // bootstrap run and prevent the sweep from reaching older pages.
+    idempotent: true,
+    sql: `
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS takes_extracted_content_hash TEXT;
     `,
   },
 ];

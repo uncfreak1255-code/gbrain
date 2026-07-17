@@ -36,6 +36,7 @@ describe('applyAliasHop', () => {
     const hit = out.find(r => r.slug === 'projects/mingtang');
     expect(hit).toBeDefined();
     expect(hit!.alias_hit).toBe(true);
+    expect(hit!.page_id).toBe((await engine.getPage('projects/mingtang'))!.id);
     expect(out[0].slug).toBe('projects/mingtang'); // injected at top-of-organic + ε
     expect(hit!.score).toBeGreaterThan(0.5);
   });

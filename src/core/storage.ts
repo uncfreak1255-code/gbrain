@@ -30,6 +30,28 @@ export interface StorageConfig {
 }
 
 /**
+ * Physical object key for a newly uploaded source-owned file.
+ *
+ * `files.storage_path` is the source-local logical path exposed by the CLI
+ * and MCP operations. Object stores are global to the configured bucket, so
+ * using that logical path directly lets two sources overwrite each other's
+ * bytes. Keep the source namespace in the physical key and persist that key
+ * in files.metadata for backward-compatible reads of legacy unscoped rows.
+ */
+export function sourceScopedStorageKey(sourceId: string, storagePath: string): string {
+  const encodedSource = Buffer.from(sourceId, 'utf8').toString('base64url');
+  return `.gbrain/sources/${encodedSource}/${storagePath}`;
+}
+
+/** Resolve the physical key for a file row, preserving legacy unscoped rows. */
+export function storedObjectKey(
+  row: { storage_path: string; metadata?: Record<string, unknown> | null },
+): string {
+  const key = row.metadata?.storage_object_key;
+  return typeof key === 'string' && key.length > 0 ? key : row.storage_path;
+}
+
+/**
  * Create a StorageBackend from config.
  */
 export async function createStorage(config: StorageConfig): Promise<StorageBackend> {

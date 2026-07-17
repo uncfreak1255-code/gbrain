@@ -128,18 +128,23 @@ describe('BrainEngine.upsertFile (Phase 3 + Eng-3E)', () => {
   });
 
   test('upsertFile honors source_id for multi-source brains', async () => {
-    // Insert into source 'default'.
-    await engine.upsertFile({
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('source-b', 'source-b') ON CONFLICT DO NOTHING`,
+    );
+    const fromDefault = await engine.upsertFile({
       filename: 'a.jpg',
       storage_path: 'photos/a.jpg',
       content_hash: 'sha256:a-default',
     });
-    // The (source_id, storage_path) UNIQUE pattern is enforced via the
-    // single UNIQUE(storage_path) constraint shared with Postgres — this
-    // mirrors the v0.18 design. Per-source path namespacing is the brain's
-    // responsibility (sources mount at distinct path prefixes). This test
-    // verifies the API returns the source_id field correctly.
-    const row = await engine.getFile('default', 'photos/a.jpg');
-    expect(row!.source_id).toBe('default');
+    const fromB = await engine.upsertFile({
+      source_id: 'source-b',
+      filename: 'a.jpg',
+      storage_path: 'photos/a.jpg',
+      content_hash: 'sha256:a-source-b',
+    });
+
+    expect(fromB.id).not.toBe(fromDefault.id);
+    expect((await engine.getFile('default', 'photos/a.jpg'))?.content_hash).toBe('sha256:a-default');
+    expect((await engine.getFile('source-b', 'photos/a.jpg'))?.content_hash).toBe('sha256:a-source-b');
   });
 });

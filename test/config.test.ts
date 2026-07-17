@@ -253,3 +253,10 @@ describe('loadConfig — GBRAIN_MAX_MARKUP_RATIO env (v0.42 #1699)', () => {
     });
   });
 });
+
+describe('KNOWN_CONFIG_KEYS — documented enable commands must be registered', () => {
+  test('takes bootstrap opt-in key is registered', async () => {
+    const { KNOWN_CONFIG_KEYS } = await import('../src/core/config.ts');
+    expect(KNOWN_CONFIG_KEYS).toContain('takes.bootstrap_enabled');
+  });
+});

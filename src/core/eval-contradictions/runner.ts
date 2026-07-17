@@ -171,11 +171,19 @@ async function generateIntraPagePairs(
   results: SearchResult[],
 ): Promise<ContradictionPair[]> {
   if (results.length === 0) return [];
-  // Unique page_ids only.
-  const pageIds = Array.from(new Set(results.map((r) => r.page_id)));
+  // Only positive int32 page IDs may reach the `$1::int[]` query. This is a
+  // defensive boundary for synthetic or extension-provided search results.
+  const isValidPageId = (n: unknown): n is number =>
+    typeof n === 'number' && Number.isSafeInteger(n) && n > 0 && n <= 2_147_483_647;
+  const pageIds = Array.from(
+    new Set(
+      results.map((r) => r.page_id).filter(isValidPageId),
+    ),
+  );
   const takesByPage = await engine.listActiveTakesForPages(pageIds);
   const out: ContradictionPair[] = [];
   for (const r of results) {
+    if (!isValidPageId(r.page_id)) continue;
     const takes = takesByPage.get(r.page_id) ?? [];
     if (takes.length === 0) continue;
     const chunkMember = searchResultToMember(r);

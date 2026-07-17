@@ -132,6 +132,10 @@ CREATE TABLE IF NOT EXISTS pages (
   -- path). Powers `gbrain extract --stale` + the `links_extraction_lag` doctor
   -- check. NULL = never extracted.
   links_extracted_at    TIMESTAMPTZ,
+  -- v0.46.0.0 (migration v123): Takes bootstrap completion watermark.
+  -- Stores the content hash classified even when the model returns zero
+  -- claims, so bounded sweeps progress and changed pages become eligible.
+  takes_extracted_content_hash TEXT,
   -- v0.40.3.0 contextual retrieval (renumbered from v81 to v90 on master
   -- merge). contextual_retrieval_mode is what tier the page was last embedded
   -- under (NULL = pre-v90 = treated as 'none' for drift detection).
@@ -160,7 +164,7 @@ CREATE TABLE IF NOT EXISTS pages (
 -- content columns IS DISTINCT FROM (allow-list widened per D6 + codex #3
 -- to include title/type/page_kind/corpus_generation/content_hash) so
 -- read-time mutations don't invalidate every cache row.
-CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger AS $func$
+CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   IF (TG_OP = 'INSERT') THEN
     NEW.generation := COALESCE((SELECT MAX(generation) FROM pages), 0) + 1;
@@ -240,7 +244,7 @@ SELECT setval('page_generation_clock_seq', GREATEST(
   COALESCE((SELECT MAX(generation) FROM pages), 0)
 ));
 
-CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
+CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   PERFORM nextval('page_generation_clock_seq');
   RETURN NULL;
@@ -356,7 +360,7 @@ CREATE INDEX IF NOT EXISTS content_chunks_stale_idx
 -- NL queries ("how do we handle errors") rank doc-comment hits above body text.
 -- BEFORE INSERT OR UPDATE OF specific columns — only refires when those change,
 -- not on every chunk update (e.g., embedding refresh doesn't trigger rebuild).
-CREATE OR REPLACE FUNCTION update_chunk_search_vector() RETURNS TRIGGER AS $fn$
+CREATE OR REPLACE FUNCTION update_chunk_search_vector() RETURNS TRIGGER SET search_path = pg_catalog, public AS $fn$
 BEGIN
   NEW.search_vector :=
     setweight(to_tsvector('english', COALESCE(NEW.doc_comment, '')), 'A') ||
@@ -776,7 +780,7 @@ CREATE TABLE IF NOT EXISTS files (
   content_hash TEXT   NOT NULL,
   metadata     JSONB  NOT NULL DEFAULT '{}',
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(storage_path)
+  CONSTRAINT files_source_storage_path_key UNIQUE(source_id, storage_path)
 );
 
 -- Migration: drop storage_url if it exists (renamed to storage_path only)
@@ -815,7 +819,7 @@ ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
 
 -- Function to rebuild search_vector for a page
-CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $$
 DECLARE
   timeline_text TEXT;
 BEGIN
@@ -1357,7 +1361,7 @@ CREATE INDEX IF NOT EXISTS think_ab_results_recent_idx
   ON think_ab_results (source_id, ran_at DESC);
 
 -- NOTIFY trigger for real-time job events (Postgres only, not PGLite)
-CREATE OR REPLACE FUNCTION notify_minion_job_change() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION notify_minion_job_change() RETURNS trigger SET search_path = pg_catalog, public AS $$
 BEGIN
   PERFORM pg_notify('minion_jobs', json_build_object(
     'id', NEW.id, 'status', NEW.status, 'name', NEW.name,
@@ -1382,7 +1386,10 @@ DO $$
 DECLARE
   has_bypass BOOLEAN;
 BEGIN
-  SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+  -- Role attributes are not inherited through membership. Check the active
+  -- login directly; alias `pr` avoids PL/pgSQL record-variable collisions.
+  SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass
+    FROM pg_roles pr WHERE pr.rolname = current_user;
   IF has_bypass THEN
     ALTER TABLE pages ENABLE ROW LEVEL SECURITY;
     ALTER TABLE content_chunks ENABLE ROW LEVEL SECURITY;

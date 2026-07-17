@@ -2,6 +2,37 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.46.0.0] - 2026-07-16
+
+**The downstream fork is now current with upstream's safety and correctness fixes through `323d7d63`, without merging incompatible histories or weakening the fork's existing controls.** File and source boundaries fail closed, long-running workers keep their live locks, large reconciles refuse suspicious deletions, and federated reads and writes stay inside the selected sources.
+
+### To take advantage of v0.46.0.0
+
+Run `gbrain upgrade`. Migrations 121 through 123 apply automatically: migration 121 hardens function search paths, the `page_links` view, and row-level-security enablement; migration 122 scopes file identity to each source; migration 123 records bounded Takes-classification progress, including valid no-claim pages. No required configuration change is needed.
+
+Generated HTTP admin tokens remain hidden from non-interactive output by default. Use `--print-admin-token` only when a trusted automation explicitly needs the value.
+
+### Itemized changes
+
+### Added
+- **Confinement at filesystem sinks.** Routing files, skills, uploads, transcription, imports, and write-through paths reject symlink escapes, hostile slugs, unsafe permissions, and shell-shaped arguments before bytes leave the trusted root.
+- **Schema hardening gate.** Migration 121, generated schema parity, and the new search-path verification check keep security-sensitive functions and views pinned to safe behavior on both fresh and upgraded brains.
+- **Current bundled-pack and model coverage.** `schema use` resolves every bundled pack, pack-declared atom extraction types are honored without feeding synthesis outputs back into extraction, and Sonnet 5/Fable 5 have conservative budget prices.
+
+### Changed
+- **Source isolation is end to end.** Think gather and trajectories, Takes mutations/search, image imports, files, aliases, and related reads now honor scalar and federated source scopes instead of silently falling back to another source.
+- **Bounded extraction progresses.** Atom slugs are stable for dated and undated sources, partial multi-atom writes retry until the final atom marks the source complete, and repeated Takes bootstrap runs persist valid no-claim completion so bounded slices advance unless `--include-covered` requests a refresh.
+- **Safer operational recovery.** PGLite and autopilot locks trust live process ownership regardless of heartbeat age; interrupted engine migrations resume only against the matching target and restart cleanly under `--force`.
+
+### Fixed
+- **Suspicious full-sync deletions stop before data loss.** Path separators are normalized and a majority-delete valve refuses large reconcile sweeps unless `GBRAIN_ALLOW_MASS_RECONCILE=1` explicitly restores bulk-delete behavior.
+- **Search and entity edge cases stay deterministic.** Ambiguous bare entities, alias page IDs, contradiction inputs, cache-policy hashing, escaped table pipes, BIGINT serialization, generated-corpus orphan exclusions, and fence-less imports now use the safe path.
+- **Identical file paths stay isolated by source.** File metadata now uses `(source_id, storage_path)` as its identity, and configured object storage uses a source-scoped physical key, so the same relative path in two sources cannot overwrite either source's row or bytes.
+- **Generated bootstrap secrets stay off logs.** Non-TTY serve startup suppresses newly generated admin tokens unless the caller explicitly opts in.
+
+### For contributors
+- Focused unit, PGLite, slow, and real-Postgres regression coverage now pins the adopted behavior, including public full-sync deletion gating, filesystem-sink confinement, source-scoped Takes keyword/vector search, source-isolated file identity, and fresh-vs-migrated schema security.
+
 ## [0.45.6.0] - 2026-07-12
 
 **Dream can now stop before a single transcript spills past the child limit.** Set an optional child budget for a synthesize run and GBrain will refuse a transcript whose complete set of chunks cannot fit. That keeps a one-child canary genuinely one child instead of quietly starting only the first part of a larger transcript.

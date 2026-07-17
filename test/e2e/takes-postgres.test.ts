@@ -91,6 +91,44 @@ d('v0.28 takes engine — Postgres', () => {
     expect(worldHits.every(h => h.holder === 'world')).toBe(true);
   });
 
+  test('keyword and vector take search honor scalar and federated source filters', async () => {
+    const engine = getEngine();
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('takes-scope-a', 'Takes Scope A'), ('takes-scope-b', 'Takes Scope B') ON CONFLICT DO NOTHING`,
+    );
+    const pageA = await engine.putPage('companies/shared-scope', {
+      title: 'Shared A', type: 'company', compiled_truth: 'Source A',
+    }, { sourceId: 'takes-scope-a' });
+    const pageB = await engine.putPage('companies/shared-scope', {
+      title: 'Shared B', type: 'company', compiled_truth: 'Source B',
+    }, { sourceId: 'takes-scope-b' });
+    await engine.addTakesBatch([
+      { page_id: pageA.id, row_num: 1, claim: 'alphascope source isolation claim', kind: 'take', holder: 'world', weight: 0.8 },
+      { page_id: pageB.id, row_num: 1, claim: 'betascope source isolation claim', kind: 'take', holder: 'world', weight: 0.8 },
+    ]);
+
+    const scalarKeyword = await engine.searchTakes('source isolation claim', { sourceId: 'takes-scope-a' });
+    expect(scalarKeyword.map(hit => hit.page_id)).toEqual([pageA.id]);
+    const federatedKeyword = await engine.searchTakes('source isolation claim', {
+      sourceIds: ['takes-scope-a', 'takes-scope-b'],
+    });
+    expect(new Set(federatedKeyword.map(hit => hit.page_id))).toEqual(new Set([pageA.id, pageB.id]));
+
+    const embedding = new Float32Array(1536);
+    embedding[0] = 1;
+    const vectorLiteral = `[${Array.from(embedding).join(',')}]`;
+    await engine.executeRaw(
+      `UPDATE takes SET embedding = $1::vector, embedded_at = now() WHERE page_id = ANY($2::int[])`,
+      [vectorLiteral, [pageA.id, pageB.id]],
+    );
+    const scalarVector = await engine.searchTakesVector(embedding, { sourceId: 'takes-scope-b' });
+    expect(scalarVector.map(hit => hit.page_id)).toEqual([pageB.id]);
+    const federatedVector = await engine.searchTakesVector(embedding, {
+      sourceIds: ['takes-scope-a', 'takes-scope-b'],
+    });
+    expect(new Set(federatedVector.map(hit => hit.page_id))).toEqual(new Set([pageA.id, pageB.id]));
+  });
+
   test('supersedeTake is transactional on real Postgres', async () => {
     const engine = getEngine();
     const { oldRow, newRow } = await engine.supersedeTake(alicePageId, 3, {

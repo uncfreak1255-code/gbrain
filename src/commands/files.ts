@@ -116,8 +116,7 @@ async function listFiles(engine: BrainEngine, slug?: string) {
 
   console.log(`${rows.length} file(s):`);
   for (const row of rows) {
-    const sizeBytes = row.size_bytes as number | null;
-    const size = sizeBytes ? `${Math.round(sizeBytes / 1024)}KB` : '?';
+    const size = row.size_bytes ? `${Math.round(Number(row.size_bytes) / 1024)}KB` : '?';
     console.log(`  ${row.page_slug || '(unlinked)'} / ${row.filename}  [${size}, ${row.mime_type || '?'}]`);
   }
 }
@@ -140,7 +139,7 @@ async function uploadFile(engine: BrainEngine, args: string[]) {
   const sql = sqlQueryForEngine(engine);
 
   // Check for existing file by hash
-  const existing = await sql`SELECT id FROM files WHERE content_hash = ${hash} AND storage_path = ${storagePath}`;
+  const existing = await sql`SELECT id FROM files WHERE source_id = 'default' AND content_hash = ${hash} AND storage_path = ${storagePath}`;
   if (existing.length > 0) {
     console.log(`File already uploaded (hash match): ${storagePath}`);
     return;
@@ -161,7 +160,7 @@ async function uploadFile(engine: BrainEngine, args: string[]) {
   await sql`
     INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
     VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
-    ON CONFLICT (storage_path) DO UPDATE SET
+    ON CONFLICT (source_id, storage_path) DO UPDATE SET
       content_hash = EXCLUDED.content_hash,
       size_bytes = EXCLUDED.size_bytes,
       mime_type = EXCLUDED.mime_type
@@ -256,7 +255,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
     engine,
     `INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
      VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-     ON CONFLICT (storage_path) DO UPDATE SET
+     ON CONFLICT (source_id, storage_path) DO UPDATE SET
        content_hash = EXCLUDED.content_hash,
        size_bytes = EXCLUDED.size_bytes,
        mime_type = EXCLUDED.mime_type`,
@@ -328,7 +327,7 @@ async function syncFiles(engine: BrainEngine, dir?: string) {
     const stat = statSync(filePath);
 
     const sql = sqlQueryForEngine(engine);
-    const existing = await sql`SELECT id FROM files WHERE content_hash = ${hash} AND storage_path = ${storagePath}`;
+    const existing = await sql`SELECT id FROM files WHERE source_id = 'default' AND content_hash = ${hash} AND storage_path = ${storagePath}`;
     if (existing.length > 0) {
       skipped++;
       continue;
@@ -341,7 +340,7 @@ async function syncFiles(engine: BrainEngine, dir?: string) {
     await sql`
       INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
       VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
-      ON CONFLICT (storage_path) DO UPDATE SET
+      ON CONFLICT (source_id, storage_path) DO UPDATE SET
         content_hash = EXCLUDED.content_hash,
         size_bytes = EXCLUDED.size_bytes,
         mime_type = EXCLUDED.mime_type

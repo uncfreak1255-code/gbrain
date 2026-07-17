@@ -961,6 +961,10 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // operator had to discover these by reading source. Registered so `config
   // set` accepts them directly. See docs/operations/spend-controls.md.
   'spend.posture',
+  // Takes bootstrap (v0.41.18.0, A12). The command's two-gate consent reads
+  // this key, and enabling it is the documented path to
+  // `gbrain takes extract --from-pages`.
+  'takes.bootstrap_enabled',
   'sync.cost_gate_min_usd',
   'sync.federated_v2',
   'embed.backfill_cooldown_min',
