@@ -22,6 +22,7 @@ import {
   AGGREGATOR_KINDS,
   type SchemaPackManifest,
 } from '../src/core/schema-pack/index.ts';
+import { BUNDLED_PACK_NAMES } from '../src/core/schema-pack/bundled.ts';
 
 const PACK_NAMES = [
   'gbrain-creator',
@@ -55,13 +56,9 @@ describe('v0.41 T4: all 4 bundled lens packs parse cleanly', () => {
 });
 
 describe('v0.41 T4: bundled registry includes lens packs', () => {
-  test('load-active.ts BUNDLED array source includes the 4 lens pack names', () => {
-    const loadActiveSrc = readFileSync(
-      join(here, '..', 'src', 'core', 'schema-pack', 'load-active.ts'),
-      'utf-8',
-    );
+  test('canonical bundled registry includes the 4 lens pack names', () => {
     for (const name of PACK_NAMES) {
-      expect(loadActiveSrc).toContain(`'${name}'`);
+      expect(BUNDLED_PACK_NAMES.has(name)).toBe(true);
     }
   });
 });
