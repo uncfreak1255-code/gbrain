@@ -93,7 +93,7 @@ describe('writePageThrough', () => {
 
     expect(res.written).toBe(true);
     const expectedPath = resolvePageFilePath(brainDir, slug, 'default');
-    expect(res.path).toBe(expectedPath);
+    expect(res.path).toBe(fs.realpathSync(expectedPath));
     expect(fs.existsSync(expectedPath)).toBe(true);
 
     // Content is the canonical serialization of the saved row (the file is
@@ -196,10 +196,25 @@ describe('writePageThrough', () => {
 
     expect(res.written).toBe(true);
     // File at the source's tree ROOT, never nested under `.sources/<id>/`.
-    expect(res.path).toBe(path.join(alphaDir, `${slug}.md`));
+    expect(res.path).toBe(fs.realpathSync(path.join(alphaDir, `${slug}.md`)));
     expect(fs.existsSync(path.join(alphaDir, `${slug}.md`))).toBe(true);
     // The global repo path is untouched.
     expect(walkFiles(globalDir).some((f) => f.endsWith('.md'))).toBe(false);
+  });
+
+  test('refuses an escaping intermediate symlink at the actual write sink', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const outsideDir = path.join(tmpRoot, 'outside');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.symlinkSync(outsideDir, path.join(brainDir, 'escape'));
+
+    const slug = 'escape/must-not-land';
+    await seedPage(slug);
+    const res = await writePageThrough(engine, slug, { sourceId: 'default' });
+
+    expect(res).toEqual({ written: false, skipped: 'path_escapes_source_root' });
+    expect(fs.existsSync(path.join(outsideDir, 'must-not-land.md'))).toBe(false);
+    expect(walkFiles(outsideDir)).toEqual([]);
   });
 
   test('[REGRESSION] mkdir ENOTDIR (parent is a file) → error, no partial .md, no .tmp', async () => {

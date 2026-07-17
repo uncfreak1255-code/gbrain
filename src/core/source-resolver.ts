@@ -16,10 +16,10 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync, realpathSync } from 'fs';
 import { join, dirname, relative, resolve } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { SOURCE_ID_RE, isValidSourceId } from './source-id.ts';
+import { readTrustedDotfile, realpathOrResolve } from './path-confine.ts';
 
 const DOTFILE = '.gbrain-source';
 // Canonical SOURCE_ID_RE imported from `source-id.ts` (single source of truth).
@@ -37,18 +37,21 @@ function readDotfileWalk(startDir: string): string | null {
   // Guard against infinite loops on malformed paths.
   for (let i = 0; i < 50; i++) {
     const candidate = join(dir, DOTFILE);
-    if (existsSync(candidate)) {
-      try {
-        const content = readFileSync(candidate, 'utf8').trim().split('\n')[0].trim();
-        // Silent-fallback tier per codex P1-F: invalid dotfile content
-        // (legacy ids with underscores, hand-edits with whitespace, etc.)
-        // falls through to the next tier instead of throwing. The CLI's
-        // explicit/env tiers throw; dotfiles are operator-edited and the
-        // forgiving behavior preserves the resolver's existing semantics.
-        if (isValidSourceId(content)) return content;
-      } catch {
-        // Unreadable dotfile — skip and keep walking.
-      }
+    // lstatSync (NOT statSync) so a planted symlink is seen here, not silently
+    // followed-then-trusted. Any stat error (ENOENT / permission) → skip this
+    // candidate and keep walking (fail-closed). On a multi-user host an
+    // attacker who can write a shared ancestor dir could otherwise plant a
+    // forged `.gbrain-source`; `isTrustedDotfile` refuses symlinks,
+    // foreign-owned, and world-writable files (#418).
+    const raw = readTrustedDotfile(candidate);
+    if (raw !== null) {
+      const content = raw.trim().split('\n')[0].trim();
+      // Silent-fallback tier per codex P1-F: invalid dotfile content
+      // (legacy ids with underscores, hand-edits with whitespace, etc.)
+      // falls through to the next tier instead of throwing. The CLI's
+      // explicit/env tiers throw; dotfiles are operator-edited and the
+      // forgiving behavior preserves the resolver's existing semantics.
+      if (isValidSourceId(content)) return content;
     }
     const parent = dirname(dir);
     if (parent === dir) break; // reached filesystem root
@@ -99,11 +102,7 @@ function gitTopLevel(startDir: string): string | null {
 }
 
 function canonicalPath(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve(path);
-  }
+  return realpathOrResolve(path);
 }
 
 function gitWorktreeInfo(startDir: string): GitWorktreeInfo | null {

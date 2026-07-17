@@ -154,10 +154,18 @@ export function computeSnapshotSchemaHash(
  * errors). Match the literal `$$bunfs` marker OR ENOENT+pglite.data
  * co-occurrence.
  */
-export type PgliteInitFailure = 'bunfs' | 'macos-26-3' | 'unknown';
+export type PgliteInitFailure = 'bunfs' | 'macos-26-3' | 'corrupt' | 'unknown';
 
 export function classifyPgliteInitError(message: string): PgliteInitFailure {
   if (/\$\$bunfs|ENOENT[\s\S]*pglite\.data/i.test(message)) return 'bunfs';
+  // #2348: a corrupted PGLite data dir (two OS processes opened it concurrently
+  // and trashed the catalog/extension state) surfaces as a 58P01 internal error
+  // loading the pgvector library, or the vector type / a core relation gone
+  // missing. Distinct, actionable cause — must beat the generic wasm-runtime
+  // match below so the user is pointed at recovery, not the macOS WASM bug.
+  if (/58P01|internal_load_library|type "?vector"? does not exist|relation "?content_chunks"? does not exist/i.test(message)) {
+    return 'corrupt';
+  }
   if (/abort.*runtime|macos.*26\.3|wasm.*runtime/i.test(message)) {
     return 'macos-26-3';
   }
@@ -183,6 +191,18 @@ export function buildPgliteInitErrorMessage(
       hint =
         '  This is most commonly the macOS 26.3 WASM bug:\n' +
         '  https://github.com/garrytan/gbrain/issues/223';
+      break;
+    case 'corrupt':
+      hint =
+        '  Your PGLite store looks corrupted (the catalog or the pgvector\n' +
+        '  extension cannot load). This happens when two processes opened the\n' +
+        '  same brain at once — now prevented (#2348), but an already-damaged\n' +
+        '  store cannot be repaired in place. Recover:\n' +
+        '    1. Restore a backup of the brain.pglite directory if you have one, OR\n' +
+        '    2. Rebuild from your brain repo:\n' +
+        '       gbrain reinit-pglite --embedding-model <id> --embedding-dimensions <N>\n' +
+        '       (wipes + re-inits + re-syncs; DB-only state is re-derived).\n' +
+        '  Deleting .gbrain-lock/ or postmaster.pid does NOT fix this.';
       break;
     case 'unknown':
     default:
@@ -3443,7 +3463,7 @@ export class PGLiteEngine implements BrainEngine {
     const result = await this.db.query<{ id: number; created: boolean }>(
       `INSERT INTO files (source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
-       ON CONFLICT (storage_path) DO UPDATE SET
+       ON CONFLICT (source_id, storage_path) DO UPDATE SET
          page_slug = EXCLUDED.page_slug,
          page_id = EXCLUDED.page_id,
          filename = EXCLUDED.filename,
@@ -4299,7 +4319,7 @@ export class PGLiteEngine implements BrainEngine {
 
   async searchTakes(
     query: string,
-    opts: { limit?: number; takesHoldersAllowList?: string[] } = {},
+    opts: SearchOpts & { takesHoldersAllowList?: string[] } = {},
   ): Promise<TakeHit[]> {
     const limit = clampSearchLimit(opts.limit, 30, 100);
     const { rows } = await this.db.query(
@@ -4311,16 +4331,24 @@ export class PGLiteEngine implements BrainEngine {
        WHERE t.active
          AND t.claim % $1
          AND ($2::text[] IS NULL OR t.holder = ANY($2::text[]))
+         AND ($4::text[] IS NULL OR p.source_id = ANY($4::text[]))
+         AND ($5::text IS NULL OR p.source_id = $5::text)
        ORDER BY score DESC, t.weight DESC
        LIMIT $3`,
-      [query, opts.takesHoldersAllowList ?? null, limit]
+      [
+        query,
+        opts.takesHoldersAllowList ?? null,
+        limit,
+        opts.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : null,
+        opts.sourceIds && opts.sourceIds.length > 0 ? null : (opts.sourceId ?? null),
+      ]
     );
     return rows as unknown as TakeHit[];
   }
 
   async searchTakesVector(
     embedding: Float32Array,
-    opts: { limit?: number; takesHoldersAllowList?: string[] } = {},
+    opts: SearchOpts & { takesHoldersAllowList?: string[] } = {},
   ): Promise<TakeHit[]> {
     const limit = clampSearchLimit(opts.limit, 30, 100);
     const vec = `[${Array.from(embedding).join(',')}]`;
@@ -4333,9 +4361,17 @@ export class PGLiteEngine implements BrainEngine {
        WHERE t.active
          AND t.embedding IS NOT NULL
          AND ($2::text[] IS NULL OR t.holder = ANY($2::text[]))
+         AND ($4::text[] IS NULL OR p.source_id = ANY($4::text[]))
+         AND ($5::text IS NULL OR p.source_id = $5::text)
        ORDER BY t.embedding <=> $1::vector
        LIMIT $3`,
-      [vec, opts.takesHoldersAllowList ?? null, limit]
+      [
+        vec,
+        opts.takesHoldersAllowList ?? null,
+        limit,
+        opts.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : null,
+        opts.sourceIds && opts.sourceIds.length > 0 ? null : (opts.sourceId ?? null),
+      ]
     );
     return rows as unknown as TakeHit[];
   }

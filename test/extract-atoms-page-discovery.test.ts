@@ -20,6 +20,8 @@ import {
 } from '../src/core/cycle/extract-atoms.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import type { ChatOpts, ChatResult } from '../src/core/ai/gateway.ts';
+import { createHash } from 'node:crypto';
+import { emptyHome, withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 
@@ -50,7 +52,7 @@ function stubChat(text: string): (o: ChatOpts) => Promise<ChatResult> {
 
 /**
  * Stub that returns a unique-title atom on each call so atoms write to
- * distinct slugs (`atoms/${date}/${slugify(title)}`) instead of upserting
+ * distinct slugs (`atoms/<source-date>/<stem>-<identity-hash>`) instead of upserting
  * into one row. Needed for tests that count atoms after multiple work items.
  */
 function stubChatUnique(): (o: ChatOpts) => Promise<ChatResult> {
@@ -108,12 +110,11 @@ async function seedPage(opts: {
 }
 
 describe('v0.41.2.1: discoverExtractablePages SQL contract', () => {
-  test('filters by all 6 extractable types', async () => {
-    for (const type of ['meeting', 'source', 'article', 'video', 'book', 'original']) {
+  test('discovers legacy and pack-extractable types, excluding synthesis outputs', async () => {
+    for (const type of ['meeting', 'source', 'article', 'video', 'book', 'original', 'note']) {
       await seedPage({ slug: `${type}/x`, type });
     }
-    // Add a non-extractable page that should NOT appear
-    await seedPage({ slug: 'notes/skip-me', type: 'note' });
+    await seedPage({ slug: 'wiki/concepts/skip-me', type: 'concept' });
 
     const discovered = await discoverExtractablePages(engine, 'default');
     const slugs = discovered.map((d) => d.slug).sort();
@@ -121,13 +122,44 @@ describe('v0.41.2.1: discoverExtractablePages SQL contract', () => {
       'article/x',
       'book/x',
       'meeting/x',
+      'note/x',
       'original/x',
       'source/x',
       'video/x',
     ]);
   });
 
-  test('NOT EXISTS subquery skips pages whose source_hash has existing atoms', async () => {
+  test('honors brain-wide DB schema-pack selection', async () => {
+    await engine.setConfig('schema_pack', 'gbrain-investor');
+    await seedPage({ slug: 'theses/db-selected', type: 'thesis' });
+
+    const discovered = await withEnv(
+      { GBRAIN_HOME: emptyHome(), GBRAIN_SCHEMA_PACK: undefined },
+      () => discoverExtractablePages(engine, 'default'),
+    );
+    expect(discovered.map((page) => page.slug)).toEqual(['theses/db-selected']);
+  });
+
+  test('honors per-source DB schema-pack selection without widening siblings', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('dept-x', 'dept-x') ON CONFLICT DO NOTHING`,
+    );
+    await engine.setConfig('schema_pack.source.dept-x', 'gbrain-investor');
+    await seedPage({ slug: 'theses/default-skip', type: 'thesis' });
+    await seedPage({ slug: 'theses/dept-include', type: 'thesis', source_id: 'dept-x' });
+
+    const [fromDefault, fromDept] = await withEnv(
+      { GBRAIN_HOME: emptyHome(), GBRAIN_SCHEMA_PACK: undefined },
+      () => Promise.all([
+        discoverExtractablePages(engine, 'default'),
+        discoverExtractablePages(engine, 'dept-x'),
+      ]),
+    );
+    expect(fromDefault).toEqual([]);
+    expect(fromDept.map((page) => page.slug)).toEqual(['theses/dept-include']);
+  });
+
+  test('NOT EXISTS subquery skips pages whose source_hash has completed atoms', async () => {
     // Page content_hash is 20 chars; substring(from 1 for 16) yields the
     // first 16 chars. The seeded atom must carry exactly those 16 chars
     // in frontmatter.source_hash to match the subquery's comparison.
@@ -148,6 +180,28 @@ describe('v0.41.2.1: discoverExtractablePages SQL contract', () => {
 
     const discovered = await discoverExtractablePages(engine, 'default');
     expect(discovered.map((d) => d.slug)).toEqual(['meeting/new']);
+  });
+
+  test('current partial atom writes leave the source eligible for retry', async () => {
+    await seedPage({ slug: 'meeting/partial', type: 'meeting', content_hash: 'partial1234567890abc' });
+    await engine.putPage(
+      'atoms/undated-partial/first',
+      {
+        type: 'atom' as never,
+        title: 'First',
+        compiled_truth: 'body',
+        timeline: '',
+        frontmatter: {
+          source_hash: 'partial123456789',
+          source_complete: false,
+          extracted_by: 'extract_atoms-v0.46.0.0',
+        },
+      },
+      { sourceId: 'default' },
+    );
+
+    const discovered = await discoverExtractablePages(engine, 'default');
+    expect(discovered.map((d) => d.slug)).toEqual(['meeting/partial']);
   });
 
   test('markdown-greenfield pages excluded', async () => {
@@ -337,6 +391,111 @@ describe('v0.41.2.1: runPhaseExtractAtoms — dual-source merge + idempotency', 
       `SELECT COUNT(*)::int AS count FROM pages WHERE type = 'atom'`,
     );
     expect(after[0].count).toBe(before[0].count);
+  });
+
+  test('deterministic slug uses the source date and upserts a grown transcript', async () => {
+    const title = 'aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn ooo ppp';
+    const chat = stubChat(`[{"title":"${title}","atom_type":"insight","body":"b"}]`);
+    const filePath = '/srv/transcripts/2026-06-12-telegram.md';
+
+    await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath, content: 'first', contentHash: 'aaaa1111bbbb2222' }],
+      _pages: [],
+      _chat: chat,
+    });
+    await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath, content: 'first plus appended', contentHash: 'cccc3333dddd4444' }],
+      _pages: [],
+      _chat: chat,
+    });
+
+    const rows = await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE type = 'atom'`,
+    );
+    expect(rows).toHaveLength(1);
+    const slug = rows[0].slug;
+    expect(slug.startsWith('atoms/2026-06-12/')).toBe(true);
+    expect(slug).toMatch(/-[0-9a-f]{8}$/);
+    const stem = slug.slice('atoms/2026-06-12/'.length).replace(/-[0-9a-f]{8}$/, '');
+    expect(stem.endsWith('-')).toBe(false);
+    expect(stem.length).toBeLessThanOrEqual(60);
+  });
+
+  test('same-title atoms with different content write to distinct slugs', async () => {
+    const chat = stubChat(JSON.stringify([
+      { title: 'Shared headline', atom_type: 'insight', body: 'First distinct idea.' },
+      { title: 'Shared headline', atom_type: 'strategy', body: 'Second distinct idea.' },
+    ]));
+
+    await runPhaseExtractAtoms(engine, {
+      _transcripts: [{
+        filePath: '/srv/transcripts/2026-06-12-duplicate-title.md',
+        content: 'source',
+        contentHash: 'same-title-source',
+      }],
+      _pages: [],
+      _chat: chat,
+    });
+
+    const rows = await engine.executeRaw<{ slug: string; compiled_truth: string }>(
+      `SELECT slug, compiled_truth FROM pages WHERE type = 'atom' ORDER BY slug`,
+    );
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map(row => row.slug)).size).toBe(2);
+    expect(new Set(rows.map(row => row.compiled_truth))).toEqual(
+      new Set(['First distinct idea.', 'Second distinct idea.']),
+    );
+  });
+
+  test('undated sources use a stable source-derived bucket', async () => {
+    const filePath = '/srv/transcripts/plain-name.md';
+    const chat = stubChat('[{"title":"Stable","atom_type":"insight","body":"Same atom."}]');
+
+    await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath, content: 'first', contentHash: 'firsthash1234567' }],
+      _pages: [],
+      _chat: chat,
+    });
+    await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath, content: 'changed', contentHash: 'secondhash123456' }],
+      _pages: [],
+      _chat: chat,
+    });
+
+    const rows = await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE type = 'atom'`,
+    );
+    const bucket = createHash('sha256').update(filePath).digest('hex').slice(0, 8);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].slug.startsWith(`atoms/undated-${bucket}/`)).toBe(true);
+  });
+
+  test('the final atom write marks a source complete', async () => {
+    const chat = stubChat(JSON.stringify([
+      { title: 'First', atom_type: 'insight', body: 'One.' },
+      { title: 'Second', atom_type: 'strategy', body: 'Two.' },
+    ]));
+
+    await runPhaseExtractAtoms(engine, {
+      _transcripts: [{
+        filePath: '/srv/transcripts/2026-06-12-complete.md',
+        content: 'source',
+        contentHash: 'complete-source-hash',
+      }],
+      _pages: [],
+      _chat: chat,
+    });
+
+    const rows = await engine.executeRaw<{ complete: string }>(
+      `SELECT frontmatter->>'source_complete' AS complete
+         FROM pages WHERE type = 'atom' ORDER BY slug`,
+    );
+    expect(rows.map((row) => row.complete).sort()).toEqual(['false', 'true']);
+    const existing = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM pages
+        WHERE type = 'atom' AND frontmatter->>'source_complete' = 'true'`,
+    );
+    expect(existing[0].count).toBe(1);
   });
 
   test('PhaseResult.details has additive page fields populated', async () => {

@@ -43,6 +43,25 @@ async function seedAtom(slug: string, sourceHash: string, sourceId = 'default'):
   }, { sourceId });
 }
 
+async function seedCurrentAtom(
+  slug: string,
+  sourceHash: string,
+  sourceComplete: boolean,
+): Promise<void> {
+  await engine.putPage(slug, {
+    title: slug.split('/').pop() ?? slug,
+    type: 'atom',
+    compiled_truth: 'test atom body',
+    frontmatter: {
+      type: 'atom',
+      source_hash: sourceHash,
+      source_complete: sourceComplete,
+      extracted_by: 'extract_atoms-v0.46.0.0',
+    },
+    timeline: '',
+  });
+}
+
 describe('atomsExistingForHashes (T1 batch idempotency)', () => {
   test('empty input short-circuits without a query', async () => {
     const result = await atomsExistingForHashes(engine, 'default', []);
@@ -91,6 +110,21 @@ describe('atomsExistingForHashes (T1 batch idempotency)', () => {
     );
     const result = await atomsExistingForHashes(engine, 'default', ['ffffffffffffffff']);
     expect(result.size).toBe(0);
+  });
+
+  test('current partial writes retry while completed and legacy writes skip', async () => {
+    await seedCurrentAtom('atoms/undated-a/partial', 'partialhash00000', false);
+    await seedCurrentAtom('atoms/undated-b/complete', 'completehash0000', true);
+    await seedAtom('atoms/2026-05-26/legacy', 'legacyhash000000');
+
+    const result = await atomsExistingForHashes(engine, 'default', [
+      'partialhash00000',
+      'completehash0000',
+      'legacyhash000000',
+    ]);
+    expect(result.has('partialhash00000')).toBe(false);
+    expect(result.has('completehash0000')).toBe(true);
+    expect(result.has('legacyhash000000')).toBe(true);
   });
 
   test('fails open when query throws (returns empty Set, logs to stderr)', async () => {

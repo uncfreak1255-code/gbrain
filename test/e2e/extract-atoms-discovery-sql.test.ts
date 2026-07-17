@@ -11,6 +11,7 @@
  *   2. NOT EXISTS subquery skips already-extracted source pages
  *   3. sourceId scoping isolates between two seeded sources (no leak)
  *   4. ANY($2::text[]) binding actually filters by type set
+ *   5. A current-version partial atom write remains eligible for retry
  *
  * ~4 structural assertions; ~3-5s wallclock budget.
  * Skips gracefully when DATABASE_URL is unset.
@@ -38,7 +39,7 @@ afterAll(async () => {
 beforeEach(async () => {
   if (skip) return;
   // Clean test-source rows + atoms + meeting pages between tests
-  await engine.executeRaw(`DELETE FROM pages WHERE source_id IN ('default', 'dept-x') AND (type = 'atom' OR type IN ('meeting', 'source', 'article', 'video', 'book', 'original'))`);
+  await engine.executeRaw(`DELETE FROM pages WHERE source_id IN ('default', 'dept-x') AND (type = 'atom' OR type IN ('meeting', 'source', 'article', 'video', 'book', 'original', 'note', 'concept'))`);
   await engine.executeRaw(`DELETE FROM sources WHERE id = 'dept-x'`);
 });
 
@@ -72,36 +73,39 @@ async function seedPage(opts: {
 
 describeIfDB('v0.41.2.1 D10 — discoverExtractablePages on real Postgres', () => {
   test('returns extractable rows when seeded', async () => {
-    await seedPage({ slug: 'meeting/a', type: 'meeting', content_hash: 'hash-A-1234567890abc' });
-    await seedPage({ slug: 'source/b', type: 'source', content_hash: 'hash-B-1234567890abc' });
-    await seedPage({ slug: 'notes/skip', type: 'note', content_hash: 'hash-N-1234567890abc' });
+    await seedPage({ slug: 'meeting/a', type: 'meeting', content_hash: 'hash-A-abcdefghijklmn' });
+    await seedPage({ slug: 'source/b', type: 'source', content_hash: 'hash-B-abcdefghijklmn' });
+    await seedPage({ slug: 'note/c', type: 'note', content_hash: 'hash-N-abcdefghijklmn' });
+    await seedPage({ slug: 'concepts/skip', type: 'concept', content_hash: 'hash-C-abcdefghijklmn' });
 
     const discovered = await discoverExtractablePages(engine, 'default');
     const slugs = discovered.map((d) => d.slug).sort();
     expect(slugs).toContain('meeting/a');
     expect(slugs).toContain('source/b');
-    expect(slugs).not.toContain('notes/skip');
+    expect(slugs).toContain('note/c');
+    expect(slugs).not.toContain('concepts/skip');
   });
 
   test('ANY($::text[]) bind works through postgres.unsafe (PGLite parity proof)', async () => {
-    // Seed all 6 extractable types + one non-extractable. The SQL uses
+    // Seed all legacy + pack-extractable types and one synthesis output. The SQL uses
     // type = ANY($2::text[]) — if the binding shape differs between
     // PGLite and postgres.js's unsafe(), this catches it.
     for (const type of ['meeting', 'source', 'article', 'video', 'book', 'original']) {
-      await seedPage({ slug: `${type}/x`, type, content_hash: `hash-${type}-1234567890ab` });
+      await seedPage({ slug: `${type}/x`, type, content_hash: `hash-${type}-abcdefghijkl` });
     }
-    await seedPage({ slug: 'note/skip', type: 'note', content_hash: 'hash-note-1234567890' });
+    await seedPage({ slug: 'note/x', type: 'note', content_hash: 'hash-note-abcdefghij' });
+    await seedPage({ slug: 'concept/skip', type: 'concept', content_hash: 'hash-concept-abcdef' });
 
     const discovered = await discoverExtractablePages(engine, 'default');
     const slugs = discovered.map((d) => d.slug).sort();
     expect(slugs).toEqual([
-      'article/x', 'book/x', 'meeting/x', 'original/x', 'source/x', 'video/x',
+      'article/x', 'book/x', 'meeting/x', 'note/x', 'original/x', 'source/x', 'video/x',
     ]);
   });
 
   test('NOT EXISTS subquery skips pages with existing atoms', async () => {
-    await seedPage({ slug: 'meeting/old', type: 'meeting', content_hash: 'oldhash1234567890abc' });
-    await seedPage({ slug: 'meeting/new', type: 'meeting', content_hash: 'newhash1234567890abc' });
+    await seedPage({ slug: 'meeting/old', type: 'meeting', content_hash: 'oldhashabcdefghijklmn' });
+    await seedPage({ slug: 'meeting/new', type: 'meeting', content_hash: 'newhashabcdefghijklmn' });
     // Seed atom with frontmatter.source_hash = first 16 chars of oldhash
     await engine.putPage(
       'atoms/seeded/old-insight',
@@ -110,7 +114,7 @@ describeIfDB('v0.41.2.1 D10 — discoverExtractablePages on real Postgres', () =
         title: 'old',
         compiled_truth: 'b',
         timeline: '',
-        frontmatter: { source_hash: 'oldhash123456789' }, // first 16 chars of seed
+        frontmatter: { source_hash: 'oldhashabcdefghi' }, // first 16 chars of seed
       },
       { sourceId: 'default' },
     );
@@ -119,12 +123,34 @@ describeIfDB('v0.41.2.1 D10 — discoverExtractablePages on real Postgres', () =
     expect(discovered.map((d) => d.slug)).toEqual(['meeting/new']);
   });
 
+  test('current partial atom writes remain eligible for retry', async () => {
+    await seedPage({ slug: 'meeting/partial', type: 'meeting', content_hash: 'partialabcdefghijklmn' });
+    await engine.putPage(
+      'atoms/undated-partial/first',
+      {
+        type: 'atom' as never,
+        title: 'partial',
+        compiled_truth: 'b',
+        timeline: '',
+        frontmatter: {
+          source_hash: 'partialabcdefghi',
+          source_complete: false,
+          extracted_by: 'extract_atoms-v0.46.0.0',
+        },
+      },
+      { sourceId: 'default' },
+    );
+
+    const discovered = await discoverExtractablePages(engine, 'default');
+    expect(discovered.map((d) => d.slug)).toEqual(['meeting/partial']);
+  });
+
   test('sourceId scopes both candidate AND atom-existence subquery — no cross-source leak', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name) VALUES ('dept-x', 'dept-x') ON CONFLICT DO NOTHING`,
     );
-    await seedPage({ slug: 'meeting/a-default', type: 'meeting', content_hash: 'hash-default-A-12345' });
-    await seedPage({ slug: 'meeting/a-dept-x', type: 'meeting', content_hash: 'hash-dept-x-A-12345', source_id: 'dept-x' });
+    await seedPage({ slug: 'meeting/a-default', type: 'meeting', content_hash: 'hash-default-A-abcde' });
+    await seedPage({ slug: 'meeting/a-dept-x', type: 'meeting', content_hash: 'hash-dept-x-A-abcde', source_id: 'dept-x' });
 
     const fromDefault = await discoverExtractablePages(engine, 'default');
     const fromDeptX = await discoverExtractablePages(engine, 'dept-x');

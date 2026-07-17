@@ -2426,6 +2426,8 @@ ADMIN
   serve --http [--port N]            HTTP MCP server with OAuth 2.1
     --token-ttl N                    Access token TTL in seconds (default: 3600)
     --enable-dcr                     Enable Dynamic Client Registration
+    --suppress-bootstrap-token       Never print the generated admin token
+    --print-admin-token              Print it even when stderr is not a TTY
     --public-url URL                 Public issuer URL (required behind proxy/tunnel)
   connect <mcp-url> --token <t>      Wire Claude Code to a remote gbrain (bearer token)
         [--install] [--json]         Print the paste-ready command, or --install to run it

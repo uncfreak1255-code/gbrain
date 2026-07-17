@@ -19,9 +19,9 @@
  * parent's brainId instead of re-running this resolver.
  */
 
-import { readFileSync, existsSync } from 'fs';
-import { join, dirname, resolve } from 'path';
+import { join, dirname, resolve, relative, isAbsolute } from 'path';
 import { HOST_BRAIN_ID, loadMounts, validateMountId, type MountEntry } from './brain-registry.ts';
+import { readTrustedDotfile, realpathOrResolve } from './path-confine.ts';
 
 const DOTFILE = '.gbrain-mount';
 /** Same regex as brain-registry. Kept in sync. */
@@ -36,14 +36,15 @@ function readDotfileWalk(startDir: string): string | null {
   let dir = resolve(startDir);
   for (let i = 0; i < 50; i++) {
     const candidate = join(dir, DOTFILE);
-    if (existsSync(candidate)) {
-      try {
-        const content = readFileSync(candidate, 'utf8').trim().split('\n')[0].trim();
-        if (content === HOST_BRAIN_ID) return content;
-        if (BRAIN_ID_RE.test(content)) return content;
-      } catch {
-        // Unreadable dotfile — skip and keep walking.
-      }
+    // lstatSync (NOT statSync) + isTrustedDotfile: refuse a symlink, foreign-
+    // owned, or world-writable `.gbrain-mount` planted by another user in a
+    // shared ancestor dir (same multi-user-host hijack as #418, applied to the
+    // brain axis). Any stat error → skip and keep walking (fail-closed).
+    const raw = readTrustedDotfile(candidate);
+    if (raw !== null) {
+      const content = raw.trim().split('\n')[0].trim();
+      if (content === HOST_BRAIN_ID) return content;
+      if (BRAIN_ID_RE.test(content)) return content;
     }
     const parent = dirname(dir);
     if (parent === dir) break; // filesystem root
@@ -54,12 +55,16 @@ function readDotfileWalk(startDir: string): string | null {
 
 /** Longest-prefix match: find the mount whose `path` contains `cwd`. */
 function longestPathPrefixMount(mounts: MountEntry[], cwd: string): MountEntry | null {
-  const cwdResolved = resolve(cwd);
+  // realpath both sides so a symlinked CWD can't forge a prefix match against a
+  // mount path it doesn't really live under (codex #9, brain-axis mirror of the
+  // source-resolver fix). Falls back to lexical resolve() for a stale mount path.
+  const cwdResolved = realpathOrResolve(cwd);
   let best: { mount: MountEntry; pathLen: number } | null = null;
   for (const m of mounts) {
     if (m.enabled === false) continue;
-    const p = resolve(m.path);
-    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
+    const p = realpathOrResolve(m.path);
+    const rel = relative(p, cwdResolved);
+    if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
       if (!best || p.length > best.pathLen) {
         best = { mount: m, pathLen: p.length };
       }

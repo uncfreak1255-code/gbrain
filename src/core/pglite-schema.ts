@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS pages (
   -- (mirrors src/schema.sql). NULL = never extracted. Powers
   -- gbrain extract --stale + the links_extraction_lag doctor check.
   links_extracted_at    TIMESTAMPTZ,
+  -- v0.46.0.0 (migration v123): Takes bootstrap completion watermark.
+  takes_extracted_content_hash TEXT,
   -- v0.40.3.0 contextual retrieval (renumbered from v81 to v90 on master
   -- merge; mirrors src/schema.sql).
   -- contextual_retrieval_mode is the tier the page was last embedded under;
@@ -124,7 +126,7 @@ CREATE TABLE IF NOT EXISTS pages (
 -- bookmark gate fires for any cache row stored before the new page existed.
 -- UPDATE: bumps only when content columns IS DISTINCT FROM (allow-list of
 -- 10 widened per D6) so read-time mutations don't invalidate every cache.
-CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger AS $func$
+CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   IF (TG_OP = 'INSERT') THEN
     NEW.generation := COALESCE((SELECT MAX(generation) FROM pages), 0) + 1;
@@ -179,7 +181,7 @@ SELECT setval('page_generation_clock_seq', GREATEST(
   COALESCE((SELECT MAX(generation) FROM pages), 0)
 ));
 
-CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
+CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   PERFORM nextval('page_generation_clock_seq');
   RETURN NULL;
@@ -337,8 +339,8 @@ CREATE INDEX IF NOT EXISTS idx_raw_data_page ON raw_data(page_id);
 -- ============================================================
 -- files: binary asset metadata (v0.27.1 — PGLite parity for multimodal)
 -- Image bytes never enter the DB; storage_path references a path in the
--- brain repo. Identity is (source_id, storage_path) via the UNIQUE
--- constraint on storage_path; upserts replace metadata in place.
+-- brain repo. Identity is (source_id, storage_path); upserts replace
+-- metadata in place without colliding with another source's same path.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS files (
   id           SERIAL PRIMARY KEY,
@@ -353,7 +355,7 @@ CREATE TABLE IF NOT EXISTS files (
   content_hash TEXT   NOT NULL,
   metadata     JSONB  NOT NULL DEFAULT '{}',
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(storage_path)
+  CONSTRAINT files_source_storage_path_key UNIQUE(source_id, storage_path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_page ON files(page_slug);
@@ -1019,7 +1021,7 @@ ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
 
-CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $$
 DECLARE
   timeline_text TEXT;
 BEGIN

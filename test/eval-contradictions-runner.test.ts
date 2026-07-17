@@ -155,6 +155,23 @@ describe('runContradictionProbe', () => {
     expect(finding.b.holder).toBe('garry');
   });
 
+  test('ignores synthetic results without a positive int32 page id', async () => {
+    const out = await runContradictionProbe({
+      engine,
+      queries: ['synthetic result'],
+      judgeFn: stubJudge({}),
+      searchFn: async () => [
+        { ...mkResult('synthetic/result', 1, 1, 'synthetic'), page_id: Number.NaN },
+        { ...mkResult('synthetic/result', 1, 2, 'synthetic'), page_id: 1.5 },
+        { ...mkResult('synthetic/result', 1, 3, 'synthetic'), page_id: -1 },
+        { ...mkResult('synthetic/result', 1, 4, 'synthetic'), page_id: 2_147_483_648 },
+      ],
+      budgetUsd: 5,
+    });
+
+    expect(out.report.per_query[0].pairs_judged).toBe(0);
+  });
+
   test('same-slug pairs are NOT generated (cross_slug skip rule)', async () => {
     const idA = await seedPage('a/page', 'A');
     const out = await runContradictionProbe({

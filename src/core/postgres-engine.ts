@@ -3532,7 +3532,7 @@ export class PostgresEngine implements BrainEngine {
     const rows = await sql<Array<{ id: number; created: boolean }>>`
       INSERT INTO files (source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
       VALUES (${sourceId}, ${spec.page_slug ?? null}, ${spec.page_id ?? null}, ${spec.filename}, ${spec.storage_path}, ${spec.mime_type ?? null}, ${spec.size_bytes ?? null}, ${spec.content_hash}, ${sql.json(metadata)})
-      ON CONFLICT (storage_path) DO UPDATE SET
+      ON CONFLICT (source_id, storage_path) DO UPDATE SET
         page_slug = EXCLUDED.page_slug,
         page_id = EXCLUDED.page_id,
         filename = EXCLUDED.filename,
@@ -4355,6 +4355,11 @@ export class PostgresEngine implements BrainEngine {
   async searchTakes(query: string, opts: SearchOpts & { takesHoldersAllowList?: string[] } = {}): Promise<TakeHit[]> {
     const sql = this.sql;
     const limit = clampSearchLimit(opts.limit, 30, 100);
+    const sourceFilter = opts.sourceIds && opts.sourceIds.length > 0
+      ? sql`AND p.source_id = ANY(${opts.sourceIds}::text[])`
+      : opts.sourceId
+        ? sql`AND p.source_id = ${opts.sourceId}`
+        : sql``;
     const rows = await sql`
       SELECT t.id AS take_id, t.page_id, p.slug AS page_slug, t.row_num,
              t.claim, t.kind, t.holder, t.weight,
@@ -4367,6 +4372,7 @@ export class PostgresEngine implements BrainEngine {
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
+        ${sourceFilter}
       ORDER BY score DESC, t.weight DESC
       LIMIT ${limit}
     `;
@@ -4380,6 +4386,11 @@ export class PostgresEngine implements BrainEngine {
     const sql = this.sql;
     const limit = clampSearchLimit(opts.limit, 30, 100);
     const vec = `[${Array.from(embedding).join(',')}]`;
+    const sourceFilter = opts.sourceIds && opts.sourceIds.length > 0
+      ? sql`AND p.source_id = ANY(${opts.sourceIds}::text[])`
+      : opts.sourceId
+        ? sql`AND p.source_id = ${opts.sourceId}`
+        : sql``;
     const rows = await sql`
       SELECT t.id AS take_id, t.page_id, p.slug AS page_slug, t.row_num,
              t.claim, t.kind, t.holder, t.weight,
@@ -4392,6 +4403,7 @@ export class PostgresEngine implements BrainEngine {
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
+        ${sourceFilter}
       ORDER BY t.embedding <=> ${vec}::vector
       LIMIT ${limit}
     `;

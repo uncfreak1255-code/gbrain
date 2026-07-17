@@ -474,6 +474,19 @@ export function sourceScopeOpts(ctx: OperationContext): { sourceId?: string; sou
   return {};
 }
 
+/** Map the operation-layer scope names onto runThink's public options. */
+export function thinkSourceScopeOpts(ctx: OperationContext): {
+  sourceId?: string;
+  allowedSources?: string[];
+} {
+  const scope = sourceScopeOpts(ctx);
+  return scope.sourceIds !== undefined
+    ? { allowedSources: scope.sourceIds }
+    : scope.sourceId !== undefined
+      ? { sourceId: scope.sourceId }
+      : {};
+}
+
 /**
  * #2200: source scope for the LINK read ops (get_links / get_backlinks). A link
  * row references three pages (from, to, origin); the engine's federated
@@ -1849,6 +1862,7 @@ const takes_search: Operation = {
     return ctx.engine.searchTakes(p.query as string, {
       limit: p.limit as number | undefined,
       takesHoldersAllowList: ctx.takesHoldersAllowList,
+      ...sourceScopeOpts(ctx),
     });
   },
   cliHints: { name: 'takes-search', positional: ['query'] },
@@ -1935,7 +1949,7 @@ const think: Operation = {
     // present) OR the scalar; we pass both through to runThink which
     // forwards to findTrajectory. CLI callers don't go through this op
     // and get default scope + remote=false from runThink's CLI path.
-    const scope = sourceScopeOpts(ctx);
+    const thinkScope = thinkSourceScopeOpts(ctx);
     const { runThink, persistSynthesis } = await import('./think/index.ts');
     const result = await runThink(ctx.engine, {
       question: String(p.question),
@@ -1952,8 +1966,7 @@ const think: Operation = {
       since: p.since ? String(p.since) : undefined,
       until: p.until ? String(p.until) : undefined,
       takesHoldersAllowList: ctx.takesHoldersAllowList,
-      ...(scope.sourceId !== undefined ? { sourceId: scope.sourceId } : {}),
-      ...(scope.sourceIds !== undefined ? { allowedSources: scope.sourceIds } : {}),
+      ...thinkScope,
       remote: ctx.remote === true,
     });
 
@@ -2764,13 +2777,20 @@ const file_list: Operation = {
   },
   scope: 'admin',
   localOnly: true,
-  handler: async (_ctx, p) => {
+  handler: async (ctx, p) => {
     const sql = db.getConnection();
     const slug = p.slug as string | undefined;
-    if (slug) {
-      return sql`SELECT id, page_slug, filename, storage_path, mime_type, size_bytes, content_hash, created_at FROM files WHERE page_slug = ${slug} ORDER BY filename LIMIT ${FILE_LIST_LIMIT}`;
-    }
-    return sql`SELECT id, page_slug, filename, storage_path, mime_type, size_bytes, content_hash, created_at FROM files ORDER BY page_slug, filename LIMIT ${FILE_LIST_LIMIT}`;
+    const sourceId = ctx.sourceId || 'default';
+    const rows = slug
+      ? await sql`SELECT id, source_id, page_slug, filename, storage_path, mime_type, size_bytes, content_hash, created_at FROM files WHERE source_id = ${sourceId} AND page_slug = ${slug} ORDER BY filename LIMIT ${FILE_LIST_LIMIT}`
+      : await sql`SELECT id, source_id, page_slug, filename, storage_path, mime_type, size_bytes, content_hash, created_at FROM files WHERE source_id = ${sourceId} ORDER BY page_slug, filename LIMIT ${FILE_LIST_LIMIT}`;
+    // Postgres returns size_bytes (BIGINT) as native BigInt — JSON.stringify
+    // throws on those, breaking MCP callers. PGLite returns Number already.
+    // 9 PB ceiling (2^53 bytes) is far above any plausible file size.
+    return rows.map((r: Record<string, unknown>) => ({
+      ...r,
+      size_bytes: r.size_bytes == null ? null : Number(r.size_bytes),
+    }));
   },
 };
 
@@ -2793,6 +2813,7 @@ const file_upload: Operation = {
 
     const filePath = p.path as string;
     const pageSlug = (p.page_slug as string) || null;
+    const sourceId = ctx.sourceId || 'default';
 
     // Fix 1 / B5 / H5 / M4: validate path, slug, filename before any filesystem read.
     // Remote callers (MCP, agent) are confined to cwd (strict). Local CLI callers
@@ -2808,6 +2829,8 @@ const file_upload: Operation = {
     const content = readFileSync(filePath);
     const hash = createHash('sha256').update(content).digest('hex');
     const storagePath = pageSlug ? `${pageSlug}/${filename}` : `unsorted/${hash.slice(0, 8)}-${filename}`;
+    const { sourceScopedStorageKey } = await import('./storage.ts');
+    const storageObjectKey = sourceScopedStorageKey(sourceId, storagePath);
 
     const MIME_TYPES: Record<string, string> = {
       '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -2816,9 +2839,8 @@ const file_upload: Operation = {
     };
     const mimeType = MIME_TYPES[extname(filePath).toLowerCase()] || null;
 
-    const sql = db.getConnection();
-    const existing = await sql`SELECT id FROM files WHERE content_hash = ${hash} AND storage_path = ${storagePath}`;
-    if (existing.length > 0) {
+    const existing = await ctx.engine.getFile(sourceId, storagePath);
+    if (existing?.content_hash === hash) {
       return { status: 'already_exists', storage_path: storagePath };
     }
 
@@ -2827,28 +2849,30 @@ const file_upload: Operation = {
       const { createStorage } = await import('./storage.ts');
       const storage = await createStorage(ctx.config.storage as any);
       try {
-        await storage.upload(storagePath, content, mimeType || undefined);
+        await storage.upload(storageObjectKey, content, mimeType || undefined);
       } catch (uploadErr) {
         throw new OperationError('storage_error', `Upload failed: ${uploadErr instanceof Error ? uploadErr.message : String(uploadErr)}`);
       }
     }
 
     try {
-      await sql`
-        INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
-        VALUES (${pageSlug}, ${filename}, ${storagePath}, ${mimeType}, ${stat.size}, ${hash}, ${'{}'}::jsonb)
-        ON CONFLICT (storage_path) DO UPDATE SET
-          content_hash = EXCLUDED.content_hash,
-          size_bytes = EXCLUDED.size_bytes,
-          mime_type = EXCLUDED.mime_type
-      `;
+      await ctx.engine.upsertFile({
+        source_id: sourceId,
+        page_slug: pageSlug,
+        filename,
+        storage_path: storagePath,
+        mime_type: mimeType,
+        size_bytes: stat.size,
+        content_hash: hash,
+        metadata: ctx.config.storage ? { storage_object_key: storageObjectKey } : {},
+      });
     } catch (dbErr) {
       // Rollback: clean up storage if DB write failed
       if (ctx.config.storage) {
         try {
           const { createStorage } = await import('./storage.ts');
           const storage = await createStorage(ctx.config.storage as any);
-          await storage.delete(storagePath);
+          await storage.delete(storageObjectKey);
         } catch { /* best effort cleanup */ }
       }
       throw dbErr;
@@ -2866,14 +2890,16 @@ const file_url: Operation = {
   },
   scope: 'admin',
   localOnly: true,
-  handler: async (_ctx, p) => {
-    const sql = db.getConnection();
-    const rows = await sql`SELECT storage_path, mime_type, size_bytes FROM files WHERE storage_path = ${p.storage_path as string}`;
-    if (rows.length === 0) {
+  handler: async (ctx, p) => {
+    const storagePath = p.storage_path as string;
+    const row = await ctx.engine.getFile(ctx.sourceId || 'default', storagePath);
+    if (!row) {
       throw new OperationError('storage_error', `File not found: ${p.storage_path}`);
     }
+    const { storedObjectKey } = await import('./storage.ts');
+    const storageObjectKey = storedObjectKey(row);
     // TODO: generate signed URL from Supabase Storage
-    return { storage_path: rows[0].storage_path, url: `gbrain:files/${rows[0].storage_path}` };
+    return { storage_path: row.storage_path, url: `gbrain:files/${storageObjectKey}` };
   },
 };
 
