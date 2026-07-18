@@ -11,7 +11,12 @@ import { describe, test, expect } from 'bun:test';
 import { writeFileSync, mkdtempSync, rmSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { buildPrivacySafeReplayDrill, runEvalReplay, type ReplayRowResult } from '../src/commands/eval-replay.ts';
+import {
+  buildPrivacySafeReplayDrill,
+  replayExpansionOpts,
+  runEvalReplay,
+  type ReplayRowResult,
+} from '../src/commands/eval-replay.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { SearchResult } from '../src/core/types.ts';
 
@@ -329,6 +334,68 @@ describe('gbrain eval replay — happy path', () => {
     expect(operationsSource).toContain('detail: replayDetail ?? undefined');
     expect(replaySource).toContain('detail: replaySurface.detail ?? row.detail_resolved ?? row.detail ?? undefined');
     expect(replaySource).toContain('mode: opts.mode ?? replaySurface.mode');
+  });
+
+  test('pinned expansion replay returns stored variants and disables semantic cache', async () => {
+    const surface = {
+      schema_version: 1 as const,
+      pipeline: 'query_op_v1' as const,
+      expansion: true,
+      useCache: true,
+      expansionQueries: ['original query', 'pinned expansion'],
+    };
+
+    const opts = replayExpansionOpts(surface, true);
+
+    expect(opts.expansion).toBe(true);
+    expect(opts.useCache).toBe(false);
+    expect(await opts.expandFn?.('ignored live query')).toEqual([
+      'original query',
+      'pinned expansion',
+    ]);
+  });
+
+  test('labels unpinned expanded replay surfaces without losing privacy state', async () => {
+    await withTmp(async (dir) => {
+      const lines = [
+        JSON.stringify(makeCapturedRow({
+          id: 1,
+          tool_name: 'query',
+          query: 'q1',
+          retrieved_slugs: ['a'],
+          replay_surface: {
+            schema_version: 1,
+            pipeline: 'query_op_v1',
+            expansion: true,
+          },
+        })),
+        JSON.stringify(makeCapturedRow({
+          id: 2,
+          tool_name: 'query',
+          query: 'q2',
+          retrieved_slugs: ['b'],
+          replay_surface: {
+            schema_version: 1,
+            pipeline: 'query_op_v1',
+            expansion: true,
+            privacy_scrubbed: true,
+          },
+        })),
+      ].join('\n') + '\n';
+      const file = join(dir, 'baseline.ndjson');
+      writeFileSync(file, lines);
+      const engine = makeStubEngine({});
+
+      const cap = captureStdoutStderr();
+      await runEvalReplay(engine, ['--against', file, '--json', '--verbose']);
+      const { stdout } = cap.restore();
+      const out = JSON.parse(stdout);
+
+      expect(out.summary.replay_surface_counts).toEqual({
+        query_op_v1_expansion_unpinned: 1,
+        query_op_v1_privacy_scrubbed_expansion_unpinned: 1,
+      });
+    });
   });
 
   test('uses captured replay surface limit by default', async () => {

@@ -297,8 +297,46 @@ function sourceScopeFromSurface(surface: EvalReplaySurface): { sourceId?: string
 }
 
 function replaySurfaceLabel(row: CapturedRow, surface: EvalReplaySurface | null): string {
-  if (surface) return surface.privacy_scrubbed ? `${surface.pipeline}_privacy_scrubbed` : surface.pipeline;
+  if (surface) {
+    const labels: string[] = [surface.pipeline];
+    if (surface.privacy_scrubbed) labels.push('privacy_scrubbed');
+    if (
+      surface.pipeline === 'query_op_v1'
+      && surface.expansion
+      && !surface.expansionQueries?.length
+    ) {
+      labels.push('expansion_unpinned');
+    }
+    return labels.join('_');
+  }
   return row.tool_name === 'query' ? 'legacy_bare_hybrid' : 'legacy_keyword';
+}
+
+export function replayExpansionOpts(
+  surface: EvalReplaySurface,
+  rowExpandEnabled: boolean | null | undefined,
+): {
+  expansion: boolean;
+  expandFn?: (query: string) => Promise<string[]>;
+  useCache?: boolean;
+} {
+  const expansion = surface.expansion ?? rowExpandEnabled ?? false;
+  const pinnedQueries =
+    expansion && surface.expansionQueries?.length
+      ? [...surface.expansionQueries]
+      : undefined;
+
+  return {
+    expansion,
+    expandFn: expansion
+      ? pinnedQueries
+        ? async () => [...pinnedQueries]
+        : expandQuery
+      : undefined,
+    // A warm semantic-cache row can bypass expandFn entirely. Pinned replay
+    // must execute the stored variants, so it always disables the cache.
+    useCache: pinnedQueries ? false : surface.useCache,
+  };
 }
 
 async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts = {}): Promise<ReplayRowResult> {
@@ -340,12 +378,12 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
         });
       }
     } else if (replaySurface?.pipeline === 'query_op_v1') {
-      const expansion = replaySurface.expansion ?? row.expand_enabled ?? false;
+      const expansionOpts = replayExpansionOpts(replaySurface, row.expand_enabled);
       current = await hybridSearchCached(engine, row.query, {
         limit,
         offset: replaySurface.offset ?? 0,
-        expansion,
-        expandFn: expansion ? expandQuery : undefined,
+        expansion: expansionOpts.expansion,
+        expandFn: expansionOpts.expandFn,
         detail: replaySurface.detail ?? row.detail_resolved ?? row.detail ?? undefined,
         mode: opts.mode ?? replaySurface.mode,
         language: replaySurface.language,
@@ -357,7 +395,7 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
         since: replaySurface.since,
         until: replaySurface.until,
         tokenBudget: replaySurface.tokenBudget,
-        useCache: replaySurface.useCache,
+        useCache: expansionOpts.useCache,
         intentWeighting: replaySurface.intentWeighting,
         crossModal: replaySurface.crossModal,
         embeddingColumn: replaySurface.embeddingColumn ?? row.embedding_column ?? undefined,

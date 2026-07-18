@@ -92,7 +92,17 @@ export function buildEvalCandidateInput(
 ): EvalCandidateInput {
   const shouldScrub = opts.scrub_pii !== false;
   const query = shouldScrub ? scrubPii(ctx.query) : ctx.query;
-  const replaySurface = sanitizeReplaySurface(ctx.replay_surface ?? null, shouldScrub);
+  const rawReplaySurface =
+    ctx.replay_surface
+    && ctx.meta.expansion_applied
+    && ctx.meta.expansion_queries?.length
+    && ctx.meta.cache?.status !== 'hit'
+      ? {
+          ...ctx.replay_surface,
+          expansionQueries: [...ctx.meta.expansion_queries],
+        }
+      : ctx.replay_surface ?? null;
+  const replaySurface = sanitizeReplaySurface(rawReplaySurface, shouldScrub);
 
   // Deduplicate + preserve order for slug + source_id extraction.
   // Both arrays are small (hybridSearch clamps at 100 results) so the
@@ -168,6 +178,11 @@ function sanitizeReplaySurface(
   }
 
   let scrubbed = omittedFields.length > 0;
+  if (safe.expansionQueries) {
+    const scrubbedQueries = safe.expansionQueries.map(scrubPii);
+    scrubbed ||= scrubbedQueries.some((value, index) => value !== safe.expansionQueries![index]);
+    safe.expansionQueries = scrubbedQueries;
+  }
   for (const field of ['language', 'symbolKind', 'since', 'until', 'embeddingColumn'] as const) {
     const result = scrubOptionalString(safe[field]);
     safe[field] = result.value;
@@ -231,6 +246,10 @@ async function doCaptureEvalCandidate(
   ctx: CaptureContext,
   opts: { scrub_pii?: boolean } = {},
 ): Promise<void> {
+  // A semantic-cache hit may come from a similar query, so its result set and
+  // expansion variants are not an independent replay surface for this query.
+  if (ctx.meta.cache?.status === 'hit') return;
+
   try {
     const input = buildEvalCandidateInput(ctx, opts);
     await engine.logEvalCandidate(input);
