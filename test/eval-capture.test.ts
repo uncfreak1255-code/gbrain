@@ -155,6 +155,87 @@ describe('buildEvalCandidateInput', () => {
     });
   });
 
+  test('copies and scrubs the exact expansion variants into the replay surface', () => {
+    const input = buildEvalCandidateInput(
+      makeCtx({
+        meta: {
+          vector_enabled: true,
+          detail_resolved: 'medium',
+          expansion_applied: true,
+          expansion_queries: [
+            'email alice@example.com about the ticket',
+            'ticket status for alice@example.com',
+          ],
+        },
+        replay_surface: {
+          schema_version: 1,
+          pipeline: 'query_op_v1',
+          expansion: true,
+        },
+      }),
+    );
+
+    expect(input.replay_surface).toEqual({
+      schema_version: 1,
+      pipeline: 'query_op_v1',
+      expansion: true,
+      expansionQueries: [
+        'email [REDACTED] about the ticket',
+        'ticket status for [REDACTED]',
+      ],
+      privacy_scrubbed: true,
+    });
+  });
+
+  test('does not add expansion variants when expansion did not apply', () => {
+    const input = buildEvalCandidateInput(
+      makeCtx({
+        meta: {
+          vector_enabled: true,
+          detail_resolved: 'medium',
+          expansion_applied: false,
+          expansion_queries: ['must not persist'],
+        },
+        replay_surface: {
+          schema_version: 1,
+          pipeline: 'query_op_v1',
+          expansion: false,
+        },
+      }),
+    );
+
+    expect(input.replay_surface).toEqual({
+      schema_version: 1,
+      pipeline: 'query_op_v1',
+      expansion: false,
+    });
+  });
+
+  test('does not pin variants inherited from a semantic-cache hit', () => {
+    const input = buildEvalCandidateInput(
+      makeCtx({
+        meta: {
+          vector_enabled: true,
+          detail_resolved: 'medium',
+          expansion_applied: true,
+          expansion_queries: ['cached original', 'cached expansion'],
+          cache: { status: 'hit', similarity: 0.95 },
+        },
+        replay_surface: {
+          schema_version: 1,
+          pipeline: 'query_op_v1',
+          expansion: true,
+        },
+      }),
+    );
+
+    expect(input.replay_surface).toEqual({
+      schema_version: 1,
+      pipeline: 'query_op_v1',
+      expansion: true,
+    });
+  });
+
   test('scrubs private replay surface routing fields by default', () => {
     const input = buildEvalCandidateInput(
       makeCtx({
@@ -250,6 +331,22 @@ describe('captureEvalCandidate — best-effort failure handling', () => {
     const engine = makeMockEngine();
     await expect(captureEvalCandidate(engine, makeCtx())).resolves.toBeUndefined();
     expect((engine.logEvalCandidate as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1);
+    expect((engine.logEvalCaptureFailure as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0);
+  });
+
+  test('semantic-cache hits are not captured as independent retrieval rows', async () => {
+    const engine = makeMockEngine();
+    await expect(captureEvalCandidate(engine, makeCtx({
+      meta: {
+        vector_enabled: true,
+        detail_resolved: 'medium',
+        expansion_applied: true,
+        expansion_queries: ['cached original', 'cached expansion'],
+        cache: { status: 'hit', similarity: 0.95 },
+      },
+    }))).resolves.toBeUndefined();
+
+    expect((engine.logEvalCandidate as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0);
     expect((engine.logEvalCaptureFailure as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0);
   });
 

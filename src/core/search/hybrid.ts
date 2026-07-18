@@ -1270,6 +1270,7 @@ export async function hybridSearch(
       vector_enabled: false,
       detail_resolved: detailResolved,
       expansion_applied: expansionApplied,
+      ...(expansionApplied ? { expansion_queries: [...queries] } : {}),
       intent: suggestions.intent,
       mode: resolvedMode.resolved_mode,
       embedding_column: resolvedCol.name,
@@ -1496,6 +1497,7 @@ export async function hybridSearch(
     vector_enabled: true,
     detail_resolved: detailResolved,
     expansion_applied: expansionApplied,
+    ...(expansionApplied ? { expansion_queries: [...queries] } : {}),
     intent: suggestions.intent,
     mode: resolvedMode.resolved_mode,
     embedding_column: resolvedCol.name,
@@ -1687,6 +1689,9 @@ export async function hybridSearchCached(
         vector_enabled: hit.meta?.vector_enabled ?? true,
         detail_resolved: hit.meta?.detail_resolved ?? null,
         expansion_applied: hit.meta?.expansion_applied ?? false,
+        ...(hit.meta?.expansion_queries
+          ? { expansion_queries: [...hit.meta.expansion_queries] }
+          : {}),
         intent: hit.meta?.intent,
         cache: {
           status: 'hit',
@@ -1744,6 +1749,9 @@ export async function hybridSearchCached(
     vector_enabled: innerMeta?.vector_enabled ?? false,
     detail_resolved: innerMeta?.detail_resolved ?? null,
     expansion_applied: innerMeta?.expansion_applied ?? false,
+    ...(innerMeta?.expansion_queries
+      ? { expansion_queries: [...innerMeta.expansion_queries] }
+      : {}),
     intent: innerMeta?.intent,
     cache: { status: cacheStatus },
     ...(innerMeta?.mode ? { mode: innerMeta.mode } : {}),

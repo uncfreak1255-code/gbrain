@@ -1463,6 +1463,8 @@ export interface EvalReplaySurface {
   sourceId?: string;
   sourceIds?: string[];
   expansion?: boolean;
+  /** Exact query variants used when multi-query expansion actually ran. */
+  expansionQueries?: string[];
   detail?: 'low' | 'medium' | 'high';
   mode?: string;
   language?: string;
@@ -1519,6 +1521,12 @@ export interface HybridSearchMeta {
   detail_resolved: 'low' | 'medium' | 'high' | null;
   /** True iff multi-query expansion (Haiku) actually fired and produced variants. */
   expansion_applied: boolean;
+  /**
+   * Exact query variants used by the expansion path, including the original.
+   * Omitted when expansion did not apply. Semantic-cache hits may surface the
+   * stored variants for observability, but eval capture skips those rows.
+   */
+  expansion_queries?: string[];
   /**
    * v0.32.x (search-lite): the intent the zero-LLM classifier inferred for
    * this query. Surfaced for debugging — agents and the `gbrain query`

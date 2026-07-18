@@ -18,6 +18,11 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { hybridSearch } from '../src/core/search/hybrid.ts';
 import type { PageInput, HybridSearchMeta } from '../src/core/types.ts';
 import { emptyHome, withEnv } from './helpers/with-env.ts';
+import {
+  __setEmbedTransportForTests,
+  configureGateway,
+  resetGateway,
+} from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 const savedKey = process.env.OPENAI_API_KEY;
@@ -35,6 +40,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  __setEmbedTransportForTests(null);
+  resetGateway();
   if (savedKey === undefined) delete process.env.OPENAI_API_KEY;
   else process.env.OPENAI_API_KEY = savedKey;
   await engine.disconnect();
@@ -87,6 +94,36 @@ describe('hybridSearch onMeta callback — expansion_applied', () => {
       expandFn: async () => ['alice', 'alice example', 'the person alice'],
     });
     expect(meta!.expansion_applied).toBe(false);
+    expect(meta!.expansion_queries).toBeUndefined();
+  });
+
+  test('reports the exact expansion variants when expansion applies', async () => {
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      env: { OPENAI_API_KEY: 'sk-test' },
+    });
+    __setEmbedTransportForTests(async ({ values }: { values: string[] }) => ({
+      embeddings: values.map(() => new Array(1536).fill(0.01)),
+      usage: { tokens: values.length },
+    }) as never);
+    const variants = ['alice example person', 'alice biography', 'alice profile'];
+    let meta: HybridSearchMeta | null = null;
+
+    try {
+      await hybridSearch(engine, 'alice example person', {
+        expansion: true,
+        expandFn: async () => variants,
+        onMeta: (value) => { meta = value; },
+      });
+    } finally {
+      __setEmbedTransportForTests(null);
+      resetGateway();
+    }
+
+    const capturedMeta = meta as HybridSearchMeta | null;
+    expect(capturedMeta?.expansion_applied).toBe(true);
+    expect(capturedMeta?.expansion_queries).toEqual(variants);
   });
 });
 

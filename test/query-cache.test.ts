@@ -150,6 +150,23 @@ describe('SemanticQueryCache \u2014 store + lookup', () => {
     expect(hit.similarity).toBeGreaterThan(0.99);
   });
 
+  test('roundtrip preserves pinned expansion metadata', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const emb = makeEmbedding(2);
+    const meta: HybridSearchMeta = {
+      ...META,
+      expansion_applied: true,
+      expansion_queries: ['original query', 'pinned expansion'],
+    };
+
+    await cache.store('expanded query', emb, [makeResult('a')], meta);
+    const hit = await cache.lookup(emb);
+
+    expect(hit.hit).toBe(true);
+    expect(hit.meta?.expansion_applied).toBe(true);
+    expect(hit.meta?.expansion_queries).toEqual(['original query', 'pinned expansion']);
+  });
+
   test('similar embedding (cosine > 0.92) is a hit', async () => {
     const cache = new SemanticQueryCache(engine);
     const base = makeEmbedding(100);
