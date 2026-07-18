@@ -29,6 +29,7 @@
 
 import {
   existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync, statSync, appendFileSync,
+  realpathSync,
 } from 'fs';
 import { join, dirname, relative, isAbsolute } from 'path';
 import { execFileSync, execSync } from 'child_process';
@@ -184,15 +185,14 @@ if [ "\${1:-}" = "--push-only" ]; then
 fi
 
 _msg="\${1:?usage: brain-commit-push.sh <message> <path> [paths...]}"; shift || true
-# Pull first so the local tree is current before we stage.
-git fetch origin >/dev/null 2>&1 || true
-git pull --rebase origin "$_branch" || { git rebase --abort >/dev/null 2>&1 || true; echo "rebase conflict: manual attention needed" >&2; exit 3; }
-
 # EXPLICIT paths only — never a blind 'git add -A' (would risk committing
 # secrets, temp files, or unrelated edits).
 if [ "$#" -eq 0 ]; then
   echo "refusing blind 'git add -A' — pass explicit path(s) to commit" >&2; exit 2
 fi
+# Commit the requested paths before remote reconciliation. Pulling first cannot
+# rebase a dirty tracked file; brain_push below already handles an advanced
+# remote after the local commit exists.
 git add -- "$@"
 if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
 git commit -m "$_msg"
@@ -336,6 +336,46 @@ function uninstallLocalHook(repoPath: string): boolean {
   rmSync(hookPath);
   if (existsSync(hookPath + '.bak')) { writeFileSync(hookPath, readFileSync(hookPath + '.bak')); rmSync(hookPath + '.bak'); }
   return true;
+}
+
+/** Whether this repo opted into gbrain's local durability hook. */
+export function isDurabilityHardened(repoPath: string): boolean {
+  try {
+    const { dir } = resolveHooksDir(repoPath);
+    const hookPath = join(dir, 'post-commit');
+    return existsSync(hookPath) && readFileSync(hookPath, 'utf-8').includes(HOOK_BANNER);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort path-limited commit for one write-through artifact.
+ * Unrelated staged or dirty files are left untouched.
+ */
+export function commitWriteThroughFile(repoPath: string, absPath: string, slug: string): boolean {
+  try {
+    // writePageThrough canonicalizes the file's parent before writing. Match
+    // that canonical form here so macOS `/var` → `/private/var` aliases do not
+    // make an in-repo artifact look like an escaping path.
+    const canonicalRepo = realpathSync(repoPath);
+    const rel = relative(canonicalRepo, absPath);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) return false;
+    const gitOpts = {
+      stdio: 'ignore',
+      timeout: 30_000,
+      env: { ...process.env, ...GIT_ENV },
+    } as const;
+    execFileSync('git', ['-C', repoPath, 'add', '--', rel], gitOpts);
+    execFileSync(
+      'git',
+      ['-C', repoPath, 'commit', '-m', `gbrain: write-through ${slug}`, '--', rel],
+      gitOpts,
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Committed helper ────────────────────────────────────────────────────────

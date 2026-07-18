@@ -814,36 +814,6 @@ const put_page: Operation = {
     const slug = p.slug as string;
     const content = p.content as string;
 
-    // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
-    // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
-    // autopilot, dream cycle, file watcher) may populate source_kind /
-    // source_uri / ingested_via from their own state. Anything else
-    // (HTTP MCP, stdio MCP, subagent) gets the server-stamped
-    // `mcp:put_page` regardless of what was passed.
-    //
-    // Closes the spoofing surface CV6 identified: pre-fix a write-scope
-    // OAuth token could send `source_kind: 'capture-cli'` to poison the
-    // audit trail. Fail-closed: `ctx.remote === false` is the ONLY truthy
-    // condition that admits client-supplied provenance.
-    let provenanceKind: string | null;
-    let provenanceUri: string | null;
-    let provenanceVia: string | null;
-    if (ctx.remote === false) {
-      // Trusted local caller: honor the client params (may be null/undefined
-      // for legacy local callers that don't set them).
-      provenanceKind = (p.source_kind as string | undefined) ?? null;
-      provenanceUri = (p.source_uri as string | undefined) ?? null;
-      provenanceVia = (p.ingested_via as string | undefined) ?? null;
-    } else {
-      // Remote caller or unset trust: server stamps. Mirrors the existing
-      // write-through stamping at the file-side (~:637).
-      provenanceKind = 'mcp:put_page';
-      provenanceUri = null;
-      provenanceVia = 'mcp:put_page';
-    }
-    const untrustedPayload = p.untrusted_payload === true;
-    const untrustedContent = ctx.remote !== false || untrustedPayload;
-
     // Subagent namespace enforcement (v0.15+). Runs BEFORE the dry-run
     // short-circuit so preview calls surface the same rejection. Confines
     // LLM-driven writes to wiki/agents/<subagentId>/... — no leading slash
@@ -885,6 +855,50 @@ const put_page: Operation = {
     }
 
     if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
+
+    // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
+    // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
+    // autopilot, dream cycle, file watcher) may populate source_kind /
+    // source_uri / ingested_via from their own state. Anything else
+    // (HTTP MCP, stdio MCP, subagent) gets the server-stamped
+    // `mcp:put_page` regardless of what was passed.
+    //
+    // Closes the spoofing surface CV6 identified: pre-fix a write-scope
+    // OAuth token could send `source_kind: 'capture-cli'` to poison the
+    // audit trail. Fail-closed: `ctx.remote === false` is the ONLY truthy
+    // condition that admits client-supplied provenance.
+    let provenanceKind: string | null;
+    let provenanceUri: string | null;
+    let provenanceVia: string | null;
+    if (ctx.remote === false) {
+      // Trusted local caller: honor the client params (may be null/undefined
+      // for legacy local callers that don't set them).
+      provenanceKind = (p.source_kind as string | undefined) ?? null;
+      provenanceUri = (p.source_uri as string | undefined) ?? null;
+      const requestedVia = p.ingested_via as string | undefined;
+      if (requestedVia !== undefined) {
+        provenanceVia = requestedVia;
+      } else {
+        // Stamp the controlled marker on the first local put_page write (and
+        // backfill legacy rows that lack it), but keep later omitted edits
+        // null so the engine's COALESCE path preserves the original
+        // ingested_at audit timestamp.
+        const existingPage = await ctx.engine.getPage(
+          slug,
+          ctx.sourceId ? { sourceId: ctx.sourceId } : undefined,
+        );
+        provenanceVia = existingPage?.ingested_via ? null : 'put_page';
+      }
+    } else {
+      // Remote caller or unset trust: server stamps. Mirrors the existing
+      // write-through stamping at the file-side (~:637).
+      provenanceKind = 'mcp:put_page';
+      provenanceUri = null;
+      provenanceVia = 'mcp:put_page';
+    }
+    const untrustedPayload = p.untrusted_payload === true;
+    const untrustedContent = ctx.remote !== false || untrustedPayload;
+
     // Skip embedding when the AI gateway has no embedding provider configured.
     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).

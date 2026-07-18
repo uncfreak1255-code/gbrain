@@ -76,7 +76,6 @@ Then count syncable files:
 find /data/brain -name '*.md' \
   -not -path '*/.*' \
   -not -path '*/.raw/*' \
-  -not -path '*/ops/*' \
   -not -name 'README.md' \
   -not -name 'index.md' \
   -not -name 'schema.md' \

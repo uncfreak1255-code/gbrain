@@ -2,6 +2,28 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.46.1.0] - 2026-07-18
+
+**Full sync now preserves pages created through GBrain and treats `ops/` notes like ordinary brain content.** A missing generated file no longer makes a database-backed page look intentionally deleted, while real Git deletions still reconcile normally.
+
+### To take advantage of v0.46.1.0
+
+Run `gbrain upgrade`. No migration or required configuration change is needed.
+
+### Itemized changes
+
+### Changed
+- **Operator notes sync normally.** Markdown under `ops/` now follows the same canonical include and exclusion rules as other brain content instead of being pruned by directory name.
+- **Hardened write-through repositories keep local Git receipts.** Successful page writes make an explicit-path commit before any remote reconciliation, without staging unrelated work or turning Git failures into failed page writes.
+
+### Fixed
+- **Database-only pages survive full reconciliation.** Full sync distinguishes never-committed write-through pages from files that existed in Git and were deliberately deleted. It preserves and re-exports the former while retaining the existing mass-deletion safety gate.
+- **Page provenance stays server-controlled.** Local and remote `put_page` writes record trusted origin metadata without accepting hostile frontmatter as reconciliation authority, and dry runs remain side-effect free.
+- **Docker unit snapshots match the test schema.** The snapshot builder now pins the documented legacy 1536-dimension test configuration, while fresh-brain assertions opt out of the post-schema snapshot.
+
+### For contributors
+- Focused PGLite, Git-fixture, and real-PostgreSQL regressions cover operator-note discovery, committed-versus-database-only reconciliation, path-limited durability commits, trusted provenance, and snapshot isolation.
+
 ## [0.46.0.0] - 2026-07-16
 
 **The downstream fork is now current with upstream's safety and correctness fixes through `323d7d63`, without merging incompatible histories or weakening the fork's existing controls.** File and source boundaries fail closed, long-running workers keep their live locks, large reconciles refuse suspicious deletions, and federated reads and writes stay inside the selected sources.

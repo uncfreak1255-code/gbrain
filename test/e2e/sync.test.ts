@@ -224,7 +224,7 @@ describeE2E('E2E: Git-to-DB Sync Pipeline', () => {
     expect(bob).toBeNull();
   });
 
-  test('sync skips non-syncable files (README, hidden, .raw)', async () => {
+  test('sync skips metadata/hidden/raw files but imports ops content', async () => {
     const { performSync } = await import('../../src/commands/sync.ts');
     const engine = getEngine();
 
@@ -250,7 +250,7 @@ describeE2E('E2E: Git-to-DB Sync Pipeline', () => {
     expect(raw).toBeNull();
 
     const ops = await engine.getPage('ops/deploy');
-    expect(ops).toBeNull();
+    expect(ops).not.toBeNull();
   });
 
   test('sync stores last_commit and last_run in config', async () => {

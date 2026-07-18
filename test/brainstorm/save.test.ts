@@ -67,6 +67,12 @@ describe('persistSavedIdea', () => {
     expect(o.dbSaved).toBe(true);
     expect(o.writeThrough.written).toBe(true);
     expect(fs.existsSync(o.writeThrough.path!)).toBe(true);
+    const page = await engine.getPage(slug);
+    expect(page?.source_kind).toBe('lsd');
+    expect(page?.ingested_via).toBe('lsd');
+    const onDisk = fs.readFileSync(o.writeThrough.path!, 'utf8');
+    expect(onDisk).toContain('source_kind: lsd');
+    expect(onDisk).toContain('ingested_via: lsd');
 
     // Canonical proof: importFromContent wrote chunks. Raw engine.putPage (the
     // pre-fix path) would write ZERO chunks, so the page would be unsearchable

@@ -367,6 +367,8 @@ export async function persistSavedIdea(
       noEmbed: true,
       sourceId,
       sourcePath: `${args.slug}.md`,
+      source_kind: args.provenanceVia,
+      ingested_via: args.provenanceVia,
     });
     dbSaved = true;
   } catch (err) {
@@ -375,7 +377,10 @@ export async function persistSavedIdea(
   const writeThrough: WriteThroughResult = dbSaved
     ? await writePageThrough(engine, args.slug, {
         sourceId,
-        frontmatterOverrides: { source_kind: args.provenanceVia },
+        frontmatterOverrides: {
+          source_kind: args.provenanceVia,
+          ingested_via: args.provenanceVia,
+        },
       })
     : { written: false, skipped: 'page_not_found_after_write' };
   return { dbSaved, dbError, writeThrough };

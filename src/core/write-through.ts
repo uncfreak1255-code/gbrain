@@ -27,6 +27,7 @@ import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from './markdown.ts';
 import { isWriteTargetContained } from './path-confine.ts';
+import { commitWriteThroughFile, isDurabilityHardened } from './brain-repo-durability.ts';
 
 /** Minimal logger surface — structurally compatible with operations.ts `Logger`. */
 export interface WriteThroughLogger {
@@ -36,6 +37,8 @@ export interface WriteThroughLogger {
 export interface WriteThroughResult {
   written: boolean;
   path?: string;
+  /** True only when a hardened repo also committed the written artifact. */
+  committed?: boolean;
   /**
    * Non-error reasons the file was not written:
    *   - no_repo_configured: the resolved target (source `local_path` or, for a
@@ -183,7 +186,16 @@ export async function writePageThrough(
       throw writeErr;
     }
 
-    return { written: true, path: filePath };
+    let committed = false;
+    try {
+      if (isDurabilityHardened(writeRoot)) {
+        committed = commitWriteThroughFile(writeRoot, filePath, slug);
+      }
+    } catch {
+      // Git durability is best-effort; the DB row and atomic file still stand.
+    }
+
+    return { written: true, path: filePath, ...(committed ? { committed } : {}) };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     opts.logger?.warn(`[write-through] failed for ${slug}: ${msg}`);
