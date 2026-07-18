@@ -15,7 +15,7 @@ let repoPath: string;
 
 function gitInit(repo: string): void {
   execSync('git init', { cwd: repo, stdio: 'pipe' });
-  execSync('git config user.email "test@test.com"', { cwd: repo, stdio: 'pipe' });
+  execSync('git config user.email "alice@example.com"', { cwd: repo, stdio: 'pipe' });
   execSync('git config user.name "Test"', { cwd: repo, stdio: 'pipe' });
 }
 
