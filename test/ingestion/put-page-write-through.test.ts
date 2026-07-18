@@ -112,7 +112,7 @@ describe('put_page write-through — happy path', () => {
     };
     expect(result.write_through?.written).toBe(true);
     const expectedPath = path.join(brainDir, 'inbox/test-wt-1.md');
-    expect(result.write_through?.path).toBe(expectedPath);
+    expect(result.write_through?.path).toBe(fs.realpathSync(expectedPath));
     expect(fs.existsSync(expectedPath)).toBe(true);
     const onDisk = fs.readFileSync(expectedPath, 'utf8');
     expect(onDisk).toContain('WT body');
@@ -271,7 +271,9 @@ describe('put_page write-through — multi-source filing', () => {
       content: '---\ntitle: X\n---\n\nbody',
     })) as { write_through?: { written: boolean; path?: string } };
     expect(result.write_through?.written).toBe(true);
-    expect(result.write_through?.path).toBe(path.join(brainDir, '.sources/team-x/shared/page.md'));
+    expect(result.write_through?.path).toBe(
+      fs.realpathSync(path.join(brainDir, '.sources/team-x/shared/page.md')),
+    );
     expect(fs.existsSync(result.write_through!.path!)).toBe(true);
   });
 });

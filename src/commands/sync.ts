@@ -1898,8 +1898,10 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // pages in sources B/C/D.
   const pageOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
   for (const path of unsyncableModified) {
-    // v0.41.13 #1433: never delete on metafile classification.
-    if (unsyncableReason(path, syncOpts) === 'metafile') continue;
+    // Never delete deliberate pages for classifications that sync itself
+    // cannot have imported.
+    const reason = unsyncableReason(path, syncOpts);
+    if (reason === 'metafile' || reason === 'pruned-dir') continue;
     const slug = await resolveSlugByPathOrSourcePath(engine, path, opts.sourceId);
     try {
       const existing = await engine.getPage(slug, pageOpts);
@@ -3133,8 +3135,14 @@ async function performFullSync(
     // stale, and the reconcile wipes the whole source.
     const currentFiles = collectSyncableFiles(repoPath, { strategy: opts.strategy ?? 'markdown' })
       .map(abs => relative(repoPath, abs));
-    const rows = await engine.executeRaw<{ slug: string; source_path: string | null }>(
-      `SELECT slug, source_path FROM pages WHERE source_id = $1 AND source_path IS NOT NULL AND deleted_at IS NULL`,
+    const rows = await engine.executeRaw<{
+      slug: string;
+      source_path: string | null;
+      ingested_via: string | null;
+    }>(
+      `SELECT slug, source_path, ingested_via
+         FROM pages
+        WHERE source_id = $1 AND source_path IS NOT NULL AND deleted_at IS NULL`,
       [sid],
     );
     const plan = planReconcileDeletes(
@@ -3164,9 +3172,52 @@ async function performFullSync(
         `GBRAIN_ALLOW_MASS_RECONCILE=1 to restore the old behavior.`,
       );
     } else if (plan.staleSlugs.length > 0) {
+      // A missing, never-committed file is preserved only when its page carries
+      // write-through provenance. Full sync also imports ordinary untracked
+      // files; without this discriminator, deleting one before its first commit
+      // would resurrect it on the next full sync.
+      const everCommitted = listEverCommittedPaths(repoPath);
+      const rowBySlug = new Map(rows.map(row => [row.slug, row]));
+      let deletableSlugs = plan.staleSlugs;
+      const dbOnlySlugs: string[] = [];
+      if (everCommitted) {
+        deletableSlugs = [];
+        for (const slug of plan.staleSlugs) {
+          const row = rowBySlug.get(slug);
+          const sourcePath = row?.source_path;
+          const hasWriteThroughProvenance = Boolean(row?.ingested_via);
+          if (
+            sourcePath
+            && !everCommitted.has(sourcePath.replace(/\\/g, '/'))
+            && hasWriteThroughProvenance
+          ) {
+            dbOnlySlugs.push(slug);
+          } else {
+            deletableSlugs.push(slug);
+          }
+        }
+      }
+
+      if (dbOnlySlugs.length > 0) {
+        let reExported = 0;
+        try {
+          const { writePageThrough } = await import('../core/write-through.ts');
+          for (const slug of dbOnlySlugs) {
+            const result = await writePageThrough(engine, slug, { sourceId: sid });
+            if (result.written) reExported++;
+          }
+        } catch {
+          // Re-export is best-effort; preserving the DB rows is the hard rule.
+        }
+        serr(
+          `\n  Kept ${dbOnlySlugs.length} page(s) whose markdown was never committed to git.` +
+          (reExported > 0 ? ` Re-exported ${reExported} to the working tree.` : ''),
+        );
+      }
+
       const deleteScopedOpts = { sourceId: sid };
-      for (let i = 0; i < plan.staleSlugs.length; i += DELETE_BATCH_SIZE) {
-        const batch = plan.staleSlugs.slice(i, i + DELETE_BATCH_SIZE);
+      for (let i = 0; i < deletableSlugs.length; i += DELETE_BATCH_SIZE) {
+        const batch = deletableSlugs.slice(i, i + DELETE_BATCH_SIZE);
         try {
           const deleted = await engine.deletePages(batch, deleteScopedOpts);
           reconciledDeletes += deleted.length;
@@ -3283,6 +3334,43 @@ export function planReconcileDeletes(
     reconcilable.length > MASS_RECONCILE_MIN_PAGES &&
     staleSlugs.length > reconcilable.length * MASS_RECONCILE_RATIO;
   return { staleSlugs, reconcilableCount: reconcilable.length, massDelete };
+}
+
+/**
+ * Return repo-relative paths that have ever appeared as additions in git
+ * history. Rename detection is disabled so each rename destination is counted
+ * as a new path. A null result preserves the existing plain-directory fallback.
+ */
+export function listEverCommittedPaths(repoPath: string): Set<string> | null {
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      'git',
+      [
+        '-C', repoPath,
+        '-c', 'core.quotepath=off',
+        'log',
+        '--all',
+        '--no-renames',
+        '--diff-filter=A',
+        '--format=',
+        '--name-only',
+      ],
+      {
+        encoding: 'utf8',
+        maxBuffer: 512 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    );
+  } catch {
+    return null;
+  }
+
+  const paths = new Set<string>();
+  for (const line of stdout.split('\n')) {
+    if (line) paths.add(line.replace(/\\/g, '/'));
+  }
+  return paths;
 }
 
 /**

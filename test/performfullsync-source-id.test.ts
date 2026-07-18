@@ -27,7 +27,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -152,18 +152,20 @@ describe('performFullSync threads sourceId end-to-end', () => {
         compiled_truth: `Seeded database page ${i}`,
         source_path: `${slug}.md`,
       }, { sourceId });
-      if (i < presentCount) {
-        writeFileSync(join(repoPath, `${slug}.md`), [
-          '---',
-          'type: concept',
-          `title: Mass ${i}`,
-          '---',
-          '',
-          `Present page ${i}`,
-        ].join('\n'));
-      }
+      writeFileSync(join(repoPath, `${slug}.md`), [
+        '---',
+        'type: concept',
+        `title: Mass ${i}`,
+        '---',
+        '',
+        `Present page ${i}`,
+      ].join('\n'));
     }
-    execSync('git add -A && git commit -m "mass reconcile fixture"', { cwd: repoPath, stdio: 'pipe' });
+    execSync('git add -A && git commit -m "mass reconcile baseline"', { cwd: repoPath, stdio: 'pipe' });
+    for (let i = presentCount; i < totalCount; i++) {
+      unlinkSync(join(repoPath, `mass/page-${i}.md`));
+    }
+    execSync('git add -A && git commit -m "remove missing mass pages"', { cwd: repoPath, stdio: 'pipe' });
 
     const { performSync } = await import('../src/commands/sync.ts');
     await withEnv({ GBRAIN_ALLOW_MASS_RECONCILE: undefined }, async () => {

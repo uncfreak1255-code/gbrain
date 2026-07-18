@@ -131,7 +131,7 @@ describe('put_page provenance — trusted local caller (ctx.remote === false)', 
     expect(prov.ingested_at!.getTime()).toBeGreaterThan(Date.now() - 60_000);
   });
 
-  test('omitting all provenance params leaves all 4 DB columns null', async () => {
+  test('omitting provenance server-stamps put_page while optional source fields stay null', async () => {
     const ctx = makeCtx({ remote: false });
     await putPageOp.handler(ctx, {
       slug: 'wiki/p3a-no-provenance',
@@ -140,8 +140,8 @@ describe('put_page provenance — trusted local caller (ctx.remote === false)', 
     const prov = await readProvenance('wiki/p3a-no-provenance');
     expect(prov.source_kind).toBeNull();
     expect(prov.source_uri).toBeNull();
-    expect(prov.ingested_via).toBeNull();
-    expect(prov.ingested_at).toBeNull();
+    expect(prov.ingested_via).toBe('put_page');
+    expect(prov.ingested_at).toBeInstanceOf(Date);
   });
 
   test('partial provenance (source_kind only) still triggers ingested_at stamp', async () => {
@@ -154,7 +154,7 @@ describe('put_page provenance — trusted local caller (ctx.remote === false)', 
     const prov = await readProvenance('wiki/p3a-partial');
     expect(prov.source_kind).toBe('capture-cli');
     expect(prov.source_uri).toBeNull();
-    expect(prov.ingested_via).toBeNull();
+    expect(prov.ingested_via).toBe('put_page');
     expect(prov.ingested_at).toBeInstanceOf(Date);
   });
 
