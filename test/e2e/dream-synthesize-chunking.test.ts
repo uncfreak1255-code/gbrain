@@ -334,6 +334,46 @@ describe('E2E synthesize chunking — D5 cap hit', () => {
     }
   }, 30_000);
 
+  test('max_transcripts_per_cycle caps an explicit date range used by nightly scheduling', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      await rig.engine.setConfig('dream.synthesize.max_transcripts_per_cycle', '1');
+
+      for (const basename of ['2026-06-23-one.txt', '2026-06-23-two.txt']) {
+        const filePath = corpusPath(rig.corpusDir, basename);
+        const content = `${basename} useful transcript content\n`.repeat(120);
+        writeFileSync(filePath, content);
+        await seedVerdict(rig.engine, filePath, content);
+      }
+
+      await withoutAnthropicKey(async () => {
+        const { result } = await captureStderr(() =>
+          runPhaseSynthesize(rig.engine, {
+            brainDir: rig.brainDir,
+            dryRun: true,
+            from: '2026-06-23',
+            to: '2026-06-23',
+          }),
+        );
+        expect(result.status).toBe('ok');
+        const details = result.details as {
+          transcripts_discovered: number;
+          transcripts_discovered_before_limit: number;
+          max_transcripts_per_cycle: number;
+          verdicts: Array<unknown>;
+        };
+        expect(details.transcripts_discovered_before_limit).toBe(2);
+        expect(details.transcripts_discovered).toBe(1);
+        expect(details.max_transcripts_per_cycle).toBe(1);
+        expect(details.verdicts).toHaveLength(1);
+      });
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
   test('max_transcripts_per_cycle skips legacy-completed worth transcripts before filling the cap', async () => {
     const rig = await setupRig();
     try {

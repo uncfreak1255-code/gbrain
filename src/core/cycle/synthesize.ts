@@ -361,7 +361,10 @@ export async function runPhaseSynthesize(
     };
     const discoveredBeforeLimit = transcripts.length;
     const prefetchedVerdicts = new Map<string, Awaited<ReturnType<BrainEngine['getDreamVerdict']>>>();
-    if (!explicitTarget && config.maxTranscriptsPerCycle !== null) {
+    // An explicit single file is already bounded by construction. Date/range
+    // targets are not: the nightly wrapper uses --from/--to and must still
+    // honor the configured production cap before verdict or child fan-out.
+    if (!opts.inputFile && config.maxTranscriptsPerCycle !== null) {
       const selected: DiscoveredTranscript[] = [];
       for (const t of transcripts) {
         const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
