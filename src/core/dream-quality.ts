@@ -86,7 +86,10 @@ export function extractDreamSummarySlugs(markdown: string): string[] {
   return slugs;
 }
 
-export function scoreDreamPage(page: Page): DreamQualityPageScore {
+export function scoreDreamPage(
+  page: Page,
+  opts: { now?: Date } = {},
+): DreamQualityPageScore {
   const frontmatter = page.frontmatter ?? {};
   const text = `${page.title}\n${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`;
   const frontmatterText = Object.entries(frontmatter)
@@ -106,7 +109,7 @@ export function scoreDreamPage(page: Page): DreamQualityPageScore {
   const passedCount = Object.values(checks).filter(Boolean).length;
   const score = Math.round((passedCount / Object.keys(checks).length) * 100);
   const passed = score >= 72;
-  const owner = inferPromotionOwner(page, text);
+  const owner = inferPromotionOwner(page, text, opts);
   // A routing match only makes a page eligible for human review after it clears
   // the deterministic quality bar. Failed Dream residue stays searchable but
   // cannot enter a promotion queue.
@@ -138,13 +141,13 @@ function formatFrontmatterValue(value: unknown): string {
   return String(value);
 }
 
-function inferPromotionOwner(page: Page, text: string): {
+function inferPromotionOwner(page: Page, text: string, opts: { now?: Date }): {
   owner: DreamPromotionOwner;
   reason: string | null;
   next: string | null;
   needs_promotion_review: boolean;
 } {
-  const evaluation = evaluateSeascapeWritebackCandidate(page);
+  const evaluation = evaluateSeascapeWritebackCandidate(page, opts);
   if (evaluation.verdict === 'candidate' && evaluation.candidate) {
     return {
       owner: evaluation.candidate.owner,
@@ -172,7 +175,8 @@ export function buildDreamQualityReceipt(input: {
   source: 'summary' | 'slugs';
   now?: Date;
 }): DreamQualityReceipt {
-  const scores = input.pages.map(scoreDreamPage);
+  const now = input.now ?? new Date();
+  const scores = input.pages.map((page) => scoreDreamPage(page, { now }));
   const passed = scores.filter((p) => p.passed).length;
   const avg = scores.length
     ? Math.round(scores.reduce((sum, p) => sum + p.score, 0) / scores.length)
@@ -192,7 +196,7 @@ export function buildDreamQualityReceipt(input: {
 
   const base: Omit<DreamQualityReceipt, 'receipt_sha8'> = {
     schema_version: 1,
-    ts: (input.now ?? new Date()).toISOString(),
+    ts: now.toISOString(),
     summary_slug: input.summarySlug ?? null,
     source: input.source,
     pages_scored: scores.length,

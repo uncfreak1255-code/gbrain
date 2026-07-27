@@ -35,7 +35,7 @@ Source-scoped exports verify the page count, reject duplicate slugs, preserve ra
 
 ### To take advantage of v0.47.0.0
 
-`gbrain upgrade` should apply migrations 124 through 128 automatically. If Doctor reports a partial migration, run:
+`gbrain upgrade` should apply migrations 124 through 130 automatically. If Doctor reports a partial migration, run:
 
 ```bash
 gbrain apply-migrations --yes
@@ -50,10 +50,11 @@ If the upgrade still looks incomplete, include `gbrain doctor --json` and `~/.gb
 ### Added
 - **Source-scoped recovery exports.** `gbrain export --source <id>` paginates the complete source inside a consistent database snapshot, validates counts and unique slugs, confines output paths, and writes deterministic page hashes.
 - **A repeatable source-hygiene loop.** Repo-local maintenance guidance now separates investigation, adversarial review, and bounded repair, with a fresh readback after every action.
-- **Archived-source database guards.** Migrations 124 through 128 reject new or continued writes against archived sources, including job progress and source-owned row updates that do not change `source_id`.
+- **Archived-source database guards.** Migrations 124 through 130 reject new or continued writes against known archived sources, including job progress and source-owned row updates that do not change `source_id`, while retaining compatibility with unresolved legacy source identifiers and serializing archive decisions before a registry row exists.
 
 ### Changed
 - **Doctor, Planner, and Advisor share one source diagnosis.** Missing checkouts, database-only pages, empty duplicates, and healthy database-backed sources now produce consistent findings and remediation gates.
+- **Dream-quality receipts use one explicit clock.** A caller-supplied receipt timestamp now also controls promotion staleness scoring, so delayed or replayed evaluations stay deterministic.
 - **Archived sources leave normal routing.** Resolver and Doctor paths ignore soft-archived sources while retaining a narrow fallback for older schemas during upgrade.
 
 ### For contributors

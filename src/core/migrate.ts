@@ -5816,6 +5816,305 @@ export const MIGRATIONS: Migration[] = [
       $install$;
     `,
   },
+  {
+    version: 129,
+    name: 'archived_source_missing_reference_compatibility',
+    // Source identifiers can outlive their registry row in legacy brains and
+    // isolated fixtures. Preserve that compatibility while still taking a
+    // shared row lock for every known source, so a concurrent archive waits
+    // for active writers and known archived sources remain write-protected.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := ARRAY[source_ref];
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+              INTO source_refs
+              FROM jsonb_array_elements_text(raw_ref) AS values_(value);
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+              INTO source_refs
+              FROM (
+                VALUES (raw_ref->>'sourceId'), (raw_ref->>'source_id')
+              ) AS values_(value)
+             WHERE value IS NOT NULL;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := ARRAY[source_ref];
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM (
+            VALUES (NEW.data->>'sourceId'), (NEW.data->>'source_id')
+          ) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = NEW.value
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is archived', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM id
+            FROM sources
+           WHERE local_path = NEW.value AND archived = false
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    version: 130,
+    name: 'source_lifecycle_advisory_lock',
+    // A source row cannot provide a lock before it exists. Every guarded
+    // writer therefore takes the shared form of one transaction-scoped
+    // lifecycle lock; archive takes the exclusive form before rereading its
+    // predicate. Shared locks remain concurrent, while the rare archive waits
+    // for every earlier writer and blocks every later writer until commit.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := ARRAY[source_ref];
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+              INTO source_refs
+              FROM jsonb_array_elements_text(raw_ref) AS values_(value);
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+              INTO source_refs
+              FROM (
+                VALUES (raw_ref->>'sourceId'), (raw_ref->>'source_id')
+              ) AS values_(value)
+             WHERE value IS NOT NULL;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := ARRAY[source_ref];
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM (
+            VALUES (NEW.data->>'sourceId'), (NEW.data->>'source_id')
+          ) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = NEW.value
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is archived', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          PERFORM id
+            FROM sources
+           WHERE local_path = NEW.value AND archived = false
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

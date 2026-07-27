@@ -453,7 +453,7 @@ describe('archive hygiene execution gate', () => {
       } catch (caught) {
         retryError = caught;
       }
-      expect(String(retryError)).toContain('missing or archived');
+      expect(String(retryError)).toContain('is archived');
     }
     const terminal = await db.executeRaw<{ name: string; status: string }>(
       `SELECT name, status FROM minion_jobs
@@ -508,6 +508,28 @@ describe('archive hygiene execution gate', () => {
       [missingPath],
     );
 
+    // Missing registry rows are a supported legacy shape only on tables whose
+    // source references are not protected by a foreign key. The trigger keeps
+    // those rows compatible while FK-bound tables such as pages remain strict.
+    await db.executeRaw(
+      `INSERT INTO eval_candidates
+         (tool_name, query, source_ids, vector_enabled, expansion_applied, latency_ms, remote)
+       VALUES ('query', 'missing guard', ARRAY['guard-missing'], false, false, 1, false)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, data)
+       VALUES ('guard-missing-job', '{"sourceId":"guard-missing"}'::jsonb)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO config (key, value) VALUES ('sources.default', 'guard-missing')
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    );
+    await db.executeRaw(
+      `INSERT INTO gbrain_cycle_locks
+         (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
+       VALUES ('gbrain-sync:guard-missing', 1000, 'fixture', now() + interval '5 minutes', now())`,
+    );
+
     // Each non-canonical shape accepts an active source.
     await db.executeRaw(
       `INSERT INTO oauth_clients
@@ -550,7 +572,7 @@ describe('archive hygiene execution gate', () => {
         error = caught;
       }
       expect(error).toBeDefined();
-      expect(String(error)).toContain('missing or archived');
+      expect(String(error)).toContain('is archived');
     };
 
     await rejectArchived(
@@ -623,6 +645,25 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).not.toContain('UPDATE OF %I');
   });
 
+  test('migration v129 keeps missing source identifiers compatible while locking known rows', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 129);
+    expect(migration?.name).toBe('archived_source_missing_reference_compatibility');
+    expect(migration?.idempotent).toBe(true);
+    expect(migration?.sql).toContain('SELECT archived INTO source_archived');
+    expect(migration?.sql).toContain('IF FOUND AND source_archived THEN');
+    expect(migration?.sql).toContain('FOR SHARE');
+    expect(migration?.sql).not.toContain('source % is missing or archived');
+  });
+
+  test('migration v130 serializes writers with archive before a source row exists', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 130);
+    expect(migration?.name).toBe('source_lifecycle_advisory_lock');
+    expect(migration?.idempotent).toBe(true);
+    expect(migration?.sql).toContain('pg_advisory_xact_lock_shared');
+    expect(migration?.sql).toContain("hashtextextended('gbrain:source-lifecycle', 0)");
+    expect(migration?.sql).toContain('cardinality(source_refs) > 0');
+  });
+
   test('migration v125 closes terminal-job retry after source archive', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 125);
     expect(migration?.name).toBe('active_source_job_status_guard');
@@ -663,7 +704,7 @@ describe('archive hygiene execution gate', () => {
     } catch (caught) {
       progressError = caught;
     }
-    expect(String(progressError)).toContain('missing or archived');
+    expect(String(progressError)).toContain('is archived');
 
     let renewalError: unknown;
     try {
@@ -674,7 +715,7 @@ describe('archive hygiene execution gate', () => {
     } catch (caught) {
       renewalError = caught;
     }
-    expect(String(renewalError)).toContain('missing or archived');
+    expect(String(renewalError)).toContain('is archived');
 
     await db.executeRaw(
       `UPDATE minion_jobs SET status = 'failed'
@@ -689,7 +730,7 @@ describe('archive hygiene execution gate', () => {
     } catch (caught) {
       continuationError = caught;
     }
-    expect(String(continuationError)).toContain('missing or archived');
+    expect(String(continuationError)).toContain('is archived');
     const rows = await db.executeRaw<{ name: string; status: string }>(
       `SELECT name, status FROM minion_jobs
         WHERE name IN ('finish-after-archive', 'continue-after-archive')

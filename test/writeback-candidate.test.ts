@@ -45,7 +45,7 @@ describe('evaluateSeascapeWritebackCandidate', () => {
   test('admits a proof-qualified Seascape candidate', () => {
     const result = evaluateSeascapeWritebackCandidate(page({
       compiled_truth: page().compiled_truth + '\nSeascape Hub strategy canon update.\n',
-    }));
+    }), { now: new Date('2026-06-29T00:00:00Z') });
     expect(result.verdict).toBe('candidate');
     expect(result.candidate?.owner).toBe('seascape-hub');
     expect(result.candidate?.proof.qualified).toBe(true);

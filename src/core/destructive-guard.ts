@@ -186,11 +186,17 @@ export async function softDeleteSource(
   // caller cares about; pageCount is a separate count.
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
   const rows = await engine.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
-    `UPDATE sources
+    `WITH lifecycle_lock AS MATERIALIZED (
+       SELECT pg_advisory_xact_lock(
+         hashtextextended('gbrain:source-lifecycle', 0)
+       )
+     )
+     UPDATE sources
      SET archived = true,
          archived_at = now(),
          archive_expires_at = ${expiresClause},
          config = COALESCE(config, '{}'::jsonb) || '{"federated": false}'::jsonb
+     FROM lifecycle_lock
      WHERE id = $1 AND archived = false
      RETURNING id, name, archived_at, archive_expires_at`,
     [sourceId],

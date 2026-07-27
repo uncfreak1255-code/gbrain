@@ -10,6 +10,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { archiveHygieneCandidate } from '../../src/commands/sources.ts';
+import { softDeleteSource } from '../../src/core/destructive-guard.ts';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
 
 const describeE2E = hasDatabase() ? describe : describe.skip;
@@ -89,6 +90,121 @@ describeE2E('source hygiene archive/write concurrency', () => {
     }
   }, 30_000);
 
+  test('writer for a missing source blocks later registration plus archive until its reference is visible', async () => {
+    const sourceId = 'archive-missing-writer-first-e2e';
+    const jobName = 'source-hygiene-missing-source-e2e';
+    const writer = new PostgresEngine();
+    const archiver = new PostgresEngine();
+    const writerReady = deferred();
+    const releaseWriter = deferred();
+    let writerTx: Promise<void> | null = null;
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+    await archiver.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await writer.executeRaw(`DELETE FROM minion_jobs WHERE name = $1`, [jobName]);
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]);
+
+      writerTx = writer.transaction(async (tx) => {
+        await tx.executeRaw(
+          `INSERT INTO minion_jobs (name, status, data)
+           VALUES ($1, 'waiting', jsonb_build_object('sourceId', $2::text))`,
+          [jobName, sourceId],
+        );
+        writerReady.resolve();
+        await releaseWriter.promise;
+      });
+      await writerReady.promise;
+
+      await archiver.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+         VALUES ($1, $1, $2, '{}'::jsonb)`,
+        [sourceId, `/tmp/gbrain-${sourceId}-missing`],
+      );
+
+      let archiveSettled = false;
+      const archiveAttempt = archiveHygieneCandidate(archiver, sourceId)
+        .finally(() => { archiveSettled = true; });
+      await wait(100);
+      expect(archiveSettled).toBe(false);
+
+      releaseWriter.resolve();
+      await writerTx;
+      const result = await archiveAttempt;
+      expect(result.result).toBeNull();
+      expect(result.reason).toContain('nonterminal_source_work');
+
+      const rows = await writer.executeRaw<{ archived: boolean }>(
+        `SELECT archived FROM sources WHERE id = $1`,
+        [sourceId],
+      );
+      expect(rows[0]?.archived).toBe(false);
+    } finally {
+      releaseWriter.resolve();
+      await writerTx?.catch(() => {});
+      await writer.executeRaw(`DELETE FROM minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([writer.disconnect(), archiver.disconnect()]);
+    }
+  }, 30_000);
+
+  test('writer for a missing source commits before explicit soft archive', async () => {
+    const sourceId = 'archive-missing-writer-explicit-e2e';
+    const jobName = 'source-hygiene-missing-source-explicit-e2e';
+    const writer = new PostgresEngine();
+    const archiver = new PostgresEngine();
+    const writerReady = deferred();
+    const releaseWriter = deferred();
+    let writerTx: Promise<void> | null = null;
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+    await archiver.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await writer.executeRaw(`DELETE FROM minion_jobs WHERE name = $1`, [jobName]);
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]);
+
+      writerTx = writer.transaction(async (tx) => {
+        await tx.executeRaw(
+          `INSERT INTO minion_jobs (name, status, data)
+           VALUES ($1, 'waiting', jsonb_build_object('sourceId', $2::text))`,
+          [jobName, sourceId],
+        );
+        writerReady.resolve();
+        await releaseWriter.promise;
+      });
+      await writerReady.promise;
+
+      await archiver.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+         VALUES ($1, $1, $2, '{}'::jsonb)`,
+        [sourceId, `/tmp/gbrain-${sourceId}-missing`],
+      );
+
+      let archiveSettled = false;
+      const archiveAttempt = softDeleteSource(archiver, sourceId)
+        .finally(() => { archiveSettled = true; });
+      await wait(100);
+      expect(archiveSettled).toBe(false);
+
+      releaseWriter.resolve();
+      await writerTx;
+      const result = await archiveAttempt;
+      expect(result?.id).toBe(sourceId);
+
+      const rows = await writer.executeRaw<{ archived: boolean }>(
+        `SELECT archived FROM sources WHERE id = $1`,
+        [sourceId],
+      );
+      expect(rows[0]?.archived).toBe(true);
+    } finally {
+      releaseWriter.resolve();
+      await writerTx?.catch(() => {});
+      await writer.executeRaw(`DELETE FROM minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([writer.disconnect(), archiver.disconnect()]);
+    }
+  }, 30_000);
+
   test('archive holding the update lock commits before a later writer rereads and rejects', async () => {
     const sourceId = 'archive-archiver-first-e2e';
     const writer = new PostgresEngine();
@@ -141,7 +257,7 @@ describeE2E('source hygiene archive/write concurrency', () => {
         writerError = caught;
       }
       expect(writerError).toBeDefined();
-      expect(String(writerError)).toContain('missing or archived');
+      expect(String(writerError)).toContain('is archived');
     } finally {
       await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
       await Promise.all([writer.disconnect(), archiver.disconnect()]);
@@ -258,7 +374,7 @@ describeE2E('source hygiene archive/write concurrency', () => {
         refreshError = caught;
       }
       expect(refreshError).toBeDefined();
-      expect(String(refreshError)).toContain('missing or archived');
+      expect(String(refreshError)).toContain('is archived');
     } finally {
       await writer.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]).catch(() => {});
       await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});

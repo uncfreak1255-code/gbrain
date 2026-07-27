@@ -578,10 +578,13 @@ export async function archiveHygieneCandidate(
   reason: string;
 }> {
   return engine.transaction(async (tx) => {
-    // Bind the decision and mutation to one transaction. Migration v121 makes
-    // every source-reference/config producer take FOR SHARE on this same row,
-    // so FOR UPDATE waits for earlier writers and blocks later writers while
-    // all dependent-data, job, config, and lock vetoes are reread.
+    // Bind the decision and mutation to one transaction. The global lifecycle
+    // lock exists even when a source registry row does not, so it also closes
+    // the absent -> registered -> archived race. Writers take the shared form;
+    // archive takes exclusive before any evidence read and rereads every veto.
+    await tx.executeRaw(
+      `SELECT pg_advisory_xact_lock(hashtextextended('gbrain:source-lifecycle', 0))`,
+    );
     const active = await tx.executeRaw<{ id: string }>(
       `SELECT id FROM sources WHERE id = $1 AND archived = false FOR UPDATE`,
       [sourceId],

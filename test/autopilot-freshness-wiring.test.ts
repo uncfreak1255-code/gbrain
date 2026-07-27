@@ -40,9 +40,12 @@ describe('autopilot freshness sync wiring', () => {
 
   test('uses shared recommendation context for targeted remediation planning', () => {
     expect(SRC).toContain("import('../core/remediation/context.ts')");
-    expect(SRC).toMatch(/const ctx = await loadRecommendationContext\(engine,\s*\{\s*repoPath\s*\}\)/);
+    expect(SRC).toMatch(
+      /const ctx = await loadRecommendationContext\(engine,\s*\{\s*repoPath,\s*inspectLocalSourcePaths:\s*true,?\s*\}\)/,
+    );
     expect(SRC).toMatch(/computeRecommendations\(health,\s*ctx,\s*extraRemediations\)/);
     expect(CONTEXT_SRC).toContain('sourceScoped?: boolean');
+    expect(CONTEXT_SRC).toContain('inspectLocalSourcePaths?: boolean');
     expect(CONTEXT_SRC).toContain('if (opts.sourceScoped === true) sourceId = source.id;');
   });
 });
