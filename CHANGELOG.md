@@ -2,6 +2,27 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.0.1] - 2026-07-27
+
+**Extraction dry runs and corpus briefing now report the work they would actually do, while disabled quality probes stay quiet.** Dry-run link and timeline extraction checks existing database rows before counting or printing actions, markdown corpus inputs carry their own titles and source URLs into review drafts, and stale nightly probe audit rows no longer make doctor noisy after the probe is disabled.
+
+### To take advantage of v0.47.0.1
+
+Run `gbrain upgrade`. No migration or required configuration change is needed.
+
+### Itemized changes
+
+### Changed
+- **Markdown corpus sources produce better review drafts.** Local markdown inputs now read frontmatter, page titles, `source_url`, and non-segment transcript shape so generated reviews and Sawyer briefs use "Best excerpt" language instead of timestamp-only video wording.
+- **Fixture corpus pages carry richer review metadata.** Test fixtures now include source URLs, owner-safe example entities, and realistic meeting/company/person links for corpus and extraction coverage.
+
+### Fixed
+- **DB extraction dry runs only count insertable work.** Link and timeline dry runs now mirror batch conflict behavior by suppressing duplicate rows already present in the database, including origin-page-aware link keys.
+- **Disabled nightly quality probes are quiet.** `gbrain doctor` treats a disabled probe as intentionally OK even when old audit events still exist in the recent window.
+
+### For contributors
+- Focused corpus, extraction, and nightly-probe regressions cover markdown-source metadata, duplicate dry-run suppression, fixture link extraction, and disabled-probe health readbacks.
+
 ## [0.46.1.0] - 2026-07-18
 
 **Full sync now preserves pages created through GBrain and treats `ops/` notes like ordinary brain content.** A missing generated file no longer makes a database-backed page look intentionally deleted, while real Git deletions still reconcile normally.
