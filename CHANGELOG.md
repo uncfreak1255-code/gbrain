@@ -2,6 +2,63 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.0.0] - 2026-07-26
+
+**GBrain can now rescue pages that exist only in its database before cleaning up a broken source.** When a source checkout disappears or points at the wrong place, Doctor, Advisor, and the remediation planner agree on the problem and stop unrelated paid work from running ahead of the repair. Empty duplicate sources can be archived safely, while sources that still contain unique pages are protected until those pages have a checked export.
+
+### How to use it
+
+```bash
+# Inspect the source problem without changing anything.
+gbrain doctor --json
+gbrain advisor --json
+
+# Export one source with a deterministic manifest before repair.
+gbrain export --source default --out ./gbrain-default-recovery
+
+# Archive only when the source still satisfies the empty-candidate rules.
+gbrain sources archive <source-id> --if-hygiene-candidate
+```
+
+### What the safety checks do
+
+| Situation | Result |
+|---|---|
+| The checkout is missing but the database has pages | Export and recovery come first; cleanup is blocked |
+| A duplicate source has no pages | It can be soft-archived with a restore command |
+| A source is archived while work is queued | New writes and continued jobs are refused at the database boundary |
+| The source problem is healthy again | Normal planning resumes without a stale source warning |
+
+### Things to watch
+
+Source-scoped exports verify the page count, reject duplicate slugs, preserve raw data, and write a manifest with stable hashes. Archival is deliberately reversible and does not delete source pages. Protected or paid remediation remains a separate operator decision; this release only prevents it from racing ahead of a source recovery.
+
+### To take advantage of v0.47.0.0
+
+`gbrain upgrade` should apply migrations 124 through 128 automatically. If Doctor reports a partial migration, run:
+
+```bash
+gbrain apply-migrations --yes
+gbrain doctor --json
+gbrain sources list --json
+```
+
+If the upgrade still looks incomplete, include `gbrain doctor --json` and `~/.gbrain/upgrade-errors.jsonl` when filing an issue.
+
+### Itemized changes
+
+### Added
+- **Source-scoped recovery exports.** `gbrain export --source <id>` paginates the complete source inside a consistent database snapshot, validates counts and unique slugs, confines output paths, and writes deterministic page hashes.
+- **A repeatable source-hygiene loop.** Repo-local maintenance guidance now separates investigation, adversarial review, and bounded repair, with a fresh readback after every action.
+- **Archived-source database guards.** Migrations 124 through 128 reject new or continued writes against archived sources, including job progress and source-owned row updates that do not change `source_id`.
+
+### Changed
+- **Doctor, Planner, and Advisor share one source diagnosis.** Missing checkouts, database-only pages, empty duplicates, and healthy database-backed sources now produce consistent findings and remediation gates.
+- **Archived sources leave normal routing.** Resolver and Doctor paths ignore soft-archived sources while retaining a narrow fallback for older schemas during upgrade.
+
+### For contributors
+- Focused unit, export, migration, and real-PostgreSQL concurrency tests cover consistent recovery snapshots, raw-key preservation, transactional archive rechecks, queued-job races, terminalization, lock renewal, and all-update source guards.
+
 ## [0.46.1.0] - 2026-07-18
 
 **Full sync now preserves pages created through GBrain and treats `ops/` notes like ordinary brain content.** A missing generated file no longer makes a database-backed page look intentionally deleted, while real Git deletions still reconcile normally.
