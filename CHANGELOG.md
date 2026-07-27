@@ -14,7 +14,7 @@ gbrain doctor --json
 gbrain advisor --json
 
 # Export one source with a deterministic manifest before repair.
-gbrain export --source default --out ./gbrain-default-recovery
+gbrain export --source default --dir ./gbrain-default-recovery
 
 # Archive only when the source still satisfies the empty-candidate rules.
 gbrain sources archive <source-id> --if-hygiene-candidate
