@@ -4,6 +4,7 @@ version: 0.1.0
 description: Self-evolving skill optimization via SkillOpt-paper-grounded text-space optimizer.
 triggers:
   - "optimize this skill"
+  - "improve this skill"
   - "tune the skill against the benchmark"
   - "make the skill better"
   - "run skillopt"
