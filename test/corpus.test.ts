@@ -121,6 +121,129 @@ describe('corpus inspect', () => {
     }
   });
 
+  test('uses markdown source frontmatter for corpus metadata and reviews the markdown body', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    try {
+      writeFileSync(join(root, 'agent-loop-source.md'), [
+        '---',
+        'title: Agent Loop Source',
+        "source_url: 'https://example.com/agent-loop'",
+        'duration_seconds: 45',
+        'segments:',
+        '  - start: 0',
+        '    text: Frontmatter segment metadata is not used by the markdown review path yet.',
+        '---',
+        '',
+        '# Agent Loop Source',
+        '',
+        'Agents need proof receipts, evals, and stop rules before workflow decisions change.',
+        '',
+      ].join('\n'));
+
+      const inspection = await inspectCorpusInput(root, {
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+
+      expect(inspection.items[0].title).toBe('Agent Loop Source');
+      expect(inspection.items[0].canonical_url).toBe('https://example.com/agent-loop');
+      expect(inspection.items[0].duration_seconds).toBe(45);
+      expect(inspection.items[0].segments_available).toBe(false);
+
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+      const review = await reviewCorpus(ingest.out_dir, {
+        sourceId: 'briefs-test',
+        now: new Date('2026-07-02T13:00:00.000Z'),
+      });
+      const brief = await briefCorpus(ingest.out_dir, {
+        profile: 'sawyer',
+        now: new Date('2026-07-02T14:00:00.000Z'),
+      });
+
+      const page = readFileSync(review.review_pages_written[0], 'utf8');
+      expect(page).toContain('https://example.com/agent-loop');
+      expect(page).toContain('Agents need proof receipts');
+      expect(page).toContain('## Best Excerpt');
+      expect(readFileSync(brief.brief_path, 'utf8')).toContain('Best excerpt:');
+      expect(readFileSync(brief.brief_path, 'utf8')).not.toContain('Best excerpt: 00:00 -');
+      expect(page).not.toContain('title: Agent Loop Source\\nsource_url');
+      expect(page).not.toContain('## Summary\n# Agent Loop Source');
+      expect(page).not.toContain('00:00 - Agents need proof receipts');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test('frontmatter-only markdown sources do not review yaml as transcript text', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    try {
+      writeFileSync(join(root, 'metadata-only.md'), [
+        '---',
+        'title: Metadata Only Source',
+        "source_url: 'https://example.com/metadata-only'",
+        'segments:',
+        '  - start: 0',
+        '    text: This frontmatter should not become transcript text.',
+        '---',
+        '',
+      ].join('\n'));
+
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+      const review = await reviewCorpus(ingest.out_dir, {
+        sourceId: 'briefs-test',
+        now: new Date('2026-07-02T13:00:00.000Z'),
+      });
+
+      const page = readFileSync(review.review_pages_written[0], 'utf8');
+      expect(page).toContain('Metadata Only Source has no usable transcript text yet.');
+      expect(page).not.toContain('This frontmatter should not become transcript text');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  test('text transcripts starting with separators are not parsed as markdown frontmatter', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
+    const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
+    try {
+      writeFileSync(join(root, 'separator-led.txt'), [
+        '---',
+        'This separator is part of the transcript, not YAML frontmatter.',
+        '---',
+        'Agents need proof receipts after the separator.',
+        '',
+      ].join('\n'));
+
+      const ingest = await ingestCorpusInput(root, {
+        sourceId: 'briefs-test',
+        outDir: out,
+        now: new Date('2026-07-02T12:00:00.000Z'),
+      });
+      const review = await reviewCorpus(ingest.out_dir, {
+        sourceId: 'briefs-test',
+        now: new Date('2026-07-02T13:00:00.000Z'),
+      });
+
+      const page = readFileSync(review.review_pages_written[0], 'utf8');
+      expect(page).toContain('This separator is part of the transcript');
+      expect(page).toContain('Agents need proof receipts after the separator.');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
   test('ingest uses collision-resistant item ids for slug-equivalent paths', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gbrain-corpus-test-'));
     const out = mkdtempSync(join(tmpdir(), 'gbrain-corpus-out-'));
@@ -183,6 +306,7 @@ describe('corpus inspect', () => {
       const page = readFileSync(review.review_pages_written[0], 'utf8');
       expect(page).toContain('corpus_review_method: deterministic-transcript-heuristic');
       expect(page).toContain('## Key Ideas');
+      expect(page).toContain('## Best Segment');
       expect(page).toContain('01:15 - Agents need retrieval');
       expect(page).toContain('## Transcript Excerpt Pointers');
       expect(page).not.toContain('TODO');
