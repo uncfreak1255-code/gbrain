@@ -125,6 +125,26 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     }
   });
 
+  test('source lifecycle guards pin public ahead of caller-controlled temporary tables', async () => {
+    await engine.initSchema();
+    const rows = await engine.executeRaw<{ proname: string; proconfig: string[] | null }>(
+      `SELECT p.proname, p.proconfig
+         FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.proname IN (
+            'enforce_active_source_reference_fn',
+            'enforce_active_source_job_status_fn',
+            'enforce_active_source_config_fn'
+          )
+        ORDER BY p.proname`,
+    );
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
+    }
+  });
+
   test('RLS capability checks do not mistake inherited role membership for BYPASSRLS', async () => {
     await engine.initSchema();
     const suffix = `${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;

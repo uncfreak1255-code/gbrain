@@ -1093,7 +1093,9 @@ CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
 -- Source lifecycle write guard (migrations v124-v130). Mirrored from schema.sql
 -- so fresh PGLite snapshots and replayed schemas enforce the same lock protocol.
 CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-RETURNS trigger AS $fn$
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
 DECLARE
   source_ref TEXT;
   source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -1158,7 +1160,9 @@ END;
 $fn$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-RETURNS trigger AS $fn$
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
 DECLARE
   source_ref TEXT;
   source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -1200,7 +1204,9 @@ END;
 $fn$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-RETURNS trigger AS $fn$
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
 DECLARE
   matched_active BOOLEAN := false;
   source_archived BOOLEAN;

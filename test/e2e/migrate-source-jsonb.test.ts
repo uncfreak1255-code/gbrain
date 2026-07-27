@@ -27,7 +27,7 @@ describeE2E('Postgres migrate-engine source copy config shape', () => {
     source = new PGLiteEngine();
     await source.connect({});
     await source.initSchema();
-  });
+  }, 60_000);
 
   afterAll(async () => {
     await source.disconnect();

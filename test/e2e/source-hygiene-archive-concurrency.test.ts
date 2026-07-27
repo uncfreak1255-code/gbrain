@@ -38,6 +38,56 @@ describeE2E('source hygiene archive/write concurrency', () => {
     await teardownDB();
   });
 
+  test('guard ignores a caller-controlled temporary sources table', async () => {
+    const sourceId = 'archive-search-path-shadow-e2e';
+    const jobName = 'source-hygiene-search-path-shadow-e2e';
+    const writer = new PostgresEngine();
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]);
+      await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await writer.executeRaw(
+        `INSERT INTO public.sources (id, name, config, archived)
+         VALUES ($1, $1, '{}'::jsonb, true)`,
+        [sourceId],
+      );
+      const error = await writer.withReservedConnection(async (conn) => {
+        try {
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.sources`);
+          await conn.executeRaw(
+            `CREATE TEMP TABLE sources (id text PRIMARY KEY, archived boolean NOT NULL)`,
+          );
+          await conn.executeRaw(
+            `INSERT INTO pg_temp.sources (id, archived) VALUES ($1, false)`,
+            [sourceId],
+          );
+          await conn.executeRaw(`SET search_path = pg_temp, public`);
+
+          try {
+            await conn.executeRaw(
+              `INSERT INTO public.minion_jobs (name, data)
+               VALUES ($1, jsonb_build_object('sourceId', $2::text))`,
+              [jobName, sourceId],
+            );
+          } catch (caught) {
+            return caught;
+          }
+          return undefined;
+        } finally {
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.sources`).catch(() => {});
+          await conn.executeRaw(`RESET search_path`).catch(() => {});
+        }
+      });
+      expect(error).toBeDefined();
+      expect(String(error)).toContain('is archived');
+    } finally {
+      await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await writer.disconnect();
+    }
+  }, 30_000);
+
   test('writer already holding a source share lock commits before archive rereads and vetoes', async () => {
     const sourceId = 'archive-writer-first-e2e';
     const sourcePath = `/tmp/gbrain-${sourceId}-missing`;

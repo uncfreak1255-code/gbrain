@@ -23,17 +23,25 @@ cd "$ROOT"
 
 FILES="src/schema.sql src/core/pglite-schema.ts src/core/schema-embedded.ts"
 
-# A hardened header reads `... RETURNS trigger SET search_path = ... AS $tag$`.
-# An UNHARDENED one reads `... RETURNS trigger AS $tag$` — match that form and
-# (belt-and-suspenders) drop any line that already mentions search_path.
-BAD="$(grep -nEi 'CREATE OR REPLACE FUNCTION [a-z_]+\(\) RETURNS trigger AS ' $FILES 2>/dev/null | grep -vi 'search_path' || true)"
+# Trigger headers may span several lines. Read each file as one record and
+# inspect the complete header through its AS delimiter so multiline functions
+# cannot evade the guard.
+BAD="$(perl -0777 -ne '
+  while (/CREATE OR REPLACE FUNCTION\s+([a-z_]+)\(\)\s+RETURNS\s+trigger(.*?)(?=\bAS\s+\\?\$[A-Za-z_]*\\?\$)/gsi) {
+    my ($name, $options) = ($1, $2);
+    next if $options =~ /SET\s+search_path\s*=/i;
+    my $prefix = substr($_, 0, $-[0]);
+    my $line = 1 + ($prefix =~ tr/\n/\n/);
+    print "$ARGV:$line:$name\n";
+  }
+' $FILES)"
 
 if [ -n "$BAD" ]; then
   echo "ERROR: trigger function(s) missing SET search_path in schema base files:"
   echo "$BAD"
   echo
-  echo "Add 'SET search_path = pg_catalog, public' to the function header, e.g.:"
-  echo "  CREATE OR REPLACE FUNCTION foo() RETURNS trigger SET search_path = pg_catalog, public AS \$\$"
+  echo "Add 'SET search_path = pg_catalog, public, pg_temp' to the function header, e.g.:"
+  echo "  CREATE OR REPLACE FUNCTION foo() RETURNS trigger SET search_path = pg_catalog, public, pg_temp AS \$\$"
   echo "See #1647 / #171."
   exit 1
 fi

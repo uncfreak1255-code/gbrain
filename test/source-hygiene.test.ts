@@ -478,6 +478,9 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).toContain("('gbrain_cycle_locks', 'id', 'sync_lock_id'");
     expect(migration?.sql).toContain('BEFORE INSERT OR UPDATE ON %I');
     expect(migration?.sql).toContain('source_active_config_guard');
+    expect(
+      migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
+    ).toHaveLength(2);
 
     const uncovered = await db.executeRaw<{ table_name: string }>(
       `SELECT c.table_name
@@ -653,6 +656,9 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).toContain('IF FOUND AND source_archived THEN');
     expect(migration?.sql).toContain('FOR SHARE');
     expect(migration?.sql).not.toContain('source % is missing or archived');
+    expect(
+      migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
+    ).toHaveLength(3);
   });
 
   test('migration v130 serializes writers with archive before a source row exists', () => {
@@ -662,10 +668,32 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).toContain('pg_advisory_xact_lock_shared');
     expect(migration?.sql).toContain("hashtextextended('gbrain:source-lifecycle', 0)");
     expect(migration?.sql).toContain('cardinality(source_refs) > 0');
+    expect(
+      migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
+    ).toHaveLength(3);
   });
 
   test('PGLite schema replay preserves the final v130 guard on an already-upgraded brain', async () => {
+    const assertHardenedGuards = async () => {
+      const hardened = await db.executeRaw<{ proname: string; proconfig: string[] | null }>(
+        `SELECT proname, proconfig
+           FROM pg_proc
+          WHERE proname IN (
+            'enforce_active_source_reference_fn',
+            'enforce_active_source_job_status_fn',
+            'enforce_active_source_config_fn'
+          )
+          ORDER BY proname`,
+      );
+      expect(hardened).toHaveLength(3);
+      for (const guard of hardened) {
+        expect(guard.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
+      }
+    };
+
+    await assertHardenedGuards();
     await db.initSchema();
+    await assertHardenedGuards();
     await db.executeRaw(
       `INSERT INTO minion_jobs (name, data)
        VALUES ('guard-replay-missing-job', '{"sourceId":"guard-replay-missing"}'::jsonb)`,
@@ -690,6 +718,9 @@ describe('archive hygiene execution gate', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 126);
     expect(migration?.name).toBe('archived_source_job_terminalization_guard');
     expect(migration?.idempotent).toBe(true);
+    expect(
+      migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
+    ).toHaveLength(1);
     const continuationMigration = MIGRATIONS.find((entry) => entry.version === 127);
     expect(continuationMigration?.name).toBe('archived_source_job_continuation_guard');
     expect(continuationMigration?.idempotent).toBe(true);

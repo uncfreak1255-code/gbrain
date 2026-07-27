@@ -5505,7 +5505,9 @@ export const MIGRATIONS: Migration[] = [
     idempotent: true,
     sql: `
       CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -5562,7 +5564,9 @@ export const MIGRATIONS: Migration[] = [
       $fn$ LANGUAGE plpgsql;
 
       CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         matched_active BOOLEAN := false;
       BEGIN
@@ -5706,7 +5710,9 @@ export const MIGRATIONS: Migration[] = [
     idempotent: true,
     sql: `
       CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -5826,7 +5832,9 @@ export const MIGRATIONS: Migration[] = [
     idempotent: true,
     sql: `
       CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -5885,7 +5893,9 @@ export const MIGRATIONS: Migration[] = [
       $fn$ LANGUAGE plpgsql;
 
       CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -5921,7 +5931,9 @@ export const MIGRATIONS: Migration[] = [
       $fn$ LANGUAGE plpgsql;
 
       CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         matched_active BOOLEAN := false;
         source_archived BOOLEAN;
@@ -5967,7 +5979,9 @@ export const MIGRATIONS: Migration[] = [
     idempotent: true,
     sql: `
       CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -6032,7 +6046,9 @@ export const MIGRATIONS: Migration[] = [
       $fn$ LANGUAGE plpgsql;
 
       CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -6074,7 +6090,9 @@ export const MIGRATIONS: Migration[] = [
       $fn$ LANGUAGE plpgsql;
 
       CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-      RETURNS trigger AS $fn$
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
       DECLARE
         matched_active BOOLEAN := false;
         source_archived BOOLEAN;

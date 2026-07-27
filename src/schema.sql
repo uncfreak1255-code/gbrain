@@ -1381,7 +1381,9 @@ CREATE TRIGGER minion_job_notify AFTER INSERT OR UPDATE OF status ON minion_jobs
 -- evidence read or wait and reject after the source becomes archived. Missing
 -- registry rows remain compatible with legacy source identifiers.
 CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-RETURNS trigger AS $fn$
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
 DECLARE
   source_ref TEXT;
   source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -1446,7 +1448,9 @@ END;
 $fn$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-RETURNS trigger AS $fn$
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
 DECLARE
   source_ref TEXT;
   source_refs TEXT[] := ARRAY[]::TEXT[];
@@ -1488,7 +1492,9 @@ END;
 $fn$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-RETURNS trigger AS $fn$
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
 DECLARE
   matched_active BOOLEAN := false;
   source_archived BOOLEAN;
