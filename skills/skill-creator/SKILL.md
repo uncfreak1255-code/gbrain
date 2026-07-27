@@ -27,7 +27,7 @@ Three meta-skills share this space; route by intent:
   against a benchmark ("optimize this skill", "make the skill better",
   "run skillopt"). It never touches the routing surface.
 - **skillify** — an existing *feature* needs the full conformance treatment
-  ("skillify this", "make this proper"): 11-item checklist, cross-modal eval,
+  ("skillify this", "make this proper"): 12-item checklist, cross-modal eval,
   tests.
 
 ## Contract

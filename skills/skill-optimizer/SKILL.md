@@ -184,7 +184,7 @@ When invoked, this skill produces:
 ## Related skills
 
 - `skillify` — scaffolds a new skill (use BEFORE skillopt); `gbrain skillify
-  check` is the 11-item conformance audit (item 11 surfaces the cross-modal
+  check` is the 12-item conformance audit (item 11 surfaces the cross-modal
   eval receipt; no health surface reports skillopt status today — run state
   lives in the skill's own `skillopt/history.json`)
 - `skill-creator` — creates or structurally extends a skill (new coverage,

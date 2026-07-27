@@ -1,11 +1,12 @@
 /**
- * gbrain skillify check — 11-item post-task audit.
+ * gbrain skillify check — 12-item post-task audit.
  *
  * Promoted from `scripts/skillify-check.ts` (D-CX-2). The legacy
  * script stays as a thin shim so existing callers keep working, but
  * the CLI entry point is now `gbrain skillify check`.
  *
- * 11-item checklist (essay Step 3-10 + v0.27.x cross-modal eval):
+ * 12-item checklist (essay Step 3-10 + v0.27.x cross-modal eval +
+ * v0.36.x brain-first):
  *   1. SKILL.md exists
  *   2. Code file exists at target path
  *   3. Unit tests exist
@@ -21,6 +22,8 @@
  *      bound to the current SKILL.md content hash (T10=A,T7=C in
  *      plans/radiant-napping-lerdorf.md). A missing or stale receipt
  *      surfaces as a non-blocking note, not a failure.
+ *  12. Brain-first compliance (REQUIRED — external lookup refs need the
+ *      canonical Convention callout or `brain_first: exempt`).
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
