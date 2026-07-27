@@ -255,7 +255,10 @@ function runSkillifyCheckTarget(target: string, root: string): CheckResult {
     checkOptional('check-resolvable gate', resolverResult.ok, resolverResult.detail),
   );
 
-  items.push(check('E2E test (either under e2e/ or integration test)', hasE2E, 'try /qa or test/e2e/'));
+  // Label states the actual scan: only <testDir>/e2e is checked. Widening
+  // the scan to integration tests elsewhere would loosen a required gate —
+  // that's a deliberate behavior change, not a label fix (PR #90 review).
+  items.push(check('E2E test (file under test/e2e/ matching the skill)', hasE2E, 'add test/e2e/<skill>.test.ts (or run /qa)'));
 
   let writesBrain = false;
   if (existsSync(abs)) {

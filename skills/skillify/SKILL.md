@@ -52,7 +52,10 @@ prints these item numbers, and only REQUIRED items can fail the verdict.
 □ 6.  Resolver entry     — REQUIRED — entry in skills/RESOLVER.md with real trigger phrases
 □ 7.  Resolver eval      — optional — test that triggers route to this skill
 □ 8.  Check-resolvable   — optional — DRY + MECE audit surfaced, not enforced here
-□ 9.  E2E smoke          — REQUIRED — e2e/ or integration test: trigger → side effect
+□ 9.  E2E smoke          — REQUIRED — file under test/e2e/ named for the
+                           skill (or its code file): trigger → side effect.
+                           The checker scans ONLY test/e2e/ — an integration
+                           test elsewhere does not satisfy this item.
 □ 10. Brain filing       — optional — if it writes pages, entry in brain/RESOLVER.md
 □ 11. Cross-modal eval   — informational — 3 frontier models from 3 providers
 □ 12. Brain-first        — REQUIRED — external lookup refs need the Convention
