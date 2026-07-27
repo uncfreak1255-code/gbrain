@@ -2315,7 +2315,8 @@ IMPORT/EXPORT
   sync [--repo <path>] [flags]       Git-to-brain incremental sync
   sync --watch [--interval N]        Continuous sync (loops until stopped)
   sync --install-cron                Install persistent sync daemon
-  export [--dir ./out/] [--source S] Export one source to markdown with a SHA-256 receipt
+  export --source S --dir ./out/     Export one source with a SHA-256 recovery receipt
+  export [--dir ./out/]              Legacy all-source export; same-slug pages can collide
   export --restore-only [--repo <p>] Restore missing supabase-only files
         [--type T] [--slug-prefix S] With optional filters
 

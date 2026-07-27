@@ -31,7 +31,7 @@ gbrain sources archive <source-id> --if-hygiene-candidate
 
 ### Things to watch
 
-Source-scoped exports require a fresh or empty output directory, verify the page count, reject duplicate slugs, preserve raw data, and write a manifest with stable hashes. Archival is deliberately reversible and does not delete source pages. Protected or paid remediation remains a separate operator decision; this release only prevents it from racing ahead of a source recovery.
+Source-scoped exports require a fresh or empty output directory, verify the page count, reject duplicate slugs, preserve raw data, and write a manifest with stable hashes. The legacy all-source export can overwrite pages when different sources share a slug; it is not a full relational database backup. Archival is deliberately reversible and does not delete source pages. Protected or paid remediation remains a separate operator decision; this release only prevents it from racing ahead of a source recovery.
 
 ### To take advantage of v0.47.0.0
 
