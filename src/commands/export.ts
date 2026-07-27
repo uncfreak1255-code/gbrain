@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { join, dirname, isAbsolute, relative, resolve, sep } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
@@ -77,6 +77,28 @@ function confinedOutputPath(outDir: string, relativePath: string): string {
     failExport(`export path escapes output directory: ${JSON.stringify(relativePath)}`);
   }
   return candidate;
+}
+
+function assertFreshScopedOutputDirectory(outDir: string): void {
+  const root = resolve(outDir);
+  if (!existsSync(root)) return;
+
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    failExport(
+      `gbrain export --source requires --dir to name an absent or empty directory; `
+      + `${JSON.stringify(outDir)} is not a readable directory.`,
+    );
+  }
+  if (entries.length > 0) {
+    failExport(
+      `gbrain export --source requires --dir to be absent or empty; `
+      + `${JSON.stringify(outDir)} already contains ${entries.length} item(s). `
+      + 'Choose a fresh recovery directory.',
+    );
+  }
 }
 
 async function parseScopedSource(engine: BrainEngine, args: string[]): Promise<string | undefined> {
@@ -311,6 +333,7 @@ export async function runExport(engine: BrainEngine, args: string[]) {
         join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
       );
     }
+    assertFreshScopedOutputDirectory(outDir);
   }
 
   if (restoreOnly) {

@@ -31,7 +31,7 @@ gbrain sources archive <source-id> --if-hygiene-candidate
 
 ### Things to watch
 
-Source-scoped exports verify the page count, reject duplicate slugs, preserve raw data, and write a manifest with stable hashes. Archival is deliberately reversible and does not delete source pages. Protected or paid remediation remains a separate operator decision; this release only prevents it from racing ahead of a source recovery.
+Source-scoped exports require a fresh or empty output directory, verify the page count, reject duplicate slugs, preserve raw data, and write a manifest with stable hashes. Archival is deliberately reversible and does not delete source pages. Protected or paid remediation remains a separate operator decision; this release only prevents it from racing ahead of a source recovery.
 
 ### To take advantage of v0.47.0.0
 
@@ -48,7 +48,7 @@ If the upgrade still looks incomplete, include `gbrain doctor --json` and `~/.gb
 ### Itemized changes
 
 ### Added
-- **Source-scoped recovery exports.** `gbrain export --source <id>` paginates the complete source inside a consistent database snapshot, validates counts and unique slugs, confines output paths, and writes deterministic page hashes.
+- **Source-scoped recovery exports.** `gbrain export --source <id>` requires a fresh or empty output directory, paginates the complete source inside a consistent database snapshot, validates counts and unique slugs, confines output paths, and writes deterministic page hashes.
 - **A repeatable source-hygiene loop.** Repo-local maintenance guidance now separates investigation, adversarial review, and bounded repair, with a fresh readback after every action.
 - **Archived-source database guards.** Migrations 124 through 130 reject new or continued writes against known archived sources, including job progress and source-owned row updates that do not change `source_id`, while retaining compatibility with unresolved legacy source identifiers and serializing archive decisions before a registry row exists.
 

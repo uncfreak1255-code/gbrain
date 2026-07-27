@@ -11,7 +11,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -199,6 +199,31 @@ describe('export --restore-only resolution chain (D5)', () => {
 });
 
 describe('source-scoped recovery export', () => {
+  test('refuses a non-empty output directory so stale pages cannot contaminate recovery', async () => {
+    await seedSourceVariant('default', 'default');
+    mkdirSync(outDir, { recursive: true });
+    writeFileSync(join(outDir, 'stale-page.md'), 'stale recovery data\n');
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toMatch(/absent or empty|fresh recovery directory/i);
+    expect(readFileSync(join(outDir, 'stale-page.md'), 'utf8')).toBe('stale recovery data\n');
+    expect(existsSync(join(outDir, 'notes/shared.md'))).toBe(false);
+    expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(false);
+  });
+
+  test('accepts an existing empty output directory', async () => {
+    await seedSourceVariant('default', 'default');
+    mkdirSync(outDir, { recursive: true });
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBeNull();
+    expect(existsSync(join(outDir, 'notes/shared.md'))).toBe(true);
+    expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(true);
+  });
+
   test('isolates same-slug body, tags, and raw data in both source directions', async () => {
     await seedSourceVariant('default', 'default');
     await seedSourceVariant('neighbor', 'neighbor');
