@@ -32,25 +32,28 @@ mutating: true
 
 ## Contract
 
-A feature is "properly skilled" when all 11 checklist items pass. Item 3
-(cross-modal eval) is informational in v1.1.0 — it does not gate the
-skillpack-check audit, but a missing or stale receipt is surfaced so the
-user knows where the gate stands.
+A feature is "properly skilled" when all 11 checklist items pass. Item 11
+(cross-modal eval) is informational — it does not gate the
+`gbrain skillify check` audit, but a missing or stale receipt is surfaced so
+the user knows where the gate stands.
 
 ## The Checklist
+
+Numbering matches `gbrain skillify check` (`src/commands/skillify-check.ts`),
+which is the machine contract — the audit prints these item numbers.
 
 ```
 □ 1.  SKILL.md           — skill file with frontmatter + contract + phases
 □ 2.  Code               — deterministic script if applicable
-□ 3.  Cross-modal eval   — 3 frontier models from 3 providers; informational
-□ 4.  Unit tests         — cover every branch of deterministic logic
-□ 5.  Integration tests  — exercise live endpoints
-□ 6.  LLM evals          — quality/correctness cases for LLM-involving steps
-□ 7.  Resolver trigger   — entry in skills/RESOLVER.md with real user trigger phrases
-□ 8.  Resolver eval      — test that triggers route to this skill
-□ 9.  Check-resolvable   — DRY + MECE audit, no orphans
-□ 10. E2E test           — smoke test: trigger → side effect
-□ 11. Brain filing       — if it writes pages, entry in brain/RESOLVER.md
+□ 3.  Unit tests         — cover every branch of deterministic logic
+□ 4.  E2E tests          — optional; tracked but not required
+□ 5.  LLM evals          — quality/correctness cases for LLM-involving steps
+□ 6.  Resolver entry     — entry in skills/RESOLVER.md with real user trigger phrases
+□ 7.  Resolver eval      — test that triggers route to this skill
+□ 8.  Check-resolvable   — DRY + MECE audit, no orphans
+□ 9.  E2E smoke          — smoke test: trigger → side effect
+□ 10. Brain filing       — if it writes pages, entry in brain/RESOLVER.md
+□ 11. Cross-modal eval   — 3 frontier models from 3 providers; informational
 ```
 
 ## Phase 0: Should This Be a Skill?
@@ -95,7 +98,10 @@ Body must include: **Contract** (what it guarantees), **Phases** (step-by-step),
 
 Extract deterministic code into `scripts/*.ts`.
 
-## Phase 3: Cross-Modal Eval (item 3) — THE QUALITY GATE
+## Phase 3: Cross-Modal Eval (item 11) — THE QUALITY GATE
+
+(Checklist item 11 runs early, in Phase 3 — quality is proven before Phase 4
+locks behavior in with tests. Phase order ≠ item number.)
 
 ### Why this comes before tests
 
@@ -266,9 +272,10 @@ Phase 7: All green. Score: 11/11
 
 NOT properly skilled until:
 
-- All required items pass (1-2, 4-10; 11 only when applicable).
-- Cross-modal eval (item 3) has a current receipt OR is explicitly waived
-  with rationale (item 3 is informational; not blocking, but a missing
+- All required items pass (1-3, 6-9 always; 10 only when the skill writes
+  pages; 4-5 are tracked but optional).
+- Cross-modal eval (item 11) has a current receipt OR is explicitly waived
+  with rationale (item 11 is informational; not blocking, but a missing
   receipt is visible in the audit).
 - All tests pass (unit + integration + LLM evals).
 - Resolver entry exists with real trigger phrases.
