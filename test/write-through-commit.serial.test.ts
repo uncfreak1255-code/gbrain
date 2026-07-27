@@ -59,6 +59,9 @@ describe('#2426 — writePageThrough auto-commit', () => {
     execSync('git init', { cwd: repo, stdio: 'pipe' });
     execSync('git config user.email "t@t.t"', { cwd: repo, stdio: 'pipe' });
     execSync('git config user.name "T"', { cwd: repo, stdio: 'pipe' });
+    // Keep the fixture independent of an operator-level core.hooksPath. The
+    // fake durability hook below belongs to this disposable repository only.
+    execSync('git config --local core.hooksPath .git/hooks', { cwd: repo, stdio: 'pipe' });
     writeFileSync(join(repo, 'seed.md'), 'seed\n');
     execSync('git add -A && git commit -m init', { cwd: repo, stdio: 'pipe' });
     await engine.setConfig('sync.repo_path', repo);

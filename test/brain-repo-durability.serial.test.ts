@@ -70,11 +70,15 @@ describe('hardenBrainRepo', () => {
     // hook
     const hookPath = join(work, '.git', 'hooks', 'post-commit');
     expect(existsSync(hookPath)).toBe(true);
-    expect(readFileSync(hookPath, 'utf-8')).toContain('post-commit hook');
+    const hook = readFileSync(hookPath, 'utf-8');
+    expect(hook).toContain('post-commit hook');
+    expect(hook).toContain('GBRAIN_SKIP_DURABILITY_HOOK');
+    expect(hook.indexOf('GBRAIN_SKIP_DURABILITY_HOOK')).toBeLessThan(hook.indexOf('brain_push()'));
     expect(statSync(hookPath).mode & 0o111).toBeTruthy(); // executable
     // helper (committed, +x)
     const helperPath = join(work, 'scripts', 'brain-commit-push.sh');
     expect(existsSync(helperPath)).toBe(true);
+    expect(readFileSync(helperPath, 'utf-8')).toContain('GBRAIN_SKIP_DURABILITY_HOOK=1 git commit');
     expect(statSync(helperPath).mode & 0o111).toBeTruthy();
     // AGENTS.md with managed block + taxonomy
     const agents = readFileSync(join(work, 'AGENTS.md'), 'utf-8');
@@ -84,6 +88,13 @@ describe('hardenBrainRepo', () => {
     // verify pushed scaffolding → clean against origin
     expect(r.clean_against_origin).toBe(true);
     expect(r.needs_attention).toEqual([]);
+  });
+
+  test('the internal scaffolding commit does not start a second background push', async () => {
+    const r = await harden();
+    expect(r.clean_against_origin).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(existsSync(join(process.env.GBRAIN_HOME!, 'brain-push.log'))).toBe(false);
   });
 
   test('is idempotent — second run adds NO new commit', async () => {
