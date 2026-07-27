@@ -32,26 +32,39 @@ mutating: true
 
 ## Contract
 
-A feature is "properly skilled" when all 11 checklist items pass. Item 3
-(cross-modal eval) is informational in v1.1.0 — it does not gate the
-skillpack-check audit, but a missing or stale receipt is surfaced so the
-user knows where the gate stands.
+A feature is "properly skilled" when all 12 checklist items pass. Item 11
+(cross-modal eval) is informational — it does not gate the
+`gbrain skillify check` audit, but a missing or stale receipt is surfaced so
+the user knows where the gate stands.
 
 ## The Checklist
 
+Numbering AND required/optional status match `gbrain skillify check`
+(`src/commands/skillify-check.ts`), which is the machine contract — the audit
+prints these item numbers, and only REQUIRED items can fail the verdict.
+
 ```
-□ 1.  SKILL.md           — skill file with frontmatter + contract + phases
-□ 2.  Code               — deterministic script if applicable
-□ 3.  Cross-modal eval   — 3 frontier models from 3 providers; informational
-□ 4.  Unit tests         — cover every branch of deterministic logic
-□ 5.  Integration tests  — exercise live endpoints
-□ 6.  LLM evals          — quality/correctness cases for LLM-involving steps
-□ 7.  Resolver trigger   — entry in skills/RESOLVER.md with real user trigger phrases
-□ 8.  Resolver eval      — test that triggers route to this skill
-□ 9.  Check-resolvable   — DRY + MECE audit, no orphans
-□ 10. E2E test           — smoke test: trigger → side effect
-□ 11. Brain filing       — if it writes pages, entry in brain/RESOLVER.md
+□ 1.  SKILL.md           — REQUIRED — skill file with frontmatter + contract + phases
+□ 2.  Code               — REQUIRED — deterministic script if applicable
+□ 3.  Unit tests         — REQUIRED — cover every branch of deterministic logic
+□ 4.  Integration/E2E    — optional — tracked but never fails the audit
+□ 5.  LLM evals          — optional — quality cases for LLM-involving steps
+□ 6.  Resolver entry     — REQUIRED — entry in skills/RESOLVER.md with real trigger phrases
+□ 7.  Resolver eval      — optional — test that triggers route to this skill
+□ 8.  Check-resolvable   — optional — DRY + MECE audit surfaced, not enforced here
+□ 9.  E2E smoke          — REQUIRED — file under test/e2e/ named for the
+                           skill (or its code file): trigger → side effect.
+                           The checker scans ONLY test/e2e/ — an integration
+                           test elsewhere does not satisfy this item.
+□ 10. Brain filing       — optional — if it writes pages, entry in brain/RESOLVER.md
+□ 11. Cross-modal eval   — informational — 3 frontier models from 3 providers
+□ 12. Brain-first        — REQUIRED — external lookup refs need the Convention
+                           callout or `brain_first: exempt` in frontmatter
 ```
+
+Optional items 7, 8, and 10 are still part of the workflow below — "optional"
+means the audit surfaces them without failing the verdict, not that they are
+skippable when the behavior applies.
 
 ## Phase 0: Should This Be a Skill?
 
@@ -70,7 +83,7 @@ Code: [path]
 Missing items: [check each of the 11]
 ```
 
-## Phase 2: Write SKILL.md + Code (items 1-2)
+## Phase 2: Write SKILL.md + Code (items 1-2, 12)
 
 ### SKILL.md frontmatter template (copy-paste):
 
@@ -95,7 +108,10 @@ Body must include: **Contract** (what it guarantees), **Phases** (step-by-step),
 
 Extract deterministic code into `scripts/*.ts`.
 
-## Phase 3: Cross-Modal Eval (item 3) — THE QUALITY GATE
+## Phase 3: Cross-Modal Eval (item 11) — THE QUALITY GATE
+
+(Checklist item 11 runs early, in Phase 3 — quality is proven before Phase 4
+locks behavior in with tests. Phase order ≠ item number.)
 
 ### Why this comes before tests
 
@@ -210,7 +226,7 @@ you can audit retroactively.
 - Output is < 200 tokens (trivial — not worth 9 API calls).
 - The skill is a thin wrapper around a single API call (one cycle is enough).
 
-## Phase 4: Tests (items 4-6)
+## Phase 4: Tests (items 3-5)
 
 NOW that eval has proven quality, write tests that lock it in:
 
@@ -218,7 +234,7 @@ NOW that eval has proven quality, write tests that lock it in:
 **Integration tests** — hit real endpoints. Catch bugs mocks hide.
 **LLM evals** — quality/correctness for LLM steps. Lighter than cross-modal eval — test specific behaviors.
 
-## Phase 5: Resolver + Check-Resolvable (items 7-9)
+## Phase 5: Resolver + Check-Resolvable (items 6-8)
 
 1. Add to skills/RESOLVER.md with trigger phrases users ACTUALLY type
 2. Resolver eval: feed triggers, assert correct routing
@@ -228,7 +244,7 @@ NOW that eval has proven quality, write tests that lock it in:
    - No DRY violations (shared logic in lib/, not copy-pasted)
    - No ambiguous trigger routing
 
-## Phase 6: E2E + Brain Filing (items 10-11)
+## Phase 6: E2E + Brain Filing (items 9-10)
 
 - E2E smoke: full pipeline from trigger to side effect
 - Brain filing: add to brain/RESOLVER.md if the skill writes brain pages
@@ -259,16 +275,21 @@ Phase 3: Cross-modal eval cycle 1 →
 Phase 4: Write 12 unit tests locking in the improved behavior
 Phase 5: Add "summarize this PR" trigger to skills/RESOLVER.md
 Phase 6: E2E test: feed a real PR URL → verify brain page created
-Phase 7: All green. Score: 11/11
+Phase 7: All green. Score: 12/12
 ```
 
 ## Quality Gates
 
 NOT properly skilled until:
 
-- All required items pass (1-2, 4-10; 11 only when applicable).
-- Cross-modal eval (item 3) has a current receipt OR is explicitly waived
-  with rationale (item 3 is informational; not blocking, but a missing
+- All REQUIRED items pass: 1-3, 6, 9, 12. These are the only items
+  `gbrain skillify check` fails the verdict on.
+- Advisory items are clean or consciously accepted: 4-5, 7-8, and 10 are
+  surfaced by the audit without gating it — a failing check-resolvable or a
+  missing brain-filing entry is still a defect, just one the audit reports
+  rather than enforces.
+- Cross-modal eval (item 11) has a current receipt OR is explicitly waived
+  with rationale (item 11 is informational; not blocking, but a missing
   receipt is visible in the audit).
 - All tests pass (unit + integration + LLM evals).
 - Resolver entry exists with real trigger phrases.
