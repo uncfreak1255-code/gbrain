@@ -63,6 +63,7 @@ import { createHash } from 'crypto';
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted } from '../core/abort-check.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
+import { buildTimelineRows } from '../core/batch-rows.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
 // Postgres bind-parameter limit is 65535. Links use 4 cols/row → 16K hard ceiling;
@@ -1365,6 +1366,7 @@ async function linkBatchRowWouldInsert(engine: BrainEngine, row: LinkBatchInput)
 }
 
 async function timelineBatchRowWouldInsert(engine: BrainEngine, row: TimelineBatchInput): Promise<boolean> {
+  const [normalized] = buildTimelineRows([row]);
   const rows = await engine.executeRaw(
     `SELECT 1 AS would_insert
      FROM pages p
@@ -1380,11 +1382,11 @@ async function timelineBatchRowWouldInsert(engine: BrainEngine, row: TimelineBat
        )
      LIMIT 1`,
     [
-      row.slug,
-      row.source_id || 'default',
-      row.date,
-      row.summary,
-      row.source || '',
+      normalized.slug,
+      normalized.source_id,
+      normalized.date,
+      normalized.summary,
+      normalized.source,
     ],
   );
   return rows.length > 0;

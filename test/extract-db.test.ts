@@ -286,6 +286,38 @@ describe('gbrain extract timeline --source db', () => {
       .filter(row => row.action === 'add_timeline');
     expect(actions).toEqual([]);
   });
+
+  test('--dry-run duplicate check mirrors timeline text sanitization', async () => {
+    await engine.putPage('people/alice', {
+      type: 'person', title: 'Alice', compiled_truth: '',
+      timeline: '- **2026-01-15** | Test\uD800 event',
+    });
+
+    await runExtract(engine, ['timeline', '--source', 'db']);
+
+    const entries = await engine.getTimeline('people/alice');
+    expect(entries).toHaveLength(1);
+    expect(entries[0].summary).toBe('Test\uFFFD event');
+
+    const lines: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
+      lines.push(str);
+      return true;
+    }) as any;
+    try {
+      await runExtract(engine, ['timeline', '--source', 'db', '--dry-run', '--json']);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    const actions = lines
+      .filter(l => l.trim().startsWith('{'))
+      .map(l => JSON.parse(l.trim()))
+      .filter(row => row.action === 'add_timeline');
+    expect(actions).toEqual([]);
+  });
 });
 
 describe('gbrain extract all --source db', () => {
