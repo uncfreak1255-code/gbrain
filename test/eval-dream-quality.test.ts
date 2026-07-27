@@ -48,7 +48,7 @@ describe('dream quality receipt', () => {
   });
 
   test('scores useful dream pages and flags promotion review without writing repos', () => {
-    const scored = scoreDreamPage(page());
+    const scored = scoreDreamPage(page(), { now: new Date('2026-06-24T00:00:00Z') });
     expect(scored.passed).toBe(true);
     expect(scored.needs_promotion_review).toBe(true);
     expect(scored.promotion_owner).toBe('seascape-hub');
