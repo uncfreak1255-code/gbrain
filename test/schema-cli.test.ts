@@ -87,6 +87,29 @@ describe('gbrain schema CLI (Phase C)', () => {
     expect(r.stdout).toContain('valid manifest');
   });
 
+  test('all bundled lens packs resolve through schema show', () => {
+    for (const pack of [
+      'gbrain-creator',
+      'gbrain-investor',
+      'gbrain-engineer',
+      'gbrain-everything',
+    ]) {
+      const r = gbrain(['schema', 'show', pack]);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(pack);
+    }
+  });
+
+  test('bundled lens packs resolve through schema validate and use', () => {
+    const validated = gbrain(['schema', 'validate', 'gbrain-engineer']);
+    expect(validated.code).toBe(0);
+    expect(validated.stdout).toContain('valid manifest');
+
+    const used = gbrain(['schema', 'use', 'gbrain-creator']);
+    expect(used.code).toBe(0);
+    expect(used.stdout).toContain('Active schema pack set to: gbrain-creator');
+  });
+
   test('schema active reports default resolution', () => {
     const r = gbrain(['schema', 'active']);
     expect(r.code).toBe(0);

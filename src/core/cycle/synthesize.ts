@@ -354,9 +354,17 @@ export async function runPhaseSynthesize(
           to: opts.to,
           bypassGuard: opts.bypassDreamGuard,
         });
+    const emptyChildBudgetDetails = {
+      max_children_per_cycle: config.maxChildrenPerCycle,
+      child_limit_reached: false,
+      children_not_submitted_due_to_limit: 0,
+    };
     const discoveredBeforeLimit = transcripts.length;
     const prefetchedVerdicts = new Map<string, Awaited<ReturnType<BrainEngine['getDreamVerdict']>>>();
-    if (!explicitTarget && config.maxTranscriptsPerCycle !== null) {
+    // An explicit single file is already bounded by construction. Date/range
+    // targets are not: the nightly wrapper uses --from/--to and must still
+    // honor the configured production cap before verdict or child fan-out.
+    if (!opts.inputFile && config.maxTranscriptsPerCycle !== null) {
       const selected: DiscoveredTranscript[] = [];
       for (const t of transcripts) {
         const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
@@ -385,7 +393,12 @@ export async function runPhaseSynthesize(
     }
 
     if (transcripts.length === 0) {
-      return ok('no transcripts to process', { transcripts_processed: 0, pages_written: 0 });
+      return ok('no transcripts to process', {
+        transcripts_processed: 0,
+        pages_written: 0,
+        children_submitted: 0,
+        ...emptyChildBudgetDetails,
+      });
     }
 
     // Significance verdicts (cached in dream_verdicts; Haiku on miss).
@@ -460,6 +473,8 @@ export async function runPhaseSynthesize(
         pages_written: 0,
         verdicts,
         dryRun: true,
+        children_submitted: 0,
+        ...emptyChildBudgetDetails,
       });
     }
 
@@ -474,6 +489,8 @@ export async function runPhaseSynthesize(
         transcripts_processed: 0,
         pages_written: 0,
         verdicts,
+        children_submitted: 0,
+        ...emptyChildBudgetDetails,
       });
     }
 
@@ -488,8 +505,10 @@ export async function runPhaseSynthesize(
     queue = new MinionQueue(engine);
     /** Map child job_id → chunk metadata for D6 orchestrator-side slug rewrite. */
     const chunkInfo = new Map<number, { idx: number; hash6: string }>();
-    /** Skip reasons for the cycle report (D5 cap hits, D8 legacy-key skips). */
+    /** Skip reasons for the cycle report. */
     const skipReports: Array<{ filePath: string; reason: string }> = [];
+    let childLimitReached = false;
+    let childrenNotSubmittedDueToLimit = 0;
 
     const maxCharsPerChunk = computeChunkCharBudget(config.model, config.maxPromptTokens);
 
@@ -516,9 +535,9 @@ export async function runPhaseSynthesize(
 
       const chunks = splitTranscriptByBudget(t.content, t.contentHash, maxCharsPerChunk);
 
-      // D5 cap hit: log + skip; do NOT write to dream_verdicts. Closes the
-      // poison-pill class — next cycle re-attempts under whatever budget
-      // is then current.
+      // D5 cap hit: log + skip; do NOT overwrite the positive
+      // dream_verdicts entry. This keeps the transcript eligible to retry
+      // when its per-transcript chunk budget is raised.
       if (chunks.length > config.maxChunksPerTranscript) {
         process.stderr.write(
           `[dream] transcript ${t.basename} produced ${chunks.length} chunks at ` +
@@ -528,6 +547,33 @@ export async function runPhaseSynthesize(
         skipReports.push({
           filePath: t.filePath,
           reason: `oversize_after_split: ${chunks.length}/${config.maxChunksPerTranscript}`,
+        });
+        continue;
+      }
+
+      // A transcript is atomic from the synthesis point of view. Never submit
+      // just its first N chunks to meet a run-level budget: that would create
+      // partial Dream output that can look like a successful one-child canary.
+      // This check lives before releaseRetryableSynthChild() and queue.add(),
+      // so a capped run creates no retryable state or child job for the skip.
+      // The positive verdict remains eligible for a later run with more room.
+      // `childIds` is intentionally a per-invocation tracked-child count, not
+      // a fresh-row count: an idempotency hit still returns a child this run
+      // will wait on, and conservatively occupies one budget slot.
+      const remainingChildBudget = config.maxChildrenPerCycle === null
+        ? Number.POSITIVE_INFINITY
+        : config.maxChildrenPerCycle - childIds.length;
+      if (chunks.length > remainingChildBudget) {
+        childLimitReached = true;
+        childrenNotSubmittedDueToLimit += chunks.length;
+        const cap = config.maxChildrenPerCycle!;
+        process.stderr.write(
+          `[dream] skipped ${t.basename}: ${chunks.length} chunk(s) exceed the remaining ` +
+          `max_children_per_cycle budget (${Math.max(0, remainingChildBudget)}/${cap}); no child submitted.\n`,
+        );
+        skipReports.push({
+          filePath: t.filePath,
+          reason: `max_children_per_cycle_exceeded: ${childIds.length}+${chunks.length}>${cap}`,
         });
         continue;
       }
@@ -602,6 +648,34 @@ export async function runPhaseSynthesize(
           chunkInfo.set(child.id, { idx: i, hash6 });
         }
       }
+    }
+
+    // A strict child cap is a safety gate, not a successful zero-output
+    // synthesis. When it rules out every eligible transcript, stop before
+    // creating an empty summary or stamping the cooldown: a nightly wrapper
+    // must see the missing quality candidate as a failure, not silently skip
+    // the next opportunity for the configured cooldown window.
+    if (childLimitReached && childIds.length === 0) {
+      return failed(
+        makeError(
+          'InternalError',
+          'SYNTH_CHILD_LIMIT_REACHED',
+          `no transcript fit dream.synthesize.max_children_per_cycle=${config.maxChildrenPerCycle}`,
+        ),
+        {
+          transcripts_discovered: transcripts.length,
+          transcripts_discovered_before_limit: discoveredBeforeLimit,
+          max_transcripts_per_cycle: config.maxTranscriptsPerCycle,
+          max_children_per_cycle: config.maxChildrenPerCycle,
+          transcripts_processed: 0,
+          pages_written: 0,
+          children_submitted: 0,
+          child_limit_reached: true,
+          children_not_submitted_due_to_limit: childrenNotSubmittedDueToLimit,
+          skips: skipReports,
+          verdicts,
+        },
+      );
     }
 
     // Wait for every child to reach a terminal state. Tick yieldDuringPhase
@@ -706,6 +780,7 @@ export async function runPhaseSynthesize(
       transcripts_discovered: transcripts.length,
       transcripts_discovered_before_limit: discoveredBeforeLimit,
       max_transcripts_per_cycle: config.maxTranscriptsPerCycle,
+      max_children_per_cycle: config.maxChildrenPerCycle,
       transcripts_processed: submittedTranscripts,
       pages_written: writtenSlugs.length,
       // v0.29: emit the slug list so the recompute_emotional_weight phase can
@@ -719,6 +794,8 @@ export async function runPhaseSynthesize(
       // transcript for single-chunk). Differs from transcripts_processed
       // when chunking is in play.
       children_submitted: childIds.length,
+      child_limit_reached: childLimitReached,
+      children_not_submitted_due_to_limit: childrenNotSubmittedDueToLimit,
       // D5 cap hits + D8 legacy-key skips. Empty when nothing skipped.
       skips: skipReports,
       summary_slug: summarySlug,
@@ -730,6 +807,22 @@ export async function runPhaseSynthesize(
       completed_missing_write_contract: completedMissingWriteContractIds.size,
       child_ids_missing_write_contract: [...completedMissingWriteContractIds],
     };
+
+    // If a cap was reached after earlier transcripts fit, preserve their
+    // diagnostic summary but still fail the batch and leave the cooldown
+    // unstamped. A wrapper must not promote a partial batch as a completed
+    // capped run merely because its first child finished.
+    if (childLimitReached) {
+      return failed(
+        makeError(
+          'InternalError',
+          'SYNTH_CHILD_LIMIT_REACHED',
+          `${childrenNotSubmittedDueToLimit} child job(s) would exceed ` +
+            `dream.synthesize.max_children_per_cycle=${config.maxChildrenPerCycle}`,
+        ),
+        commonDetails,
+      );
+    }
 
     if (queueNonCompletedChildren.length > 0 || retryableCompletedChildrenWithoutWrites.length > 0) {
       const completedChildren = childOutcomes.filter(
@@ -813,6 +906,8 @@ interface SynthConfig {
    */
   maxChunksPerTranscript: number;
   maxTranscriptsPerCycle: number | null;
+  /** Optional total pre-submit budget for all synth children in this run. */
+  maxChildrenPerCycle: number | null;
   maxChildCostUsd: number;
 }
 
@@ -844,6 +939,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
   const maxPromptTokensStr = await engine.getConfig('dream.synthesize.max_prompt_tokens');
   const maxChunksStr = await engine.getConfig('dream.synthesize.max_chunks_per_transcript');
   const maxTranscriptsStr = await engine.getConfig('dream.synthesize.max_transcripts_per_cycle');
+  const maxChildrenStr = await engine.getConfig('dream.synthesize.max_children_per_cycle');
   const maxChildCostUsdStr = await engine.getConfig('dream.synthesize.max_child_cost_usd');
 
   let excludePatterns: string[] = ['medical', 'therapy'];
@@ -877,6 +973,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
       maxTranscriptsPerCycle = parsed;
     }
   }
+  const maxChildrenPerCycle = parseMaxChildrenPerCycle(maxChildrenStr);
   let maxChildCostUsd = DEFAULT_SYNTH_CHILD_MAX_COST_USD;
   if (maxChildCostUsdStr) {
     const parsed = Number(maxChildCostUsdStr);
@@ -898,6 +995,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     maxPromptTokens,
     maxChunksPerTranscript,
     maxTranscriptsPerCycle,
+    maxChildrenPerCycle,
     maxChildCostUsd,
   };
 }
@@ -905,6 +1003,28 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
 function normalizeSynthQueueName(raw: string | null): string {
   const trimmed = (raw ?? '').trim();
   return trimmed.length > 0 ? trimmed : DEFAULT_SYNTH_QUEUE;
+}
+
+/**
+ * An absent child budget preserves legacy unlimited behavior. A present but
+ * malformed budget must fail before fan-out rather than silently disabling a
+ * safety control (for example, `1junk` must not parse as one child).
+ */
+function parseMaxChildrenPerCycle(raw: string | null): number | null {
+  if (raw === null || raw.trim() === '') return null;
+  const trimmed = raw.trim();
+  if (!/^[1-9]\d*$/.test(trimmed)) {
+    throw new Error(
+      `dream.synthesize.max_children_per_cycle must be a positive integer; got=${JSON.stringify(raw)}`,
+    );
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(
+      `dream.synthesize.max_children_per_cycle must be a safe positive integer; got=${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed;
 }
 
 async function checkCooldown(
@@ -1683,5 +1803,6 @@ export const __testing = {
   buildTranscriptAllowedSlugPrefixes,
   collectChildPutPageSlugs,
   collectChildPutPageWriterJobIds,
+  parseMaxChildrenPerCycle,
   writeSummaryPage,
 };

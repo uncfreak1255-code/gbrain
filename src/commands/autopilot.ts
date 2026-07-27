@@ -115,6 +115,22 @@ export interface AutopilotLockState {
   fresh: boolean;
 }
 
+export type AutopilotLockDecision =
+  | { action: 'acquire' }
+  | { action: 'exit'; holderPid: number }
+  | { action: 'takeover'; reason: 'dead' | 'stale' | 'unreadable' };
+
+export function decideAutopilotLockAcquisition(lock: AutopilotLockState): AutopilotLockDecision {
+  if (!lock.exists) return { action: 'acquire' };
+  // PID liveness is authoritative. A long synchronous phase can leave an old
+  // mtime even while the holder is healthy; never start a second autopilot in
+  // that case.
+  if (lock.running && lock.pid !== null) return { action: 'exit', holderPid: lock.pid };
+  if (lock.pid !== null) return { action: 'takeover', reason: 'dead' };
+  if (!lock.fresh) return { action: 'takeover', reason: 'stale' };
+  return { action: 'takeover', reason: 'unreadable' };
+}
+
 function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -475,14 +491,15 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   try {
     mkdirSync(gbrainHomePath(), { recursive: true });
     const lock = inspectAutopilotLock(lockPath);
-    if (lock.exists) {
-      if (lock.running && lock.fresh) {
-        console.error('Another autopilot instance is running (lock file is fresh). Exiting.');
-        process.exit(0);
-      }
-      if (lock.pid !== null && !lock.running) {
+    const lockDecision = decideAutopilotLockAcquisition(lock);
+    if (lockDecision.action === 'exit') {
+      console.error(`Another autopilot instance is running (pid ${lockDecision.holderPid}). Exiting.`);
+      process.exit(0);
+    }
+    if (lockDecision.action === 'takeover') {
+      if (lockDecision.reason === 'dead') {
         console.log(`Stale autopilot lock found for dead PID ${lock.pid}. Taking over.`);
-      } else if (!lock.fresh) {
+      } else if (lockDecision.reason === 'stale') {
         console.log('Stale lock file found (>10 min). Taking over.');
       } else {
         console.log('Unreadable autopilot lock found. Taking over.');

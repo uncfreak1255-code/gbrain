@@ -66,6 +66,9 @@ import { logMutationFailure, logMutationSuccess, type MutationActor, type Mutati
 import { runFilePlaneLintRules } from './lint-rules.ts';
 import { withPackLock, type PackLockOpts } from './pack-lock.ts';
 import type { BrainEngine } from '../engine.ts';
+import { BUNDLED_PACK_NAMES } from './bundled.ts';
+
+export { BUNDLED_PACK_NAMES } from './bundled.ts';
 
 export type PackFileFormat = 'json' | 'yaml';
 
@@ -92,8 +95,6 @@ export class SchemaPackMutationError extends Error {
     this.details = details;
   }
 }
-
-export const BUNDLED_PACK_NAMES = new Set(['gbrain-base', 'gbrain-recommended', 'gbrain-base-v2']);
 
 export interface MutateResult {
   /** Pack name that was mutated. */

@@ -23,6 +23,7 @@ import { dirname } from "node:path";
 import * as crypto from "node:crypto";
 
 import { PGLiteEngine, computeSnapshotSchemaHash } from "../src/core/pglite-engine.ts";
+import { configureGateway } from "../src/core/ai/gateway.ts";
 import { MIGRATIONS } from "../src/core/migrate.ts";
 import { PGLITE_SCHEMA_SQL } from "../src/core/pglite-schema.ts";
 
@@ -39,6 +40,14 @@ async function main() {
   console.log(`[build-pglite-snapshot] schema hash: ${schemaHash.slice(0, 16)}...`);
   console.log(`[build-pglite-snapshot] booting PGLite (in-memory)...`);
   const engine = new PGLiteEngine();
+
+  // Match bunfig.toml's test preload. The snapshot builder is a normal Bun
+  // script, so test-only preloads do not run here automatically.
+  configureGateway({
+    embedding_model: "openai:text-embedding-3-large",
+    embedding_dimensions: 1536,
+    env: { ...process.env },
+  });
 
   // Bypass the env-aware short-circuit: we WANT a real init here.
   delete process.env.GBRAIN_PGLITE_SNAPSHOT;

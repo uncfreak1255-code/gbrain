@@ -9,24 +9,13 @@
 //   4. Write each atom via engine.putPage(slug, page, {sourceId})
 //      with sourceId threaded so federated brains route correctly.
 //
-// Idempotency (D1 from /plan-eng-review):
-//   Each atom carries frontmatter.source_hash (16-char sha256 prefix).
-//   Before processing a transcript/page, query "any atom with this
-//   source_hash exists in this source?". If yes, skip. Closes both:
-//     - PR #1414's primary concern (page-side re-extraction)
-//     - Pre-existing v0.41.2.0 transcript-side date-stamp duplicate bug
-//       (atom slugs are `atoms/YYYY-MM-DD/<title>`, so re-discovered
-//       transcripts on day N+1 used to write second atoms; now skipped).
-//
-// Known limitation (D9 #2 — documented, not blocking):
-//   If extraction writes atom 1 of 3 then atom 2 throws, source_hash
-//   filter sees atom 1 exists and skips on next discovery. Atoms 2+3
-//   stay missing until content_hash changes. Acceptable for v0.41.2.1:
-//     - Haiku call failure is rare; network/budget failures rarer.
-//     - Content edits trigger natural re-extract via new content_hash.
-//     - The original incident (duplicate atoms) is fully closed.
-//   Per-atom idempotency via deterministic slug is v0.42+ TODO
-//   (see TODOS.md).
+// Idempotency (per-atom, via deterministic slug):
+//   Each atom's slug is `atoms/<source-date>/<stem>-<identity-hash>` — built from
+//   the source date (not the run date) plus stable atom identity fields. Re-extracting
+//   the same atom resolves to the same slug, so putPage upserts instead of
+//   minting cross-day or trailing-dash duplicates. The source_hash batch check
+//   remains only as a cost fast-path after the final atom write marks the source
+//   complete; a partial write is retried safely.
 //
 // Config:
 //   Reads dream.synthesize.session_corpus_dir + meeting_transcripts_dir
@@ -51,8 +40,12 @@ import type { ProgressReporter } from '../progress.ts';
 import { chat as gatewayChat } from '../ai/gateway.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
+import { createHash } from 'crypto';
+import { slugifySegment } from '../sync.ts';
 
 const DEFAULT_BUDGET_USD = 0.3;
+const ATOM_EXTRACTOR_VERSION = 'extract_atoms-v0.46.0.0';
+const LEGACY_ATOM_EXTRACTOR_VERSION = 'extract_atoms-v0.41.2.1';
 
 // v0.42+ TODO: read atom_type enum from active pack manifest at runtime.
 const ATOM_TYPES = [
@@ -61,15 +54,59 @@ const ATOM_TYPES = [
   'critique', 'collection',
 ] as const;
 
-// v0.41.2.1 (D2): brain-page discovery constants. Hardcoded for now;
-// future pack-aware refactor is a one-line change to pull from the
-// active pack manifest (symmetric with the existing
-// src/core/facts/eligibility.ts:49 TODO).
-const EXTRACTABLE_PAGE_TYPES = [
+// Legacy floor retained for backwards compatibility when no active pack can
+// be loaded. Pack-declared extractable types are unioned with this set.
+const LEGACY_EXTRACTABLE_TYPES = [
   'meeting', 'source', 'article', 'video', 'book', 'original',
 ] as const;
+const SYNTHESIS_OUTPUT_TYPES = new Set<string>(['atom', 'concept']);
 const PAGE_DISCOVERY_BUDGET = 50;
 const MIN_PAGE_CHARS_FOR_EXTRACTION = 500;
+
+function completedAtomSql(alias: string): string {
+  return `(
+    ${alias}.frontmatter->>'source_complete' = 'true'
+    OR COALESCE(${alias}.frontmatter->>'extracted_by', '${LEGACY_ATOM_EXTRACTOR_VERSION}')
+       = '${LEGACY_ATOM_EXTRACTOR_VERSION}'
+  )`;
+}
+
+export function unionExtractableTypes(packExtractable: Iterable<string>): string[] {
+  const types = new Set<string>(LEGACY_EXTRACTABLE_TYPES);
+  for (const type of packExtractable) types.add(type);
+  for (const type of SYNTHESIS_OUTPUT_TYPES) types.delete(type);
+  return [...types];
+}
+
+async function resolveExtractableTypes(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<string[]> {
+  let packExtractable: Iterable<string> = [];
+  try {
+    const { loadConfig } = await import('../config.ts');
+    const { loadActivePack } = await import('../schema-pack/load-active.ts');
+    const { extractableTypesFromPack } = await import('../schema-pack/extractable.ts');
+    const [dbConfig, perSourceConfig] = await Promise.all([
+      engine.getConfig('schema_pack').catch(() => null),
+      engine.getConfig(`schema_pack.source.${sourceId}`).catch(() => null),
+    ]);
+    const perSourceDb = perSourceConfig
+      ? new Map<string, string>([[sourceId, perSourceConfig]])
+      : undefined;
+    const resolved = await loadActivePack({
+      cfg: loadConfig(),
+      remote: false,
+      sourceId,
+      perSourceDb,
+      dbConfig: dbConfig ?? undefined,
+    });
+    packExtractable = extractableTypesFromPack(resolved.manifest);
+  } catch {
+    // Bootstrap and test seams may have no pack available; keep the legacy floor.
+  }
+  return unionExtractableTypes(packExtractable);
+}
 
 export interface ExtractAtomsOpts {
   brainDir?: string;
@@ -197,6 +234,7 @@ export async function discoverExtractablePages(
         WHERE atom.type = 'atom'
           AND atom.source_id = $1
           AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
+          AND ${completedAtomSql('atom')}
           AND atom.deleted_at IS NULL
       )
     ORDER BY p.updated_at DESC
@@ -204,7 +242,7 @@ export async function discoverExtractablePages(
   `;
   const params: unknown[] = [
     sourceId,
-    EXTRACTABLE_PAGE_TYPES as unknown as string[],
+    await resolveExtractableTypes(engine, sourceId),
     MIN_PAGE_CHARS_FOR_EXTRACTION,
     PAGE_DISCOVERY_BUDGET,
   ];
@@ -233,9 +271,10 @@ export async function discoverExtractablePages(
  * atom row yet. Single source of truth for the backlog number: the doctor
  * `extract_atoms_backlog` check calls this so its definition can't drift from
  * what the phase actually processes. Uses the SAME eligibility predicate as
- * `discoverExtractablePages` (minus the LIMIT and affectedSlugs filter) so it
- * rides migration v104's `pages_atom_source_hash_idx` partial index and stays
- * O(log n) on 100K+ brains.
+ * `discoverExtractablePages` (minus the LIMIT and affectedSlugs filter) so each
+ * source-scoped query rides migration v104's partial index. Brain-wide reads
+ * enumerate sources and sum these exact per-source counts because each source
+ * can select a different schema pack.
  *
  * PAGE-BACKLOG-ONLY (Codex #11): extract_atoms also discovers transcript files
  * at runtime; this count covers DB pages only. Callers label that caveat.
@@ -247,43 +286,44 @@ export async function countExtractAtomsBacklog(
   engine: BrainEngine,
   sourceId?: string,
 ): Promise<number | null> {
+  if (sourceId === undefined) {
+    try {
+      // Resolve each source's active pack independently. A brain-wide union
+      // would overcount page types that are extractable in one source's pack
+      // but intentionally disabled in another source.
+      const sources = await engine.listAllSources();
+      let total = 0;
+      for (const source of sources) {
+        const count = await countExtractAtomsBacklog(engine, source.id);
+        if (count === null) return null;
+        total += count;
+      }
+      return total;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[extract_atoms] backlog source enumeration failed: ${msg}`);
+      return null;
+    }
+  }
+
   try {
-    // Two modes: scoped (the phase's per-source `remaining`) vs brain-wide
-    // (doctor — matches the conversation-facts check's cross-source posture).
-    // The atom must live in the SAME source as the page either way, so the
-    // brain-wide form keys the NOT EXISTS on `atom.source_id = p.source_id`.
-    const scoped = sourceId !== undefined;
-    const sql = scoped
-      ? `SELECT COUNT(*) AS cnt FROM pages p
-         WHERE p.source_id = $1
-           AND p.type = ANY($2::text[])
-           AND p.deleted_at IS NULL
-           AND p.content_hash IS NOT NULL
-           AND COALESCE(p.frontmatter->>'imported_from',   '') <> 'markdown-greenfield'
-           AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
-           AND length(COALESCE(p.compiled_truth, '')) >= $3
-           AND NOT EXISTS (
-             SELECT 1 FROM pages atom
-             WHERE atom.type = 'atom' AND atom.source_id = $1
-               AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
-               AND atom.deleted_at IS NULL
-           )`
-      : `SELECT COUNT(*) AS cnt FROM pages p
-         WHERE p.type = ANY($1::text[])
-           AND p.deleted_at IS NULL
-           AND p.content_hash IS NOT NULL
-           AND COALESCE(p.frontmatter->>'imported_from',   '') <> 'markdown-greenfield'
-           AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
-           AND length(COALESCE(p.compiled_truth, '')) >= $2
-           AND NOT EXISTS (
-             SELECT 1 FROM pages atom
-             WHERE atom.type = 'atom' AND atom.source_id = p.source_id
-               AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
-               AND atom.deleted_at IS NULL
-           )`;
-    const params = scoped
-      ? [sourceId, EXTRACTABLE_PAGE_TYPES as unknown as string[], MIN_PAGE_CHARS_FOR_EXTRACTION]
-      : [EXTRACTABLE_PAGE_TYPES as unknown as string[], MIN_PAGE_CHARS_FOR_EXTRACTION];
+    const sql = `SELECT COUNT(*) AS cnt FROM pages p
+       WHERE p.source_id = $1
+         AND p.type = ANY($2::text[])
+         AND p.deleted_at IS NULL
+         AND p.content_hash IS NOT NULL
+         AND COALESCE(p.frontmatter->>'imported_from',   '') <> 'markdown-greenfield'
+         AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+         AND length(COALESCE(p.compiled_truth, '')) >= $3
+         AND NOT EXISTS (
+           SELECT 1 FROM pages atom
+           WHERE atom.type = 'atom' AND atom.source_id = $1
+             AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
+             AND ${completedAtomSql('atom')}
+             AND atom.deleted_at IS NULL
+         )`;
+    const extractableTypes = await resolveExtractableTypes(engine, sourceId);
+    const params = [sourceId, extractableTypes, MIN_PAGE_CHARS_FOR_EXTRACTION];
     const rows = await engine.executeRaw<{ cnt: string | number }>(sql, params);
     return Number(rows[0]?.cnt ?? 0);
   } catch (err) {
@@ -318,11 +358,12 @@ export async function atomsExistingForHashes(
   try {
     const rows = await engine.executeRaw<{ h: string }>(
       `SELECT frontmatter->>'source_hash' AS h
-         FROM pages
-        WHERE type = 'atom'
-          AND source_id = $1
-          AND deleted_at IS NULL
-          AND frontmatter->>'source_hash' = ANY($2::text[])`,
+       FROM pages atom
+        WHERE atom.type = 'atom'
+          AND atom.source_id = $1
+          AND atom.deleted_at IS NULL
+          AND atom.frontmatter->>'source_hash' = ANY($2::text[])
+          AND ${completedAtomSql('atom')}`,
       [sourceId, contentHash16s],
     );
     return new Set(rows.map(r => r.h));
@@ -552,8 +593,9 @@ export async function runPhaseExtractAtoms(
       }
 
       if (!opts.dryRun) {
-        for (const atom of atoms) {
-          const slug = `atoms/${todayDate()}/${slugify(atom.title)}`;
+        for (const [atomIndex, atom] of atoms.entries()) {
+          const sourceRef = item.kind === 'transcript' ? item.filePath : item.slug;
+          const slug = atomSlug(atom, sourceRef);
           const originFrontmatter =
             item.kind === 'transcript'
               ? { source_path: item.filePath }
@@ -576,8 +618,9 @@ export async function runPhaseExtractAtoms(
                 ...(atom.lesson && { lesson: atom.lesson }),
                 ...(atom.virality_score !== undefined && { virality_score: atom.virality_score }),
                 ...(atom.emotional_register && { emotional_register: atom.emotional_register }),
+                source_complete: atomIndex === atoms.length - 1,
                 extracted_at: new Date().toISOString(),
-                extracted_by: 'extract_atoms-v0.41.2.1',
+                extracted_by: ATOM_EXTRACTOR_VERSION,
               },
               timeline: '',
             },
@@ -728,16 +771,30 @@ export function parseAtomsResponse(raw: string): ExtractedAtom[] {
   return atoms;
 }
 
-function todayDate(): string {
-  return new Date().toISOString().slice(0, 10);
+function atomSlugStem(title: string): string {
+  return slugifySegment(title).slice(0, 60).replace(/-+$/g, '') || 'untitled';
 }
 
-function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .trim()
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .slice(0, 60);
+function sourceBucket(ref: string): string {
+  const base = ref.split('/').pop() ?? ref;
+  const match = base.match(/(\d{4}-\d{2}-\d{2})/) ?? ref.match(/(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+  const hash = createHash('sha256').update(ref).digest('hex').slice(0, 8);
+  return `undated-${hash}`;
+}
+
+function atomSlug(atom: ExtractedAtom, sourceRef: string): string {
+  // Title alone is not an identity: one extraction can legitimately return
+  // two differently supported atoms with the same headline. Prefer the
+  // verbatim source quote as the stable disambiguator, falling back to body
+  // when the model omitted one, and include atom_type so distinct claims never
+  // overwrite each other under a shared title.
+  const identity = JSON.stringify([
+    sourceRef,
+    atom.title,
+    atom.atom_type,
+    atom.source_quote?.trim() || atom.body.trim(),
+  ]);
+  const hash = createHash('sha256').update(identity).digest('hex').slice(0, 8);
+  return `atoms/${sourceBucket(sourceRef)}/${atomSlugStem(atom.title)}-${hash}`;
 }

@@ -255,7 +255,8 @@ const PRUNE_DIR_NAMES = new Set<string>([
   // with the first-sync walker in commands/import.ts.
   'venv',
   '.raw',
-  'ops',
+  // `ops/` is ordinary user content. Only generated and vendored trees
+  // belong in this list.
 ]);
 
 /**
@@ -372,8 +373,8 @@ function classifySync(path: string, opts: SyncableOptions = {}): SyncableReason 
   if (!isAllowedByStrategy(path, strategy)) return 'strategy';
 
   // Skip every path segment that pruneDir would block walkers from descending
-  // into. Catches hidden dirs (`.git`, `.obsidian`), `.raw/` sidecars,
-  // `node_modules/` (latent bug fix), and `ops/` at any depth.
+  // into. Catches hidden dirs (`.git`, `.obsidian`), `.raw/` sidecars, and
+  // vendor/generated trees (`node_modules/`, `vendor/`, etc.) at any depth.
   const segments = path.split('/');
   if (segments.some(p => !pruneDir(p))) return 'pruned-dir';
 

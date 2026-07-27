@@ -446,7 +446,13 @@ describe('budget reconcile readback', () => {
     ]);
     const out = join(tmp, 'receipt.json');
     await withEnv({ GBRAIN_AUDIT_DIR: tmp }, async () => {
-      const rc = await runBudget(['reconcile', '--days', '30', '--json', '--out', out]);
+      const rc = await runBudget([
+        'reconcile',
+        '--since', '2026-06-20T00:00:00.000Z',
+        '--until', '2026-06-21T00:00:00.000Z',
+        '--json',
+        '--out', out,
+      ]);
       expect(rc).toBe(0);
       expect(existsSync(out)).toBe(true);
       const written = JSON.parse(readFileSync(out, 'utf-8'));

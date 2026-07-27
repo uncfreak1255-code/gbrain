@@ -407,11 +407,11 @@ describe('SIGKILL crash-replay reconciliation across provider matrix (v0.38 LOAD
 
       const ctx = await makeCrashedCtx(jobId, 'do it', 'anthropic:claude-sonnet-4-6');
 
-      // The gateway-loop throws "non-idempotent ... pending on resume; cannot safely re-run".
+      // The gateway-loop throws the stable non_idempotent_pending_tool code.
       // The subagent.ts handler doesn't catch this — it bubbles. Asserting it bubbles
       // out as an Error is the contract; an UnrecoverableError variant would be a future
       // upgrade.
-      await expect(handler(ctx)).rejects.toThrow(/non-idempotent.*pending/i);
+      await expect(handler(ctx)).rejects.toThrow(/non[_-]idempotent.*pending/i);
     });
   });
 

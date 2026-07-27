@@ -20,6 +20,7 @@ import {
   PGVECTOR_COLUMN_MAX_DIMS,
 } from '../src/core/embedding-dim-check.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 // Canonical pattern: single engine per file, init once, disconnect once.
 // The two tests below diverge in whether they want a migrated brain or a
@@ -72,16 +73,19 @@ describe('readContentChunksEmbeddingDim', () => {
 
   test('returns { exists: false, dims: null } on a fresh brain (no initSchema)', async () => {
     // One-off engine for the fresh-brain case. Never call initSchema so
-    // content_chunks doesn't exist yet. Cleaned up at end of test.
-    const fresh = new PGLiteEngine();
-    await fresh.connect({});
-    try {
-      const result = await readContentChunksEmbeddingDim(fresh);
-      expect(result.exists).toBe(false);
-      expect(result.dims).toBeNull();
-    } finally {
-      await fresh.disconnect();
-    }
+    // content_chunks doesn't exist yet. The CI snapshot is post-schema, so
+    // disable it for this assertion and restore the caller's setting after.
+    await withEnv({ GBRAIN_PGLITE_SNAPSHOT: undefined }, async () => {
+      const fresh = new PGLiteEngine();
+      try {
+        await fresh.connect({});
+        const result = await readContentChunksEmbeddingDim(fresh);
+        expect(result.exists).toBe(false);
+        expect(result.dims).toBeNull();
+      } finally {
+        await fresh.disconnect();
+      }
+    });
   }, 30000);
 });
 

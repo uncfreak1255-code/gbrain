@@ -23,6 +23,7 @@ import {
 } from '../../src/core/onboard/render.ts';
 import { runAllOnboardChecks } from '../../src/core/onboard/checks.ts';
 import { makeRemediationStep } from '../../src/core/remediation-step.ts';
+import { withEnv } from '../helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 
@@ -122,7 +123,13 @@ describe('onboard E2E — runAllOnboardChecks', () => {
         frontmatter: {},
       });
 
-      const results = await runAllOnboardChecks(local);
+      // Pin a bundled pack with no regex inference rules. The default
+      // gbrain-base pack does provide NER inputs, so relying on the ambient
+      // HOME made this assertion pass or fail based on operator config.
+      const results = await withEnv(
+        { GBRAIN_SCHEMA_PACK: 'gbrain-base-v2' },
+        () => runAllOnboardChecks(local),
+      );
       const byName = Object.fromEntries(results.map((r) => [r.check.name, r]));
       expect(byName.entity_link_coverage?.check.status).toBe('warn');
       expect(byName.timeline_coverage?.check.status).toBe('warn');

@@ -84,6 +84,25 @@ beforeEach(async () => {
     chunk_source: 'compiled_truth',
     token_count: 11,
   }], { sourceId: 'src-b' });
+
+  const defaultAlice = await engine.getPage('people/alice', { sourceId: 'default' });
+  const sourceBAlice = await engine.getPage('people/alice', { sourceId: 'src-b' });
+  await engine.addTakesBatch([
+    {
+      page_id: defaultAlice!.id,
+      row_num: 1,
+      claim: 'Source isolation claim from default',
+      kind: 'take',
+      holder: 'world',
+    },
+    {
+      page_id: sourceBAlice!.id,
+      row_num: 1,
+      claim: 'Source isolation claim from source B',
+      kind: 'take',
+      holder: 'world',
+    },
+  ]);
 });
 
 describe('v0.34.1 source-isolation regression (#861)', () => {
@@ -206,6 +225,44 @@ describe('v0.34.1 source-isolation regression (#861)', () => {
     for (const r of rows) {
       expect(r.source_id).toBe('src-b');
     }
+  });
+
+  test('takes_search op honors a scalar source-bound caller', async () => {
+    const { operations } = await import('../../src/core/operations.ts');
+    const op = operations.find((candidate) => candidate.name === 'takes_search');
+    const ctx = {
+      engine,
+      config: { engine: 'pglite' as const },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      dryRun: false,
+      remote: true,
+      sourceId: 'default',
+    };
+
+    const rows = await op!.handler(ctx as any, { query: 'source isolation claim' }) as Array<{ claim: string }>;
+    expect(rows.map((row) => row.claim)).toEqual(['Source isolation claim from default']);
+  });
+
+  test('takes_search op lets the federated grant override the scalar source', async () => {
+    const { operations } = await import('../../src/core/operations.ts');
+    const op = operations.find((candidate) => candidate.name === 'takes_search');
+    const ctx = {
+      engine,
+      config: { engine: 'pglite' as const },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      dryRun: false,
+      remote: true,
+      sourceId: 'default',
+      auth: {
+        token: 'test',
+        clientId: 'test',
+        scopes: ['read'],
+        allowedSources: ['src-b'],
+      },
+    };
+
+    const rows = await op!.handler(ctx as any, { query: 'source isolation claim' }) as Array<{ claim: string }>;
+    expect(rows.map((row) => row.claim)).toEqual(['Source isolation claim from source B']);
   });
 
   test('AuthInfo.allowedSources path: ctx.auth.allowedSources widens read scope', async () => {

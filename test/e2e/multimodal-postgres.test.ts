@@ -140,6 +140,27 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
     expect(r2.created).toBe(false);
   }, 30_000);
 
+  test('same storage path remains isolated across sources', async () => {
+    await pg.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('files-source-b', 'files-source-b') ON CONFLICT DO NOTHING`,
+    );
+    const fromDefault = await pg.upsertFile({
+      filename: 'shared.jpg',
+      storage_path: 'photos/shared.jpg',
+      content_hash: 'sha256:default',
+    });
+    const fromB = await pg.upsertFile({
+      source_id: 'files-source-b',
+      filename: 'shared.jpg',
+      storage_path: 'photos/shared.jpg',
+      content_hash: 'sha256:source-b',
+    });
+
+    expect(fromB.id).not.toBe(fromDefault.id);
+    expect((await pg.getFile('default', 'photos/shared.jpg'))?.content_hash).toBe('sha256:default');
+    expect((await pg.getFile('files-source-b', 'photos/shared.jpg'))?.content_hash).toBe('sha256:source-b');
+  }, 30_000);
+
   test('upsertChunks writes embedding_image + modality columns (round-trip)', async () => {
     const page = await pg.putPage('photos/round-trip', {
       type: 'image', page_kind: 'image',

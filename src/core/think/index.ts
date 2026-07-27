@@ -270,6 +270,8 @@ export async function runThink(
     anchor: opts.anchor,
     questionEmbedding,
     takesHoldersAllowList: opts.takesHoldersAllowList,
+    ...(opts.sourceId !== undefined ? { sourceId: opts.sourceId } : {}),
+    ...(opts.allowedSources !== undefined ? { sourceIds: opts.allowedSources } : {}),
   });
 
   // Render evidence blocks for the prompt
@@ -331,31 +333,37 @@ export async function runThink(
         if (candidates.length > 0) {
           const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
           const { formatTrajectoryBlock } = await import('../trajectory-format.ts');
-          const sourceIdScalar = opts.sourceId ?? 'default';
-          // Per-candidate trajectory fetch. Concurrency cap = 3; each call
+          // Resolve entities in the same source set used by gather. An explicit
+          // federated allowlist wins over the scalar source and an empty list
+          // stays empty (fail-closed rather than widening to default).
+          const trajectorySourceIds = opts.allowedSources !== undefined
+            ? opts.allowedSources
+            : [opts.sourceId ?? 'default'];
+          // Per source/entity trajectory fetch. Concurrency cap = 3; each call
           // has its own 5s timeout via Promise.race. allSettled prevents
           // one error from killing the others (Codex Problem 13: timeout
           // bounds latency, not just failure propagation).
           const allBlocks: string[] = [];
-          const seenSlugs = new Set<string>();
+          const seenEntitySources = new Set<string>();
           let totalPoints = 0;
-          const candidateQueue = [...candidates];
-          while (candidateQueue.length > 0) {
-            const batch = candidateQueue.splice(0, 3);
+          const trajectoryQueue = candidates.flatMap(cand =>
+            trajectorySourceIds.map(sourceId => ({ cand, sourceId })),
+          );
+          while (trajectoryQueue.length > 0) {
+            const batch = trajectoryQueue.splice(0, 3);
             const settled = await Promise.allSettled(
-              batch.map(async (cand) => {
-                const resolved = await resolveEntitySlugWithSource(engine, sourceIdScalar, cand.raw);
-                if (!resolved) return null;
-                if (resolved.source === 'fallback_slugify') return null;
-                if (seenSlugs.has(resolved.slug)) return null;
-                seenSlugs.add(resolved.slug);
-                // 5s per-candidate timeout. Promise.race resolves with the
-                // first to land; the timeout returns [] (empty trajectory).
+              batch.map(async ({ cand, sourceId }) => {
+                const resolved = await resolveEntitySlugWithSource(engine, sourceId, cand.raw);
+                if (!resolved || resolved.source === 'fallback_slugify') return null;
+                const entitySourceKey = `${sourceId}\u0000${resolved.slug}`;
+                if (seenEntitySources.has(entitySourceKey)) return null;
+                seenEntitySources.add(entitySourceKey);
+                // 5s per source/entity timeout. Promise.race resolves with
+                // the first to land; timeout degrades to an empty trajectory.
                 const points = await Promise.race([
                   engine.findTrajectory({
                     entitySlug: resolved.slug,
-                    ...(opts.sourceId !== undefined ? { sourceId: opts.sourceId } : {}),
-                    ...(opts.allowedSources !== undefined ? { sourceIds: opts.allowedSources } : {}),
+                    sourceId,
                     ...(opts.remote !== undefined ? { remote: opts.remote } : {}),
                     kind: 'all',
                     limit: 100,

@@ -711,7 +711,10 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     const outerTracker = new BudgetTracker({ label: 'outer.scope' });
 
     await expect(withBudgetTracker(outerTracker, () => handler(ctx))).rejects.toThrow(/budget_exhausted/);
-    expect(outerTracker.totalSpent).toBeGreaterThan(0);
+    // The per-job reservation rejects before provider transport, so the
+    // enclosing budget scope must show no spend and no recorded call.
+    expect(outerTracker.totalSpent).toBe(0);
+    expect(outerTracker.snapshot().callsRecorded).toBe(0);
   });
 
   it('refusal stop reason: handler maps refusal → SubagentStopReason refusal', async () => {

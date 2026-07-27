@@ -12,6 +12,8 @@ import { loadConfig, saveConfig, toEngineConfig, gbrainPath, effectiveEnvDatabas
 import type { BrainEngine } from '../core/engine.ts';
 import type { EngineConfig } from '../core/types.ts';
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import { createHash } from 'crypto';
+import { resolve } from 'path';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { executeRawJsonb } from '../core/sql-query.ts';
@@ -50,10 +52,25 @@ function getManifestPath(): string {
   return gbrainPath('migrate-manifest.json');
 }
 
-interface MigrateManifest {
+export interface MigrateManifest {
   completed_slugs: string[];
   target_engine: string;
+  target_id?: string;
+  schema_version?: number;
   started_at: string;
+}
+
+export function migrationTargetId(config: EngineConfig): string {
+  const locator = config.engine === 'postgres'
+    ? config.database_url ?? ''
+    : resolve(config.database_path ?? gbrainPath('brain.pglite'));
+  return createHash('sha256')
+    .update(JSON.stringify([config.engine, locator]))
+    .digest('hex');
+}
+
+export function manifestMatchesTarget(manifest: MigrateManifest, targetId: string): boolean {
+  return manifest.schema_version === 2 && manifest.target_id === targetId;
 }
 
 interface SourceMigrationRow {
@@ -202,6 +219,7 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   } else {
     targetConfig.database_path = opts.targetPath || gbrainPath('brain.pglite');
   }
+  const targetId = migrationTargetId(targetConfig);
 
   // Connect to target
   console.log(`Connecting to target (${opts.targetEngine})...`);
@@ -209,9 +227,20 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   await targetEngine.connect(targetConfig);
   await targetEngine.initSchema();
 
-  // Check if target has data
+  // Load the resume manifest before deciding whether a non-empty target is
+  // safe. A matching v2 manifest proves that the existing rows belong to an
+  // interrupted migration to this exact target, so that case resumes in place.
+  let manifest = loadManifest();
+  if (manifest && !manifestMatchesTarget(manifest, targetId)) {
+    console.log('Previous migration was to a different target. Starting fresh.');
+    manifest = null;
+    clearManifest();
+  }
+
+  // Check if target has data.
   const targetStats = await targetEngine.getStats();
-  if (targetStats.page_count > 0 && !opts.force) {
+  const canResume = manifest !== null && manifestMatchesTarget(manifest, targetId);
+  if (targetStats.page_count > 0 && !opts.force && !canResume) {
     console.error(`Target brain is not empty (${targetStats.page_count} pages).`);
     console.error('Run with --force to overwrite, or migrate to an empty brain.');
     await targetEngine.disconnect();
@@ -227,18 +256,21 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     // the original semantic. Cascades through content_chunks / page_links /
     // tags / timeline_entries / page_versions via existing FKs.
     await targetEngine.executeRaw('DELETE FROM pages');
+    manifest = null;
+    clearManifest();
+  } else if (opts.force || (targetStats.page_count === 0 && (manifest?.completed_slugs.length ?? 0) > 0)) {
+    // `--force` always means a fresh copy. An empty target also cannot contain
+    // pages named by a partial manifest, so carrying those skip keys forward
+    // would silently produce an incomplete migration.
+    manifest = null;
+    clearManifest();
   }
 
   console.log('Copying source rows...');
   const sourceCount = await copySourceRowsForMigration(sourceEngine, targetEngine);
   console.log(`Copied ${sourceCount} source rows.`);
 
-  // Load or create manifest for resume
-  let manifest = loadManifest();
-  if (manifest && manifest.target_engine !== opts.targetEngine) {
-    console.log('Previous migration was to a different target. Starting fresh.');
-    manifest = null;
-  }
+  // Continue the matching manifest, or create a fresh one.
   // v0.32.8 F8: manifest keys are now `${source_id}::${slug}` so multi-source
   // migrations don't collide on same-slug-different-source pages. Pre-v0.32.8
   // entries were bare slugs; we keep treating those as default-source for
@@ -250,6 +282,8 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     manifest = {
       completed_slugs: [],
       target_engine: opts.targetEngine,
+      target_id: targetId,
+      schema_version: 2,
       started_at: new Date().toISOString(),
     };
   }

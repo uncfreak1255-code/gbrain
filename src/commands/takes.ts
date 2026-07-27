@@ -28,6 +28,7 @@ import {
   type ParsedTake,
 } from '../core/takes-fence.ts';
 import { withPageLock } from '../core/page-lock.ts';
+import { resolveSourceId } from '../core/source-resolver.ts';
 
 // --- Helpers ---
 
@@ -41,7 +42,11 @@ function flagPresent(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
-async function resolveBrainDir(engine: BrainEngine | null, explicitDir: string | null): Promise<string> {
+async function resolveBrainDir(
+  engine: BrainEngine | null,
+  explicitDir: string | null,
+  sourceId?: string,
+): Promise<string> {
   if (explicitDir) {
     if (!existsSync(explicitDir)) {
       console.error(`--dir path does not exist: ${explicitDir}`);
@@ -50,6 +55,22 @@ async function resolveBrainDir(engine: BrainEngine | null, explicitDir: string |
     return explicitDir;
   }
   if (engine) {
+    if (sourceId) {
+      const rows = await engine.executeRaw<{ local_path: string | null }>(
+        `SELECT local_path FROM sources WHERE id = $1`,
+        [sourceId],
+      );
+      const sourcePath = rows[0]?.local_path;
+      if (sourcePath && existsSync(sourcePath)) return sourcePath;
+      // A non-default source must never fall through to the legacy global
+      // repo path: that would write markdown in one source while mutating the
+      // selected source's DB page.
+      if (sourceId !== 'default') {
+        console.error(`Source "${sourceId}" has no existing local_path. Pass --dir <path> or configure the source path first.`);
+        process.exit(1);
+      }
+    }
+    // Legacy pre-multi-source fallback for the seeded default source.
     const configured = await engine.getConfig('sync.repo_path');
     if (configured && existsSync(configured)) return configured;
   }
@@ -83,16 +104,28 @@ function ensureFloat(raw: string | undefined, fallback: number): number {
   return n;
 }
 
-async function getPageId(engine: BrainEngine, slug: string): Promise<number> {
-  const rows = await engine.executeRaw<{ id: number }>(
-    `SELECT id FROM pages WHERE slug = $1 LIMIT 1`,
-    [slug],
-  );
+async function getPageId(engine: BrainEngine, slug: string, sourceId?: string): Promise<number> {
+  const rows = sourceId
+    ? await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM pages WHERE slug = $1 AND source_id = $2 LIMIT 1`,
+        [slug, sourceId],
+      )
+    : await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM pages WHERE slug = $1 LIMIT 1`,
+        [slug],
+      );
   if (!rows[0]) {
-    console.error(`Page not found in brain: ${slug}. Run \`gbrain sync\` first.`);
+    console.error(`Page not found in brain: ${slug}${sourceId ? ` (source=${sourceId})` : ''}. Run \`gbrain sync\` first.`);
     process.exit(1);
   }
   return rows[0].id;
+}
+
+async function resolveTakesSourceId(engine: BrainEngine): Promise<string> {
+  // Fail closed: an invalid or missing selected source must never degrade to
+  // getPageId's legacy unscoped lookup, which can pick an arbitrary same-slug
+  // page from another source.
+  return resolveSourceId(engine, null);
 }
 
 function readBodyOrEmpty(path: string): string {
@@ -169,7 +202,7 @@ async function cmdSearch(engine: BrainEngine, args: string[]): Promise<void> {
   }
 }
 
-async function cmdAdd(engine: BrainEngine, args: string[]): Promise<void> {
+async function cmdAdd(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
   const slug = args[0];
   if (!slug) {
     console.error('Usage: gbrain takes add <slug> --claim "..." --kind <k> --who <h> [--weight 0.5] [--source "..."] [--since YYYY-MM]');
@@ -184,7 +217,7 @@ async function cmdAdd(engine: BrainEngine, args: string[]): Promise<void> {
   const source = flagValue(args, '--source');
   const since = flagValue(args, '--since');
   const dirArg = flagValue(args, '--dir');
-  const brainDir = await resolveBrainDir(engine, dirArg ?? null);
+  const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
 
   await withPageLock(slug, async () => {
     const path = pageFilePath(brainDir, slug);
@@ -195,7 +228,7 @@ async function cmdAdd(engine: BrainEngine, args: string[]): Promise<void> {
     writeBody(path, nextBody);
 
     // Mirror to DB. Page may not be in DB yet if not synced — caller must run sync first.
-    const pageId = await getPageId(engine, slug);
+    const pageId = await getPageId(engine, slug, sourceId);
     await engine.addTakesBatch([{
       page_id: pageId, row_num: rowNum, claim, kind, holder, weight,
       since_date: since, source, active: true, superseded_by: null,
@@ -204,7 +237,7 @@ async function cmdAdd(engine: BrainEngine, args: string[]): Promise<void> {
   });
 }
 
-async function cmdUpdate(engine: BrainEngine, args: string[]): Promise<void> {
+async function cmdUpdate(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
   const slug = args[0];
   const rowNumStr = flagValue(args, '--row');
   if (!slug || !rowNumStr) {
@@ -220,10 +253,10 @@ async function cmdUpdate(engine: BrainEngine, args: string[]): Promise<void> {
   const since = flagValue(args, '--since');
   if (since !== undefined) fields.since_date = since;
   const dirArg = flagValue(args, '--dir');
-  const brainDir = await resolveBrainDir(engine, dirArg ?? null);
+  const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
 
   await withPageLock(slug, async () => {
-    const pageId = await getPageId(engine, slug);
+    const pageId = await getPageId(engine, slug, sourceId);
     await engine.updateTake(pageId, rowNum, fields);
 
     // Sync the markdown table: read fence, find row, apply field updates, re-render.
@@ -254,7 +287,7 @@ async function cmdUpdate(engine: BrainEngine, args: string[]): Promise<void> {
   });
 }
 
-async function cmdSupersede(engine: BrainEngine, args: string[]): Promise<void> {
+async function cmdSupersede(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
   const slug = args[0];
   const rowNumStr = flagValue(args, '--row');
   if (!slug || !rowNumStr) {
@@ -265,10 +298,10 @@ async function cmdSupersede(engine: BrainEngine, args: string[]): Promise<void> 
   const claim = flagValue(args, '--claim');
   if (!claim) { console.error('Missing --claim'); process.exit(1); }
   const dirArg = flagValue(args, '--dir');
-  const brainDir = await resolveBrainDir(engine, dirArg ?? null);
+  const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
 
   await withPageLock(slug, async () => {
-    const pageId = await getPageId(engine, slug);
+    const pageId = await getPageId(engine, slug, sourceId);
 
     // Read existing row to inherit kind/holder unless overridden
     const existing = await engine.listTakes({ page_id: pageId, active: false, limit: 500 });
@@ -302,7 +335,7 @@ async function cmdSupersede(engine: BrainEngine, args: string[]): Promise<void> 
   });
 }
 
-async function cmdResolve(engine: BrainEngine, args: string[]): Promise<void> {
+async function cmdResolve(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
   const slug = args[0];
   const rowNumStr = flagValue(args, '--row');
   const qualityStr = flagValue(args, '--quality');
@@ -347,7 +380,8 @@ async function cmdResolve(engine: BrainEngine, args: string[]): Promise<void> {
   const resolvedBy = flagValue(args, '--by') ?? 'garry';
   const dirArg = flagValue(args, '--dir');
 
-  const pageId = await getPageId(engine, slug);
+  const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
+  const pageId = await getPageId(engine, slug, sourceId);
   await engine.resolveTake(pageId, rowNum, {
     quality,
     outcome,
@@ -361,7 +395,6 @@ async function cmdResolve(engine: BrainEngine, args: string[]): Promise<void> {
   // The renderer conditionally widens the table to 13 columns when at least one
   // row has resolution data; pages with no resolved rows keep the 7-col shape.
   // Round-trip via parseTakesFence + renderTakesFence preserves all rows.
-  const brainDir = await resolveBrainDir(engine, dirArg ?? null);
   await withPageLock(slug, async () => {
     const path = pageFilePath(brainDir, slug);
     const body = readBodyOrEmpty(path);
@@ -553,7 +586,7 @@ Subcommands:
                                           Calibration curve binned by stated weight (v0.30.0)
 
 Common flags:
-  --dir <path>    Override the brain directory (default: sync.repo_path config)
+  --dir <path>    Override the brain directory (default: selected source local_path)
   --help, -h      Show this help
 `);
     return;
@@ -564,10 +597,10 @@ Common flags:
 
   switch (sub) {
     case 'search':      return cmdSearch(engine, rest);
-    case 'add':         return cmdAdd(engine, rest);
-    case 'update':      return cmdUpdate(engine, rest);
-    case 'supersede':   return cmdSupersede(engine, rest);
-    case 'resolve':     return cmdResolve(engine, rest);
+    case 'add':         return cmdAdd(engine, rest, await resolveTakesSourceId(engine));
+    case 'update':      return cmdUpdate(engine, rest, await resolveTakesSourceId(engine));
+    case 'supersede':   return cmdSupersede(engine, rest, await resolveTakesSourceId(engine));
+    case 'resolve':     return cmdResolve(engine, rest, await resolveTakesSourceId(engine));
     case 'scorecard':   return cmdScorecard(engine, rest);
     case 'calibration': return cmdCalibration(engine, rest);
     case 'revisit':     return cmdRevisit(engine, rest);
@@ -591,7 +624,8 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
   const sub = rest[0];
   if (sub !== '--from-pages') {
     process.stderr.write(
-      'Usage: gbrain takes extract --from-pages [--yes] [--dry-run] [--source-id <id>] [--max-pages N] [--holder <name>]\n',
+      'Usage: gbrain takes extract --from-pages [--yes] [--dry-run] [--source-id <id>] [--max-pages N (clamped to 1000)] [--include-covered] [--holder <name>]\n' +
+      'Runs progress: pages already classified at their current content are skipped, including valid no-claim pages. --include-covered rescans everything (refresh).\n',
     );
     process.exit(1);
   }
@@ -604,6 +638,7 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
   const maxPages = maxPagesRaw ? Math.max(1, Math.min(1000, parseInt(maxPagesRaw, 10) || 50)) : 50;
   const holderIdx = rest.indexOf('--holder');
   const holder = holderIdx >= 0 ? rest[holderIdx + 1] : 'system';
+  const includeCovered = rest.includes('--include-covered');
 
   // A12 consent gate.
   const bootstrapEnabledCfg = await engine.getConfig('takes.bootstrap_enabled');
@@ -628,6 +663,7 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
     dryRun,
     sourceIdFilter,
     maxPages,
+    includeCovered,
     holder,
   });
   if (result.llm_unavailable) {

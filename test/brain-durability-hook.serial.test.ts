@@ -100,6 +100,28 @@ describe('brain-commit-push.sh (D13 guarantee)', () => {
     } catch (e: any) { code = e.status ?? 1; }
     expect(code).toBe(2);
   });
+
+  test('#2426 — commits a modified tracked file when the remote advanced', () => {
+    rmSync(join(work, '.git', 'hooks', 'post-commit'));
+    const other = mkdtempSync(join(root, 'other-'));
+    execFileSync('git', ['-c', 'protocol.file.allow=always', 'clone', '-q', bare, other], { stdio: 'ignore' });
+    git(other, 'config', 'user.email', 'o@o.o');
+    git(other, 'config', 'user.name', 'other');
+    writeFileSync(join(other, 'remote.md'), 'from other\n');
+    git(other, 'add', 'remote.md');
+    git(other, 'commit', '-qm', 'remote change');
+    git(other, 'push', '-q', 'origin', 'main');
+
+    writeFileSync(join(work, 'README.md'), 'modified by write-through\n');
+    execFileSync('bash', [join(work, 'scripts', 'brain-commit-push.sh'), 'wt: README', 'README.md'], {
+      cwd: work, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
+    });
+
+    const subjects = git(bare, 'log', '--format=%s', 'main');
+    expect(subjects).toContain('wt: README');
+    expect(subjects).toContain('remote change');
+    expect(git(work, 'status', '--porcelain', 'README.md')).toBe('');
+  });
 });
 
 describe('post-commit hook (D9 local, D7 self-contained)', () => {

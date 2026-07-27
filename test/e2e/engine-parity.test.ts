@@ -588,7 +588,10 @@ describeBoth('Engine parity — relationalFanout', () => {
   }, 30_000);
 
   const shape = (rows: Awaited<ReturnType<BrainEngine['relationalFanout']>>) =>
-    rows.map(r => `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.path.join('>')}:${r.canonical_chunk_id ?? 'null'}`);
+    // canonical_chunk_id is a physical primary key, so the numeric value is
+    // intentionally different between a shared Postgres sequence and a fresh
+    // PGLite database. Parity is whether a canonical chunk was selected.
+    rows.map(r => `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.path.join('>')}:${r.canonical_chunk_id === null ? 'none' : 'set'}`);
 
   test('typed-edge fan-out is identical across engines', async () => {
     const opts = { direction: 'in' as const, linkTypes: ['invested_in'] };
@@ -596,6 +599,8 @@ describeBoth('Engine parity — relationalFanout', () => {
     const pglite = await pgliteEngine.relationalFanout(['companies/ep-widget'], opts);
     expect(shape(pg)).toEqual(shape(pglite));
     expect(pg.map(r => r.slug).sort()).toEqual(['people/ep-inv-a', 'people/ep-inv-b']);
+    expect(pg.find(r => r.slug === 'people/ep-inv-b')?.canonical_chunk_id).not.toBeNull();
+    expect(pglite.find(r => r.slug === 'people/ep-inv-b')?.canonical_chunk_id).not.toBeNull();
   });
 
   test('type-agnostic + mentions-exclusion identical across engines', async () => {

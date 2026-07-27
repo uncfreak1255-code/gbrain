@@ -2,6 +2,108 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.46.1.0] - 2026-07-18
+
+**Full sync now preserves pages created through GBrain and treats `ops/` notes like ordinary brain content.** A missing generated file no longer makes a database-backed page look intentionally deleted, while real Git deletions still reconcile normally.
+
+### To take advantage of v0.46.1.0
+
+Run `gbrain upgrade`. No migration or required configuration change is needed.
+
+### Itemized changes
+
+### Changed
+- **Operator notes sync normally.** Markdown under `ops/` now follows the same canonical include and exclusion rules as other brain content instead of being pruned by directory name.
+- **Hardened write-through repositories keep local Git receipts.** Successful page writes make an explicit-path commit before any remote reconciliation, without staging unrelated work or turning Git failures into failed page writes.
+
+### Fixed
+- **Database-only pages survive full reconciliation.** Full sync distinguishes never-committed write-through pages from files that existed in Git and were deliberately deleted. It preserves and re-exports the former while retaining the existing mass-deletion safety gate.
+- **Page provenance stays server-controlled.** Local and remote `put_page` writes record trusted origin metadata without accepting hostile frontmatter as reconciliation authority, and dry runs remain side-effect free.
+- **Docker unit snapshots match the test schema.** The snapshot builder now pins the documented legacy 1536-dimension test configuration, while fresh-brain assertions opt out of the post-schema snapshot.
+
+### For contributors
+- Focused PGLite, Git-fixture, and real-PostgreSQL regressions cover operator-note discovery, committed-versus-database-only reconciliation, path-limited durability commits, trusted provenance, and snapshot isolation.
+
+## [0.46.0.0] - 2026-07-16
+
+**The downstream fork is now current with upstream's safety and correctness fixes through `323d7d63`, without merging incompatible histories or weakening the fork's existing controls.** File and source boundaries fail closed, long-running workers keep their live locks, large reconciles refuse suspicious deletions, and federated reads and writes stay inside the selected sources.
+
+### To take advantage of v0.46.0.0
+
+Run `gbrain upgrade`. Migrations 121 through 123 apply automatically: migration 121 hardens function search paths, the `page_links` view, and row-level-security enablement; migration 122 scopes file identity to each source; migration 123 records bounded Takes-classification progress, including valid no-claim pages. No required configuration change is needed.
+
+Generated HTTP admin tokens remain hidden from non-interactive output by default. Use `--print-admin-token` only when a trusted automation explicitly needs the value.
+
+### Itemized changes
+
+### Added
+- **Confinement at filesystem sinks.** Routing files, skills, uploads, transcription, imports, and write-through paths reject symlink escapes, hostile slugs, unsafe permissions, and shell-shaped arguments before bytes leave the trusted root.
+- **Schema hardening gate.** Migration 121, generated schema parity, and the new search-path verification check keep security-sensitive functions and views pinned to safe behavior on both fresh and upgraded brains.
+- **Current bundled-pack and model coverage.** `schema use` resolves every bundled pack, pack-declared atom extraction types are honored without feeding synthesis outputs back into extraction, and Sonnet 5/Fable 5 have conservative budget prices.
+
+### Changed
+- **Source isolation is end to end.** Think gather and trajectories, Takes mutations/search, image imports, files, aliases, and related reads now honor scalar and federated source scopes instead of silently falling back to another source.
+- **Bounded extraction progresses.** Atom slugs are stable for dated and undated sources, partial multi-atom writes retry until the final atom marks the source complete, and repeated Takes bootstrap runs persist valid no-claim completion so bounded slices advance unless `--include-covered` requests a refresh.
+- **Safer operational recovery.** PGLite and autopilot locks trust live process ownership regardless of heartbeat age; interrupted engine migrations resume only against the matching target and restart cleanly under `--force`.
+
+### Fixed
+- **Suspicious full-sync deletions stop before data loss.** Path separators are normalized and a majority-delete valve refuses large reconcile sweeps unless `GBRAIN_ALLOW_MASS_RECONCILE=1` explicitly restores bulk-delete behavior.
+- **Search and entity edge cases stay deterministic.** Ambiguous bare entities, alias page IDs, contradiction inputs, cache-policy hashing, escaped table pipes, BIGINT serialization, generated-corpus orphan exclusions, and fence-less imports now use the safe path.
+- **Identical file paths stay isolated by source.** File metadata now uses `(source_id, storage_path)` as its identity, and configured object storage uses a source-scoped physical key, so the same relative path in two sources cannot overwrite either source's row or bytes.
+- **Generated bootstrap secrets stay off logs.** Non-TTY serve startup suppresses newly generated admin tokens unless the caller explicitly opts in.
+
+### For contributors
+- Focused unit, PGLite, slow, and real-Postgres regression coverage now pins the adopted behavior, including public full-sync deletion gating, filesystem-sink confinement, source-scoped Takes keyword/vector search, source-isolated file identity, and fresh-vs-migrated schema security.
+
+## [0.45.6.0] - 2026-07-12
+
+**Dream can now stop before a single transcript spills past the child limit.** Set an optional child budget for a synthesize run and GBrain will refuse a transcript whose complete set of chunks cannot fit. That keeps a one-child canary genuinely one child instead of quietly starting only the first part of a larger transcript.
+
+When the limit rules out all eligible work, the receipt is an explicit failure, no empty Dream summary is written, and the normal cooldown is left alone. If earlier transcripts fit but a later one does not, the run preserves its diagnostics but still fails rather than presenting a partial batch as a completed one. The result is a clearer handoff to the existing quality gate: review only artifacts with a passing quality receipt.
+
+### To take advantage of v0.45.6.0
+
+`gbrain upgrade`. No migration or required config change is needed.
+
+For an intentionally one-child synthesize run:
+
+```bash
+gbrain config set dream.synthesize.max_children_per_cycle 1
+gbrain dream --phase synthesize --json
+gbrain eval dream-quality --json
+```
+
+Dream output remains review material only. A passing quality result does not promote it into canon.
+
+### Itemized changes
+
+### Added
+- **Optional hard Dream child budget.** `dream.synthesize.max_children_per_cycle` limits child jobs before they are queued, including date-range and explicit-input runs. Multi-chunk transcripts are all-or-nothing.
+
+### Fixed
+- **Cap misses cannot look successful.** `SYNTH_CHILD_LIMIT_REACHED` now carries the child-limit details and leaves the synthesize cooldown unstamped. A zero-child cap miss does not create an empty summary.
+- **Headless initialization stays headless.** `gbrain init --non-interactive` no longer opens the search-mode picker merely because the caller owns a terminal.
+- **Explicit source selection wins in recall.** `gbrain recall --source default` now stays on the default source even when another source is the only non-default option.
+- **Admin app routes resolve in development.** Direct navigation to an admin client route now serves the app entry point instead of returning a missing-file response.
+
+### For contributors
+- **Hermetic E2E setup.** The suite clears source and cycle-lock state between files and isolates configured embedding-provider variables during fresh-install coverage.
+
+## [0.45.5.1] - 2026-07-12
+
+**Plugin and skill installs now report the same release version as GBrain itself.** This small repair keeps the bundled OpenClaw plugin and skill manifest aligned with the CLI package, so install and update tools no longer describe an older release after upgrading.
+
+### To take advantage of v0.45.5.1
+`gbrain upgrade`. No migration or config change is required.
+
+### Itemized changes
+
+### Fixed
+- **Aligned bundled manifest metadata.** `openclaw.plugin.json` and `skills/manifest.json` now carry the active release version.
+
+### Added
+- **Release-version regression guard.** The release workflow test now fails when either distributable manifest drifts from `VERSION`.
+
 ## [0.45.5.0] - 2026-07-11
 
 **Bounded Dream synthesis now stops its own work cleanly and keeps weak output out of the review lane.** If a `gbrain dream` synthesis run is interrupted or times out, it cancels only the children it created and returns a partial receipt instead of leaving work behind or touching another run's queue. Passing quality receipts make artifacts available for human review, while failed or inconclusive output stays quarantined.

@@ -95,8 +95,9 @@ Triggers sync on push events for instant sync (<5s).
 
 Sync only indexes "syncable" markdown files. These are excluded by design:
 - Hidden paths (`.git/`, `.raw/`, etc.)
-- The `ops/` directory
 - Meta files: `README.md`, `index.md`, `schema.md`, `log.md`
+
+Ordinary user directories, including `ops/`, are synced.
 
 ### Sync is Idempotent
 

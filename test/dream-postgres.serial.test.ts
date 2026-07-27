@@ -24,15 +24,29 @@ import { runCycle } from '../src/core/cycle.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
+let savedGbrainHome: string | undefined;
+let isolatedGbrainHome: string;
 
 beforeAll(async () => {
+  // runDream consults gbrainPath('autopilot.lock') even when its database
+  // engine is an in-memory test double. Keep this checkout-less suite from
+  // inheriting a real operator's live autopilot lock.
+  savedGbrainHome = process.env.GBRAIN_HOME;
+  isolatedGbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-dream-postgres-home-'));
+  process.env.GBRAIN_HOME = isolatedGbrainHome;
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
 });
 
 afterAll(async () => {
-  await engine.disconnect();
+  try {
+    await engine.disconnect();
+  } finally {
+    if (savedGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+    else process.env.GBRAIN_HOME = savedGbrainHome;
+    rmSync(isolatedGbrainHome, { recursive: true, force: true });
+  }
 });
 
 beforeEach(async () => {

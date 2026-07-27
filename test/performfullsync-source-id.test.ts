@@ -27,13 +27,14 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runSources } from '../src/commands/sources.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 let repoPath: string;
@@ -135,5 +136,66 @@ describe('performFullSync threads sourceId end-to-end', () => {
     // Back-compat: callers that omit sourceId continue to target source 'default'.
     expect(counts['default']).toBeGreaterThan(0);
     expect(counts['testsrc-pfs'] ?? 0).toBe(0);
+  });
+
+  test('public full-sync flow blocks a majority reconcile delete unless explicitly overridden', async () => {
+    const sourceId = 'testsrc-pfs';
+    const presentCount = 10;
+    const totalCount = 25;
+    mkdirSync(join(repoPath, 'mass'), { recursive: true });
+
+    for (let i = 0; i < totalCount; i++) {
+      const slug = `mass/page-${i}`;
+      await engine.putPage(slug, {
+        title: `Mass ${i}`,
+        type: 'concept',
+        compiled_truth: `Seeded database page ${i}`,
+        source_path: `${slug}.md`,
+      }, { sourceId });
+      writeFileSync(join(repoPath, `${slug}.md`), [
+        '---',
+        'type: concept',
+        `title: Mass ${i}`,
+        '---',
+        '',
+        `Present page ${i}`,
+      ].join('\n'));
+    }
+    execSync('git add -A && git commit -m "mass reconcile baseline"', { cwd: repoPath, stdio: 'pipe' });
+    for (let i = presentCount; i < totalCount; i++) {
+      unlinkSync(join(repoPath, `mass/page-${i}.md`));
+    }
+    execSync('git add -A && git commit -m "remove missing mass pages"', { cwd: repoPath, stdio: 'pipe' });
+
+    const { performSync } = await import('../src/commands/sync.ts');
+    await withEnv({ GBRAIN_ALLOW_MASS_RECONCILE: undefined }, async () => {
+      await performSync(engine, {
+        repoPath,
+        full: true,
+        sourceId,
+        noPull: true,
+        noEmbed: true,
+      });
+    });
+    const blocked = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM pages WHERE source_id = $1 AND slug LIKE 'mass/%' AND deleted_at IS NULL`,
+      [sourceId],
+    );
+    expect(blocked[0].count).toBe(totalCount);
+
+    await withEnv({ GBRAIN_ALLOW_MASS_RECONCILE: '1' }, async () => {
+      await performSync(engine, {
+        repoPath,
+        full: true,
+        sourceId,
+        noPull: true,
+        noEmbed: true,
+      });
+    });
+    const overridden = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM pages WHERE source_id = $1 AND slug LIKE 'mass/%' AND deleted_at IS NULL`,
+      [sourceId],
+    );
+    expect(overridden[0].count).toBe(presentCount);
   });
 });

@@ -582,6 +582,11 @@ describeE2E('E2E: Files', () => {
       const files = await callOp('file_list', {}) as any[];
       expect(files.length).toBe(1);
 
+      // Regression: Postgres BIGINT(size_bytes) returned native BigInt before
+      // v0.22.5 so the MCP serializer threw and CLI listFiles div-by-1024 threw.
+      expect(typeof files[0].size_bytes).toBe('number');
+      expect(() => JSON.stringify(files)).not.toThrow();
+
       // Verify file_url returns URI format
       const url = await callOp('file_url', { storage_path: result.storage_path }) as any;
       expect(url.url).toContain('gbrain:files/');
@@ -642,7 +647,7 @@ describeE2E('E2E: file_list LIMIT enforcement', () => {
       await sql`
         INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
         VALUES (${testSlug}, ${'file-' + String(i).padStart(3, '0') + '.txt'}, ${testSlug + '/file-' + i + '.txt'}, ${'text/plain'}, ${100}, ${'hash-' + i}, ${'{}'}::jsonb)
-        ON CONFLICT (storage_path) DO NOTHING
+        ON CONFLICT (source_id, storage_path) DO NOTHING
       `;
     }
 

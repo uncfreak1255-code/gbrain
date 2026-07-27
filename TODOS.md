@@ -1418,22 +1418,6 @@ PR bisectable.
 
 ## v0.41.10.1 fix-wave follow-ups (v0.42+)
 
-- [ ] **v0.42+: per-atom idempotency via deterministic atom slug.** The
-  v0.41.10.1 fix wave closed the duplicate-atoms bug class via source-hash
-  existence check at the SOURCE level (skip the whole transcript/page if
-  any atom row exists for `frontmatter.source_hash`). Known limitation
-  surfaced by codex review (D9 #2): if the first Haiku call writes atom
-  1 of 3 then atom 2 throws, the source_hash filter sees atom 1 exists
-  and skips on next discovery — atoms 2 + 3 stay missing until
-  `content_hash` changes. The cleaner solution is per-atom idempotency:
-  switch atom slugs from date-stamped (`atoms/2026-05-25/<title-slug>`)
-  to content-hash-stamped (`atoms/<source_hash16>/<sha8-of-title-body>`)
-  so `engine.putPage` upserts naturally on retry. Bounded scope; needs
-  a migration to consolidate existing duplicate atoms (filed separately
-  below as the v0.42+ consolidation TODO). Priority: P2. References:
-  `src/core/cycle/extract-atoms.ts:atomsExistForHash`, the documented
-  known-limitation comment in the file header.
-
 - [ ] **v0.42+: atom-slug consolidation migration.** The v0.41.10.1 fix
   wave stops NEW duplicates from being written but doesn't migrate
   existing duplicate atoms from prior v0.41.2.0 runs. Brains that ran
@@ -3789,6 +3773,14 @@ keeping both skills' triggers intact for chaining.
 **Found:** 2026-04-24 during v0.19.0 production-readiness review.
 
 ## Completed
+
+### ~~Per-atom idempotency via deterministic atom slugs~~
+**Completed:** v0.46.0.0 (2026-07-16)
+
+Atom writes now use `atoms/<source-date>/<stem>-<identity-hash>`, so re-extracting
+an append-only source converges on the same page instead of minting cross-day
+or trailing-dash duplicates. The existing source-hash check remains as a cost
+fast path. Historical duplicate consolidation remains a separate open item.
 
 ### ~~TODO-LR-2 (P2): doctor check `lock_renewal_health`~~
 **Completed:** v0.45.4.0 (2026-06-28)

@@ -78,6 +78,37 @@ describe('gbrain recall --today', () => {
     expect(captured).toContain('💭');  // belief
     expect(captured).toContain('📌');  // fact
   });
+
+  test('explicit --source default overrides automatic source routing', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('recall-other', 'recall-other', '/tmp/recall-other', '{}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+    );
+    await engine.insertFact(
+      { fact: 'default-source-only', kind: 'event', entity_slug: 'render-default', source: 'test' },
+      { source_id: 'default' },
+    );
+    await engine.insertFact(
+      { fact: 'other-source-only', kind: 'event', entity_slug: 'render-other', source: 'test' },
+      { source_id: 'recall-other' },
+    );
+
+    captured = '';
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      captured += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await runRecall(engine, ['--today', '--source', 'default']);
+    } finally {
+      process.stdout.write = origWrite;
+      await engine.executeRaw(`DELETE FROM sources WHERE id = 'recall-other'`);
+    }
+
+    expect(captured).toContain('default-source-only');
+    expect(captured).not.toContain('other-source-only');
+  });
 });
 
 describe('gbrain recall --json', () => {

@@ -272,6 +272,7 @@ export interface GBrainConfig {
       verdict_model?: string;
       max_prompt_tokens?: number;
       max_chunks_per_transcript?: number;
+      max_children_per_cycle?: number;
     };
     patterns?: {
       lookback_days?: number;
@@ -769,6 +770,12 @@ export async function loadConfigWithEngine(
   const dbVerdictModel = await dbStr('dream.synthesize.verdict_model');
   const dbMaxPromptTokens = await dbInt('dream.synthesize.max_prompt_tokens');
   const dbMaxChunksPerTranscript = await dbInt('dream.synthesize.max_chunks_per_transcript');
+  const dbMaxChildrenPerCycleRaw = await dbStr('dream.synthesize.max_children_per_cycle');
+  const dbMaxChildrenPerCycle = (
+    dbMaxChildrenPerCycleRaw !== undefined && /^[1-9]\d*$/.test(dbMaxChildrenPerCycleRaw.trim())
+  )
+    ? Number(dbMaxChildrenPerCycleRaw.trim())
+    : undefined;
   const dbLookbackDays = await dbInt('dream.patterns.lookback_days');
   const dbMinEvidence = await dbInt('dream.patterns.min_evidence');
 
@@ -792,6 +799,13 @@ export async function loadConfigWithEngine(
   }
   if (mergedSynth.max_chunks_per_transcript === undefined && dbMaxChunksPerTranscript !== undefined) {
     mergedSynth.max_chunks_per_transcript = dbMaxChunksPerTranscript;
+  }
+  if (
+    mergedSynth.max_children_per_cycle === undefined &&
+    dbMaxChildrenPerCycle !== undefined &&
+    Number.isSafeInteger(dbMaxChildrenPerCycle)
+  ) {
+    mergedSynth.max_children_per_cycle = dbMaxChildrenPerCycle;
   }
   if (mergedPatterns.lookback_days === undefined && dbLookbackDays !== undefined) {
     mergedPatterns.lookback_days = dbLookbackDays;
@@ -902,6 +916,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'dream.synthesize.verdict_model',
   'dream.synthesize.max_prompt_tokens',
   'dream.synthesize.max_chunks_per_transcript',
+  'dream.synthesize.max_children_per_cycle',
   'dream.patterns.lookback_days',
   'dream.patterns.min_evidence',
   // Emotional weight (v0.29)
@@ -946,6 +961,10 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // operator had to discover these by reading source. Registered so `config
   // set` accepts them directly. See docs/operations/spend-controls.md.
   'spend.posture',
+  // Takes bootstrap (v0.41.18.0, A12). The command's two-gate consent reads
+  // this key, and enabling it is the documented path to
+  // `gbrain takes extract --from-pages`.
+  'takes.bootstrap_enabled',
   'sync.cost_gate_min_usd',
   'sync.federated_v2',
   'embed.backfill_cooldown_min',

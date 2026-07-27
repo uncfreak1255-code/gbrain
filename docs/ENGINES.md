@@ -133,7 +133,12 @@ RRF fusion, multi-query expansion, and 4-layer dedup are engine-agnostic. They o
 
 ## PostgresEngine (v0, ships)
 
-**Dependencies:** `postgres` (porsager/postgres), `pgvector`
+**Dependencies:** PostgreSQL 15+, `postgres` (porsager/postgres), `pgvector`
+
+PostgreSQL 15 is the minimum supported server version. The schema uses
+`UNIQUE NULLS NOT DISTINCT` for link identity and `security_invoker` views for
+RLS-safe aliases; both are PostgreSQL 15 features. PGLite embeds PostgreSQL
+17.5 and already satisfies this boundary.
 
 **Postgres-specific features used:**
 - `tsvector` + `GIN` index for full-text search with `ts_rank` weighting

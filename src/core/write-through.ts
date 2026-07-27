@@ -21,11 +21,13 @@
  * only does "row exists + repo is a real dir → render + atomic write".
  */
 
-import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs';
-import { dirname, join } from 'path';
+import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync, realpathSync } from 'fs';
+import { basename, dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from './markdown.ts';
+import { isWriteTargetContained } from './path-confine.ts';
+import { commitWriteThroughFile, isDurabilityHardened } from './brain-repo-durability.ts';
 
 /** Minimal logger surface — structurally compatible with operations.ts `Logger`. */
 export interface WriteThroughLogger {
@@ -35,6 +37,8 @@ export interface WriteThroughLogger {
 export interface WriteThroughResult {
   written: boolean;
   path?: string;
+  /** True only when a hardened repo also committed the written artifact. */
+  committed?: boolean;
   /**
    * Non-error reasons the file was not written:
    *   - no_repo_configured: the resolved target (source `local_path` or, for a
@@ -45,8 +49,10 @@ export interface WriteThroughResult {
    *     — #2018: writing here would pollute that sibling's repo, so we skip.
    *   - page_not_found_after_write: the DB row isn't readable back (the caller's
    *     DB write failed or targeted a different source).
+   *   - path_escapes_source_root: the computed file path resolves outside the
+   *     source's working tree (hostile slug row / symlinked subtree) — refused.
    */
-  skipped?: 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'page_not_found_after_write';
+  skipped?: 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'page_not_found_after_write' | 'path_escapes_source_root';
   /** Set when the render/write/rename itself threw (EACCES, ENOTDIR, disk full). */
   error?: string;
 }
@@ -95,6 +101,7 @@ export async function writePageThrough(
     //      `local_path`, nesting this page there would pollute that sibling's
     //      git repo (the reported bug). Skip instead.
     let filePath: string;
+    let writeRoot: string;
     const srcRows = await engine.executeRaw<{ local_path: string | null }>(
       `SELECT local_path FROM sources WHERE id = $1`,
       [sourceId],
@@ -106,6 +113,7 @@ export async function writePageThrough(
         return { written: false, skipped: 'repo_not_found' };
       }
       filePath = join(sourceLocalPath, `${slug}.md`);
+      writeRoot = sourceLocalPath;
     } else {
       const repoPath = await engine.getConfig('sync.repo_path');
       if (!repoPath) {
@@ -127,6 +135,16 @@ export async function writePageThrough(
         return { written: false, skipped: 'source_repo_belongs_to_other_source' };
       }
       filePath = resolvePageFilePath(repoPath, slug, sourceId);
+      writeRoot = repoPath;
+    }
+
+    // Defense-in-depth (#1647-slug / codex #6): confirm the computed file path
+    // stays within the source's working tree before any mkdir/write. validateSlug
+    // already rejects `..`/backslash/control/%2e in the slug at write time, so
+    // this guards a pre-existing hostile row or a symlinked intermediate dir
+    // under the source tree from escaping to an arbitrary filesystem location.
+    if (!isWriteTargetContained(filePath, writeRoot)) {
+      return { written: false, skipped: 'path_escapes_source_root' };
     }
 
     const writtenPage = await engine.getPage(slug, { sourceId });
@@ -142,13 +160,22 @@ export async function writePageThrough(
 
     mkdirSync(dirname(filePath), { recursive: true });
 
+    // Resolve the now-existing parent once more and write through that
+    // canonical path. This closes the ordinary check-then-mkdir symlink swap
+    // window: a pre-existing or newly introduced escaping parent fails the
+    // containment check before any page bytes are written.
+    filePath = join(realpathSync(dirname(filePath)), basename(filePath));
+    if (!isWriteTargetContained(filePath, writeRoot)) {
+      return { written: false, skipped: 'path_escapes_source_root' };
+    }
+
     // Atomic write: unique temp sibling + rename. Unique name (pid + random)
     // so two concurrent saves to the same target can't clobber each other's
     // temp file. Clean up the temp on any failure so we never leak a stray
     // `.tmp` next to the real file.
     const tmpPath = `${filePath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
     try {
-      writeFileSync(tmpPath, md, 'utf8');
+      writeFileSync(tmpPath, md, { encoding: 'utf8', flag: 'wx', mode: 0o644 });
       renameSync(tmpPath, filePath);
     } catch (writeErr) {
       try {
@@ -159,7 +186,16 @@ export async function writePageThrough(
       throw writeErr;
     }
 
-    return { written: true, path: filePath };
+    let committed = false;
+    try {
+      if (isDurabilityHardened(writeRoot)) {
+        committed = commitWriteThroughFile(writeRoot, filePath, slug);
+      }
+    } catch {
+      // Git durability is best-effort; the DB row and atomic file still stand.
+    }
+
+    return { written: true, path: filePath, ...(committed ? { committed } : {}) };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     opts.logger?.warn(`[write-through] failed for ${slug}: ${msg}`);

@@ -433,7 +433,7 @@ Examples:
 
 Configure synthesize:
   gbrain config set dream.synthesize.session_corpus_dir /path/to/transcripts
-  gbrain config set dream.synthesize.session_corpus_dir /path/to/transcripts
+  gbrain config set dream.synthesize.max_children_per_cycle 1  # optional hard child cap
 
 Related:
   gbrain autopilot --install            # continuous maintenance as a daemon

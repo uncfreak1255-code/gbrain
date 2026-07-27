@@ -120,6 +120,34 @@ describe('importImageFile happy path (noEmbed)', () => {
     expect(r2.status).toBe('skipped');
   });
 
+  test('routes page, chunks, and file metadata to the requested source (#2706)', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
+      ['image-source', 'Image Source'],
+    );
+    const defaultTarget = join(tmpDir, 'default-source-photo.png');
+    writeFileSync(defaultTarget, Buffer.from('fake-png-bytes-default-scoped'));
+    await importImageFile(engine, defaultTarget, 'photos/source-photo.png', { noEmbed: true });
+
+    const target = join(tmpDir, 'source-photo.png');
+    writeFileSync(target, Buffer.from('fake-png-bytes-source-scoped'));
+
+    const result = await importImageFile(engine, target, 'photos/source-photo.png', {
+      noEmbed: true,
+      sourceId: 'image-source',
+    });
+
+    expect(result.status).toBe('imported');
+    expect(await engine.getPage('photos/source-photo.png', { sourceId: 'default' })).not.toBeNull();
+    const page = await engine.getPage('photos/source-photo.png', { sourceId: 'image-source' });
+    expect(page).not.toBeNull();
+    expect(await engine.getChunks('photos/source-photo.png', { sourceId: 'default' })).toHaveLength(1);
+    expect(await engine.getChunks('photos/source-photo.png', { sourceId: 'image-source' })).toHaveLength(1);
+    expect((await engine.getFile('default', 'photos/source-photo.png'))?.content_hash).not.toBe(
+      (await engine.getFile('image-source', 'photos/source-photo.png'))?.content_hash,
+    );
+  });
+
   test('refuses oversized files (>20MB)', async () => {
     const target = join(tmpDir, 'huge.png');
     // Write a 21MB file. Buffer.alloc is fast.

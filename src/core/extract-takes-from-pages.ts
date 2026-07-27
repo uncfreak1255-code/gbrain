@@ -46,6 +46,11 @@ export interface ExtractTakesFromPagesOpts {
   sourceIdFilter?: string;
   /** Max pages to classify per run (caps cost). Default 50. */
   maxPages?: number;
+  /**
+   * Also rescan pages that already hold takes (refresh semantics).
+   * Default false: repeat bootstrap runs progress through a large corpus.
+   */
+  includeCovered?: boolean;
   /** Owner identifier for the inserted takes. Default 'system'. */
   holder?: string;
   /** Model override; defaults to facts.extraction_model. */
@@ -69,7 +74,34 @@ interface PageRow {
   source_id: string;
   type: string;
   compiled_truth: string;
+  extraction_hash: string;
   updated_at: string | Date;
+}
+
+type ParsedClaim = { claim: string; kind: TakeKind; weight: number };
+
+function parseClaimsResponse(raw: string): ParsedClaim[] | null {
+  try {
+    // Strip code fences if model wrapped output in ```json.
+    let text = raw.trim();
+    const fenceMatch = text.match(/^```(?:json)?\n?([\s\S]*?)\n?```$/);
+    if (fenceMatch) text = fenceMatch[1].trim();
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return null;
+    const valid: ParsedClaim[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') return null;
+      const claim = typeof item.claim === 'string' ? item.claim.trim().slice(0, 200) : '';
+      const kind = typeof item.kind === 'string' ? item.kind : '';
+      const weightRaw = typeof item.weight === 'number' ? item.weight : 0.5;
+      const weight = Math.max(0, Math.min(1, weightRaw));
+      if (!claim || !['fact', 'take', 'bet', 'hunch'].includes(kind)) return null;
+      valid.push({ claim, kind: kind as TakeKind, weight });
+    }
+    return valid;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -77,27 +109,7 @@ interface PageRow {
  * on any parse failure (caller treats as "no claims extracted").
  */
 export function parseClaimsJson(raw: string): Array<{ claim: string; kind: TakeKind; weight: number }> {
-  try {
-    // Strip code fences if model wrapped output in ```json.
-    let text = raw.trim();
-    const fenceMatch = text.match(/^```(?:json)?\n?([\s\S]*?)\n?```$/);
-    if (fenceMatch) text = fenceMatch[1].trim();
-    const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed)) return [];
-    const valid: Array<{ claim: string; kind: TakeKind; weight: number }> = [];
-    for (const item of parsed) {
-      if (!item || typeof item !== 'object') continue;
-      const claim = typeof item.claim === 'string' ? item.claim.trim().slice(0, 200) : '';
-      const kind = typeof item.kind === 'string' ? item.kind : '';
-      const weightRaw = typeof item.weight === 'number' ? item.weight : 0.5;
-      const weight = Math.max(0, Math.min(1, weightRaw));
-      if (!claim || !['fact', 'take', 'bet', 'hunch'].includes(kind)) continue;
-      valid.push({ claim, kind, weight });
-    }
-    return valid;
-  } catch {
-    return [];
-  }
+  return parseClaimsResponse(raw) ?? [];
 }
 
 export async function extractTakesFromPages(
@@ -132,12 +144,20 @@ export async function extractTakesFromPages(
   // Fetch eligible pages. Order by updated_at DESC so recently-edited
   // pages get bootstrapped first.
   const typesList = ALLOWED_PAGE_TYPES.map((t) => `'${t}'`).join(', ');
+  const coveredFilter = opts.includeCovered
+    ? ''
+    : `AND NOT EXISTS (SELECT 1 FROM takes t WHERE t.page_id = pages.id)
+       AND pages.takes_extracted_content_hash IS DISTINCT FROM
+           COALESCE(pages.content_hash, 'md5:' || md5(pages.compiled_truth))`;
   const pages = await engine.executeRaw<PageRow>(
-    `SELECT id, slug, source_id, type, compiled_truth, updated_at
+    `SELECT id, slug, source_id, type, compiled_truth,
+            COALESCE(content_hash, 'md5:' || md5(compiled_truth)) AS extraction_hash,
+            updated_at
        FROM pages
       WHERE type IN (${typesList})
         AND deleted_at IS NULL
         AND length(COALESCE(compiled_truth, '')) > 200
+        ${coveredFilter}
         ${sourceFilter}
       ORDER BY updated_at DESC
       LIMIT ${maxPages}`,
@@ -147,19 +167,30 @@ export async function extractTakesFromPages(
   let pagesScanned = 0;
   let claimsExtracted = 0;
   const batch: TakeBatchInput[] = [];
+  const completedPages: Array<{ id: number; extractionHash: string }> = [];
 
   async function flush() {
-    if (batch.length === 0) return;
-    if (!dryRun) {
+    if (batch.length === 0 && completedPages.length === 0) return;
+    if (dryRun) {
+      claimsExtracted += batch.length;
+    } else {
       try {
         claimsExtracted += await engine.addTakesBatch(batch);
+        for (const page of completedPages) {
+          await engine.executeRaw(
+            `UPDATE pages
+                SET takes_extracted_content_hash = $2
+              WHERE id = $1
+                AND COALESCE(content_hash, 'md5:' || md5(compiled_truth)) = $2`,
+            [page.id, page.extractionHash],
+          );
+        }
       } catch {
-        // batch error — drop and continue with subsequent pages
+        // Batch or completion-marker error — leave pages eligible for retry.
       }
-    } else {
-      claimsExtracted += batch.length;
     }
     batch.length = 0;
+    completedPages.length = 0;
   }
 
   for (const page of pages) {
@@ -191,8 +222,11 @@ export async function extractTakesFromPages(
       continue;
     }
 
-    const claims = parseClaimsJson(response.text);
-    if (claims.length === 0) continue;
+    const claims = parseClaimsResponse(response.text);
+    // Malformed classifier output is retryable. A valid [] is a completed
+    // classification and must be marked so bounded sweeps can progress.
+    if (claims === null) continue;
+    completedPages.push({ id: page.id, extractionHash: page.extraction_hash });
 
     // Assign row_num starting from 1 per page. We don't query existing
     // takes for the page — collisions on (page_id, row_num) are an existing
@@ -211,7 +245,7 @@ export async function extractTakesFromPages(
         source: 'cli:takes-bootstrap-from-pages',
       });
     }
-    if (batch.length >= 200) await flush();
+    if (batch.length >= 200 || completedPages.length >= 200) await flush();
   }
 
   await flush();

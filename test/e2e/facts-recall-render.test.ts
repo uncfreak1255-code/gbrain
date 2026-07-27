@@ -33,7 +33,9 @@ d('gbrain recall --today (Postgres)', () => {
       return true;
     }) as typeof process.stdout.write;
     try {
-      await runRecall(engine, ['--today']);
+      // Other E2E files can leave extra source rows behind. Pin this render
+      // contract to the source receiving the fixture facts.
+      await runRecall(engine, ['--today', '--source', 'default']);
     } finally {
       process.stdout.write = origWrite;
     }
