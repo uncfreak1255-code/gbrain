@@ -1090,14 +1090,15 @@ CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
 CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
   ON page_aliases (source_id, slug);
 
--- Source lifecycle write guard (migration v124). Mirrored from schema.sql so
--- fresh PGLite snapshots and replayed schemas enforce the same lock protocol.
+-- Source lifecycle write guard (migrations v124-v130). Mirrored from schema.sql
+-- so fresh PGLite snapshots and replayed schemas enforce the same lock protocol.
 CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
 RETURNS trigger AS $fn$
 DECLARE
   source_ref TEXT;
   source_refs TEXT[] := ARRAY[]::TEXT[];
   raw_ref JSONB;
+  source_archived BOOLEAN;
 BEGIN
   IF TG_ARGV[0] = 'scalar' THEN
     source_ref := to_jsonb(NEW)->>TG_ARGV[1];
@@ -1133,14 +1134,21 @@ BEGIN
     RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
   END IF;
 
+  IF cardinality(source_refs) > 0 THEN
+    PERFORM pg_advisory_xact_lock_shared(
+      hashtextextended('gbrain:source-lifecycle', 0)
+    );
+  END IF;
+
   FOREACH source_ref IN ARRAY source_refs LOOP
-    PERFORM id
+    source_archived := NULL;
+    SELECT archived INTO source_archived
       FROM sources
-     WHERE id = source_ref AND archived = false
+     WHERE id = source_ref
      FOR SHARE;
-    IF NOT FOUND THEN
+    IF FOUND AND source_archived THEN
       RAISE EXCEPTION
-        'Cannot write %.%: source % is missing or archived',
+        'Cannot write %.%: source % is archived',
         TG_TABLE_NAME, TG_ARGV[1], source_ref
         USING ERRCODE = '23503';
     END IF;
@@ -1154,6 +1162,7 @@ RETURNS trigger AS $fn$
 DECLARE
   source_ref TEXT;
   source_refs TEXT[] := ARRAY[]::TEXT[];
+  source_archived BOOLEAN;
 BEGIN
   IF TG_OP = 'UPDATE'
      AND NEW.data IS NOT DISTINCT FROM OLD.data
@@ -1168,13 +1177,21 @@ BEGIN
     ) AS values_(value)
    WHERE value IS NOT NULL;
 
+  IF cardinality(source_refs) > 0 THEN
+    PERFORM pg_advisory_xact_lock_shared(
+      hashtextextended('gbrain:source-lifecycle', 0)
+    );
+  END IF;
+
   FOREACH source_ref IN ARRAY source_refs LOOP
-    PERFORM id FROM sources
-     WHERE id = source_ref AND archived = false
+    source_archived := NULL;
+    SELECT archived INTO source_archived
+      FROM sources
+     WHERE id = source_ref
      FOR SHARE;
-    IF NOT FOUND THEN
+    IF FOUND AND source_archived THEN
       RAISE EXCEPTION
-        'Cannot write minion_jobs.data: source % is missing or archived', source_ref
+        'Cannot write minion_jobs.data: source % is archived', source_ref
         USING ERRCODE = '23503';
     END IF;
   END LOOP;
@@ -1186,18 +1203,25 @@ CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
 RETURNS trigger AS $fn$
 DECLARE
   matched_active BOOLEAN := false;
+  source_archived BOOLEAN;
 BEGIN
   IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
-    PERFORM id
+    PERFORM pg_advisory_xact_lock_shared(
+      hashtextextended('gbrain:source-lifecycle', 0)
+    );
+    SELECT archived INTO source_archived
       FROM sources
-     WHERE id = NEW.value AND archived = false
+     WHERE id = NEW.value
      FOR SHARE;
-    IF NOT FOUND THEN
+    IF FOUND AND source_archived THEN
       RAISE EXCEPTION
-        'Cannot set sources.default: source % is missing or archived', NEW.value
+        'Cannot set sources.default: source % is archived', NEW.value
         USING ERRCODE = '23503';
     END IF;
   ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+    PERFORM pg_advisory_xact_lock_shared(
+      hashtextextended('gbrain:source-lifecycle', 0)
+    );
     PERFORM id
       FROM sources
      WHERE local_path = NEW.value AND archived = false

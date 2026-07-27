@@ -59,7 +59,11 @@ describe('extract-atoms-drain handler', () => {
     const nextHandler = handler.indexOf("worker.register('embed-backfill'");
     const body = handler.slice(0, nextHandler);
     expect(body).toContain('inspectSourceHygiene(engine');
-    expect(body).toContain('gateProtectedSourceWork(sourceHygiene, sourceId)');
+    expect(body).toContain('gateProtectedSourceWork(sourceHygiene, hygieneSourceId)');
+    expect(body).toContain("job.data.sourceId : undefined");
+    expect(body).toContain("const hygieneSourceId = sourceId ?? 'default'");
+    expect(body).toContain('runExtractAtomsDrainForSource(engine, {\n        sourceId,');
+    expect(body).not.toContain('source_hygiene_source_id_missing');
     expect(body.indexOf('inspectSourceHygiene(engine')).toBeLessThan(
       body.indexOf('runExtractAtomsDrainForSource(engine'),
     );

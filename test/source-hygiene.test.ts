@@ -664,6 +664,21 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).toContain('cardinality(source_refs) > 0');
   });
 
+  test('PGLite schema replay preserves the final v130 guard on an already-upgraded brain', async () => {
+    await db.initSchema();
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, data)
+       VALUES ('guard-replay-missing-job', '{"sourceId":"guard-replay-missing"}'::jsonb)`,
+    );
+    const definitions = await db.executeRaw<{ definition: string }>(
+      `SELECT pg_get_functiondef(
+         'enforce_active_source_reference_fn()'::regprocedure
+       ) AS definition`,
+    );
+    expect(definitions[0]?.definition).toContain('pg_advisory_xact_lock_shared');
+    expect(definitions[0]?.definition).not.toContain('source % is missing or archived');
+  });
+
   test('migration v125 closes terminal-job retry after source archive', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 125);
     expect(migration?.name).toBe('active_source_job_status_guard');

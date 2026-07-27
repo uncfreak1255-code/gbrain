@@ -1936,30 +1936,24 @@ export async function registerBuiltinHandlers(
     const { LockUnavailableError } = await import('../core/db-lock.ts');
     const { gateProtectedSourceWork, inspectSourceHygiene } = await import('../core/source-hygiene.ts');
     const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+    const hygieneSourceId = sourceId ?? 'default';
     const windowSeconds =
       typeof job.data.window === 'number' && job.data.window > 0 ? job.data.window : 120;
     const repoPath =
       typeof job.data.repoPath === 'string'
         ? job.data.repoPath
         : ((await engine.getConfig('sync.repo_path')) ?? undefined);
-    if (!sourceId) {
-      return {
-        phase: 'extract_atoms',
-        status: 'skipped',
-        reason: 'source_hygiene_source_id_missing',
-      };
-    }
     const sourceHygiene = await inspectSourceHygiene(engine, { inspectFilesystem: true });
     const sourceDecision = sourceHygiene.sources.find(
-      (decision) => decision.source_id === sourceId,
+      (decision) => decision.source_id === hygieneSourceId,
     );
-    const sourceGate = gateProtectedSourceWork(sourceHygiene, sourceId);
+    const sourceGate = gateProtectedSourceWork(sourceHygiene, hygieneSourceId);
     if (!sourceGate.allowed) {
       return {
         phase: 'extract_atoms',
         status: 'skipped',
         reason: 'source_hygiene_blocked',
-        source_id: sourceId,
+        source_id: hygieneSourceId,
         classification: sourceDecision?.classification ?? 'unknown_source',
         block_reason: sourceGate.reason,
       };
