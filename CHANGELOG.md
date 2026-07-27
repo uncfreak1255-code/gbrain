@@ -57,8 +57,11 @@ If the upgrade still looks incomplete, include `gbrain doctor --json` and `~/.gb
 - **Dream-quality receipts use one explicit clock.** A caller-supplied receipt timestamp now also controls promotion staleness scoring, so delayed or replayed evaluations stay deterministic.
 - **Archived sources leave normal routing.** Resolver and Doctor paths ignore soft-archived sources while retaining a narrow fallback for older schemas during upgrade.
 
+### Fixed
+- **Live upgrades keep legacy source identifiers writable and serialized.** Every intermediate archived-source guard migration distinguishes a missing legacy registry row from a known archived source while taking the shared lifecycle lock, preventing temporary write failures or archive races as migrations 124 through 130 apply one at a time.
+
 ### For contributors
-- Focused unit, export, migration, and real-PostgreSQL concurrency tests cover consistent recovery snapshots, raw-key preservation, transactional archive rechecks, queued-job races, terminalization, lock renewal, and all-update source guards.
+- Focused unit, export, migration, and real-PostgreSQL concurrency tests cover consistent recovery snapshots, raw-key preservation, transactional archive rechecks, intermediate migration compatibility, queued-job races, terminalization, lock renewal, and all-update source guards.
 
 ## [0.46.1.0] - 2026-07-18
 

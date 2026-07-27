@@ -5512,6 +5512,7 @@ export const MIGRATIONS: Migration[] = [
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
         raw_ref JSONB;
+        source_archived BOOLEAN;
       BEGIN
         IF TG_ARGV[0] = 'scalar' THEN
           source_ref := to_jsonb(NEW)->>TG_ARGV[1];
@@ -5547,14 +5548,21 @@ export const MIGRATIONS: Migration[] = [
           RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
         END IF;
 
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
         FOREACH source_ref IN ARRAY source_refs LOOP
-          PERFORM id
+          source_archived := NULL;
+          SELECT archived INTO source_archived
             FROM sources
-           WHERE id = source_ref AND archived = false
+           WHERE id = source_ref
            FOR SHARE;
-          IF NOT FOUND THEN
+          IF FOUND AND source_archived THEN
             RAISE EXCEPTION
-              'Cannot write %.%: source % is missing or archived',
+              'Cannot write %.%: source % is archived',
               TG_TABLE_NAME, TG_ARGV[1], source_ref
               USING ERRCODE = '23503';
           END IF;
@@ -5569,18 +5577,26 @@ export const MIGRATIONS: Migration[] = [
       AS $fn$
       DECLARE
         matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
       BEGIN
         IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
-          PERFORM id
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          source_archived := NULL;
+          SELECT archived INTO source_archived
             FROM sources
-           WHERE id = NEW.value AND archived = false
+           WHERE id = NEW.value
            FOR SHARE;
-          IF NOT FOUND THEN
+          IF FOUND AND source_archived THEN
             RAISE EXCEPTION
-              'Cannot set sources.default: source % is missing or archived', NEW.value
+              'Cannot set sources.default: source % is archived', NEW.value
               USING ERRCODE = '23503';
           END IF;
         ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
           PERFORM id
             FROM sources
            WHERE local_path = NEW.value AND archived = false
@@ -5716,6 +5732,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         source_ref TEXT;
         source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
       BEGIN
         IF TG_OP = 'UPDATE'
            AND NEW.data IS NOT DISTINCT FROM OLD.data
@@ -5730,13 +5747,21 @@ export const MIGRATIONS: Migration[] = [
           ) AS values_(value)
          WHERE value IS NOT NULL;
 
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
         FOREACH source_ref IN ARRAY source_refs LOOP
-          PERFORM id FROM sources
-           WHERE id = source_ref AND archived = false
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
            FOR SHARE;
-          IF NOT FOUND THEN
+          IF FOUND AND source_archived THEN
             RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is missing or archived', source_ref
+              'Cannot write minion_jobs.data: source % is archived', source_ref
               USING ERRCODE = '23503';
           END IF;
         END LOOP;
@@ -5826,9 +5851,10 @@ export const MIGRATIONS: Migration[] = [
     version: 129,
     name: 'archived_source_missing_reference_compatibility',
     // Source identifiers can outlive their registry row in legacy brains and
-    // isolated fixtures. Preserve that compatibility while still taking a
-    // shared row lock for every known source, so a concurrent archive waits
-    // for active writers and known archived sources remain write-protected.
+    // isolated fixtures. Preserve that compatibility while taking the shared
+    // lifecycle lock before any source lookup, then a row lock for every known
+    // source. Concurrent archive waits even when the source row does not exist,
+    // while known archived sources remain write-protected.
     idempotent: true,
     sql: `
       CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
@@ -5875,6 +5901,12 @@ export const MIGRATIONS: Migration[] = [
           RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
         END IF;
 
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
         FOREACH source_ref IN ARRAY source_refs LOOP
           source_archived := NULL;
           SELECT archived INTO source_archived
@@ -5914,6 +5946,12 @@ export const MIGRATIONS: Migration[] = [
           ) AS values_(value)
          WHERE value IS NOT NULL;
 
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
         FOREACH source_ref IN ARRAY source_refs LOOP
           source_archived := NULL;
           SELECT archived INTO source_archived
@@ -5939,6 +5977,9 @@ export const MIGRATIONS: Migration[] = [
         source_archived BOOLEAN;
       BEGIN
         IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
           SELECT archived INTO source_archived
             FROM sources
            WHERE id = NEW.value
@@ -5949,6 +5990,9 @@ export const MIGRATIONS: Migration[] = [
               USING ERRCODE = '23503';
           END IF;
         ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
           PERFORM id
             FROM sources
            WHERE local_path = NEW.value AND archived = false

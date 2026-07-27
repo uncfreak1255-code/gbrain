@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { archiveHygieneCandidate } from '../../src/commands/sources.ts';
 import { softDeleteSource } from '../../src/core/destructive-guard.ts';
+import { MIGRATIONS } from '../../src/core/migrate.ts';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
 
 const describeE2E = hasDatabase() ? describe : describe.skip;
@@ -85,6 +86,169 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
       await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
       await writer.disconnect();
+    }
+  }, 30_000);
+
+  test('intermediate guards allow missing legacy sources but reject archived sources', async () => {
+    const referenceGuard = MIGRATIONS.find((entry) => entry.version === 124);
+    const jobGuard = MIGRATIONS.find((entry) => entry.version === 126);
+    const continuationGuard = MIGRATIONS.find((entry) => entry.version === 127);
+    const ownedRowGuard = MIGRATIONS.find((entry) => entry.version === 128);
+    const compatibilityGuard = MIGRATIONS.find((entry) => entry.version === 129);
+    const finalGuard = MIGRATIONS.find((entry) => entry.version === 130);
+    expect(referenceGuard?.sql).toBeDefined();
+    expect(jobGuard?.sql).toBeDefined();
+    expect(continuationGuard?.sql).toBeDefined();
+    expect(ownedRowGuard?.sql).toBeDefined();
+    expect(compatibilityGuard?.sql).toBeDefined();
+    expect(finalGuard?.sql).toBeDefined();
+
+    const writer = new PostgresEngine();
+    const archiver = new PostgresEngine();
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+    await archiver.connect({ database_url: process.env.DATABASE_URL! });
+
+    const proveMissingWriterBlocksArchive = async (sourceId: string, jobName: string) => {
+      const writerReady = deferred();
+      const releaseWriter = deferred();
+      let writerTx: Promise<void> | null = null;
+      let archiveAttempt: ReturnType<typeof archiveHygieneCandidate> | null = null;
+
+      try {
+        writerTx = writer.transaction(async (tx) => {
+          await tx.executeRaw(
+            `INSERT INTO minion_jobs (name, status, data)
+             VALUES ($1, 'waiting', jsonb_build_object('sourceId', $2::text))`,
+            [jobName, sourceId],
+          );
+          writerReady.resolve();
+          await releaseWriter.promise;
+        });
+        await writerReady.promise;
+
+        await archiver.executeRaw(
+          `INSERT INTO sources (id, name, local_path, config)
+           VALUES ($1, $1, $2, '{}'::jsonb)`,
+          [sourceId, `/tmp/gbrain-${sourceId}-missing`],
+        );
+        let archiveSettled = false;
+        archiveAttempt = archiveHygieneCandidate(archiver, sourceId)
+          .finally(() => { archiveSettled = true; });
+        await wait(100);
+        expect(archiveSettled).toBe(false);
+
+        releaseWriter.resolve();
+        await writerTx;
+        const archive = await archiveAttempt;
+        expect(archive.result).toBeNull();
+        expect(archive.reason).toContain('nonterminal_source_work');
+      } finally {
+        releaseWriter.resolve();
+        await writerTx?.catch(() => {});
+        await archiveAttempt?.catch(() => {});
+        await writer.executeRaw(`DELETE FROM minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+        await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
+      }
+    };
+
+    try {
+      await writer.runMigration(124, referenceGuard!.sql!);
+      await writer.executeRaw(
+        `INSERT INTO sources (id, name, archived)
+         VALUES ('v124-archived-e2e', 'v124-archived-e2e', true)`,
+      );
+      await writer.executeRaw(
+        `INSERT INTO eval_candidates
+           (tool_name, query, source_ids, vector_enabled, expansion_applied, latency_ms, remote)
+         VALUES ('query', 'v124 missing source e2e', ARRAY['v124-missing-e2e'], false, false, 1, false)`,
+      );
+      await writer.executeRaw(
+        `INSERT INTO config (key, value) VALUES ('sources.default', 'v124-missing-e2e')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
+      await writer.runMigration(124, `
+            DO $assert$
+            BEGIN
+              BEGIN
+                INSERT INTO eval_candidates
+                  (tool_name, query, source_ids, vector_enabled, expansion_applied, latency_ms, remote)
+                VALUES ('query', 'v124 archived source e2e', ARRAY['v124-archived-e2e'], false, false, 1, false);
+                RAISE EXCEPTION 'v124 accepted an archived source reference';
+              EXCEPTION WHEN foreign_key_violation THEN
+                IF SQLERRM NOT LIKE '%is archived%' THEN RAISE; END IF;
+              END;
+
+              BEGIN
+                INSERT INTO config (key, value) VALUES ('sources.default', 'v124-archived-e2e')
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+                RAISE EXCEPTION 'v124 accepted an archived default source';
+              EXCEPTION WHEN foreign_key_violation THEN
+                IF SQLERRM NOT LIKE '%is archived%' THEN RAISE; END IF;
+              END;
+            END;
+            $assert$;
+      `);
+
+      await writer.runMigration(126, jobGuard!.sql!);
+      await writer.executeRaw(
+        `INSERT INTO minion_jobs (name, data)
+         VALUES ('v126-missing-source-e2e', '{"sourceId":"v126-missing-e2e"}'::jsonb)`,
+      );
+      await writer.runMigration(126, `
+            DO $assert$
+            BEGIN
+              BEGIN
+                INSERT INTO minion_jobs (name, data)
+                VALUES ('v126-archived-source-e2e', '{"sourceId":"v124-archived-e2e"}'::jsonb);
+                RAISE EXCEPTION 'v126 accepted an archived source reference';
+              EXCEPTION WHEN foreign_key_violation THEN
+                IF SQLERRM NOT LIKE '%is archived%' THEN RAISE; END IF;
+              END;
+            END;
+            $assert$;
+      `);
+
+      await proveMissingWriterBlocksArchive(
+        'v126-lock-missing-e2e',
+        'v126-lock-missing-source-e2e',
+      );
+
+      await writer.runMigration(129, compatibilityGuard!.sql!);
+      await writer.runMigration(129, `
+            DO $assert$
+            BEGIN
+              BEGIN
+                INSERT INTO minion_jobs (name, data)
+                VALUES ('v129-archived-source-e2e', '{"sourceId":"v124-archived-e2e"}'::jsonb);
+                RAISE EXCEPTION 'v129 accepted an archived source reference';
+              EXCEPTION WHEN foreign_key_violation THEN
+                IF SQLERRM NOT LIKE '%is archived%' THEN RAISE; END IF;
+              END;
+            END;
+            $assert$;
+      `);
+      await proveMissingWriterBlocksArchive(
+        'v129-lock-missing-e2e',
+        'v129-lock-missing-source-e2e',
+      );
+    } finally {
+      await writer.runMigration(127, continuationGuard!.sql!);
+      await writer.runMigration(128, ownedRowGuard!.sql!);
+      await writer.runMigration(130, finalGuard!.sql!);
+      await writer.executeRaw(
+        `DELETE FROM minion_jobs
+          WHERE name IN ('v126-missing-source-e2e', 'v126-lock-missing-source-e2e',
+                         'v129-lock-missing-source-e2e')`,
+      ).catch(() => {});
+      await writer.executeRaw(
+        `DELETE FROM eval_candidates
+          WHERE query IN ('v124 missing source e2e', 'v124 archived source e2e')`,
+      ).catch(() => {});
+      await writer.executeRaw(
+        `DELETE FROM sources
+          WHERE id IN ('v124-archived-e2e', 'v126-lock-missing-e2e', 'v129-lock-missing-e2e')`,
+      ).catch(() => {});
+      await Promise.all([writer.disconnect(), archiver.disconnect()]);
     }
   }, 30_000);
 

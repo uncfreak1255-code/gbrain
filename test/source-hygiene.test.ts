@@ -478,6 +478,10 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).toContain("('gbrain_cycle_locks', 'id', 'sync_lock_id'");
     expect(migration?.sql).toContain('BEFORE INSERT OR UPDATE ON %I');
     expect(migration?.sql).toContain('source_active_config_guard');
+    expect(migration?.sql).toContain('IF FOUND AND source_archived THEN');
+    expect(migration?.sql).toContain('pg_advisory_xact_lock_shared');
+    expect(migration?.sql).toContain("hashtextextended('gbrain:source-lifecycle', 0)");
+    expect(migration?.sql).not.toContain('source % is missing or archived');
     expect(
       migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
     ).toHaveLength(2);
@@ -648,6 +652,70 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).not.toContain('UPDATE OF %I');
   });
 
+  test('intermediate guards allow missing legacy sources but reject archived sources', async () => {
+    const referenceGuard = MIGRATIONS.find((entry) => entry.version === 124);
+    const jobGuard = MIGRATIONS.find((entry) => entry.version === 126);
+    const continuationGuard = MIGRATIONS.find((entry) => entry.version === 127);
+    const ownedRowGuard = MIGRATIONS.find((entry) => entry.version === 128);
+    const finalGuard = MIGRATIONS.find((entry) => entry.version === 130);
+    expect(referenceGuard?.sql).toBeDefined();
+    expect(jobGuard?.sql).toBeDefined();
+    expect(continuationGuard?.sql).toBeDefined();
+    expect(ownedRowGuard?.sql).toBeDefined();
+    expect(finalGuard?.sql).toBeDefined();
+
+    await db.runMigration(124, referenceGuard!.sql!);
+    try {
+      await db.executeRaw(
+        `INSERT INTO sources (id, name, archived)
+         VALUES ('v124-archived', 'v124-archived', true)`,
+      );
+      await db.executeRaw(
+        `INSERT INTO eval_candidates
+           (tool_name, query, source_ids, vector_enabled, expansion_applied, latency_ms, remote)
+         VALUES ('query', 'v124 missing source', ARRAY['v124-missing'], false, false, 1, false)`,
+      );
+      await db.executeRaw(
+        `INSERT INTO config (key, value) VALUES ('sources.default', 'v124-missing')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      );
+
+      const assertArchivedRejected = async (run: () => Promise<unknown>) => {
+        let error: unknown;
+        try {
+          await run();
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeDefined();
+        expect(String(error)).toContain('is archived');
+      };
+      await assertArchivedRejected(() => db.executeRaw(
+        `INSERT INTO eval_candidates
+           (tool_name, query, source_ids, vector_enabled, expansion_applied, latency_ms, remote)
+         VALUES ('query', 'v124 archived source', ARRAY['v124-archived'], false, false, 1, false)`,
+      ));
+      await assertArchivedRejected(() => db.executeRaw(
+        `INSERT INTO config (key, value) VALUES ('sources.default', 'v124-archived')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      ));
+
+      await db.runMigration(126, jobGuard!.sql!);
+      await db.executeRaw(
+        `INSERT INTO minion_jobs (name, data)
+         VALUES ('v126-missing-source-job', '{"sourceId":"v126-missing"}'::jsonb)`,
+      );
+      await assertArchivedRejected(() => db.executeRaw(
+        `INSERT INTO minion_jobs (name, data)
+         VALUES ('v126-archived-source-job', '{"sourceId":"v124-archived"}'::jsonb)`,
+      ));
+    } finally {
+      await db.runMigration(127, continuationGuard!.sql!);
+      await db.runMigration(128, ownedRowGuard!.sql!);
+      await db.runMigration(130, finalGuard!.sql!);
+    }
+  });
+
   test('migration v129 keeps missing source identifiers compatible while locking known rows', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 129);
     expect(migration?.name).toBe('archived_source_missing_reference_compatibility');
@@ -655,6 +723,8 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).toContain('SELECT archived INTO source_archived');
     expect(migration?.sql).toContain('IF FOUND AND source_archived THEN');
     expect(migration?.sql).toContain('FOR SHARE');
+    expect(migration?.sql).toContain('pg_advisory_xact_lock_shared');
+    expect(migration?.sql).toContain("hashtextextended('gbrain:source-lifecycle', 0)");
     expect(migration?.sql).not.toContain('source % is missing or archived');
     expect(
       migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
@@ -718,6 +788,10 @@ describe('archive hygiene execution gate', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 126);
     expect(migration?.name).toBe('archived_source_job_terminalization_guard');
     expect(migration?.idempotent).toBe(true);
+    expect(migration?.sql).toContain('IF FOUND AND source_archived THEN');
+    expect(migration?.sql).toContain('pg_advisory_xact_lock_shared');
+    expect(migration?.sql).toContain("hashtextextended('gbrain:source-lifecycle', 0)");
+    expect(migration?.sql).not.toContain('source % is missing or archived');
     expect(
       migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
     ).toHaveLength(1);

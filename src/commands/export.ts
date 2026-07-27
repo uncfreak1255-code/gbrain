@@ -350,93 +350,103 @@ export async function runExport(engine: BrainEngine, args: string[]) {
   let rawSidecarCount = 0;
   const manifestPages: ExportManifestPage[] = [];
 
-  for (const page of pages) {
-    const tags = sourceId
-      ? (scopedTags?.get(page.slug) ?? [])
-      : await engine.getTags(page.slug);
-    const md = serializeMarkdown(
-      page.frontmatter,
-      page.compiled_truth,
-      page.timeline,
-      { type: page.type, title: page.title, tags },
-    );
+  try {
+    for (const page of pages) {
+      const tags = sourceId
+        ? (scopedTags?.get(page.slug) ?? [])
+        : await engine.getTags(page.slug);
+      const md = serializeMarkdown(
+        page.frontmatter,
+        page.compiled_truth,
+        page.timeline,
+        { type: page.type, title: page.title, tags },
+      );
 
-    const filePath = sourceId
-      ? confinedOutputPath(outDir, `${page.slug}.md`)
-      : join(outDir, `${page.slug}.md`);
-    mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, md);
+      const filePath = sourceId
+        ? confinedOutputPath(outDir, `${page.slug}.md`)
+        : join(outDir, `${page.slug}.md`);
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(filePath, md);
 
-    // Export raw data as sidecar JSON
-    const rawData = sourceId
-      ? (scopedRaw?.get(page.slug) ?? [])
-      : await engine.getRawData(page.slug);
-    let rawSidecarSha256: string | null = null;
-    if (rawData.length > 0) {
-      const slugParts = page.slug.split('/');
-      const rawPath = sourceId
-        ? confinedOutputPath(
-            outDir,
-            join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
-          )
-        : join(
-            outDir,
-            ...slugParts.slice(0, -1),
-            '.raw',
-            `${slugParts[slugParts.length - 1]}.json`,
-          );
-      mkdirSync(dirname(rawPath), { recursive: true });
+      // Export raw data as sidecar JSON
+      const rawData = sourceId
+        ? (scopedRaw?.get(page.slug) ?? [])
+        : await engine.getRawData(page.slug);
+      let rawSidecarSha256: string | null = null;
+      if (rawData.length > 0) {
+        const slugParts = page.slug.split('/');
+        const rawPath = sourceId
+          ? confinedOutputPath(
+              outDir,
+              join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
+            )
+          : join(
+              outDir,
+              ...slugParts.slice(0, -1),
+              '.raw',
+              `${slugParts[slugParts.length - 1]}.json`,
+            );
+        mkdirSync(dirname(rawPath), { recursive: true });
 
-      const rawObj = Object.create(null) as Record<string, unknown>;
-      const orderedRawData = sourceId
-        ? [...rawData].sort((left, right) => compareCodePoints(left.source, right.source))
-        : rawData;
-      for (const rd of orderedRawData) {
-        rawObj[rd.source] = rd.data;
+        const rawObj = Object.create(null) as Record<string, unknown>;
+        const orderedRawData = sourceId
+          ? [...rawData].sort((left, right) => compareCodePoints(left.source, right.source))
+          : rawData;
+        for (const rd of orderedRawData) {
+          rawObj[rd.source] = rd.data;
+        }
+        const rawJson = sourceId
+          ? canonicalJson(rawObj)
+          : JSON.stringify(rawObj, null, 2) + '\n';
+        writeFileSync(rawPath, rawJson);
+        rawSidecarSha256 = sha256(rawJson);
+        rawSidecarCount++;
       }
-      const rawJson = sourceId
-        ? canonicalJson(rawObj)
-        : JSON.stringify(rawObj, null, 2) + '\n';
-      writeFileSync(rawPath, rawJson);
-      rawSidecarSha256 = sha256(rawJson);
-      rawSidecarCount++;
-    }
 
-    if (sourceId) {
-      manifestPages.push({
-        slug: page.slug,
-        db_content_hash: page.content_hash ?? null,
-        markdown_sha256: sha256(md),
-        raw_sidecar_sha256: rawSidecarSha256,
-        raw_record_count: rawData.length,
-      });
-    }
+      if (sourceId) {
+        manifestPages.push({
+          slug: page.slug,
+          db_content_hash: page.content_hash ?? null,
+          markdown_sha256: sha256(md),
+          raw_sidecar_sha256: rawSidecarSha256,
+          raw_record_count: rawData.length,
+        });
+      }
 
-    exported++;
-    progress.tick();
+      exported++;
+      progress.tick();
+    }
+  } catch (error) {
+    progress.finish('failed');
+    throw error;
   }
 
-  progress.finish();
   let manifestReceipt: string | null = null;
-  if (sourceId) {
-    if (sourcePageCount === undefined) {
-      failExport('complete source page count was not captured.');
+  try {
+    if (sourceId) {
+      if (sourcePageCount === undefined) {
+        failExport('complete source page count was not captured.');
+      }
+      const manifest: ExportManifest = {
+        schema_version: 1,
+        source_id: sourceId,
+        source_page_count: sourcePageCount,
+        page_count: exported,
+        raw_sidecar_count: rawSidecarCount,
+        pages: manifestPages,
+      };
+      const manifestJson = JSON.stringify(manifest, null, 2) + '\n';
+      const manifestPath = confinedOutputPath(outDir, '.gbrain-export-manifest.json');
+      mkdirSync(dirname(manifestPath), { recursive: true });
+      writeFileSync(manifestPath, manifestJson);
+      manifestReceipt = `Manifest: ${manifestPath} sha256=${sha256(manifestJson)} `
+        + `pages=${exported} raw_sidecars=${rawSidecarCount}`;
     }
-    const manifest: ExportManifest = {
-      schema_version: 1,
-      source_id: sourceId,
-      source_page_count: sourcePageCount,
-      page_count: exported,
-      raw_sidecar_count: rawSidecarCount,
-      pages: manifestPages,
-    };
-    const manifestJson = JSON.stringify(manifest, null, 2) + '\n';
-    const manifestPath = confinedOutputPath(outDir, '.gbrain-export-manifest.json');
-    mkdirSync(dirname(manifestPath), { recursive: true });
-    writeFileSync(manifestPath, manifestJson);
-    manifestReceipt = `Manifest: ${manifestPath} sha256=${sha256(manifestJson)} `
-      + `pages=${exported} raw_sidecars=${rawSidecarCount}`;
+  } catch (error) {
+    progress.finish('failed');
+    throw error;
   }
+  progress.finish();
 
   // Stdout summary preserved so scripts that grep for "Exported N pages" keep working.
   if (restoreOnly) {
