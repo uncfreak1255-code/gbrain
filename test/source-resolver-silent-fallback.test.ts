@@ -70,6 +70,15 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
       const resolved = await resolveSourceId(engine, null, cwd);
       expect(resolved).toBe('default');
     });
+
+    test('soft-archived dotfile source falls through to an active lower tier', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config, archived)
+         VALUES ('retired', 'retired', '{}'::jsonb, true)`,
+      );
+      writeFileSync(join(cwd, '.gbrain-source'), 'retired\n');
+      await expect(resolveSourceId(engine, null, cwd)).resolves.toBe('default');
+    });
   });
 
   describe('tier 5 — brain_default config', () => {
@@ -95,6 +104,16 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
       const resolved = await resolveSourceId(engine, null, cwd);
       expect(resolved).toBe('default');
     });
+
+    test('soft-archived brain_default falls through instead of routing writes to it', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config)
+         VALUES ('retired', 'retired', '{}'::jsonb)`,
+      );
+      await engine.setConfig('sources.default', 'retired');
+      await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'retired'`);
+      await expect(resolveSourceId(engine, null, cwd)).resolves.toBe('default');
+    });
   });
 
   describe('tier 1 — explicit --source (throw-on-invalid contract)', () => {
@@ -113,6 +132,14 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
 
     test('whitespace in explicit source THROWS', async () => {
       await expect(resolveSourceId(engine, 'has space', cwd)).rejects.toThrow(/Invalid --source/);
+    });
+
+    test('explicit source can still intentionally name a soft-archived source', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config, archived)
+         VALUES ('retired', 'retired', '{}'::jsonb, true)`,
+      );
+      await expect(resolveSourceId(engine, 'retired', cwd)).resolves.toBe('retired');
     });
   });
 

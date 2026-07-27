@@ -25,9 +25,16 @@ function makeStub(
   paths: Array<{ id: string; local_path: string; archived?: boolean }>,
   defaultKey: string | null,
 ): BrainEngine {
+  const archivedIds = new Set(paths.filter((path) => path.archived).map((path) => path.id));
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+      if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+        const target = params?.[0] as string;
+        return (registeredSources.includes(target)
+          ? [{ id: target, archived: archivedIds.has(target) } as unknown as T]
+          : []);
+      }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
         const target = params?.[0];
         return (registeredSources.includes(target as string)
@@ -84,6 +91,28 @@ describe('resolveSourceWithTier pre-v34 compatibility', () => {
       tier: 'local_path',
     });
   });
+
+  test('treats an existing automatic source as active when archived is undefined', async () => {
+    const engine = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+          throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
+        }
+        if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
+          return params?.[0] === 'legacy-source' ? [{ id: 'legacy-source' }] : [];
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) return [];
+        return [];
+      },
+      getConfig: async (key: string) => key === 'sources.default' ? 'legacy-source' : null,
+    } as unknown as BrainEngine;
+
+    await expect(resolveSourceWithTier(engine, null, '/tmp')).resolves.toMatchObject({
+      source_id: 'legacy-source',
+      tier: 'brain_default',
+    });
+  });
 });
 
 describe('resolveSourceWithTier — tier 1 (flag)', () => {
@@ -99,6 +128,18 @@ describe('resolveSourceWithTier — tier 1 (flag)', () => {
     const engine = makeStub(['default'], [], null);
     await expect(resolveSourceWithTier(engine, 'ghost', '/tmp')).rejects.toThrow(/not found/);
   });
+
+  test('explicit flag can still name an archived source', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/retired', archived: true }],
+      null,
+    );
+    await expect(resolveSourceWithTier(engine, 'retired', '/tmp')).resolves.toMatchObject({
+      source_id: 'retired',
+      tier: 'flag',
+    });
+  });
 });
 
 describe('resolveSourceWithTier — tier 2 (env)', () => {
@@ -109,6 +150,20 @@ describe('resolveSourceWithTier — tier 2 (env)', () => {
       expect(result.source_id).toBe('wiki');
       expect(result.tier).toBe('env');
       expect(result.detail).toBe('GBRAIN_SOURCE=wiki');
+    });
+  });
+
+  test('GBRAIN_SOURCE can still intentionally name an archived source', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/retired', archived: true }],
+      null,
+    );
+    await withEnv({ GBRAIN_SOURCE: 'retired' }, async () => {
+      await expect(resolveSourceWithTier(engine, null, '/tmp')).resolves.toMatchObject({
+        source_id: 'retired',
+        tier: 'env',
+      });
     });
   });
 });
@@ -138,6 +193,28 @@ describe('resolveSourceWithTier — tier 3 (dotfile)', () => {
     const engine = makeStub(['default', 'team-alpha'], [], null);
     const result = await resolveSourceWithTier(engine, null, nested);
     expect(result.tier).toBe('dotfile');
+  });
+
+  test('archived dotfile falls through to an active local-path source', async () => {
+    writeFileSync(join(scratchDir, '.gbrain-source'), 'retired\n');
+    const engine = makeStub(
+      ['default', 'retired', 'active'],
+      [
+        { id: 'retired', local_path: '/retired', archived: true },
+        { id: 'active', local_path: scratchDir },
+      ],
+      null,
+    );
+    await expect(resolveSourceWithTier(engine, null, scratchDir)).resolves.toMatchObject({
+      source_id: 'active',
+      tier: 'local_path',
+    });
+  });
+
+  test('valid-but-unregistered dotfile remains a loud error', async () => {
+    writeFileSync(join(scratchDir, '.gbrain-source'), 'missing-source\n');
+    const engine = makeStub(['default'], [], null);
+    await expect(resolveSourceWithTier(engine, null, scratchDir)).rejects.toThrow(/not found/);
   });
 });
 
@@ -190,6 +267,23 @@ describe('resolveSourceWithTier — tier 5 (brain_default)', () => {
     expect(result.source_id).toBe('dept-x');
     expect(result.tier).toBe('brain_default');
     expect(result.detail).toContain('sources.default');
+  });
+
+  test('archived brain default falls through to the seed default', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/retired', archived: true }],
+      'retired',
+    );
+    await expect(resolveSourceWithTier(engine, null, '/tmp/no-dotfile-here')).resolves.toMatchObject({
+      source_id: 'default',
+      tier: 'seed_default',
+    });
+  });
+
+  test('valid-but-unregistered brain default remains a loud error', async () => {
+    const engine = makeStub(['default'], [], 'missing-source');
+    await expect(resolveSourceWithTier(engine, null, '/tmp/no-dotfile-here')).rejects.toThrow(/not found/);
   });
 });
 

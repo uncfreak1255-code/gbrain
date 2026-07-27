@@ -210,8 +210,7 @@ export async function resolveSourceId(
 
   // 3. .gbrain-source dotfile walk-up.
   const dotfile = readDotfileWalk(cwd);
-  if (dotfile) {
-    await assertSourceExists(engine, dotfile);
+  if (dotfile && await sourceIsActiveOrThrowIfMissing(engine, dotfile)) {
     return dotfile;
   }
 
@@ -227,8 +226,11 @@ export async function resolveSourceId(
   // value (operator hand-edit gone wrong, legacy underscore id) falls through
   // to tier 6 rather than throwing. Resolver stays robust to bad config.
   const globalDefault = await engine.getConfig('sources.default');
-  if (globalDefault && isValidSourceId(globalDefault)) {
-    await assertSourceExists(engine, globalDefault);
+  if (
+    globalDefault
+    && isValidSourceId(globalDefault)
+    && await sourceIsActiveOrThrowIfMissing(engine, globalDefault)
+  ) {
     return globalDefault;
   }
 
@@ -301,12 +303,40 @@ async function assertSourceExists(engine: BrainEngine, id: string): Promise<void
     [id],
   );
   if (rows.length === 0) {
-    throw new Error(
-      `Source "${id}" not found. Available sources: ` +
-      `run \`gbrain sources list\` to see registered sources, ` +
-      `or \`gbrain sources add ${id}\` to create it.`,
-    );
+    throw sourceNotFoundError(id);
   }
+}
+
+/**
+ * Automatic routing signals must not revive a soft-archived source. Explicit
+ * flag/env routing keeps using assertSourceExists so restore and admin flows
+ * can still name an archived source intentionally.
+ *
+ * A valid-but-unregistered automatic signal remains a loud error, matching
+ * the pre-archive resolver contract. Pre-v34 brains do not have the archived
+ * column, so every existing source is active there.
+ */
+async function sourceIsActiveOrThrowIfMissing(engine: BrainEngine, id: string): Promise<boolean> {
+  try {
+    const rows = await engine.executeRaw<{ id: string; archived: boolean }>(
+      `SELECT id, archived FROM sources WHERE id = $1`,
+      [id],
+    );
+    if (rows.length === 0) throw sourceNotFoundError(id);
+    return rows[0].archived !== true;
+  } catch (error) {
+    if (!isUndefinedColumnError(error, 'archived')) throw error;
+    await assertSourceExists(engine, id);
+    return true;
+  }
+}
+
+function sourceNotFoundError(id: string): Error {
+  return new Error(
+    `Source "${id}" not found. Available sources: ` +
+    `run \`gbrain sources list\` to see registered sources, ` +
+    `or \`gbrain sources add ${id}\` to create it.`,
+  );
 }
 
 /**
@@ -400,8 +430,7 @@ export async function resolveSourceWithTier(
 
   // 3. .gbrain-source dotfile walk-up.
   const dotfile = readDotfileWalk(cwd);
-  if (dotfile) {
-    await assertSourceExists(engine, dotfile);
+  if (dotfile && await sourceIsActiveOrThrowIfMissing(engine, dotfile)) {
     return { source_id: dotfile, tier: 'dotfile', detail: `.gbrain-source` };
   }
 
@@ -412,8 +441,11 @@ export async function resolveSourceWithTier(
 
   // 5. Brain-level default. Silent-fallback (P1-F) like tier 5 in resolveSourceId.
   const globalDefault = await engine.getConfig('sources.default');
-  if (globalDefault && isValidSourceId(globalDefault)) {
-    await assertSourceExists(engine, globalDefault);
+  if (
+    globalDefault
+    && isValidSourceId(globalDefault)
+    && await sourceIsActiveOrThrowIfMissing(engine, globalDefault)
+  ) {
     return { source_id: globalDefault, tier: 'brain_default', detail: 'sources.default config' };
   }
 
