@@ -127,7 +127,11 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
   const extraRemediations = onboardCheckResults.flatMap((r) => r.remediations);
 
   if (check && !auto) {
-    const plan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
+    const plan = await computeRemediationPlan(engine, {
+      targetScore,
+      extraRemediations,
+      inspectLocalSourcePaths: true,
+    });
     const report = buildOnboardReport(plan);
     if (jsonOutput) {
       process.stdout.write(JSON.stringify(report, null, 2) + '\n');
@@ -155,6 +159,7 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
         extraRemediations,
         yes ? 'auto-with-prompt' : 'auto',
       ),
+      inspectLocalSourcePaths: true,
       maxUsd,
       // CLI shell owns the consent tiers. --auto runs only auto_apply;
       // --auto --yes additionally opts into prompt_required. manual_only

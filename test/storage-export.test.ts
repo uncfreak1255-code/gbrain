@@ -10,12 +10,15 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runExport } from '../src/commands/export.ts';
+import { __testing as exportTesting, runExport } from '../src/commands/export.ts';
 import { __resetMissingStorageWarning } from '../src/core/storage-config.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import type { Page } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
 let tmp: string;
@@ -90,6 +93,55 @@ async function tryRunExport(args: string[]): Promise<void> {
   }
 }
 
+async function seedSourceVariant(
+  sourceId: string,
+  variant: 'default' | 'neighbor',
+): Promise<void> {
+  if (sourceId !== 'default') {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $2)`,
+      [sourceId, `Source ${sourceId}`],
+    );
+  }
+  await engine.putPage(
+    'notes/shared',
+    {
+      type: 'note',
+      title: `${variant} title`,
+      compiled_truth: `${variant} body`,
+      timeline: '',
+      frontmatter: { variant },
+    },
+    { sourceId },
+  );
+  await engine.addTag('notes/shared', `${variant}-tag`, { sourceId });
+  await engine.putRawData(
+    'notes/shared',
+    'unit-test',
+    { variant, nested: { z: 2, a: 1 } },
+    { sourceId },
+  );
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+interface ExportManifest {
+  schema_version: number;
+  source_id: string;
+  source_page_count: number;
+  page_count: number;
+  raw_sidecar_count: number;
+  pages: Array<{
+    slug: string;
+    db_content_hash: string | null;
+    markdown_sha256: string;
+    raw_sidecar_sha256: string | null;
+    raw_record_count: number;
+  }>;
+}
+
 describe('export --restore-only resolution chain (D5)', () => {
   test('hard-errors when --restore-only has no --repo and no default source path', async () => {
     // sources.default has no local_path (the seeded shape).
@@ -142,5 +194,181 @@ describe('export --restore-only resolution chain (D5)', () => {
     await tryRunExport(['--dir', outDir]);
     expect(exitCode).toBeNull();
     expect(stdout.some((line) => line.includes('Exporting 0'))).toBe(true);
+    expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(false);
+  });
+});
+
+describe('source-scoped recovery export', () => {
+  test('isolates same-slug body, tags, and raw data in both source directions', async () => {
+    await seedSourceVariant('default', 'default');
+    await seedSourceVariant('neighbor', 'neighbor');
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBeNull();
+    const defaultMarkdown = readFileSync(join(outDir, 'notes/shared.md'), 'utf8');
+    expect(defaultMarkdown).toContain('default body');
+    expect(defaultMarkdown).toContain('default-tag');
+    expect(defaultMarkdown).not.toContain('neighbor body');
+    expect(defaultMarkdown).not.toContain('neighbor-tag');
+    expect(JSON.parse(readFileSync(join(outDir, 'notes/.raw/shared.json'), 'utf8')))
+      .toEqual({ 'unit-test': { nested: { a: 1, z: 2 }, variant: 'default' } });
+
+    const neighborOut = join(tmp, 'neighbor-out');
+    await tryRunExport(['--dir', neighborOut, '--source', 'neighbor']);
+    const neighborMarkdown = readFileSync(join(neighborOut, 'notes/shared.md'), 'utf8');
+    expect(neighborMarkdown).toContain('neighbor body');
+    expect(neighborMarkdown).toContain('neighbor-tag');
+    expect(neighborMarkdown).not.toContain('default body');
+    expect(neighborMarkdown).not.toContain('default-tag');
+    expect(JSON.parse(readFileSync(join(neighborOut, 'notes/.raw/shared.json'), 'utf8')))
+      .toEqual({ 'unit-test': { nested: { a: 1, z: 2 }, variant: 'neighbor' } });
+  });
+
+  test('writes a deterministic source receipt without printing page content', async () => {
+    await seedSourceVariant('default', 'default');
+    await engine.putPage(
+      'notes/alpha',
+      { type: 'note', title: 'Alpha', compiled_truth: 'private alpha body' },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    const manifestPath = join(outDir, '.gbrain-export-manifest.json');
+    const manifestBytes = readFileSync(manifestPath, 'utf8');
+    const manifest = JSON.parse(manifestBytes) as ExportManifest;
+    expect(manifest.schema_version).toBe(1);
+    expect(manifest.source_id).toBe('default');
+    expect(manifest.source_page_count).toBe(2);
+    expect(manifest.page_count).toBe(2);
+    expect(manifest.raw_sidecar_count).toBe(1);
+    expect(manifest.pages.map((page) => page.slug)).toEqual(['notes/alpha', 'notes/shared']);
+    expect(manifest.pages.every((page) => /^[a-f0-9]{64}$/.test(page.markdown_sha256))).toBe(true);
+    expect(manifest.pages[0].raw_sidecar_sha256).toBeNull();
+    expect(manifest.pages[0].raw_record_count).toBe(0);
+    expect(manifest.pages[1].raw_sidecar_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(manifest.pages[1].raw_record_count).toBe(1);
+    expect(manifestBytes.endsWith('\n')).toBe(true);
+    expect(stdout.join('\n')).toContain(`sha256=${sha256(manifestBytes)}`);
+    expect(stdout.join('\n')).not.toContain('private alpha body');
+    expect(stdout.join('\n')).not.toContain('default body');
+
+    const repeatOut = join(tmp, 'repeat-out');
+    await tryRunExport(['--dir', repeatOut, '--source', 'default']);
+    expect(readFileSync(join(repeatOut, '.gbrain-export-manifest.json'), 'utf8'))
+      .toBe(manifestBytes);
+  });
+
+  test('rejects missing, unknown, and restore-only source flags before writing', async () => {
+    for (const args of [
+      ['--dir', outDir, '--source'],
+      ['--dir', outDir, '--source', 'ghost'],
+      ['--dir', outDir, '--source', 'default', '--restore-only'],
+    ]) {
+      exitCode = null;
+      stderr = [];
+      await tryRunExport(args);
+      expect(exitCode as number | null).toBe(1);
+      expect(stderr.join('\n')).toMatch(/source|restore-only/i);
+      expect(existsSync(outDir)).toBe(false);
+    }
+  });
+
+  test('rejects filters that would make a recovery receipt incomplete', async () => {
+    await seedSourceVariant('default', 'default');
+
+    for (const filter of [['--type', 'note'], ['--slug-prefix', 'notes/']]) {
+      exitCode = null;
+      stderr = [];
+      await tryRunExport(['--dir', outDir, '--source', 'default', ...filter]);
+      expect(exitCode as number | null).toBe(1);
+      expect(stderr.join('\n')).toMatch(/complete recovery export|does not support/i);
+      expect(existsSync(outDir)).toBe(false);
+    }
+  });
+
+  test('preserves raw keys named __proto__ without prototype assignment loss', async () => {
+    await seedSourceVariant('default', 'default');
+    await engine.putRawData(
+      'notes/shared',
+      '__proto__',
+      { preserved: true },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    const raw = JSON.parse(
+      readFileSync(join(outDir, 'notes/.raw/shared.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(raw, '__proto__')).toBe(true);
+    expect(raw.__proto__).toEqual({ preserved: true });
+    const manifest = JSON.parse(
+      readFileSync(join(outDir, '.gbrain-export-manifest.json'), 'utf8'),
+    ) as ExportManifest;
+    expect(manifest.pages[0]?.raw_record_count).toBe(2);
+  });
+
+  test('uses locale-independent code-point ordering for canonical receipts', () => {
+    const value = Object.assign(Object.create(null), { 'ä': 1, z: 2, a: 3 });
+    const json = exportTesting.canonicalJson(value);
+    expect(json.indexOf('"a"')).toBeLessThan(json.indexOf('"z"'));
+    expect(json.indexOf('"z"')).toBeLessThan(json.indexOf('"ä"'));
+  });
+
+  test('rejects traversal-shaped legacy slugs before writing any export file', async () => {
+    await engine.putPage(
+      'notes/safe',
+      { type: 'note', title: 'Safe', compiled_truth: 'safe body' },
+      { sourceId: 'default' },
+    );
+    await engine.putPage(
+      'notes/legacy',
+      { type: 'note', title: 'Legacy', compiled_truth: 'legacy body' },
+      { sourceId: 'default' },
+    );
+    await engine.executeRaw(
+      `UPDATE pages SET slug = '../escape' WHERE source_id = 'default' AND slug = 'notes/legacy'`,
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toMatch(/unsafe|slug|path/i);
+    expect(existsSync(outDir)).toBe(false);
+    expect(existsSync(join(tmp, 'escape.md'))).toBe(false);
+  });
+});
+
+describe('source recovery pagination', () => {
+  test('reads past one batch and proves the exported count matches the source count', async () => {
+    const pages = Array.from({ length: 5_001 }, (_, index) => ({
+      slug: `notes/${String(index).padStart(5, '0')}`,
+    })) as Page[];
+    const offsets: number[] = [];
+    const fake = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string) => sql.includes('FROM sources')
+        ? [{ id: 'default' }]
+        : [{ n: pages.length }],
+      listPages: async (filters: { offset?: number; limit?: number }) => {
+        const offset = filters.offset ?? 0;
+        const limit = filters.limit ?? 100;
+        offsets.push(offset);
+        return pages.slice(offset, offset + limit);
+      },
+      getTags: async () => [],
+      getRawData: async () => [],
+      transaction: async (fn: (tx: BrainEngine) => Promise<unknown>) => fn(fake as unknown as BrainEngine),
+    } as unknown as BrainEngine;
+
+    const result = await exportTesting.loadCompleteScopedPages(fake, 'default');
+
+    expect(offsets).toEqual([0, 5_000]);
+    expect(result.sourcePageCount).toBe(5_001);
+    expect(result.pages).toHaveLength(5_001);
+    expect(result.pages[0]?.slug).toBe('notes/00000');
+    expect(result.pages.at(-1)?.slug).toBe('notes/05000');
   });
 });

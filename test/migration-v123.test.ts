@@ -25,7 +25,9 @@ describe('migration v123 — Takes extraction completion watermark', () => {
     await engine.setConfig('version', '122');
 
     const result = await runMigrations(engine);
-    expect(result.applied).toBe(1);
+    expect(result.applied).toBe(
+      MIGRATIONS.filter((candidate) => candidate.version > 122).length,
+    );
 
     const columns = await engine.executeRaw<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns

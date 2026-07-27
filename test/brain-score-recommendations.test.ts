@@ -262,6 +262,49 @@ describe('computeRecommendations', () => {
     expect(recs.find((r) => r.job === 'extract-atoms-drain')).toBeUndefined();
   });
 
+  test('unresolved source recovery suppresses paid and protected remediation', () => {
+    const health = makeHealth({ missing_embeddings: 100, brain_score: 50 });
+    const recs = computeRecommendations(health, {
+      repoPath: '/missing-brain',
+      embeddingProviderConfigured: true,
+      extractAtomsPackDeclaresPhase: false,
+      extractAtomsWarnThreshold: 10,
+      extractAtomsBacklogBySource: [
+        { sourceId: 'default', backlog: 44, repoPath: '/missing-brain' },
+      ],
+      sourceHygiene: {
+        schema_version: 1,
+        filesystem_inspected: true,
+        sources: [{
+          source_id: 'default',
+          archived: false,
+          has_local_path: true,
+          shared_path_source_count: 1,
+          repo_state: 'missing',
+          remote_recovery_configured: false,
+          managed_clone: false,
+          configured_default: true,
+          configured_default_known: true,
+          source_config_known: true,
+          dependent_row_count: 443,
+          dependent_data_known: true,
+          nonterminal_work_count: 0,
+          work_state_known: true,
+          live_sync_lock: false,
+          lock_state_known: true,
+          classification: 'recovery_required',
+          recovery_mode: 'manual',
+          proposed_command_argv: null,
+          veto_reasons: ['default_source', 'source_has_dependent_data'],
+          safe_for_agent_review: false,
+        }],
+      },
+    });
+
+    expect(recs.find((rec) => rec.job === 'embed')).toBeUndefined();
+    expect(recs.find((rec) => rec.job === 'extract-atoms-drain')).toBeUndefined();
+  });
+
   test('severity ordering: critical before high before medium', () => {
     const health = makeHealth({
       missing_embeddings: 100,  // critical
@@ -356,6 +399,44 @@ describe('classifyChecks (D13)', () => {
   test('human_only: orphan_pages (archive is product judgment)', () => {
     const result = classifyChecks([{ name: 'orphan_pages', status: 'warn' }], { repoPath: '/brain' });
     expect(result[0]?.status).toBe('human_only');
+  });
+
+  test('blocked: source_path_health names source-specific recovery mode', () => {
+    const result = classifyChecks([{ name: 'source_path_health', status: 'fail' }], {
+      sourceHygiene: {
+        schema_version: 1,
+        filesystem_inspected: true,
+        sources: [{
+          source_id: 'default',
+          archived: false,
+          has_local_path: true,
+          shared_path_source_count: 1,
+          repo_state: 'missing',
+          remote_recovery_configured: false,
+          managed_clone: false,
+          configured_default: true,
+          configured_default_known: true,
+          source_config_known: true,
+          dependent_row_count: 443,
+          dependent_data_known: true,
+          nonterminal_work_count: 0,
+          work_state_known: true,
+          live_sync_lock: false,
+          lock_state_known: true,
+          classification: 'recovery_required',
+          recovery_mode: 'manual',
+          proposed_command_argv: null,
+          veto_reasons: ['default_source'],
+          safe_for_agent_review: false,
+        }],
+      },
+    });
+
+    expect(result[0]).toMatchObject({
+      check: 'source_path_health',
+      status: 'blocked',
+    });
+    expect(result[0]?.reason).toContain('default: manual');
   });
 
   test('remediable: extract_atoms_backlog when pack does not run phase and backlog exists', () => {

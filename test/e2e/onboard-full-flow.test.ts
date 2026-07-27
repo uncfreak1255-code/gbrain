@@ -254,6 +254,10 @@ describe('onboard E2E — runAllOnboardChecks', () => {
         frontmatter: {},
       });
       await local.executeRaw(
+        `INSERT INTO sources (id, name, config)
+         VALUES ('meeting-source-a', 'meeting-source-a', '{}'::jsonb)`,
+      );
+      await local.executeRaw(
         `INSERT INTO minion_jobs (name, status, data, result, finished_at)
          VALUES (
            'extract-timeline-from-meetings',

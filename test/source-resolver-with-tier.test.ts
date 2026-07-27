@@ -22,7 +22,7 @@ import { withEnv } from './helpers/with-env.ts';
 // Stub engine same shape as source-resolver.test.ts
 function makeStub(
   registeredSources: string[],
-  paths: Array<{ id: string; local_path: string }>,
+  paths: Array<{ id: string; local_path: string; archived?: boolean }>,
   defaultKey: string | null,
 ): BrainEngine {
   return {
@@ -35,7 +35,10 @@ function makeStub(
           : []);
       }
       if (sql.includes('SELECT id, local_path FROM sources')) {
-        return paths as unknown as T[];
+        const visiblePaths = sql.includes('archived = false')
+          ? paths.filter((path) => !path.archived)
+          : paths;
+        return visiblePaths as unknown as T[];
       }
       return [];
     },
@@ -57,6 +60,29 @@ describe('SOURCE_TIER_NAMES ordering matches resolveSourceId priority', () => {
       'sole_non_default',
       'seed_default',
     ]);
+  });
+});
+
+describe('resolveSourceWithTier pre-v34 compatibility', () => {
+  test('uses the legacy registered-path query when archived is undefined', async () => {
+    const engine = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string) => {
+        if (sql.includes('archived = false')) {
+          throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) {
+          return [{ id: 'legacy-source', local_path: '/legacy/repo' }];
+        }
+        return [];
+      },
+      getConfig: async () => null,
+    } as unknown as BrainEngine;
+
+    expect(await resolveSourceWithTier(engine, null, '/legacy/repo/nested')).toMatchObject({
+      source_id: 'legacy-source',
+      tier: 'local_path',
+    });
   });
 });
 
@@ -139,6 +165,20 @@ describe('resolveSourceWithTier — tier 4 (local_path)', () => {
     );
     const result = await resolveSourceWithTier(engine, null, '/work/sub/file');
     expect(result.source_id).toBe('child');
+    expect(result.tier).toBe('local_path');
+  });
+
+  test('an archived exact-path source cannot win the attributed resolver', async () => {
+    const engine = makeStub(
+      ['default', 'archived-copy'],
+      [
+        { id: 'archived-copy', local_path: '/work/shared', archived: true },
+        { id: 'default', local_path: '/work/shared' },
+      ],
+      null,
+    );
+    const result = await resolveSourceWithTier(engine, null, '/work/shared/pages');
+    expect(result.source_id).toBe('default');
     expect(result.tier).toBe('local_path');
   });
 });

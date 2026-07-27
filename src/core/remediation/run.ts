@@ -89,12 +89,16 @@ export async function runRemediation(
     clearRemediationCheckpoint,
   } = await import('../remediation-checkpoint.ts');
 
-  const ctx = await loadRecommendationContext(engine);
+  const ctx = await loadRecommendationContext(engine, {
+    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
+  });
 
   // Pre-flight ceiling check via the shared plan computation.
   const initialPlan = await computeRemediationPlan(engine, {
     targetScore,
     extraRemediations,
+    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
+    sourceHygienePacket: ctx.sourceHygiene,
   });
   if (initialPlan.target_unreachable) {
     hooks.onTargetUnreachable?.(targetScore, initialPlan.max_reachable_score);
@@ -342,7 +346,9 @@ export async function runRemediation(
       // steps with bumped retry suffix (D1).
       if (recs.length === 0 || stepCount >= maxJobs) break;
       const freshHealth = await engine.getHealth();
-      const freshCtx = await loadRecommendationContext(engine);
+      const freshCtx = await loadRecommendationContext(engine, {
+        inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
+      });
       recs = computeRecommendations(freshHealth, freshCtx, extraRemediations)
         .filter((r) => r.status === 'remediable' && !attemptedIds.has(r.id));
     }

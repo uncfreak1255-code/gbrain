@@ -31,6 +31,7 @@ const RED_RUNTIME_CHECKS = new Set([
   'rls',
   'rls_event_trigger',
   'schema_version',
+  'source_path_health',
   'stale_locks',
   'subagent_capability',
   'supervisor',

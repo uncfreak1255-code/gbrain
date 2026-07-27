@@ -71,6 +71,17 @@ describe('checkSourceRoutingHealth (#1167)', () => {
     expect(r.message).toMatch(/--source-id/);
     expect(r.message).toMatch(/gbrain sources current/);
   });
+
+  test('archived zero-page source is not treated as an active routing problem', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived, archived_at)
+       VALUES ('archived-empty', 'archived-empty', true, now())`,
+    );
+    const r = await checkSourceRoutingHealth(engine);
+    expect(r.status).toBe('ok');
+    expect(r.message).toMatch(/single-source/i);
+    expect(r.message).not.toContain('archived-empty');
+  });
 });
 
 describe('checkOauthConfidentialHealth (#1166)', () => {

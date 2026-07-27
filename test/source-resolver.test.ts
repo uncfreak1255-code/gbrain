@@ -19,7 +19,11 @@ import type { BrainEngine } from '../src/core/engine.ts';
 
 // ── Stub engine ────────────────────────────────────────────
 
-function makeStub(registeredSources: string[], paths: Array<{ id: string; local_path: string }>, defaultKey: string | null): BrainEngine {
+function makeStub(
+  registeredSources: string[],
+  paths: Array<{ id: string; local_path: string; archived?: boolean }>,
+  defaultKey: string | null,
+): BrainEngine {
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
@@ -30,7 +34,10 @@ function makeStub(registeredSources: string[], paths: Array<{ id: string; local_
           : []);
       }
       if (sql.includes('SELECT id, local_path FROM sources')) {
-        return paths as unknown as T[];
+        const visiblePaths = sql.includes('archived = false')
+          ? paths.filter((path) => !path.archived)
+          : paths;
+        return visiblePaths as unknown as T[];
       }
       return [];
     },
@@ -60,6 +67,29 @@ describe('resolveSourceId priority 1 — explicit flag', () => {
   test('rejects invalid format', async () => {
     const engine = makeStub(['default'], [], null);
     await expect(resolveSourceId(engine, 'WRONG-case!')).rejects.toThrow(/Invalid --source/);
+  });
+});
+
+describe('pre-v34 archived-column compatibility', () => {
+  test('falls back to the legacy registered-path query only for an undefined archived column', async () => {
+    let fallbackRead = false;
+    const engine = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string) => {
+        if (sql.includes('archived = false')) {
+          throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) {
+          fallbackRead = true;
+          return [{ id: 'legacy-source', local_path: '/legacy/repo' }];
+        }
+        return [];
+      },
+      getConfig: async () => null,
+    } as unknown as BrainEngine;
+
+    expect(await resolveSourceId(engine, null, '/legacy/repo/nested')).toBe('legacy-source');
+    expect(fallbackRead).toBe(true);
   });
 });
 
@@ -150,6 +180,19 @@ describe('resolveSourceId priority 4 — registered local_path longest-prefix ma
       null,
     );
     const id = await resolveSourceId(engine, null, '/some/other/dir');
+    expect(id).toBe('default');
+  });
+
+  test('an archived source sharing the active source path cannot win resolution', async () => {
+    const engine = makeStub(
+      ['default', 'archived-copy'],
+      [
+        { id: 'archived-copy', local_path: '/tmp/shared-brain', archived: true },
+        { id: 'default', local_path: '/tmp/shared-brain' },
+      ],
+      null,
+    );
+    const id = await resolveSourceId(engine, null, '/tmp/shared-brain/pages');
     expect(id).toBe('default');
   });
 });

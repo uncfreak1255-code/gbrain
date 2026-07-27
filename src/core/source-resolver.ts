@@ -20,6 +20,7 @@ import { join, dirname, relative, resolve } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { SOURCE_ID_RE, isValidSourceId } from './source-id.ts';
 import { readTrustedDotfile, realpathOrResolve } from './path-confine.ts';
+import { isUndefinedColumnError } from './utils.ts';
 
 const DOTFILE = '.gbrain-source';
 // Canonical SOURCE_ID_RE imported from `source-id.ts` (single source of truth).
@@ -63,6 +64,19 @@ function readDotfileWalk(startDir: string): string | null {
 interface RegisteredSourcePath {
   id: string;
   local_path: string;
+}
+
+async function loadActiveRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourcePath[]> {
+  try {
+    return await engine.executeRaw<RegisteredSourcePath>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL AND archived = false`,
+    );
+  } catch (error) {
+    if (!isUndefinedColumnError(error, 'archived')) throw error;
+    return engine.executeRaw<RegisteredSourcePath>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
+    );
+  }
 }
 
 interface SourcePathMatch {
@@ -204,9 +218,7 @@ export async function resolveSourceId(
   // 4. Registered source whose local_path contains CWD.
   //    Uses longest-prefix match so nested-path configurations (e.g.
   //    gstack at ~/gstack + plans at ~/gstack/plans) pick the deepest.
-  const registered = await engine.executeRaw<RegisteredSourcePath>(
-    `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
-  );
+  const registered = await loadActiveRegisteredPaths(engine);
   const best = pickRegisteredPathMatch(registered, cwd);
   if (best) return best.id;
 
@@ -259,7 +271,8 @@ async function pickSoleNonDefaultSource(engine: BrainEngine): Promise<string | n
     rows = await engine.executeRaw<{ id: string }>(
       `SELECT id FROM sources WHERE local_path IS NOT NULL AND id != 'default' AND archived = false`,
     );
-  } catch {
+  } catch (error) {
+    if (!isUndefinedColumnError(error, 'archived')) throw error;
     rows = await engine.executeRaw<{ id: string }>(
       `SELECT id FROM sources WHERE local_path IS NOT NULL AND id != 'default'`,
     );
@@ -393,9 +406,7 @@ export async function resolveSourceWithTier(
   }
 
   // 4. Registered source whose local_path contains CWD.
-  const registered = await engine.executeRaw<RegisteredSourcePath>(
-    `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
-  );
+  const registered = await loadActiveRegisteredPaths(engine);
   const best = pickRegisteredPathMatch(registered, cwd);
   if (best) return { source_id: best.id, tier: 'local_path', detail: best.detail };
 

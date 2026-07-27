@@ -541,6 +541,19 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(3);
   }
 
+  if (args.includes('--if-hygiene-candidate')) {
+    const attempt = await archiveHygieneCandidate(engine, id);
+    if (!attempt.result) {
+      console.error(
+        `Refused to archive source "${id}": fresh source-hygiene evidence `
+        + `did not authorize it (${attempt.reason}).`,
+      );
+      process.exit(4);
+    }
+    console.log(formatSoftDelete(attempt.result));
+    return;
+  }
+
   // Show impact preview
   const impact = await assessDestructiveImpact(engine, id);
   if (!impact) {
@@ -555,6 +568,39 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
   }
 
   console.log(formatSoftDelete(result));
+}
+
+export async function archiveHygieneCandidate(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<{
+  result: Awaited<ReturnType<typeof softDeleteSource>>;
+  reason: string;
+}> {
+  return engine.transaction(async (tx) => {
+    // Bind the decision and mutation to one transaction. Migration v121 makes
+    // every source-reference/config producer take FOR SHARE on this same row,
+    // so FOR UPDATE waits for earlier writers and blocks later writers while
+    // all dependent-data, job, config, and lock vetoes are reread.
+    const active = await tx.executeRaw<{ id: string }>(
+      `SELECT id FROM sources WHERE id = $1 AND archived = false FOR UPDATE`,
+      [sourceId],
+    );
+    if (active.length === 0) return { result: null, reason: 'source_not_active' };
+
+    const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+    const packet = await inspectSourceHygiene(tx, { inspectFilesystem: true });
+    const decision = packet.sources.find((source) => source.source_id === sourceId);
+    if (decision?.classification !== 'archive_candidate' || !decision.safe_for_agent_review) {
+      const reason = decision
+        ? [decision.classification, ...decision.veto_reasons].join(':')
+        : 'source_not_found';
+      return { result: null, reason };
+    }
+
+    const result = await softDeleteSource(tx, sourceId);
+    return { result, reason: result ? 'archived' : 'archive_update_failed' };
+  });
 }
 
 // ── Subcommand: restore ─────────────────────────────────────

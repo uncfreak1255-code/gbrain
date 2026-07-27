@@ -59,6 +59,42 @@ Stop:
 - clean no-op
 - blocked proof gap
 
+## Source Hygiene Arbiter Loop
+
+Use when Doctor or Advisor says a source checkout is missing, or before a
+source cleanup/recovery action.
+
+Read fresh state:
+- active and archived source rows
+- source-owned row counts, configured defaults, recovery metadata, queued work,
+  and live sync locks
+- `gbrain doctor --json`, `gbrain doctor --remediation-plan --json`, and
+  `gbrain advisor --json`
+
+Proof gate:
+- populated sources have a verified source-scoped export manifest committed to
+  a private local Git repository before lifecycle changes
+- a zero-content archive candidate has no unresolved veto
+
+Act:
+- investigator produces the packet
+- an adversarial reviewer tries to disprove it
+- execute at most one bounded lifecycle action
+- use `gbrain sources archive <id> --if-hygiene-candidate` so the archive
+  transaction rereads the full predicate; never auto-remove or purge
+- preserve and recover every populated or ambiguous source
+
+Stop:
+- fresh Doctor/Planner/Advisor agreement
+- evidence drift
+- unknown work/lock/config state
+- paid work would run before source recovery
+- one action completed
+- blocked or owner authority required
+
+Archive is reversible for 72 hours. Unrelated paid remediation is not progress
+on a source-health failure.
+
 ## Dream Value Loop
 
 Adapted from the published self-improving champion loop.

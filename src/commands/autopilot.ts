@@ -909,12 +909,35 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                 if (submittedToday < maxJobsToday) {
                   const { loadAllSources } = await import('../core/sources-load.ts');
                   const { countExtractAtomsBacklog } = await import('../core/cycle/extract-atoms.ts');
+                  const { gateProtectedSourceWork, inspectSourceHygiene } = await import('../core/source-hygiene.ts');
                   const sources = await loadAllSources(engine);
+                  const drainCandidates: Array<{
+                    src: (typeof sources)[number];
+                    backlog: number;
+                  }> = [];
                   for (const src of sources) {
-                    if (submittedToday >= maxJobsToday) break; // brain-wide daily cap (fairness)
                     if (!src.local_path) continue;
                     const backlog = await countExtractAtomsBacklog(engine, src.id);
                     if (backlog === null || backlog <= threshold) continue;
+                    drainCandidates.push({ src, backlog });
+                  }
+                  const sourceHygiene = drainCandidates.length > 0
+                    ? await inspectSourceHygiene(engine, { inspectFilesystem: true })
+                    : null;
+                  for (const { src, backlog } of drainCandidates) {
+                    if (submittedToday >= maxJobsToday) break; // brain-wide daily cap (fairness)
+                    const sourceGate = sourceHygiene
+                      ? gateProtectedSourceWork(sourceHygiene, src.id)
+                      : { allowed: false as const, reason: 'unknown_source' as const };
+                    if (!sourceGate.allowed) {
+                      logError(
+                        'dispatch.auto-drain-source-hygiene',
+                        new Error(
+                          `source ${src.id} is blocked from protected atom work: ${sourceGate.reason}`,
+                        ),
+                      );
+                      continue;
+                    }
                     // Time-sloted key (CODEX #2): a static key would block the
                     // source FOREVER once the first job completes. A new UTC-day
                     // slot reopens it each day.
@@ -971,7 +994,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         const health = await engine.getHealth();
         const score = health.brain_score;
         const { loadRecommendationContext } = await import('../core/remediation/context.ts');
-        const ctx = await loadRecommendationContext(engine, { repoPath });
+        const ctx = await loadRecommendationContext(engine, {
+          repoPath,
+          inspectLocalSourcePaths: true,
+        });
         // v0.41.18.0 (A5 + A19 + A22, T15): consult onboard recommendations
         // ALONGSIDE doctor's brain-score recommendations. Onboard's 4 new
         // checks (embed_staleness, link_coverage, timeline_coverage,

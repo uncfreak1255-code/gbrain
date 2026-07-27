@@ -8,6 +8,7 @@ import {
   EXTRACTION_LAG_WARN_PCT_DEFAULT,
   shouldWarnForExtractionLag,
 } from './extraction-lag.ts';
+import type { SourceHygienePacket } from './source-hygiene.ts';
 
 /**
  * v0.40.x: env-var name → file/DB config field, for hosted embedding providers
@@ -172,6 +173,27 @@ export interface RecommendationContext {
   extractAtomsWarnThreshold?: number;
   /** Bounded runtime window passed to extract-atoms-drain jobs. */
   extractAtomsDrainWindowSeconds?: number;
+  /**
+   * Trusted-local source-path evidence. Absent on remote/MCP callers.
+   * The planner uses this to stop paid/protected work behind an unresolved
+   * source recovery instead of treating downstream backlog as the root task.
+   */
+  sourceHygiene?: SourceHygienePacket;
+}
+
+export function unresolvedSourceHygiene(
+  ctx: RecommendationContext,
+): NonNullable<RecommendationContext['sourceHygiene']>['sources'] {
+  return (ctx.sourceHygiene?.sources ?? []).filter(
+    (source) => source.classification === 'recovery_required',
+  );
+}
+
+function shouldSuppressForSourceRecovery(step: RemediationStep): boolean {
+  return step.protected === true ||
+    (step.est_usd_cost ?? 0) > 0 ||
+    step.job === 'embed' ||
+    step.job === 'embed-backfill';
 }
 
 /** Triage result for one check. */
@@ -371,6 +393,16 @@ export function computeRecommendations(
     }
   }
 
+  // A broken or unprovable source path is upstream of paid/protected quality
+  // work. Running those jobs first can spend money on data that is about to be
+  // recovered or repointed, so local trusted planners hold them until a fresh
+  // source-hygiene readback clears the recovery requirement.
+  if (unresolvedSourceHygiene(ctx).length > 0) {
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (shouldSuppressForSourceRecovery(out[i]!)) out.splice(i, 1);
+    }
+  }
+
   // Sort: severity (critical first), then est_seconds ascending so quick
   // wins come first within a severity tier.
   const sevRank: Record<RemediationSeverity, number> = {
@@ -434,10 +466,37 @@ function classifyOne(check: Check, ctx: RecommendationContext): CheckClassificat
     // --- remediable paths (matched by recommendation generator) ---
     case 'brain_score':
     case 'sync_freshness':
+      if (unresolvedSourceHygiene(ctx).length > 0) {
+        return {
+          check: check.name,
+          status: 'blocked',
+          reason: 'source recovery must be resolved before automated remediation',
+        };
+      }
       if (!ctx.repoPath) {
         return { check: check.name, status: 'blocked', reason: 'no repo configured (set sync.repo_path)' };
       }
       return { check: check.name, status: 'remediable' };
+    case 'source_path_health': {
+      const unresolved = unresolvedSourceHygiene(ctx);
+      if (unresolved.length > 0) {
+        return {
+          check: check.name,
+          status: 'blocked',
+          reason: unresolved
+            .map((source) => `${source.source_id}: ${source.recovery_mode}`)
+            .join('; '),
+        };
+      }
+      if ((ctx.sourceHygiene?.sources ?? []).some((source) => source.classification === 'archive_candidate')) {
+        return {
+          check: check.name,
+          status: 'human_only',
+          reason: 'empty missing source requires an adversarial archive review',
+        };
+      }
+      return { check: check.name, status: 'remediable' };
+    }
     case 'missing_embeddings':
       if (ctx.embeddingProviderConfigured === false) {
         return { check: check.name, status: 'blocked', reason: 'embedding provider not configured' };

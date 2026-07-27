@@ -79,6 +79,40 @@ When the target score is unreachable for the brain (empty brain with no entity
 pages → `graph_coverage` caps at 70; unconfigured embedding key → caps at 60),
 the command bails with a list of what's missing rather than looping.
 
+### Source hygiene arbiter — before sync, spend, or cleanup
+
+When Doctor or Advisor reports a missing source checkout, treat that as the
+root task. Do not let an unrelated embedding or atom job make the run look
+healthy.
+
+1. **Investigator:** read fresh `gbrain doctor --json`,
+   `gbrain doctor --remediation-plan --json`, and `gbrain advisor --json`.
+   Preserve the structured source-hygiene evidence. For a populated source,
+   create a source-scoped recovery export in a fresh private directory:
+   `gbrain export --source <id> --dir <private-new-dir>`; verify its manifest
+   SHA-256 and commit that directory to a private local Git repository before
+   changing source lifecycle state.
+2. **Adversarial reviewer:** try to veto the proposed action. An archive
+   candidate must be non-default, missing, zero-content across every
+   source-linked table and scalar/array/JSON binding, outside configured
+   defaults, free of remote/managed recovery metadata, free of nonterminal
+   work, and free of a live lock.
+   Unknown evidence is a veto. Populated sources are recovery work, never
+   cleanup.
+3. **Bounded executor:** perform at most one lifecycle action. A fully proven
+   empty phantom may be soft-archived with
+   `gbrain sources archive <id> --if-hygiene-candidate` when the current task
+   authorizes mutation. Use the arbiter's exact argv so the full predicate is
+   reread in the archive transaction. A populated or ambiguous source is
+   preserved and recovered; never sync from an empty replacement directory.
+4. **Fresh readback:** rerun sources status, Doctor, remediation plan, and
+   Advisor. Report the exact source decision and any remaining blocker.
+
+Never auto-run `gbrain sources remove` or `gbrain sources purge`. Soft archive
+is reversible for only 72 hours. Paid/protected remediation stays blocked while
+any source is `recovery_required`, and an unrelated quality improvement cannot
+close the source-health failure.
+
 Use the per-dimension walk below (Phase 2 onward) when:
 - The user explicitly asks for a dimension-by-dimension audit
 - You're investigating why score is stuck below `--remediate`'s ceiling

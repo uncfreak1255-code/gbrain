@@ -100,6 +100,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'salience_health',
   'scraper_junk_pages',
   'source_routing_health',
+  'source_path_health',
   'stub_guard_24h',
   'sync_failures',
   'sync_freshness',

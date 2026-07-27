@@ -63,6 +63,7 @@ export const ROOT_CAUSE_CHECKS: ReadonlySet<string> = new Set([
   'worker_oom_loop',
   'pool_reap_health',
   'connection',
+  'source_path_health',
   'sync_freshness',
   'schema_version',
 ]);

@@ -33,7 +33,13 @@ export type { RecommendationContext };
  */
 export async function loadRecommendationContext(
   engine: BrainEngine,
-  opts: { repoPath?: string; sourceScoped?: boolean } = {},
+  opts: {
+    repoPath?: string;
+    sourceScoped?: boolean;
+    inspectLocalSourcePaths?: boolean;
+    /** Focused test/integration seam to reuse a packet without another scan. */
+    sourceHygienePacket?: RecommendationContext['sourceHygiene'];
+  } = {},
 ): Promise<RecommendationContext> {
   // v0.37 fix wave (Lane E.4 + CDX2-11): read schema-sizing fields from
   // gateway, not DB. The DB plane is schema-applied metadata; the file
@@ -52,9 +58,16 @@ export async function loadRecommendationContext(
   let extractAtomsPackDeclaresPhase: boolean | undefined;
   let extractAtomsBacklogBySource: RecommendationContext['extractAtomsBacklogBySource'];
   let extractAtomsDrainWindowSeconds = DEFAULT_EXTRACT_ATOMS_DRAIN_WINDOW_SECONDS;
+  let sourceHygiene: RecommendationContext['sourceHygiene'] = opts.sourceHygienePacket;
+
+  if (opts.inspectLocalSourcePaths === true && !sourceHygiene) {
+    const { inspectSourceHygiene } = await import('../source-hygiene.ts');
+    sourceHygiene = await inspectSourceHygiene(engine, { inspectFilesystem: true });
+  }
 
   if (repoPath) {
     try {
+      const configuredSourceId = await engine.getConfig('sources.default');
       const rows = await engine.executeRaw<{
         id: string;
         local_path: string | null;
@@ -65,18 +78,28 @@ export async function loadRecommendationContext(
         `SELECT id, local_path, last_commit, chunker_version, last_sync_at
            FROM sources
           WHERE local_path = $1
-          ORDER BY id
+            AND archived = false
+          ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END, id
           LIMIT 1`,
-        [repoPath],
+        [repoPath, configuredSourceId ?? 'default'],
       );
       const source = rows[0];
       if (source) {
         if (opts.sourceScoped === true) sourceId = source.id;
-        const gitFresh = isSourceUnchangedSinceSync(source.local_path, source.last_commit, {
-          requireCleanWorkingTree: 'ignore-untracked',
-        });
+        const gitFresh = opts.inspectLocalSourcePaths === true
+          ? isSourceUnchangedSinceSync(source.local_path, source.last_commit, {
+              requireCleanWorkingTree: 'ignore-untracked',
+            })
+          : false;
         const chunkerFresh = String(source.chunker_version ?? '') === String(CHUNKER_VERSION);
         repoNeedsSync = !chunkerFresh || (!gitFresh && isPastSyncRemediationWindow(source.last_sync_at));
+        const sourceDecision = sourceHygiene?.sources.find((row) => row.source_id === source.id);
+        if (
+          sourceDecision?.classification === 'recovery_required' &&
+          sourceDecision.recovery_mode !== 'managed_clone_sync'
+        ) {
+          repoNeedsSync = false;
+        }
       } else {
         repoNeedsSync = true;
       }
@@ -126,6 +149,7 @@ export async function loadRecommendationContext(
       const sources = await engine.executeRaw<{ id: string; local_path: string | null }>(
         `SELECT id, local_path
            FROM sources
+          WHERE archived = false
           ORDER BY id`,
         [],
       );
@@ -199,6 +223,7 @@ export async function loadRecommendationContext(
     extractAtomsBacklogBySource,
     extractAtomsWarnThreshold: DEFAULT_EXTRACT_ATOMS_WARN_THRESHOLD,
     extractAtomsDrainWindowSeconds,
+    sourceHygiene,
   };
 }
 

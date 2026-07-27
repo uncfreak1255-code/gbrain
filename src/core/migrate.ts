@@ -5492,6 +5492,203 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   {
+    version: 124,
+    name: 'active_source_reference_write_guard',
+    // Source archive safety is a database invariant, not a CLI convention.
+    // Every producer takes a shared lock on each referenced active source;
+    // `sources archive --if-hygiene-candidate` takes FOR UPDATE on that source.
+    // Therefore an already-running writer finishes before archive evidence is
+    // reread, while a writer that arrives during archive waits and then fails
+    // if the source committed as archived. The dynamic registry covers every
+    // exact source_id column plus the non-canonical array/JSON/config and
+    // per-source sync-lock shapes audited by src/core/source-hygiene.ts.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := ARRAY[source_ref];
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+              INTO source_refs
+              FROM jsonb_array_elements_text(raw_ref) AS values_(value);
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+              INTO source_refs
+              FROM (
+                VALUES (raw_ref->>'sourceId'), (raw_ref->>'source_id')
+              ) AS values_(value)
+             WHERE value IS NOT NULL;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := ARRAY[source_ref];
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          PERFORM id
+            FROM sources
+           WHERE id = source_ref AND archived = false
+           FOR SHARE;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is missing or archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM id
+            FROM sources
+           WHERE id = NEW.value AND archived = false
+           FOR SHARE;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is missing or archived', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM id
+            FROM sources
+           WHERE local_path = NEW.value AND archived = false
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        FOR ref IN
+          SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema
+             AND t.table_name = c.table_name
+           WHERE c.table_schema = 'public'
+             AND t.table_type = 'BASE TABLE'
+             AND c.column_name = 'source_id'
+           ORDER BY c.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_active_ref_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+            ref.table_name, 'scalar', ref.column_name
+          );
+        END LOOP;
+
+        FOR ref IN
+          SELECT *
+            FROM (VALUES
+              ('oauth_clients', 'bound_source_id', 'scalar', 'source_active_bound_source_guard'),
+              ('oauth_clients', 'federated_read', 'array', 'source_active_federated_read_guard'),
+              ('eval_candidates', 'source_ids', 'array', 'source_active_source_ids_guard'),
+              ('minion_jobs', 'data', 'json_source_keys', 'source_active_job_data_guard'),
+              ('gbrain_cycle_locks', 'id', 'sync_lock_id', 'source_active_sync_lock_guard')
+            ) AS refs(table_name, column_name, kind, trigger_name)
+           WHERE EXISTS (
+             SELECT 1
+               FROM information_schema.columns c
+              WHERE c.table_schema = 'public'
+                AND c.table_name = refs.table_name
+                AND c.column_name = refs.column_name
+           )
+           ORDER BY table_name, column_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS %I ON %I',
+            ref.trigger_name, ref.table_name
+          );
+          IF ref.kind = 'sync_lock_id' THEN
+            EXECUTE format(
+              'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
+              || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+              ref.trigger_name, ref.table_name, ref.kind, ref.column_name
+            );
+          ELSE
+            EXECUTE format(
+              'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
+              || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+              ref.trigger_name, ref.table_name, ref.kind, ref.column_name
+            );
+          END IF;
+        END LOOP;
+
+        IF to_regclass('public.config') IS NOT NULL THEN
+          DROP TRIGGER IF EXISTS source_active_config_guard ON config;
+          CREATE TRIGGER source_active_config_guard
+            BEFORE INSERT OR UPDATE OF key, value ON config
+            FOR EACH ROW EXECUTE FUNCTION enforce_active_source_config_fn();
+        END IF;
+      END;
+      $install$;
+    `,
+  },
+  {
+    version: 125,
+    name: 'active_source_job_status_guard',
+    idempotent: true,
+    sql: `
+      DO $install$
+      BEGIN
+        IF to_regclass('public.minion_jobs') IS NOT NULL
+           AND to_regprocedure('enforce_active_source_reference_fn()') IS NOT NULL THEN
+          DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
+          CREATE TRIGGER source_active_job_data_guard
+            BEFORE INSERT OR UPDATE OF data, status ON minion_jobs
+            FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(
+              'json_source_keys', 'data'
+            );
+        END IF;
+      END;
+      $install$;
+    `,
+  },
+  {
     version: 123,
     name: 'pages_takes_extracted_content_hash',
     // A valid classifier result may contain zero claims. Without a page-level
@@ -5501,6 +5698,122 @@ export const MIGRATIONS: Migration[] = [
     sql: `
       ALTER TABLE pages
         ADD COLUMN IF NOT EXISTS takes_extracted_content_hash TEXT;
+    `,
+  },
+  {
+    version: 126,
+    name: 'archived_source_job_terminalization_guard',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM (
+            VALUES (NEW.data->>'sourceId'), (NEW.data->>'source_id')
+          ) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          PERFORM id FROM sources
+           WHERE id = source_ref AND archived = false
+           FOR SHARE;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is missing or archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
+      CREATE TRIGGER source_active_job_data_guard
+        BEFORE INSERT OR UPDATE OF data, status ON minion_jobs
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+    `,
+  },
+  {
+    version: 127,
+    name: 'archived_source_job_continuation_guard',
+    idempotent: true,
+    sql: `
+      DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
+      CREATE TRIGGER source_active_job_data_guard
+        BEFORE INSERT OR UPDATE ON minion_jobs
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+    `,
+  },
+  {
+    version: 128,
+    name: 'archived_source_owned_row_guard',
+    idempotent: true,
+    sql: `
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        FOR ref IN
+          SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema
+             AND t.table_name = c.table_name
+           WHERE c.table_schema = 'public'
+             AND t.table_type = 'BASE TABLE'
+             AND c.column_name = 'source_id'
+           ORDER BY c.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_active_ref_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+            ref.table_name, 'scalar', ref.column_name
+          );
+        END LOOP;
+
+        FOR ref IN
+          SELECT *
+            FROM (VALUES
+              ('oauth_clients', 'bound_source_id', 'scalar', 'source_active_bound_source_guard'),
+              ('oauth_clients', 'federated_read', 'array', 'source_active_federated_read_guard'),
+              ('eval_candidates', 'source_ids', 'array', 'source_active_source_ids_guard')
+            ) AS refs(table_name, column_name, kind, trigger_name)
+           WHERE EXISTS (
+             SELECT 1
+               FROM information_schema.columns c
+              WHERE c.table_schema = 'public'
+                AND c.table_name = refs.table_name
+                AND c.column_name = refs.column_name
+           )
+           ORDER BY table_name, column_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS %I ON %I',
+            ref.trigger_name, ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+            ref.trigger_name, ref.table_name, ref.kind, ref.column_name
+          );
+        END LOOP;
+      END;
+      $install$;
     `,
   },
 ];
