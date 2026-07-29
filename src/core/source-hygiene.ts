@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { inspectLock, syncLockId } from './db-lock.ts';
+import { cycleLockIdFor } from './cycle.ts';
 import { type RepoState, validateRepoState } from './git-remote.ts';
 import { isOwnedClone } from './sources-ops.ts';
 import {
@@ -58,6 +59,8 @@ export interface SourceHygieneEvidence {
   work_state_known: boolean;
   live_sync_lock: boolean | null;
   lock_state_known: boolean;
+  live_cycle_lock: boolean | null;
+  cycle_lock_state_known: boolean;
 }
 
 export interface SourceHygieneDecision extends SourceHygieneEvidence {
@@ -88,6 +91,7 @@ export type ProtectedSourceWorkGate =
 export interface SourceHygieneProbes {
   repoState: (localPath: string, expectedRemoteUrl?: string) => RepoState;
   liveSyncLock: (engine: BrainEngine, sourceId: string) => Promise<boolean>;
+  liveCycleLock: (engine: BrainEngine, sourceId: string) => Promise<boolean>;
 }
 
 export interface InspectSourceHygieneOpts {
@@ -104,6 +108,13 @@ const DEFAULT_PROBES: SourceHygieneProbes = {
   liveSyncLock: async (engine, sourceId) => {
     const snap = await inspectLock(engine, syncLockId(sourceId));
     return !!snap && !snap.ttl_expired;
+  },
+  liveCycleLock: async (engine, sourceId) => {
+    const [sourceScoped, legacyGlobal] = await Promise.all([
+      inspectLock(engine, cycleLockIdFor(sourceId)),
+      inspectLock(engine, cycleLockIdFor()),
+    ]);
+    return [sourceScoped, legacyGlobal].some((snap) => !!snap && !snap.ttl_expired);
   },
 };
 
@@ -196,7 +207,9 @@ export function classifySourceHygieneEvidence(
     evidence.work_state_known &&
     evidence.nonterminal_work_count === 0 &&
     evidence.lock_state_known &&
-    evidence.live_sync_lock === false;
+    evidence.live_sync_lock === false &&
+    evidence.cycle_lock_state_known &&
+    evidence.live_cycle_lock === false;
 
   if (managedRecoverable) {
     return decision(
@@ -265,6 +278,8 @@ export async function inspectSourceHygiene(
     repoState: SourceHygieneRepoState;
     liveSyncLock: boolean | null;
     lockStateKnown: boolean;
+    liveCycleLock: boolean | null;
+    cycleLockStateKnown: boolean;
   }>();
   const degradedSourceIds: string[] = [];
 
@@ -279,9 +294,11 @@ export async function inspectSourceHygiene(
       ? 'not_inspected'
       : 'not_applicable';
     let liveSyncLock: boolean | null = null;
+    let liveCycleLock: boolean | null = null;
     const draining = source.embedding_drain_token != null;
     const expectedArchiveDrain = source.id === opts.expectedArchiveDrainSourceId;
     let lockStateKnown = !hasLocalPath || source.archived === true || draining;
+    let cycleLockStateKnown = lockStateKnown;
 
     if (
       inspectFilesystem
@@ -297,9 +314,22 @@ export async function inspectSourceHygiene(
         liveSyncLock = null;
         lockStateKnown = false;
       }
+      try {
+        liveCycleLock = await probes.liveCycleLock(engine, source.id);
+        cycleLockStateKnown = true;
+      } catch {
+        liveCycleLock = null;
+        cycleLockStateKnown = false;
+      }
       if (repoState !== 'healthy') degradedSourceIds.push(source.id);
     }
-    pathEvidence.set(source.id, { repoState, liveSyncLock, lockStateKnown });
+    pathEvidence.set(source.id, {
+      repoState,
+      liveSyncLock,
+      lockStateKnown,
+      liveCycleLock,
+      cycleLockStateKnown,
+    });
   }
 
   // The expensive aggregate scans are needed only when a trusted local path
@@ -327,6 +357,8 @@ export async function inspectSourceHygiene(
     const repoState = inspected.repoState;
     const liveSyncLock = inspected.liveSyncLock;
     const lockStateKnown = inspected.lockStateKnown;
+    const liveCycleLock = inspected.liveCycleLock;
+    const cycleLockStateKnown = inspected.cycleLockStateKnown;
 
     let managedClone = false;
     try {
@@ -360,6 +392,8 @@ export async function inspectSourceHygiene(
       work_state_known: work.known,
       live_sync_lock: liveSyncLock,
       lock_state_known: lockStateKnown,
+      live_cycle_lock: liveCycleLock,
+      cycle_lock_state_known: cycleLockStateKnown,
     };
     const classified = classifySourceHygieneEvidence(
       source.id === opts.expectedArchiveDrainSourceId
@@ -416,6 +450,11 @@ function archiveVetoReasons(evidence: SourceHygieneEvidence): string[] {
     vetoes.push('sync_lock_unknown');
   } else if (evidence.live_sync_lock) {
     vetoes.push('live_sync_lock');
+  }
+  if (!evidence.cycle_lock_state_known || evidence.live_cycle_lock === null) {
+    vetoes.push('cycle_lock_unknown');
+  } else if (evidence.live_cycle_lock) {
+    vetoes.push('live_cycle_lock');
   }
   if (evidence.repo_state !== 'missing') {
     vetoes.push(`repo_state_${evidence.repo_state}`);

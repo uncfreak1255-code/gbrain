@@ -1208,6 +1208,76 @@ BEGIN
 END;
 $fn$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION enforce_active_source_lock_fn()
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
+DECLARE
+  lock_ref TEXT;
+  lock_refs TEXT[] := ARRAY[to_jsonb(NEW)->>'id'];
+  source_ref TEXT;
+  source_refs TEXT[] := ARRAY[]::TEXT[];
+  legacy_cycle_lock BOOLEAN := false;
+  draining_source_ref TEXT;
+  source_archived BOOLEAN;
+  source_draining BOOLEAN;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    lock_refs := lock_refs || ARRAY[to_jsonb(OLD)->>'id'];
+  END IF;
+  FOREACH lock_ref IN ARRAY lock_refs LOOP
+    IF lock_ref LIKE 'gbrain-sync:%' THEN
+      source_ref := substring(lock_ref FROM length('gbrain-sync:') + 1);
+    ELSIF lock_ref LIKE 'gbrain-cycle:%' THEN
+      source_ref := substring(lock_ref FROM length('gbrain-cycle:') + 1);
+    ELSIF lock_ref = 'gbrain-cycle' THEN
+      legacy_cycle_lock := true;
+      source_ref := NULL;
+    ELSE
+      source_ref := NULL;
+    END IF;
+    IF source_ref IS NOT NULL AND source_ref <> '' THEN
+      source_refs := array_append(source_refs, source_ref);
+    END IF;
+  END LOOP;
+  SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+    INTO source_refs FROM unnest(source_refs) AS values_(value)
+   WHERE value IS NOT NULL;
+  IF cardinality(source_refs) > 0 OR legacy_cycle_lock THEN
+    PERFORM pg_advisory_xact_lock_shared(
+      hashtextextended('gbrain:source-lifecycle', 0)
+    );
+  END IF;
+  IF legacy_cycle_lock THEN
+    SELECT id
+      INTO draining_source_ref
+      FROM sources
+     WHERE archived IS NOT TRUE
+       AND embedding_drain_token IS NOT NULL
+     ORDER BY id
+     LIMIT 1
+     FOR SHARE;
+    IF FOUND THEN
+      RAISE EXCEPTION 'Cannot acquire global cycle lock while source % is draining',
+        draining_source_ref USING ERRCODE = '23503';
+    END IF;
+  END IF;
+  FOR source_ref, source_archived, source_draining IN
+    SELECT id, archived, embedding_drain_token IS NOT NULL
+      FROM sources
+     WHERE id = ANY(source_refs)
+     ORDER BY id
+     FOR SHARE
+  LOOP
+    IF source_archived OR source_draining THEN
+      RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
+        TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
+    END IF;
+  END LOOP;
+  RETURN NEW;
+END;
+$fn$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
 RETURNS trigger
 SET search_path = pg_catalog, public, pg_temp
@@ -1551,7 +1621,7 @@ BEGIN
         ('oauth_clients', 'federated_read', 'array', 'source_active_federated_read_guard'),
         ('eval_candidates', 'source_ids', 'array', 'source_active_source_ids_guard'),
         ('minion_jobs', 'data', 'json_source_keys', 'source_active_job_data_guard'),
-        ('gbrain_cycle_locks', 'id', 'sync_lock_id', 'source_active_sync_lock_guard')
+        ('gbrain_cycle_locks', 'id', 'source_lock_id', 'source_active_sync_lock_guard')
       ) AS refs(table_name, column_name, kind, trigger_name)
      WHERE EXISTS (
        SELECT 1
@@ -1572,11 +1642,11 @@ BEGIN
         || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn()',
         ref.trigger_name, ref.table_name
       );
-    ELSIF ref.kind = 'sync_lock_id' THEN
+    ELSIF ref.kind = 'source_lock_id' THEN
       EXECUTE format(
         'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
-        || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
-        ref.trigger_name, ref.table_name, ref.kind, ref.column_name
+        || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_lock_fn()',
+        ref.trigger_name, ref.table_name
       );
     ELSE
       EXECUTE format(

@@ -75,6 +75,8 @@ function hygieneSource(
     work_state_known: true,
     live_sync_lock: false,
     lock_state_known: true,
+    live_cycle_lock: false,
+    cycle_lock_state_known: true,
     classification,
     recovery_mode: archiveCandidate ? 'archive_review' as const : 'none' as const,
     proposed_command_argv: archiveCandidate

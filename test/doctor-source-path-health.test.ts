@@ -29,6 +29,8 @@ function sourceDecision(
     work_state_known: true,
     live_sync_lock: false,
     lock_state_known: true,
+    live_cycle_lock: false,
+    cycle_lock_state_known: true,
     classification,
     recovery_mode: classification === 'archive_candidate' ? 'archive_review' : 'manual',
     proposed_command_argv: null,

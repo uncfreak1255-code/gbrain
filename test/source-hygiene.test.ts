@@ -42,6 +42,8 @@ function evidence(overrides: Partial<SourceHygieneEvidence> = {}): SourceHygiene
     work_state_known: true,
     live_sync_lock: false,
     lock_state_known: true,
+    live_cycle_lock: false,
+    cycle_lock_state_known: true,
     ...overrides,
   };
 }
@@ -84,9 +86,11 @@ describe('classifySourceHygieneEvidence', () => {
       [{ configured_default_known: false }, 'configured_default_unknown'],
       [{ nonterminal_work_count: 1 }, 'nonterminal_source_work'],
       [{ live_sync_lock: true }, 'live_sync_lock'],
+      [{ live_cycle_lock: true }, 'live_cycle_lock'],
       [{ dependent_data_known: false, dependent_row_count: null }, 'dependent_data_unknown'],
       [{ work_state_known: false, nonterminal_work_count: null }, 'source_work_unknown'],
       [{ lock_state_known: false, live_sync_lock: null }, 'sync_lock_unknown'],
+      [{ cycle_lock_state_known: false, live_cycle_lock: null }, 'cycle_lock_unknown'],
     ];
 
     for (const [overrides, veto] of cases) {
@@ -201,6 +205,7 @@ describe('inspectSourceHygiene', () => {
   test('remote/no-filesystem mode never invokes path or lock probes and returns privacy-safe evidence', async () => {
     let pathProbeCalls = 0;
     let lockProbeCalls = 0;
+    let cycleLockProbeCalls = 0;
     const engine = makeEngine([
       sourceRow('default', '/private/owner/default-brain', false),
       sourceRow('archived-one', '/private/owner/archived', true),
@@ -212,11 +217,13 @@ describe('inspectSourceHygiene', () => {
       probes: {
         repoState: () => { pathProbeCalls++; return 'healthy'; },
         liveSyncLock: async () => { lockProbeCalls++; return false; },
+        liveCycleLock: async () => { cycleLockProbeCalls++; return false; },
       },
     });
 
     expect(pathProbeCalls).toBe(0);
     expect(lockProbeCalls).toBe(0);
+    expect(cycleLockProbeCalls).toBe(0);
     expect(packet.schema_version).toBe(1);
     expect(packet.filesystem_inspected).toBe(false);
     expect(packet.sources.find((s) => s.source_id === 'default')).toMatchObject({
@@ -245,6 +252,7 @@ describe('inspectSourceHygiene', () => {
       probes: {
         repoState: () => 'missing',
         liveSyncLock: async () => false,
+        liveCycleLock: async () => false,
       },
     });
 
@@ -274,6 +282,7 @@ describe('inspectSourceHygiene', () => {
       probes: {
         repoState: () => 'missing',
         liveSyncLock: async () => { throw new Error('lock table unavailable'); },
+        liveCycleLock: async () => { throw new Error('lock table unavailable'); },
       },
     });
 
@@ -281,6 +290,7 @@ describe('inspectSourceHygiene', () => {
       classification: 'recovery_required',
       work_state_known: false,
       lock_state_known: false,
+      cycle_lock_state_known: false,
       safe_for_agent_review: false,
     });
   });
@@ -295,6 +305,7 @@ describe('inspectSourceHygiene', () => {
       probes: {
         repoState: () => 'missing',
         liveSyncLock: async () => false,
+        liveCycleLock: async () => false,
       },
     });
 
@@ -315,6 +326,7 @@ describe('inspectSourceHygiene', () => {
       probes: {
         repoState: () => 'missing',
         liveSyncLock: async () => false,
+        liveCycleLock: async () => false,
       },
     });
 
@@ -342,6 +354,7 @@ describe('inspectSourceHygiene', () => {
       probes: {
         repoState: () => 'missing',
         liveSyncLock: async () => false,
+        liveCycleLock: async () => false,
       },
     });
 
@@ -420,6 +433,54 @@ describe('archive hygiene execution gate', () => {
 
   afterAll(async () => {
     await db.disconnect();
+  });
+
+  test('source-scoped and legacy global cycle locks veto hygiene archive', async () => {
+    const sourceId = 'cycle-lock-candidate';
+    const missingPath = join(tmpdir(), `gbrain-cycle-lock-${Date.now()}`);
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ($1, $1, $2, '{}'::jsonb)`,
+      [sourceId, missingPath],
+    );
+
+    for (const lockId of [`gbrain-cycle:${sourceId}`, 'gbrain-cycle']) {
+      await db.executeRaw(
+        `INSERT INTO gbrain_cycle_locks
+           (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
+         VALUES ($1, 2001, 'fixture', now() + interval '5 minutes', now())`,
+        [lockId],
+      );
+      const packet = await inspectSourceHygiene(db, { inspectFilesystem: true });
+      expect(packet.sources.find((source) => source.source_id === sourceId)).toMatchObject({
+        classification: 'recovery_required',
+        live_cycle_lock: true,
+        cycle_lock_state_known: true,
+        safe_for_agent_review: false,
+      });
+      expect(packet.sources.find((source) => source.source_id === sourceId)?.veto_reasons)
+        .toContain('live_cycle_lock');
+      await db.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]);
+    }
+  });
+
+  test('database guard rejects source-scoped and global cycle locks after archive drain begins', async () => {
+    const sourceId = 'cycle-lock-during-drain';
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ($1, $1, '{}'::jsonb)`,
+      [sourceId],
+    );
+    const drain = await beginSourceArchiveDrain(db, sourceId);
+    expect(drain).not.toBeNull();
+
+    for (const lockId of [`gbrain-cycle:${sourceId}`, 'gbrain-cycle']) {
+      await expect(db.executeRaw(
+        `INSERT INTO gbrain_cycle_locks
+           (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
+         VALUES ($1, 2002, 'fixture', now() + interval '5 minutes', now())`,
+        [lockId],
+      )).rejects.toThrow(/archived or draining|global cycle lock.*draining/);
+    }
   });
 
   test('a committed drain is visible, resumable, and does not survive restore', async () => {
@@ -595,6 +656,7 @@ describe('archive hygiene execution gate', () => {
       probes: {
         repoState: () => 'missing',
         liveSyncLock: async () => false,
+        liveCycleLock: async () => false,
       },
     });
 
@@ -631,6 +693,15 @@ describe('archive hygiene execution gate', () => {
     expect(
       migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
     ).toHaveLength(2);
+
+    const cycleLockMigration = MIGRATIONS.find((entry) => entry.version === 134);
+    expect(cycleLockMigration?.name).toBe('source_cycle_lock_archive_guard');
+    expect(cycleLockMigration?.idempotent).toBe(true);
+    expect(cycleLockMigration?.sql).toContain("lock_ref LIKE 'gbrain-cycle:%'");
+    expect(cycleLockMigration?.sql).toContain("lock_ref = 'gbrain-cycle'");
+    expect(cycleLockMigration?.sql).toContain('Cannot acquire global cycle lock while source % is draining');
+    expect(cycleLockMigration?.sql).toContain('enforce_active_source_lock_fn');
+    expect(cycleLockMigration?.sql).toContain('pg_advisory_xact_lock_shared');
 
     const uncovered = await db.executeRaw<{ table_name: string }>(
       `SELECT c.table_name
@@ -1168,7 +1239,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '130');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(3);
+    expect(result.applied).toBe(4);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -1216,7 +1287,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '131');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(2);
+    expect(result.applied).toBe(3);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -1236,7 +1307,7 @@ describe('archive hygiene execution gate', () => {
     expect(jobDefinitions[0]?.definition).toContain('path_source_refs_after');
   });
 
-  test('PGLite schema replay preserves the final v132 guards on an already-upgraded brain', async () => {
+  test('PGLite schema replay preserves the final source guards on an already-upgraded brain', async () => {
     const assertHardenedGuards = async () => {
       const hardened = await db.executeRaw<{ proname: string; proconfig: string[] | null }>(
         `SELECT proname, proconfig

@@ -7128,6 +7128,93 @@ export const MIGRATIONS: Migration[] = [
       $install$;
     `,
   },
+  {
+    version: 134,
+    name: 'source_cycle_lock_archive_guard',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_lock_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        lock_ref TEXT;
+        lock_refs TEXT[] := ARRAY[to_jsonb(NEW)->>'id'];
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        legacy_cycle_lock BOOLEAN := false;
+        draining_source_ref TEXT;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE' THEN
+          lock_refs := lock_refs || ARRAY[to_jsonb(OLD)->>'id'];
+        END IF;
+
+        FOREACH lock_ref IN ARRAY lock_refs LOOP
+          IF lock_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(lock_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          ELSIF lock_ref LIKE 'gbrain-cycle:%' THEN
+            source_ref := substring(lock_ref FROM length('gbrain-cycle:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          ELSIF lock_ref = 'gbrain-cycle' THEN
+            legacy_cycle_lock := true;
+          END IF;
+        END LOOP;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 OR legacy_cycle_lock THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        IF legacy_cycle_lock THEN
+          SELECT id
+            INTO draining_source_ref
+            FROM public.sources
+           WHERE archived IS NOT TRUE
+             AND embedding_drain_token IS NOT NULL
+           ORDER BY id
+           LIMIT 1
+           FOR SHARE;
+          IF FOUND THEN
+            RAISE EXCEPTION 'Cannot acquire global cycle lock while source % is draining',
+              draining_source_ref USING ERRCODE = '23503';
+          END IF;
+        END IF;
+
+        FOR source_ref, source_archived, source_draining IN
+          SELECT id, archived, embedding_drain_token IS NOT NULL
+            FROM public.sources
+           WHERE id = ANY(source_refs)
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          IF source_archived OR source_draining THEN
+            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
+              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_active_sync_lock_guard ON public.gbrain_cycle_locks;
+      CREATE TRIGGER source_active_sync_lock_guard
+        BEFORE INSERT OR UPDATE ON public.gbrain_cycle_locks
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_lock_fn();
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

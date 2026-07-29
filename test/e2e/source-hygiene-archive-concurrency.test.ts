@@ -774,6 +774,8 @@ describeE2E('source hygiene archive/write concurrency', () => {
     const compatibilityGuard = MIGRATIONS.find((entry) => entry.version === 129);
     const finalGuard = MIGRATIONS.find((entry) => entry.version === 130);
     const indirectGuard = MIGRATIONS.find((entry) => entry.version === 132);
+    const providerDrainGuard = MIGRATIONS.find((entry) => entry.version === 133);
+    const cycleLockGuard = MIGRATIONS.find((entry) => entry.version === 134);
     expect(referenceGuard?.sql).toBeDefined();
     expect(jobGuard?.sql).toBeDefined();
     expect(continuationGuard?.sql).toBeDefined();
@@ -781,6 +783,8 @@ describeE2E('source hygiene archive/write concurrency', () => {
     expect(compatibilityGuard?.sql).toBeDefined();
     expect(finalGuard?.sql).toBeDefined();
     expect(indirectGuard?.sql).toBeDefined();
+    expect(providerDrainGuard?.sql).toBeDefined();
+    expect(cycleLockGuard?.sql).toBeDefined();
 
     const writer = new PostgresEngine();
     const archiver = new PostgresEngine();
@@ -915,6 +919,8 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await writer.runMigration(128, ownedRowGuard!.sql!);
       await writer.runMigration(130, finalGuard!.sql!);
       await writer.runMigration(132, indirectGuard!.sql!);
+      await writer.runMigration(133, providerDrainGuard!.sql!);
+      await writer.runMigration(134, cycleLockGuard!.sql!);
       await writer.executeRaw(
         `DELETE FROM minion_jobs
           WHERE name IN ('v126-missing-source-e2e', 'v126-lock-missing-source-e2e',
@@ -1225,6 +1231,83 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await writer.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]).catch(() => {});
       await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
       await Promise.all([writer.disconnect(), archiver.disconnect()]);
+    }
+  }, 30_000);
+
+  test('live source-cycle acquisition commits before archive rereads and vetoes', async () => {
+    const sourceId = 'archive-cycle-lock-first-e2e';
+    const lockId = `gbrain-cycle:${sourceId}`;
+    const writer = new PostgresEngine();
+    const archiver = new PostgresEngine();
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+    await archiver.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await writer.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]);
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]);
+      await writer.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+         VALUES ($1, $1, $2, '{}'::jsonb)`,
+        [sourceId, `/tmp/gbrain-${sourceId}-missing`],
+      );
+
+      const lockReady = deferred();
+      const releaseLockWriter = deferred();
+      const lockTx = writer.transaction(async (tx) => {
+        await tx.executeRaw(
+          `INSERT INTO gbrain_cycle_locks
+             (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
+           VALUES ($1, 2003, 'fixture', now() + interval '5 minutes', now())`,
+          [lockId],
+        );
+        lockReady.resolve();
+        await releaseLockWriter.promise;
+      });
+      await lockReady.promise;
+
+      let archiveSettled = false;
+      const archiveAttempt = archiveHygieneCandidate(archiver, sourceId)
+        .finally(() => { archiveSettled = true; });
+      await wait(100);
+      expect(archiveSettled).toBe(false);
+
+      releaseLockWriter.resolve();
+      await lockTx;
+      const result = await archiveAttempt;
+      expect(result.result).toBeNull();
+      expect(result.reason).toContain('live_cycle_lock');
+    } finally {
+      await writer.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([writer.disconnect(), archiver.disconnect()]);
+    }
+  }, 30_000);
+
+  test('global cycle lock rejects after any source drain commits', async () => {
+    const sourceId = 'archive-global-cycle-after-drain-e2e';
+    const lockId = 'gbrain-cycle';
+    const writer = new PostgresEngine();
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await writer.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]);
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]);
+      await writer.executeRaw(
+        `INSERT INTO sources (id, name, config) VALUES ($1, $1, '{}'::jsonb)`,
+        [sourceId],
+      );
+      expect(await beginSourceArchiveDrain(writer, sourceId)).not.toBeNull();
+
+      await expect(writer.executeRaw(
+        `INSERT INTO gbrain_cycle_locks
+           (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
+         VALUES ($1, 2004, 'fixture', now() + interval '5 minutes', now())`,
+        [lockId],
+      )).rejects.toThrow(/global cycle lock.*draining/);
+    } finally {
+      await writer.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await writer.disconnect();
     }
   }, 30_000);
 
