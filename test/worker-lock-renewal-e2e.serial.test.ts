@@ -47,14 +47,14 @@ process.env.GBRAIN_AUDIT_DIR = auditDir;
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
-let originalExecuteRaw: PGLiteEngine['executeRaw'];
+let originalExecuteRawDirect: PGLiteEngine['executeRawDirect'];
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({ database_url: '' });
   await engine.initSchema();
   queue = new MinionQueue(engine);
-  originalExecuteRaw = engine.executeRaw.bind(engine);
+  originalExecuteRawDirect = engine.executeRawDirect.bind(engine);
 });
 
 afterAll(async () => {
@@ -72,17 +72,19 @@ describe('H: gold-standard regression — worker survives renewLock throws', () 
     await engine.executeRaw('DELETE FROM minion_jobs');
     await queue.add('long-runner', {});
 
-    // Wrap executeRaw to inject renewLock failures. The renewLock SQL
+    // Wrap the dedicated claim/renewal path to inject renewLock failures.
+    // Leaving executeRaw untouched preserves PGLite transaction receivers.
+    // The renewLock SQL
     // shape (`UPDATE minion_jobs SET lock_until = now() + ...`) is narrow
     // enough to skip claim / completeJob / failJob / etc.
     let throwsRemaining = 50;
     let renewLockCallCount = 0;
-    (engine as { executeRaw: PGLiteEngine['executeRaw'] }).executeRaw = async (
+    (engine as { executeRawDirect: PGLiteEngine['executeRawDirect'] }).executeRawDirect = async (
       sql: string,
       params?: unknown[],
       opts?: { signal?: AbortSignal },
     ) => {
-      const isRenewLock = sql.includes('SET lock_until = now()') && sql.includes('lock_token');
+      const isRenewLock = sql.includes('UPDATE minion_jobs SET lock_until = now()');
       if (isRenewLock) {
         renewLockCallCount++;
         if (throwsRemaining > 0) {
@@ -90,7 +92,7 @@ describe('H: gold-standard regression — worker survives renewLock throws', () 
           throw new Error('simulated PgBouncer connection drop');
         }
       }
-      return originalExecuteRaw(sql, params, opts);
+      return originalExecuteRawDirect(sql, params, opts);
     };
 
     // Short lockDuration → 50ms timer interval, abort deadline at
@@ -166,7 +168,7 @@ describe('H: gold-standard regression — worker survives renewLock throws', () 
       expect(gaveUp[0].error_message_summary).toMatch(/simulated PgBouncer/);
     } finally {
       process.off('unhandledRejection', rejectionListener);
-      (engine as { executeRaw: PGLiteEngine['executeRaw'] }).executeRaw = originalExecuteRaw;
+      (engine as { executeRawDirect: PGLiteEngine['executeRawDirect'] }).executeRawDirect = originalExecuteRawDirect;
       worker.stop();
       await Promise.race([p, new Promise((r) => setTimeout(r, 2000))]);
     }

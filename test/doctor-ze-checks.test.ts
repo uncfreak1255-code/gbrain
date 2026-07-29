@@ -143,11 +143,14 @@ describe('checkEmbeddingWidthConsistency', () => {
   });
 
   test('gateway unconfigured: skips with ok', async () => {
-    // Reset gateway so requireConfig() throws.
-    const { resetGateway } = await import('../src/core/ai/gateway.ts');
-    resetGateway();
-    const check = await checkEmbeddingWidthConsistency(engine);
-    expect(check.status).toBe('ok');
-    expect(check.message).toContain('gateway not configured');
+    const { __unconfigureGatewayForTests, resetGateway } = await import('../src/core/ai/gateway.ts');
+    __unconfigureGatewayForTests();
+    try {
+      const check = await checkEmbeddingWidthConsistency(engine);
+      expect(check.status).toBe('ok');
+      expect(check.message).toContain('gateway not configured');
+    } finally {
+      resetGateway();
+    }
   });
 });

@@ -540,8 +540,22 @@ function warnRecipesMissingBatchTokens(): void {
   }
 }
 
-/** Reset (for tests). */
-export function resetGateway(): void {
+/**
+ * Test-only reset baseline. The bun test preload registers the legacy
+ * OpenAI/1536 configuration so one test file cannot leave the next file's
+ * beforeAll hook to initialize a 1280-d schema under 1536-d fixtures.
+ * Production never registers this factory, so resetGateway still fully
+ * unconfigures there.
+ */
+let _resetBaseline: (() => AIGatewayConfig) | null = null;
+
+export function __setGatewayResetBaselineForTests(
+  factory: (() => AIGatewayConfig) | null,
+): void {
+  _resetBaseline = factory;
+}
+
+function clearGatewayState(): void {
   _config = null;
   _modelCache.clear();
   _shrinkState.clear();
@@ -550,6 +564,17 @@ export function resetGateway(): void {
   _chatTransport = null;
   _warnedRecipes.clear();
   _extendedModels.clear();
+}
+
+/** Reset module state and restore the registered test baseline, if any. */
+export function resetGateway(): void {
+  clearGatewayState();
+  if (_resetBaseline) configureGateway(_resetBaseline());
+}
+
+/** Test-only hard reset for assertions that require no gateway config. */
+export function __unconfigureGatewayForTests(): void {
+  clearGatewayState();
 }
 
 /**

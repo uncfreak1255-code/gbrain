@@ -18,7 +18,11 @@
  * `configureGateway()` explicitly in their own beforeAll, which
  * overwrites this preload.
  */
-import { configureGateway, getEmbeddingDimensions } from '../../src/core/ai/gateway.ts';
+import {
+  configureGateway,
+  getEmbeddingDimensions,
+  __setGatewayResetBaselineForTests,
+} from '../../src/core/ai/gateway.ts';
 import { beforeEach } from 'bun:test';
 
 const LEGACY_CONFIG = {
@@ -26,12 +30,16 @@ const LEGACY_CONFIG = {
   embedding_dimensions: 1536,
 } as const;
 
-function applyLegacy() {
-  configureGateway({
+function legacyGatewayConfig() {
+  return {
     embedding_model: LEGACY_CONFIG.embedding_model,
     embedding_dimensions: LEGACY_CONFIG.embedding_dimensions,
     env: { ...process.env },
-  });
+  };
+}
+
+function applyLegacy() {
+  configureGateway(legacyGatewayConfig());
 }
 
 if (process.env.GBRAIN_DEBUG_PRELOAD === '1') {
@@ -40,6 +48,11 @@ if (process.env.GBRAIN_DEBUG_PRELOAD === '1') {
 
 // Initial application — covers tests that don't reset the gateway.
 applyLegacy();
+
+// Keep resetGateway() at the process-wide test baseline. The factory captures
+// fresh environment values on every reset while preserving the 1536-d schema
+// contract expected by legacy fixtures.
+__setGatewayResetBaselineForTests(legacyGatewayConfig);
 
 // Per-test re-application — handles tests that call `resetGateway()`
 // in their setup/teardown. Bun's preload allows registering global
