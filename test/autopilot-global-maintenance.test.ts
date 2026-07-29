@@ -96,6 +96,26 @@ describe('autopilot global-maintenance throttle split', () => {
     expect(decision.shouldDispatchGlobalMaintenance).toBe(false);
   });
 
+  test('source recovery blocks low-score and hourly-floor full cycles', () => {
+    for (const input of [
+      { score: 50, minutesSinceLastFull: 10 },
+      { score: 99, minutesSinceLastFull: 61 },
+    ]) {
+      const decision = decideAutopilotDispatch({
+        ...input,
+        planLength: 0,
+        estTotal: 0,
+        globalMaintenanceDue: true,
+        sourceRecoveryBlocked: true,
+        fullCycleFloorMin: 60,
+      });
+
+      expect(decision.shouldFullCycle).toBe(false);
+      expect(decision.shouldSleep).toBe(true);
+      expect(decision.shouldDispatchGlobalMaintenance).toBe(false);
+    }
+  });
+
   test('global due reads autopilot.last_global_at with the configured floor', async () => {
     const now = Date.UTC(2026, 5, 16, 12, 0, 0);
     const engine = {

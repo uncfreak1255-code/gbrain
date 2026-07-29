@@ -1737,6 +1737,25 @@ export async function registerBuiltinHandlers(
       }
     }
 
+    // Claim-time defense in depth: a source can enter recovery after the
+    // daemon queued this job. Re-read current filesystem + DB evidence before
+    // allowing any full-cycle primitive to run paid or protected phases.
+    const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+    const sourceHygiene = await inspectSourceHygiene(engine, { inspectFilesystem: true });
+    const recoverySourceIds = sourceHygiene.sources
+      .filter((source) => source.classification === 'recovery_required')
+      .map((source) => source.source_id);
+    if (recoverySourceIds.length > 0) {
+      return {
+        partial: false,
+        status: 'skipped',
+        report: {
+          reason: 'source_hygiene_blocked',
+          source_ids: recoverySourceIds,
+        },
+      };
+    }
+
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull,
@@ -1773,6 +1792,24 @@ export async function registerBuiltinHandlers(
       ? (job.data.phases as string[]).filter((p) => validPhases.has(p as never))
       : GLOBAL_PHASES;
     const phases = (requested.length > 0 ? requested : GLOBAL_PHASES) as typeof GLOBAL_PHASES;
+
+    // A previously queued global job must not outlive a newly discovered
+    // recovery requirement and start spend-capable brain-wide work.
+    const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+    const sourceHygiene = await inspectSourceHygiene(engine, { inspectFilesystem: true });
+    const recoverySourceIds = sourceHygiene.sources
+      .filter((source) => source.classification === 'recovery_required')
+      .map((source) => source.source_id);
+    if (recoverySourceIds.length > 0) {
+      return {
+        partial: false,
+        status: 'skipped',
+        report: {
+          reason: 'source_hygiene_blocked',
+          source_ids: recoverySourceIds,
+        },
+      };
+    }
 
     const report = await runCycle(engine, {
       brainDir: repoPath,

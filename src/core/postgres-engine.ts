@@ -94,6 +94,8 @@ export function getPostgresSchema(
 export class PostgresEngine implements BrainEngine {
   readonly kind = 'postgres' as const;
   private _sql: ReturnType<typeof postgres> | null = null;
+  /** True only on the scoped clone passed to BrainEngine.transaction(). */
+  private _inTransaction = false;
   /** Saved config for reconnection. */
   private _savedConfig: (EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }) | null = null;
   /** Whether a reconnect is in progress (prevents concurrent reconnects). */
@@ -888,6 +890,7 @@ export class PostgresEngine implements BrainEngine {
       const txEngine = Object.create(this) as PostgresEngine;
       Object.defineProperty(txEngine, 'sql', { get: () => tx });
       Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
+      Object.defineProperty(txEngine, '_inTransaction', { value: true });
       return fn(txEngine);
     }) as Promise<T>;
   }
@@ -3812,7 +3815,7 @@ export class PostgresEngine implements BrainEngine {
     // readable; batch sizes are small (5-30 rows per page in practice).
     // No supersede flow in this path — fence reconciliation is the
     // canonical source-of-truth direction, not the consolidator path.
-    const ids = await sql.begin(async (tx) => {
+    const insertRows = async (tx: postgres.TransactionSql) => {
       const out: number[] = [];
       for (const input of rows) {
         const validFrom = input.valid_from ?? new Date();
@@ -3855,7 +3858,12 @@ export class PostgresEngine implements BrainEngine {
         out.push(Number(ins[0].id));
       }
       return out;
-    });
+    };
+    // A page reconciliation owns a wider delete+insert transaction. Reuse its
+    // scoped connection instead of opening an independent nested transaction.
+    const ids = this._inTransaction
+      ? await insertRows(sql as unknown as postgres.TransactionSql)
+      : await sql.begin(insertRows) as number[];
     return { inserted: ids.length, ids };
   }
 

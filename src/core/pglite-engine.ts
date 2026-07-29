@@ -244,6 +244,8 @@ async function preservingProcessExitCode<T>(fn: () => Promise<T>): Promise<T> {
 export class PGLiteEngine implements BrainEngine {
   readonly kind = 'pglite' as const;
   private _db: PGLiteDB | null = null;
+  /** True only on the scoped clone passed to BrainEngine.transaction(). */
+  private _inTransaction = false;
   private _lock: LockHandle | null = null;
   // #2034: captured at connect() so reconnect() can restore the same data dir
   // after a drop, matching PostgresEngine's _savedConfig contract.
@@ -933,6 +935,7 @@ export class PGLiteEngine implements BrainEngine {
     return this.db.transaction(async (tx) => {
       const txEngine = Object.create(this) as PGLiteEngine;
       Object.defineProperty(txEngine, 'db', { get: () => tx });
+      Object.defineProperty(txEngine, '_inTransaction', { value: true });
       return fn(txEngine);
     });
   }
@@ -3710,7 +3713,7 @@ export class PGLiteEngine implements BrainEngine {
     // VALUES) keep the embedding-vs-no-embedding branching readable; batch
     // sizes are small (5-30 rows per page in practice) so the loop overhead
     // is negligible vs the embedding compute cost.
-    const ids = await this.db.transaction(async (tx) => {
+    const insertRows = async (tx: Transaction) => {
       const out: number[] = [];
       for (const input of rows) {
         const validFrom = input.valid_from ?? new Date();
@@ -3774,7 +3777,12 @@ export class PGLiteEngine implements BrainEngine {
         out.push(ins.rows[0].id);
       }
       return out;
-    });
+    };
+    // A page reconciliation owns a wider delete+insert transaction. Reuse its
+    // scoped connection instead of attempting a nested PGLite transaction.
+    const ids = this._inTransaction
+      ? await insertRows(this.db as unknown as Transaction)
+      : await this.db.transaction(insertRows);
     return { inserted: ids.length, ids };
   }
 
