@@ -298,6 +298,7 @@ async function runPipelineWithBody(
     sessionId: ctx.sessionId,
     entityHints: ctx.entityHints,
     source: ctx.source,
+    sourceId: ctx.sourceId,
     isDreamGenerated: input.isDreamGenerated,
     engine: ctx.engine,
     abortSignal,

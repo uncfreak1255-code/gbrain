@@ -15,6 +15,7 @@ function decision(
   return {
     source_id: sourceId,
     archived: false,
+    draining: false,
     has_local_path: true,
     shared_path_source_count: 1,
     repo_state: classification === 'healthy' ? 'healthy' : 'missing',
@@ -56,6 +57,24 @@ describe('source-hygiene advisor collector', () => {
       ask_user: true,
     });
     expect(findings[0]?.fix.command_argv).toBeNull();
+  });
+
+  test('surfaces an interrupted drain as an agent-runnable archive resume', () => {
+    const findings = sourceHygieneFindings(packet([
+      decision('stuck-drain', 'recovery_required', {
+        draining: true,
+        recovery_mode: 'archive_resume',
+        proposed_command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'],
+        safe_for_agent_review: true,
+      }),
+    ]));
+
+    expect(findings[0]).toMatchObject({
+      id: 'source_recovery_required:stuck-drain',
+      severity: 'warn',
+      ask_user: false,
+      fix: { command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'] },
+    });
   });
 
   test('marks a proven empty source as agent-reviewable soft archive', () => {

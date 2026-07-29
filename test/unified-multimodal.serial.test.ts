@@ -19,6 +19,13 @@ import {
 } from '../src/core/ai/gateway.ts';
 import { hybridSearch } from '../src/core/search/hybrid.ts';
 import { runReindexMultimodal } from '../src/commands/reindex-multimodal.ts';
+import {
+  beginSourceArchiveDrain,
+  cancelSourceArchiveDrain,
+} from '../src/core/source-embedding-lease.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let engine: PGLiteEngine;
 let fetchHandler: ((url: string, init: RequestInit) => Promise<Response>) | null = null;
@@ -96,6 +103,144 @@ describe('reindex --multimodal command (Phase 3)', () => {
     expect(result.pending_before).toBe(0);
     expect(result.reembedded).toBe(0);
     expect(result.failed).toBe(0);
+  });
+
+  test('partitions mixed-source rows and holds the exact source lease during each provider call', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $2), ($3, $4)`,
+      ['source-alpha', 'Source Alpha', 'source-beta', 'Source Beta'],
+    );
+    const pageInput = (title: string) => ({
+      type: 'topic',
+      title,
+      compiled_truth: title,
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.putPage('topics/alpha', pageInput('alpha provider payload'), { sourceId: 'source-alpha' });
+    await engine.upsertChunks('topics/alpha', [{
+      chunk_index: 0,
+      chunk_text: 'alpha provider payload',
+      chunk_source: 'compiled_truth',
+    }], { sourceId: 'source-alpha' });
+    await engine.putPage('topics/beta', pageInput('beta provider payload'), { sourceId: 'source-beta' });
+    await engine.upsertChunks('topics/beta', [{
+      chunk_index: 0,
+      chunk_text: 'beta provider payload',
+      chunk_source: 'compiled_truth',
+    }], { sourceId: 'source-beta' });
+
+    const providerSources: string[] = [];
+    fetchHandler = async (_url, init) => {
+      const request = JSON.parse(String(init.body)) as {
+        inputs: Array<{ content: Array<{ text?: string }> }>;
+      };
+      const texts = request.inputs.map((input) => input.content[0]?.text ?? '');
+      const expectedSource = texts.every((text) => text.includes('alpha'))
+        ? 'source-alpha'
+        : texts.every((text) => text.includes('beta'))
+          ? 'source-beta'
+          : 'mixed';
+      const leases = await engine.executeRaw<{ source_id: string }>(
+        `SELECT source_id FROM source_embedding_leases ORDER BY source_id`,
+      );
+      expect(expectedSource).not.toBe('mixed');
+      expect(leases.map((row) => row.source_id)).toEqual([expectedSource]);
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      providerSources.push(expectedSource);
+      return new Response(JSON.stringify({
+        data: request.inputs.map(() => ({ embedding: Array.from({ length: 1024 }, () => 0.1) })),
+      }), { status: 200 });
+    };
+
+    const isolatedHome = mkdtempSync(join(tmpdir(), 'gbrain-mm-lease-'));
+    const result = await withEnv({ GBRAIN_HOME: isolatedHome }, () =>
+      runReindexMultimodal(engine, { yes: true }));
+
+    expect(result.reembedded).toBe(2);
+    expect(result.failed).toBe(0);
+    expect(providerSources.sort()).toEqual(['source-alpha', 'source-beta']);
+    expect(await engine.executeRaw(`SELECT lease_token FROM source_embedding_leases`)).toEqual([]);
+  });
+
+  test('draining sources are excluded from pending, cost, fetch, and completion coverage', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $2), ($3, $4)`,
+      ['active-source', 'Active Source', 'draining-source', 'Draining Source'],
+    );
+    const pageInput = (title: string) => ({
+      type: 'topic',
+      title,
+      compiled_truth: title,
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.putPage('topics/active', pageInput('active payload'), { sourceId: 'active-source' });
+    await engine.upsertChunks('topics/active', [{
+      chunk_index: 0,
+      chunk_text: 'active payload',
+      chunk_source: 'compiled_truth',
+    }], { sourceId: 'active-source' });
+    await engine.putPage(
+      'topics/draining',
+      pageInput('draining payload'),
+      { sourceId: 'draining-source' },
+    );
+    await engine.upsertChunks('topics/draining', [{
+      chunk_index: 0,
+      chunk_text: 'draining payload '.repeat(500),
+      chunk_source: 'compiled_truth',
+    }], { sourceId: 'draining-source' });
+
+    const drain = await beginSourceArchiveDrain(engine, 'draining-source');
+    expect(drain).not.toBeNull();
+    const isolatedHome = mkdtempSync(join(tmpdir(), 'gbrain-mm-drain-filter-'));
+
+    try {
+      const estimate = await withEnv({ GBRAIN_HOME: isolatedHome }, () =>
+        runReindexMultimodal(engine, { costEstimate: true }));
+      expect(estimate.pending_before).toBe(1);
+      expect(estimate.cost_usd_estimate).toBeCloseTo(
+        ('active payload'.length / 3.5 / 1_000_000) * 0.18,
+        12,
+      );
+
+      const providerTexts: string[][] = [];
+      fetchHandler = async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as {
+          inputs: Array<{ content: Array<{ text?: string }> }>;
+        };
+        const texts = body.inputs.map(input => input.content[0]?.text ?? '');
+        providerTexts.push(texts);
+        return new Response(JSON.stringify({
+          data: texts.map(() => ({ embedding: Array.from({ length: 1024 }, () => 0.1) })),
+        }), { status: 200 });
+      };
+
+      const result = await withEnv({ GBRAIN_HOME: isolatedHome }, () =>
+        runReindexMultimodal(engine, { yes: true }));
+      expect(result.pending_before).toBe(1);
+      expect(result.pending_after).toBe(0);
+      expect(result.reembedded).toBe(1);
+      expect(providerTexts).toEqual([['active payload']]);
+
+      const coverage = await engine.executeRaw<{
+        source_id: string;
+        embedded: boolean;
+      }>(
+        `SELECT page.source_id, chunk.embedding_multimodal IS NOT NULL AS embedded
+           FROM content_chunks chunk
+           JOIN pages page ON page.id = chunk.page_id
+          WHERE page.source_id IN ('active-source', 'draining-source')
+          ORDER BY page.source_id`,
+      );
+      expect(coverage).toEqual([
+        { source_id: 'active-source', embedded: true },
+        { source_id: 'draining-source', embedded: false },
+      ]);
+    } finally {
+      if (drain) await cancelSourceArchiveDrain(engine, drain);
+    }
   });
 });
 

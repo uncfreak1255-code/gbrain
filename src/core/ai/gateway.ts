@@ -52,6 +52,7 @@ import { dimsProviderOptions } from './dims.ts';
 import { hasAnthropicKey } from './anthropic-key.ts';
 import { AIConfigError, AITransientError, normalizeAIError } from './errors.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
+import { anySignal } from '../abort-check.ts';
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
 //
@@ -1351,6 +1352,17 @@ export interface EmbedOpts {
    * rejects the insert/search. NULL preserves the global-default.
    */
   dimensions?: number;
+  /**
+   * Optional fence around each real text-embedding provider submission.
+   * The gateway invokes this at the `embedSubBatch` boundary, after its
+   * recipe pre-split and again for every recursive token-limit retry. The
+   * callback can therefore acquire a short durable source lease without
+   * holding a database transaction over the provider request.
+   */
+  withProviderSubmission?: (
+    texts: string[],
+    submit: (leaseSignal?: AbortSignal) => Promise<Float32Array[]>,
+  ) => Promise<Float32Array[]>;
 }
 
 export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32Array[]> {
@@ -1557,7 +1569,10 @@ async function embedSubBatch(
   modelId: string,
   opts?: EmbedOpts,
 ): Promise<Float32Array[]> {
-  try {
+  const submit = async (leaseSignal?: AbortSignal): Promise<Float32Array[]> => {
+    const callerSignal = leaseSignal
+      ? anySignal(leaseSignal, opts?.abortSignal)
+      : opts?.abortSignal;
     const callTransport = () => _embedTransport({
       model,
       values: texts,
@@ -1566,37 +1581,52 @@ async function embedSubBatch(
       // once at embed() top would cap a whole multi-batch import; this is the
       // per-SDK-call scope). Composes with a caller signal (Fix 3's 6s query
       // deadline) — shorter wins.
-      abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
+      abortSignal: withDefaultTimeout(callerSignal, AI_EMBED_TIMEOUT_MS),
       ...(opts?.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
     });
-    // Carry the threaded input_type across the SDK boundary via
-    // __embedInputTypeStore (the adapter strips it from providerOptions —
-    // see the store's doc comment). Populated only when dimsProviderOptions
-    // actually emitted one, so non-asymmetric paths run store-empty and the
-    // fetch shims leave their wire bodies untouched.
-    const threadedInputType = providerOpts?.openaiCompatible?.input_type;
-    const result = await (threadedInputType === 'query' || threadedInputType === 'document'
-      ? __embedInputTypeStore.run(threadedInputType, callTransport)
-      : callTransport());
 
-    if (!Array.isArray(result.embeddings) || result.embeddings.length !== texts.length) {
-      throw new AIConfigError(
-        `Embedding provider returned ${result.embeddings?.length ?? 0} embedding(s) for ${texts.length} input(s).`,
-        `Retry the import after checking provider health; partial embedding responses are not safe to index.`,
-      );
-    }
+    try {
+      // Carry the threaded input_type across the SDK boundary via
+      // __embedInputTypeStore (the adapter strips it from providerOptions —
+      // see the store's doc comment). Populated only when dimsProviderOptions
+      // actually emitted one, so non-asymmetric paths run store-empty and the
+      // fetch shims leave their wire bodies untouched.
+      const threadedInputType = providerOpts?.openaiCompatible?.input_type;
+      const result = await (threadedInputType === 'query' || threadedInputType === 'document'
+        ? __embedInputTypeStore.run(threadedInputType, callTransport)
+        : callTransport());
 
-    for (const embedding of result.embeddings) {
-      if (Array.isArray(embedding) && embedding.length !== expectedDims) {
+      if (!Array.isArray(result.embeddings) || result.embeddings.length !== texts.length) {
         throw new AIConfigError(
-          `Embedding dim mismatch: model ${modelId} returned ${embedding.length} but schema expects ${expectedDims}.`,
-          `Run \`gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${embedding.length}\` or change models.`,
+          `Embedding provider returned ${result.embeddings?.length ?? 0} embedding(s) for ${texts.length} input(s).`,
+          `Retry the import after checking provider health; partial embedding responses are not safe to index.`,
         );
       }
-    }
 
-    recordSubBatchSuccess(recipe);
-    return result.embeddings.map((e: number[]) => new Float32Array(e));
+      for (const embedding of result.embeddings) {
+        if (Array.isArray(embedding) && embedding.length !== expectedDims) {
+          throw new AIConfigError(
+            `Embedding dim mismatch: model ${modelId} returned ${embedding.length} but schema expects ${expectedDims}.`,
+            `Run \`gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${embedding.length}\` or change models.`,
+          );
+        }
+      }
+
+      recordSubBatchSuccess(recipe);
+      return result.embeddings.map((e: number[]) => new Float32Array(e));
+    } catch (err) {
+      // Normalize only provider/response failures inside the submit closure.
+      // Errors thrown by withProviderSubmission itself (for example, a source
+      // beginning to drain before lease acquisition/completion) must retain
+      // their source-lifecycle identity and recovery text.
+      throw normalizeAIError(err, `embed(${recipe.id}:${modelId})`);
+    }
+  };
+
+  try {
+    return opts?.withProviderSubmission
+      ? await opts.withProviderSubmission(texts, submit)
+      : await submit();
   } catch (err) {
     // On token-limit error, tighten the recipe's effective safety factor
     // (so the next embed() pre-splits smaller) and recursively halve THIS
@@ -1608,13 +1638,13 @@ async function embedSubBatch(
       const right = await embedSubBatch(texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts);
       return [...left, ...right];
     }
-    throw normalizeAIError(err, `embed(${recipe.id}:${modelId})`);
+    throw err;
   }
 }
 
 /** Embed one text (convenience wrapper). */
-export async function embedOne(text: string): Promise<Float32Array> {
-  const [v] = await embed([text]);
+export async function embedOne(text: string, opts?: EmbedOpts): Promise<Float32Array> {
+  const [v] = await embed([text], opts);
   return v;
 }
 
@@ -1769,61 +1799,71 @@ export async function embedMultimodal(
       input_type: inputType,
     };
 
-    let res: Response;
-    try {
-      res = await fetch(`${baseUrl}/multimodalembeddings`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
-        // v0.42.20.0 (codex #4) — per-request multimodal timeout (direct fetch
-        // bypasses the SDK abortSignal).
-        signal: AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
+    const submit = async (leaseSignal?: AbortSignal): Promise<Float32Array[]> => {
+      let res: Response;
+      try {
+        const callerSignal = leaseSignal
+          ? anySignal(leaseSignal, opts.abortSignal)
+          : opts.abortSignal;
+        res = await fetch(`${baseUrl}/multimodalembeddings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(body),
+          // v0.42.20.0 (codex #4) — per-request multimodal timeout (direct
+          // fetch bypasses the SDK abortSignal). Source-owned callers compose
+          // their lease-loss signal here before the timeout backstop.
+          signal: withDefaultTimeout(callerSignal, AI_MULTIMODAL_TIMEOUT_MS),
+        });
+      } catch (err) {
+        throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${parsed.modelId})`);
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        if (res.status === 401 || res.status === 403) {
+          throw new AIConfigError(
+            `Voyage multimodal returned ${res.status}: ${text || 'auth failed'}.`,
+            `Re-export ${recipe.auth_env?.required[0]} or rotate the key at ${recipe.auth_env?.setup_url}.`,
+          );
+        }
+        // 429 / 5xx are transient; let the caller retry.
+        throw new AITransientError(
+          `Voyage multimodal returned ${res.status}: ${text || 'transient error'}.`,
+        );
+      }
+
+      let parsedBody: { data?: Array<{ embedding: number[] }> };
+      try {
+        parsedBody = (await res.json()) as { data?: Array<{ embedding: number[] }> };
+      } catch (err) {
+        throw new AITransientError(
+          `Voyage multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
+        );
+      }
+      if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length !== batch.length) {
+        throw new AITransientError(
+          `Voyage multimodal returned unexpected payload shape (expected ${batch.length} embeddings).`,
+        );
+      }
+
+      return parsedBody.data.map((row) => {
+        if (!Array.isArray(row.embedding) || row.embedding.length !== targetDims) {
+          throw new AIConfigError(
+            `Voyage multimodal returned ${row.embedding?.length ?? 0}-dim vector; expected ${targetDims}.`,
+            `Voyage multimodal-3 is fixed at 1024 dims. Brain primary embedding dim is ${expected} ` +
+            `(used by the text path). Image vectors land in content_chunks.embedding_image (1024).`,
+          );
+        }
+        return new Float32Array(row.embedding);
       });
-    } catch (err) {
-      throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${parsed.modelId})`);
-    }
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      if (res.status === 401 || res.status === 403) {
-        throw new AIConfigError(
-          `Voyage multimodal returned ${res.status}: ${text || 'auth failed'}.`,
-          `Re-export ${recipe.auth_env?.required[0]} or rotate the key at ${recipe.auth_env?.setup_url}.`,
-        );
-      }
-      // 429 / 5xx are transient; let the caller retry.
-      throw new AITransientError(
-        `Voyage multimodal returned ${res.status}: ${text || 'transient error'}.`,
-      );
-    }
-
-    let parsedBody: { data?: Array<{ embedding: number[] }> };
-    try {
-      parsedBody = (await res.json()) as { data?: Array<{ embedding: number[] }> };
-    } catch (err) {
-      throw new AITransientError(
-        `Voyage multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
-      );
-    }
-    if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length !== batch.length) {
-      throw new AITransientError(
-        `Voyage multimodal returned unexpected payload shape (expected ${batch.length} embeddings).`,
-      );
-    }
-
-    for (const row of parsedBody.data) {
-      if (!Array.isArray(row.embedding) || row.embedding.length !== targetDims) {
-        throw new AIConfigError(
-          `Voyage multimodal returned ${row.embedding?.length ?? 0}-dim vector; expected ${targetDims}.`,
-          `Voyage multimodal-3 is fixed at 1024 dims. Brain primary embedding dim is ${expected} ` +
-          `(used by the text path). Image vectors land in content_chunks.embedding_image (1024).`,
-        );
-      }
-      allEmbeddings.push(new Float32Array(row.embedding));
-    }
+    };
+    const batchEmbeddings = opts.withProviderSubmission
+      ? await opts.withProviderSubmission(batch, submit)
+      : await submit();
+    allEmbeddings.push(...batchEmbeddings);
   }
 
   return allEmbeddings;
@@ -1914,75 +1954,85 @@ async function embedMultimodalOpenAICompat(
       input_type: inputType,
     };
 
-    let res: Response;
-    try {
-      res = await fetch(`${baseUrl}/embeddings`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [authResult.headerName]: authResult.token,
-        },
-        body: JSON.stringify(body),
-        // v0.42.20.0 (codex #4) — per-request multimodal timeout (direct fetch).
-        signal: AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
-      });
-    } catch (err) {
-      throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${modelId})`);
-    }
+    const submit = async (leaseSignal?: AbortSignal): Promise<Float32Array[]> => {
+      let res: Response;
+      try {
+        const callerSignal = leaseSignal
+          ? anySignal(leaseSignal, opts.abortSignal)
+          : opts.abortSignal;
+        res = await fetch(`${baseUrl}/embeddings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            [authResult.headerName]: authResult.token,
+          },
+          body: JSON.stringify(body),
+          // v0.42.20.0 (codex #4) — per-request multimodal timeout (direct
+          // fetch). Compose a source lease-loss signal when supplied.
+          signal: withDefaultTimeout(callerSignal, AI_MULTIMODAL_TIMEOUT_MS),
+        });
+      } catch (err) {
+        throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${modelId})`);
+      }
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      if (res.status === 401 || res.status === 403) {
-        const requiredKey = recipe.auth_env?.required[0];
-        throw new AIConfigError(
-          `${recipe.name} multimodal returned ${res.status}: ${text || 'auth failed'}.`,
-          requiredKey
-            ? `Re-export ${requiredKey} or rotate the key at ${recipe.auth_env?.setup_url ?? recipe.setup_hint}.`
-            : recipe.setup_hint,
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        if (res.status === 401 || res.status === 403) {
+          const requiredKey = recipe.auth_env?.required[0];
+          throw new AIConfigError(
+            `${recipe.name} multimodal returned ${res.status}: ${text || 'auth failed'}.`,
+            requiredKey
+              ? `Re-export ${requiredKey} or rotate the key at ${recipe.auth_env?.setup_url ?? recipe.setup_hint}.`
+              : recipe.setup_hint,
+          );
+        }
+        // Surface the upstream error verbatim — 400s here usually mean the
+        // proxied model doesn't support multimodal input. The error text is
+        // the user's best signal for picking a different model id.
+        throw new AITransientError(
+          `${recipe.name} multimodal returned ${res.status}: ${text || 'transient error'}.`,
         );
       }
-      // Surface the upstream error verbatim — 400s here usually mean the
-      // proxied model doesn't support multimodal input. The error text is
-      // the user's best signal for picking a different model id.
-      throw new AITransientError(
-        `${recipe.name} multimodal returned ${res.status}: ${text || 'transient error'}.`,
-      );
-    }
 
-    let parsedBody: { data?: Array<{ embedding: number[] }> };
-    try {
-      parsedBody = (await res.json()) as { data?: Array<{ embedding: number[] }> };
-    } catch (err) {
-      throw new AITransientError(
-        `${recipe.name} multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
-      );
-    }
-    if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length < 1) {
-      throw new AITransientError(
-        `${recipe.name} multimodal returned no embeddings (expected 1).`,
-      );
-    }
+      let parsedBody: { data?: Array<{ embedding: number[] }> };
+      try {
+        parsedBody = (await res.json()) as { data?: Array<{ embedding: number[] }> };
+      } catch (err) {
+        throw new AITransientError(
+          `${recipe.name} multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
+        );
+      }
+      if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length < 1) {
+        throw new AITransientError(
+          `${recipe.name} multimodal returned no embeddings (expected 1).`,
+        );
+      }
 
-    const row = parsedBody.data[0];
-    if (!Array.isArray(row.embedding)) {
-      throw new AITransientError(
-        `${recipe.name} multimodal returned non-array embedding payload.`,
-      );
-    }
-    // D12 — dim validation. Throw EmbedDimensionMismatchError-shape error
-    // (AIConfigError with model id + observed + expected so the operator
-    // can diagnose and pick a compatible model OR adjust the brain's
-    // embedding_dimensions config). Skip the check when expectedDims=0
-    // (no recipe declaration AND no config override).
-    if (expectedDims > 0 && row.embedding.length !== expectedDims) {
-      throw new AIConfigError(
-        `${recipe.id}:${modelId} returned ${row.embedding.length}-dim vector; expected ${expectedDims}.`,
-        `The brain's embedding column is fixed at ${expectedDims} dims; this model is incompatible. ` +
-        `Either pick a model that returns ${expectedDims} dims, OR set --embedding-dimensions ${row.embedding.length} ` +
-        `and reinitialize the embedding column at the new width.`,
-      );
-    }
-    allEmbeddings.push(new Float32Array(row.embedding));
+      const row = parsedBody.data[0];
+      if (!Array.isArray(row.embedding)) {
+        throw new AITransientError(
+          `${recipe.name} multimodal returned non-array embedding payload.`,
+        );
+      }
+      // D12 — dim validation. Throw EmbedDimensionMismatchError-shape error
+      // (AIConfigError with model id + observed + expected so the operator
+      // can diagnose and pick a compatible model OR adjust the brain's
+      // embedding_dimensions config). Skip the check when expectedDims=0
+      // (no recipe declaration AND no config override).
+      if (expectedDims > 0 && row.embedding.length !== expectedDims) {
+        throw new AIConfigError(
+          `${recipe.id}:${modelId} returned ${row.embedding.length}-dim vector; expected ${expectedDims}.`,
+          `The brain's embedding column is fixed at ${expectedDims} dims; this model is incompatible. ` +
+          `Either pick a model that returns ${expectedDims} dims, OR set --embedding-dimensions ${row.embedding.length} ` +
+          `and reinitialize the embedding column at the new width.`,
+        );
+      }
+      return [new Float32Array(row.embedding)];
+    };
+    const [embedding] = opts.withProviderSubmission
+      ? await opts.withProviderSubmission([input], submit)
+      : await submit();
+    allEmbeddings.push(embedding);
   }
 
   return allEmbeddings;

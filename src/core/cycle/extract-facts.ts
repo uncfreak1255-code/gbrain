@@ -41,8 +41,10 @@ import {
   emptyPhantomPassResult,
   type PhantomPassResult,
 } from './phantom-redirect.ts';
-import { embed, isAvailable } from '../ai/gateway.ts';
+import { isAvailable } from '../ai/gateway.ts';
+import { embedBatch } from '../embedding.ts';
 import { isAborted } from '../abort-check.ts';
+import { withActiveSourceProviderLease } from '../source-embedding-lease.ts';
 
 export interface ExtractFactsOpts {
   /** Subset of slugs to reconcile. undefined = walk every page in the brain. */
@@ -255,7 +257,16 @@ export async function runExtractFacts(
         const texts = extracted.map(e => e.fact);
         // #1972: forward the abort signal so a cancelled cycle's in-flight
         // batch embed (a network call) is itself abortable, not just the loop.
-        const embeddings = await embed(texts, { abortSignal: opts.signal });
+        const embeddings = await embedBatch(texts, {
+          abortSignal: opts.signal,
+          withProviderSubmission: (_batch, submit) =>
+            withActiveSourceProviderLease(
+              engine,
+              sourceId,
+              (leaseSignal) => submit(leaseSignal),
+              opts.signal,
+            ),
+        });
         // Defensive: embed should return one vector per input; if the
         // gateway returns a partial array (provider partial-batch retry
         // returning fewer than requested), only fill what we have.

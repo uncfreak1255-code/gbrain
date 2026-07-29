@@ -33,6 +33,7 @@ import {
   assessDestructiveImpact,
   checkDestructiveConfirmation,
   softDeleteSource,
+  softDeleteSourceGuarded,
   restoreSource,
   listArchivedSources,
   purgeExpiredSources,
@@ -577,33 +578,37 @@ export async function archiveHygieneCandidate(
   result: Awaited<ReturnType<typeof softDeleteSource>>;
   reason: string;
 }> {
-  return engine.transaction(async (tx) => {
-    // Bind the decision and mutation to one transaction. The global lifecycle
-    // lock exists even when a source registry row does not, so it also closes
-    // the absent -> registered -> archived race. Writers take the shared form;
-    // archive takes exclusive before any evidence read and rereads every veto.
-    await tx.executeRaw(
-      `SELECT pg_advisory_xact_lock(hashtextextended('gbrain:source-lifecycle', 0))`,
-    );
-    const active = await tx.executeRaw<{ id: string }>(
-      `SELECT id FROM sources WHERE id = $1 AND archived = false FOR UPDATE`,
-      [sourceId],
-    );
-    if (active.length === 0) return { result: null, reason: 'source_not_active' };
-
-    const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
-    const packet = await inspectSourceHygiene(tx, { inspectFilesystem: true });
+  const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+  const inspectCandidate = async (
+    candidateEngine: BrainEngine,
+    expectedArchiveDrainSourceId?: string,
+  ) => {
+    const packet = await inspectSourceHygiene(candidateEngine, {
+      inspectFilesystem: true,
+      expectedArchiveDrainSourceId,
+    });
     const decision = packet.sources.find((source) => source.source_id === sourceId);
-    if (decision?.classification !== 'archive_candidate' || !decision.safe_for_agent_review) {
-      const reason = decision
-        ? [decision.classification, ...decision.veto_reasons].join(':')
-        : 'source_not_found';
-      return { result: null, reason };
+    if (decision?.classification === 'archive_candidate' && decision.safe_for_agent_review) {
+      return { allowed: true, reason: 'archive_candidate' };
     }
+    return {
+      allowed: false,
+      reason: decision
+        ? [decision.classification, ...decision.veto_reasons].join(':')
+        : 'source_not_found',
+    };
+  };
 
-    const result = await softDeleteSource(tx, sourceId);
-    return { result, reason: result ? 'archived' : 'archive_update_failed' };
-  });
+  // Avoid putting a healthy/non-candidate source into drain state. After the
+  // committed drain blocks new source work, reread the same full evidence
+  // outside the short final lifecycle transaction.
+  const preflight = await inspectCandidate(engine);
+  if (!preflight.allowed) return { result: null, reason: preflight.reason };
+  return softDeleteSourceGuarded(
+    engine,
+    sourceId,
+    (candidateEngine) => inspectCandidate(candidateEngine, sourceId),
+  );
 }
 
 // ── Subcommand: restore ─────────────────────────────────────
@@ -1353,10 +1358,18 @@ async function runAudit(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const { fetchSource } = await import('../core/sources-load.ts');
+  const {
+    fetchSource,
+    isSourceActive,
+    sourceDrainResumeMessage,
+  } = await import('../core/sources-load.ts');
   const src = await fetchSource(engine, sourceId);
   if (!src) {
     console.error(`Source not found: ${sourceId} (run \`gbrain sources list\` to see registered sources)`);
+    process.exit(1);
+  }
+  if (!isSourceActive(src) && src.embedding_drain_token != null) {
+    console.error(sourceDrainResumeMessage(sourceId));
     process.exit(1);
   }
   if (!src.local_path) {

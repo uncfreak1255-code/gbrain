@@ -15,6 +15,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { resolveSourceId } from '../src/core/source-resolver.ts';
+import { softDeleteSource } from '../src/core/destructive-guard.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -107,14 +108,16 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
       expect(resolved).toBe('default');
     });
 
-    test('soft-archived brain_default falls through instead of routing writes to it', async () => {
+    test('soft-archived brain_default fails loudly instead of rerouting writes', async () => {
       await engine.executeRaw(
         `INSERT INTO sources (id, name, config)
          VALUES ('retired', 'retired', '{}'::jsonb)`,
       );
       await engine.setConfig('sources.default', 'retired');
-      await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'retired'`);
-      await expect(resolveSourceId(engine, null, cwd)).resolves.toBe('default');
+      expect(await softDeleteSource(engine, 'retired')).not.toBeNull();
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /Source "retired" is archived.*sources\.default/,
+      );
     });
   });
 

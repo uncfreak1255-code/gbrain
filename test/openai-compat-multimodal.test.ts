@@ -91,6 +91,33 @@ describe('embedMultimodal — openai-compat routing (#875)', () => {
     expect(result.length).toBe(3);
   });
 
+  test('provider fence fires once for every OpenAI-compatible request', async () => {
+    configureLitellm();
+    const fencedInputs: string[] = [];
+    const requestSignals: Array<AbortSignal | null | undefined> = [];
+    fetchHandler = async (_url, init) => {
+      requestSignals.push(init.signal);
+      return okResponse(1024, 1);
+    };
+
+    const result = await embedMultimodal(
+      [
+        { kind: 'image_base64', data: 'img1', mime: 'image/jpeg' },
+        { kind: 'image_base64', data: 'img2', mime: 'image/png' },
+      ],
+      {
+        withProviderSubmission: (inputs, submit) => {
+          fencedInputs.push(inputs[0]?.kind ?? 'missing');
+          return submit(new AbortController().signal);
+        },
+      },
+    );
+
+    expect(result).toHaveLength(2);
+    expect(fencedInputs).toEqual(['image_base64', 'image_base64']);
+    expect(requestSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+  });
+
   test('LiteLLM without LITELLM_API_KEY still works (proxy may run unauthenticated)', async () => {
     configureGateway({
       embedding_model: 'litellm:multimodal-foo',

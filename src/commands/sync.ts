@@ -1099,10 +1099,25 @@ See also:
   }
 
   // Verify source exists before submitting
-  const { fetchSource } = await import('../core/sources-load.ts');
+  const {
+    fetchSource,
+    isSourceActive,
+    sourceDrainResumeMessage,
+  } = await import('../core/sources-load.ts');
   const source = await fetchSource(engine, sourceIdArg);
   if (!source) {
     console.error(`Source "${sourceIdArg}" not found. List with: gbrain sources list`);
+    process.exit(1);
+  }
+  if (!isSourceActive(source)) {
+    if (source.archived === true) {
+      console.error(
+        `Source "${sourceIdArg}" is archived; restore with `
+        + `\`gbrain sources restore ${sourceIdArg}\` before triggering sync.`,
+      );
+      process.exit(1);
+    }
+    console.error(sourceDrainResumeMessage(sourceIdArg));
     process.exit(1);
   }
 

@@ -14,6 +14,12 @@
  */
 
 import type { BrainEngine } from './engine.ts';
+import {
+  beginSourceArchiveDrain,
+  cancelSourceArchiveDrain,
+  lockSourceDrainForFinalize,
+  waitForSourceEmbeddingLeases,
+} from './source-embedding-lease.ts';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -181,41 +187,102 @@ export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
-  // Atomic: only flip rows that are currently active. Returns the metadata
-  // we need without a follow-up SELECT. RETURNING projects the columns the
-  // caller cares about; pageCount is a separate count.
+  return (await softDeleteSourceGuarded(engine, sourceId)).result;
+}
+
+export interface SoftDeleteGuardDecision {
+  allowed: boolean;
+  reason: string;
+}
+
+/**
+ * Two-phase archive with provider wait and any expensive guard outside the
+ * final transaction. A committed drain blocks new source work, so the final
+ * exclusive section needs only exact source/token validation plus the UPDATE.
+ */
+export async function softDeleteSourceGuarded(
+  engine: BrainEngine,
+  sourceId: string,
+  guard?: (engine: BrainEngine) => Promise<SoftDeleteGuardDecision>,
+): Promise<{ result: SoftDeletedSource | null; reason: string }> {
+  const drain = await beginSourceArchiveDrain(engine, sourceId);
+  if (!drain) return { result: null, reason: 'source_not_active' };
+
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
-  const rows = await engine.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
-    `WITH lifecycle_lock AS MATERIALIZED (
-       SELECT pg_advisory_xact_lock(
-         hashtextextended('gbrain:source-lifecycle', 0)
-       )
-     )
-     UPDATE sources
-     SET archived = true,
-         archived_at = now(),
-         archive_expires_at = ${expiresClause},
-         config = COALESCE(config, '{}'::jsonb) || '{"federated": false}'::jsonb
-     FROM lifecycle_lock
-     WHERE id = $1 AND archived = false
-     RETURNING id, name, archived_at, archive_expires_at`,
-    [sourceId],
-  );
-  if (rows.length === 0) return null;
-  const row = rows[0];
+  let final: {
+    row: { id: string; name: string; archived_at: string; archive_expires_at: string } | null;
+    reason: string;
+  };
+  try {
+    await waitForSourceEmbeddingLeases(engine, drain);
+    if (guard) {
+      const decision = await guard(engine);
+      if (!decision.allowed) {
+        await cancelSourceArchiveDrain(engine, drain);
+        return { result: null, reason: decision.reason };
+      }
+    }
+    final = await engine.transaction(async (tx) => {
+      await tx.executeRaw(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended('gbrain:source-lifecycle', 0)
+         )`,
+      );
+      const readiness = await lockSourceDrainForFinalize(tx, drain);
+      if (readiness.status === 'already_archived') {
+        return { row: null, reason: 'source_not_active' };
+      }
+      const rows = await tx.executeRaw<{
+        id: string;
+        name: string;
+        archived_at: string;
+        archive_expires_at: string;
+      }>(
+        `UPDATE public.sources
+            SET archived = true,
+                archived_at = now(),
+                archive_expires_at = ${expiresClause},
+                embedding_drain_token = NULL,
+                config = COALESCE(config, '{}'::jsonb) || '{"federated": false}'::jsonb
+          WHERE id = $1
+            AND archived IS NOT TRUE
+            AND embedding_drain_token = $2
+            AND embedding_drain_epoch = $3
+        RETURNING id, name, archived_at, archive_expires_at`,
+        [sourceId, drain.token, drain.epoch],
+      );
+      return {
+        row: rows[0] ?? null,
+        reason: rows.length === 1 ? 'archived' : 'archive_update_failed',
+      };
+    });
+  } catch (caught) {
+    // Fail safe: an uncertain provider token or DB failure keeps the source in
+    // drain state. A later archive invocation adopts the same token+epoch and
+    // resumes; we never reopen provider egress on uncertain state.
+    throw caught;
+  }
+  if (!final.row) {
+    await cancelSourceArchiveDrain(engine, drain);
+    return { result: null, reason: final.reason };
+  }
+  const row = final.row;
 
   const pageRows = await engine.executeRaw<{ n: number }>(
-    `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1`,
+    `SELECT COUNT(*)::int AS n FROM public.pages WHERE source_id = $1`,
     [sourceId],
   );
   const pageCount = pageRows[0]?.n ?? 0;
 
   return {
-    id: sourceId,
-    name: row.name,
-    deletedAt: new Date(row.archived_at),
-    expiresAt: new Date(row.archive_expires_at),
-    pageCount,
+    result: {
+      id: sourceId,
+      name: row.name,
+      deletedAt: new Date(row.archived_at),
+      expiresAt: new Date(row.archive_expires_at),
+      pageCount,
+    },
+    reason: 'archived',
   };
 }
 

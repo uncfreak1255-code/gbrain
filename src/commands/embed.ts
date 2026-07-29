@@ -19,6 +19,7 @@ import {
 } from '../core/pace-mode.ts';
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
 import { embedBackfillLockId } from '../core/embed-backfill-lock.ts';
+import { withActiveSourceProviderLease } from '../core/source-embedding-lease.ts';
 
 export interface EmbedOpts {
   /** Embed ALL pages (every chunk). */
@@ -576,7 +577,11 @@ async function embedPage(
     return;
   }
 
-  const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text), { abortSignal: signal });
+  const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text), {
+    abortSignal: signal,
+    withProviderSubmission: (_texts, submit) =>
+      withActiveEmbeddingSource(engine, sourceId ?? 'default', submit),
+  });
   const embeddingMap = new Map<number, Float32Array>();
   for (let j = 0; j < toEmbed.length; j++) {
     embeddingMap.set(toEmbed[j].chunk_index, embeddings[j]);
@@ -603,6 +608,23 @@ async function embedPage(
   result.embedded += toEmbed.length;
   result.pages_processed++;
   slog(`${slug}: embedded ${toEmbed.length} chunks`);
+}
+
+/**
+ * Last-moment egress guard for every embedding provider submission.
+ *
+ * Page/chunk selection already excludes archived sources, but a source can be
+ * archived after that read and before the provider request. A durable exact
+ * token closes that gap without holding a database transaction across network
+ * I/O. Archive marks the source draining, rejects new tokens, then waits for
+ * existing provider calls to settle before it commits.
+ */
+export async function withActiveEmbeddingSource<T>(
+  engine: BrainEngine,
+  sourceId: string,
+  submit: (leaseSignal?: AbortSignal) => Promise<T>,
+): Promise<T> {
+  return withActiveSourceProviderLease(engine, sourceId, submit);
 }
 
 async function embedAll(
@@ -659,8 +681,19 @@ async function embedAll(
   // defeating the soft-block. Filtering JS-side here mirrors the SQL-side
   // filter that listStaleChunks/countStaleChunks apply on --stale.
   const allPages = await engine.listPages({ limit: 100000, ...(sourceId && { sourceId }) });
-  const pages = filterOutEmbedSkipped(allPages);
-  const skippedByEmbedSkip = allPages.length - pages.length;
+  const activeSources = await engine.listAllSources();
+  const activeSourceIds = Array.isArray(activeSources)
+    ? new Set(activeSources.map((source) => source.id))
+    : null;
+  const activePages = activeSourceIds
+    ? allPages.filter((page) => activeSourceIds.has(page.source_id ?? 'default'))
+    : allPages;
+  const pages = filterOutEmbedSkipped(activePages);
+  const skippedByArchivedSource = allPages.length - activePages.length;
+  const skippedByEmbedSkip = activePages.length - pages.length;
+  if (skippedByArchivedSource > 0) {
+    serr(`[embed] skipped ${skippedByArchivedSource} page(s) from archived sources`);
+  }
   if (skippedByEmbedSkip > 0) {
     serr(`[embed] skipped ${skippedByEmbedSkip} page(s) with frontmatter.embed_skip set`);
   }
@@ -711,7 +744,10 @@ async function embedAll(
     }
 
     try {
-      const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text));
+      const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text), {
+        withProviderSubmission: (_texts, submit) =>
+          withActiveEmbeddingSource(engine, pageSourceId ?? 'default', submit),
+      });
       // Build a map of new embeddings by chunk_index
       const embeddingMap = new Map<number, Float32Array>();
       for (let j = 0; j < toEmbed.length; j++) {
@@ -1005,7 +1041,11 @@ async function embedAllStale(
         const keySourceId = stale[0]?.source_id ?? 'default';
         const slug = stale[0].slug;
         try {
-          const embeddings = await embedBatchWithBackoff(stale.map(c => c.chunk_text), { abortSignal: effectiveSignal });
+          const embeddings = await embedBatchWithBackoff(stale.map(c => c.chunk_text), {
+            abortSignal: effectiveSignal,
+            withProviderSubmission: (_texts, submit) =>
+              withActiveEmbeddingSource(engine, keySourceId, submit),
+          });
           // Re-fetch existing chunks and merge to avoid deleting non-stale chunks.
           const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
           const staleIdxToEmbedding = new Map<number, Float32Array>();
@@ -1132,6 +1172,11 @@ export const RATE_LIMIT_JITTER = 0.3;
 
 export interface EmbedBatchWithBackoffOpts {
   abortSignal?: AbortSignal;
+  /** Lease held across every real provider submission. */
+  withProviderSubmission?: (
+    texts: string[],
+    submit: (leaseSignal?: AbortSignal) => Promise<Float32Array[]>,
+  ) => Promise<Float32Array[]>;
 }
 
 /**
@@ -1208,7 +1253,13 @@ export async function embedBatchWithBackoff(
       // D4a + D8: maxRetries:0 disables the SDK's stacked retries (so this
       // wrapper is the single source of truth) and abortSignal threads
       // through to the gateway so an in-flight HTTP request cancels mid-fetch.
-      return await embedBatch(texts, { maxRetries: 0, ...(signal && { abortSignal: signal }) });
+      return await embedBatch(texts, {
+        maxRetries: 0,
+        ...(signal && { abortSignal: signal }),
+        ...(opts.withProviderSubmission && {
+          withProviderSubmission: opts.withProviderSubmission,
+        }),
+      });
     } catch (e: unknown) {
       // If the budget fired we may have been aborted mid-fetch; bubble out.
       if (signal?.aborted) throw e;
@@ -1226,5 +1277,9 @@ export async function embedBatchWithBackoff(
     }
   }
   // Unreachable, but TypeScript needs it.
-  return embedBatch(texts);
+  return embedBatch(texts, {
+    ...(opts.withProviderSubmission && {
+      withProviderSubmission: opts.withProviderSubmission,
+    }),
+  });
 }

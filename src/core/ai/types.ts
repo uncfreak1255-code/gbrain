@@ -138,6 +138,22 @@ export type MultimodalInput =
  */
 export interface EmbedMultimodalOpts {
   inputType?: 'document' | 'query';
+  /**
+   * Abort the in-flight provider request. Source-owned document callers
+   * compose their durable lease-loss signal here; query and smoke callers
+   * can continue to omit it.
+   */
+  abortSignal?: AbortSignal;
+  /**
+   * Optional fence around each real multimodal provider submission. The
+   * gateway invokes this once per Voyage batch (<=32 inputs) and once per
+   * OpenAI-compatible request, including the smaller attempts made by
+   * embedMultimodalSafe after a transient failure.
+   */
+  withProviderSubmission?: (
+    inputs: MultimodalInput[],
+    submit: (leaseSignal?: AbortSignal) => Promise<Float32Array[]>,
+  ) => Promise<Float32Array[]>;
 }
 
 /**

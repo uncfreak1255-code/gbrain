@@ -1293,7 +1293,7 @@ export class PGLiteEngine implements BrainEngine {
     }>(
       `SELECT id, name, local_path, last_sync_at, config
          FROM sources
-        WHERE ($1::boolean OR archived IS NOT TRUE)
+        WHERE ($1::boolean OR (archived IS NOT TRUE AND embedding_drain_token IS NULL))
           AND ($2::boolean OR local_path IS NOT NULL)
         ORDER BY (id = 'default') DESC, id`,
       [includeArchived, !localPathOnly],
@@ -2212,6 +2212,8 @@ export class PGLiteEngine implements BrainEngine {
       conds.push(`cc.embedding IS NULL`);
     }
     conds.push(`NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
+    conds.push(`s.archived IS NOT TRUE`);
+    conds.push(`s.embedding_drain_token IS NULL`);
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
@@ -2228,6 +2230,7 @@ export class PGLiteEngine implements BrainEngine {
       `SELECT count(*)::int AS count
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params,
     );
@@ -2243,6 +2246,7 @@ export class PGLiteEngine implements BrainEngine {
       `SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params,
     );
@@ -2271,7 +2275,10 @@ export class PGLiteEngine implements BrainEngine {
       `UPDATE content_chunks cc
           SET embedding = NULL, embedded_at = NULL
          FROM pages p
+         JOIN sources s ON s.id = p.source_id
         WHERE cc.page_id = p.id
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND cc.embedding IS NOT NULL
           AND p.embedding_signature IS NOT NULL
           AND p.embedding_signature <> $1${srcClause}
@@ -2306,7 +2313,10 @@ export class PGLiteEngine implements BrainEngine {
                   p.updated_at
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
+             JOIN sources s ON s.id = p.source_id
             WHERE cc.embedding IS NULL
+              AND s.archived IS NOT TRUE
+              AND s.embedding_drain_token IS NULL
               AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
             LIMIT $1`,
@@ -2317,7 +2327,10 @@ export class PGLiteEngine implements BrainEngine {
                   p.updated_at
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
+             JOIN sources s ON s.id = p.source_id
             WHERE cc.embedding IS NULL
+              AND s.archived IS NOT TRUE
+              AND s.embedding_drain_token IS NULL
               AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
               AND (
                 p.updated_at < $1::timestamptz
@@ -2336,7 +2349,10 @@ export class PGLiteEngine implements BrainEngine {
                 p.updated_at
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
+           JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND p.source_id = $1
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
@@ -2348,7 +2364,10 @@ export class PGLiteEngine implements BrainEngine {
                 p.updated_at
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
+           JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND p.source_id = $1
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (
@@ -2373,7 +2392,10 @@ export class PGLiteEngine implements BrainEngine {
                 cc.model, cc.token_count, p.source_id, cc.page_id
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
+           JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (cc.page_id, cc.chunk_index) > ($1, $2)
           ORDER BY cc.page_id, cc.chunk_index
@@ -2387,7 +2409,10 @@ export class PGLiteEngine implements BrainEngine {
               cc.model, cc.token_count, p.source_id, cc.page_id
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND p.source_id = $1
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > ($2, $3)

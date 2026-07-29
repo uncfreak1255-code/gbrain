@@ -14,6 +14,7 @@ function sourceDecision(
   return {
     source_id: sourceId,
     archived: false,
+    draining: false,
     has_local_path: true,
     shared_path_source_count: 1,
     repo_state: classification === 'healthy' ? 'healthy' : 'missing',
@@ -55,6 +56,26 @@ describe('Doctor source path health', () => {
     });
     expect(check.message).toContain('default');
     expect(check.message).not.toContain('gbrain sync');
+  });
+
+  test('reports an interrupted archive with its resumable command', async () => {
+    const hygiene = packet([
+      sourceDecision('stuck-drain', 'recovery_required', {
+        draining: true,
+        recovery_mode: 'archive_resume',
+        proposed_command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'],
+        safe_for_agent_review: true,
+      }),
+    ]);
+    const check = await checkSourcePathHealth({} as never, { packet: hygiene });
+
+    expect(check.message).toContain('interrupted');
+    expect(check.details).toMatchObject({
+      recovery_required: [{
+        source_id: 'stuck-drain',
+        proposed_command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'],
+      }],
+    });
   });
 
   test('empty missing source is a warning for adversarial soft-archive review', async () => {

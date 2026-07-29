@@ -38,6 +38,7 @@ import { dirname } from 'node:path';
 // v0.41.15.0 (T9, D9): per-chunk UPDATE workers within each batch.
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
+import { withActiveSourceProviderLease } from '../core/source-embedding-lease.ts';
 
 const LOCK_ID = 'gbrain-reindex-multimodal';
 const BATCH_SIZE = 32; // Voyage cap
@@ -113,8 +114,12 @@ export async function runReindexMultimodal(
   // Count pending chunks.
   const pendingRows = await sql`
     SELECT COUNT(*)::text AS count
-    FROM content_chunks
-    WHERE embedding_multimodal IS NULL
+    FROM content_chunks chunk
+    JOIN pages page ON page.id = chunk.page_id
+    JOIN sources source ON source.id = page.source_id
+    WHERE chunk.embedding_multimodal IS NULL
+      AND source.archived IS NOT TRUE
+      AND source.embedding_drain_token IS NULL
   `;
   const pendingBefore = parseInt(String(pendingRows[0]?.count ?? '0'), 10);
 
@@ -123,8 +128,12 @@ export async function runReindexMultimodal(
   const statsRows = pendingBefore > 0
     ? await sql`
       SELECT COALESCE(SUM(LENGTH(chunk_text)), 0)::text AS chars
-      FROM content_chunks
-      WHERE embedding_multimodal IS NULL
+      FROM content_chunks chunk
+      JOIN pages page ON page.id = chunk.page_id
+      JOIN sources source ON source.id = page.source_id
+      WHERE chunk.embedding_multimodal IS NULL
+        AND source.archived IS NOT TRUE
+        AND source.embedding_drain_token IS NULL
     `
     : [{ chars: '0' }];
   const totalChars = parseInt(String(statsRows[0]?.chars ?? '0'), 10);
@@ -228,11 +237,15 @@ export async function runReindexMultimodal(
         ? Math.min(BATCH_SIZE, opts.limit - processed)
         : BATCH_SIZE;
       const rows = await sql`
-        SELECT id::text AS id, chunk_text
-        FROM content_chunks
-        WHERE embedding_multimodal IS NULL
-          AND id > ${lastId}
-        ORDER BY id
+        SELECT chunk.id::text AS id, chunk.chunk_text, page.source_id
+        FROM content_chunks chunk
+        JOIN pages page ON page.id = chunk.page_id
+        JOIN sources source ON source.id = page.source_id
+        WHERE chunk.embedding_multimodal IS NULL
+          AND source.archived IS NOT TRUE
+          AND source.embedding_drain_token IS NULL
+          AND chunk.id > ${lastId}
+        ORDER BY chunk.id
         LIMIT ${batchSize}
       `;
       if (rows.length === 0) break;
@@ -240,6 +253,7 @@ export async function runReindexMultimodal(
       const items = rows.map(r => ({
         id: parseInt(String(r.id), 10),
         text: String(r.chunk_text ?? ''),
+        sourceId: String(r.source_id),
       })).filter(r => !completedIds.has(r.id));
 
       if (items.length === 0) {
@@ -251,41 +265,61 @@ export async function runReindexMultimodal(
       // failed_indices surfaced. We persist what succeeded and log what
       // failed for the next run to retry.
       if (!opts.noEmbed) {
-        const result = await embedMultimodalSafe(
-          items.map(it => ({ kind: 'text' as const, text: it.text })),
-          { inputType: 'document' },
-        );
-        // v0.41.15.0 (T9): per-chunk UPDATE loop wrapped in the sliding
-        // pool. JS single-threaded event loop makes reembedded++ /
-        // failed++ / completedIds.add atomic; the workers race only on
-        // the DB UPDATE round-trip, which is exactly the parallelism
-        // win on Postgres.
-        const writersResolved = resolveWorkersWithClamp(
-          engine,
-          opts.workers,
-          'reindex-multimodal',
-          items.length,
-        );
-        await runSlidingPool({
-          items,
-          workers: writersResolved.workers,
-          failureLabel: (it) => String(it.id),
-          onItem: async (item, i) => {
-            const vec = result.embeddings[i];
-            if (vec) {
-              const vecLiteral = `[${Array.from(vec).join(',')}]`;
-              await sql`
-                UPDATE content_chunks
-                SET embedding_multimodal = ${vecLiteral}::vector
-                WHERE id = ${item.id}
-              `;
-              reembedded++;
-              completedIds.add(item.id);
-            } else {
-              failed++;
-            }
-          },
-        });
+        // One provider submission can belong to exactly one source. A batch
+        // fetched by chunk id can interleave sources, so partition it before
+        // calling the gateway and acquire a durable token for each real
+        // provider attempt (including embedMultimodalSafe split retries).
+        const bySource = new Map<string, typeof items>();
+        for (const item of items) {
+          const group = bySource.get(item.sourceId);
+          if (group) group.push(item);
+          else bySource.set(item.sourceId, [item]);
+        }
+        for (const [sourceId, sourceItems] of bySource) {
+          const result = await embedMultimodalSafe(
+            sourceItems.map(it => ({ kind: 'text' as const, text: it.text })),
+            {
+              inputType: 'document',
+              withProviderSubmission: (_inputs, submit) =>
+                withActiveSourceProviderLease(
+                  engine,
+                  sourceId,
+                  (leaseSignal) => submit(leaseSignal),
+                ),
+            },
+          );
+          // v0.41.15.0 (T9): per-chunk UPDATE loop wrapped in the sliding
+          // pool. JS single-threaded event loop makes reembedded++ /
+          // failed++ / completedIds.add atomic; the workers race only on
+          // the DB UPDATE round-trip, which is exactly the parallelism
+          // win on Postgres.
+          const writersResolved = resolveWorkersWithClamp(
+            engine,
+            opts.workers,
+            'reindex-multimodal',
+            sourceItems.length,
+          );
+          await runSlidingPool({
+            items: sourceItems,
+            workers: writersResolved.workers,
+            failureLabel: (it) => String(it.id),
+            onItem: async (item, i) => {
+              const vec = result.embeddings[i];
+              if (vec) {
+                const vecLiteral = `[${Array.from(vec).join(',')}]`;
+                await sql`
+                  UPDATE content_chunks
+                  SET embedding_multimodal = ${vecLiteral}::vector
+                  WHERE id = ${item.id}
+                `;
+                reembedded++;
+                completedIds.add(item.id);
+              } else {
+                failed++;
+              }
+            },
+          });
+        }
       }
 
       processed += items.length;
@@ -301,8 +335,12 @@ export async function runReindexMultimodal(
   // D23-#2 auto-flip prompt at completion.
   const pendingAfterRows = await sql`
     SELECT COUNT(*)::text AS count
-    FROM content_chunks
-    WHERE embedding_multimodal IS NULL
+    FROM content_chunks chunk
+    JOIN pages page ON page.id = chunk.page_id
+    JOIN sources source ON source.id = page.source_id
+    WHERE chunk.embedding_multimodal IS NULL
+      AND source.archived IS NOT TRUE
+      AND source.embedding_drain_token IS NULL
   `;
   const pendingAfter = parseInt(String(pendingAfterRows[0]?.count ?? '0'), 10);
   let unifiedFlagPrompted = false;

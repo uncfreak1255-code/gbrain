@@ -278,6 +278,7 @@ describe('computeRecommendations', () => {
         sources: [{
           source_id: 'default',
           archived: false,
+          draining: false,
           has_local_path: true,
           shared_path_source_count: 1,
           repo_state: 'missing',
@@ -409,6 +410,7 @@ describe('classifyChecks (D13)', () => {
         sources: [{
           source_id: 'default',
           archived: false,
+          draining: false,
           has_local_path: true,
           shared_path_source_count: 1,
           repo_state: 'missing',

@@ -1673,28 +1673,41 @@ export async function registerBuiltinHandlers(
       // Archive recheck (codex r1 P1-5): cheap pre-cycle lookup. Returns
       // immediately if source is gone or archived; runCycle never even
       // acquires a lock.
-      const rows = await engine.executeRaw<{ archived: boolean | null; local_path: string | null }>(
-        `SELECT archived, local_path FROM sources WHERE id = $1`,
-        [rawSourceId],
-      );
-      if (rows.length === 0) {
+      const {
+        fetchSource,
+        isSourceActive,
+        sourceDrainResumeMessage,
+      } = await import('../core/sources-load.ts');
+      const source = await fetchSource(engine, rawSourceId);
+      if (!source) {
         return {
           partial: false,
           status: 'skipped',
           report: { reason: 'source_not_found', source_id: rawSourceId },
         };
       }
-      if (rows[0].archived === true) {
+      if (!isSourceActive(source)) {
+        if (source.archived === true) {
+          return {
+            partial: false,
+            status: 'skipped',
+            report: { reason: 'source_archived', source_id: rawSourceId },
+          };
+        }
         return {
           partial: false,
           status: 'skipped',
-          report: { reason: 'source_archived', source_id: rawSourceId },
+          report: {
+            reason: 'source_draining',
+            source_id: rawSourceId,
+            recovery: sourceDrainResumeMessage(rawSourceId),
+          },
         };
       }
       const { existsSync } = await import('fs');
       sourceId = rawSourceId;
-      repoPath = rows[0].local_path && existsSync(rows[0].local_path)
-        ? rows[0].local_path
+      repoPath = source.local_path && existsSync(source.local_path)
+        ? source.local_path
         : null;
     }
 

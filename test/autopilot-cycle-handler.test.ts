@@ -90,6 +90,24 @@ describe('autopilot-cycle handler source_id validation + archive recheck', () =>
     expect(result.report.reason).toBe('source_archived');
   });
 
+  test('source_id with an interrupted archive drain skips with resume guidance', async () => {
+    await seedSource('draining-src');
+    await engine.executeRaw(
+      `UPDATE sources
+          SET embedding_drain_token = 'interrupted-drain'
+        WHERE id = 'draining-src'`,
+    );
+
+    const result = await runHandlerOnce({
+      repoPath: brainDir,
+      source_id: 'draining-src',
+      phases: ['lint'],
+    });
+    expect(result.status).toBe('skipped');
+    expect(result.report.reason).toBe('source_draining');
+    expect(result.report.recovery).toContain('gbrain sources archive draining-src');
+  });
+
   test('malformed source_id (regex fail) throws (codex P1-B)', async () => {
     await expect(
       runHandlerOnce({ repoPath: brainDir, source_id: 'BAD ID', phases: ['lint'] }),

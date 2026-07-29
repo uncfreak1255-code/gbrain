@@ -4038,6 +4038,7 @@ export async function checkSourcePathHealth(
         source_id: source.source_id,
         recovery_mode: source.recovery_mode,
         dependent_row_count: source.dependent_row_count,
+        proposed_command_argv: source.proposed_command_argv,
         veto_reasons: source.veto_reasons,
       })),
       archive_candidates: archiveCandidates.map((source) => ({
@@ -4045,7 +4046,9 @@ export async function checkSourcePathHealth(
         proposed_command_argv: source.proposed_command_argv,
       })),
       fix_hint: recovery.length > 0
-        ? 'Preserve the source data and restore its checkout before running sync or paid remediation.'
+        ? recovery.every((source) => source.recovery_mode === 'archive_resume')
+          ? 'Rerun each listed archive command to finish its interrupted source drain.'
+          : 'Preserve the source data and restore its checkout before running sync or paid remediation.'
         : archiveCandidates.length > 0
           ? 'Adversarially verify each zero-content source, then soft-archive at most one candidate.'
           : 'No source-path action required.',
@@ -4054,7 +4057,9 @@ export async function checkSourcePathHealth(
       return {
         name: 'source_path_health',
         status: 'fail',
-        message: `${recovery.length} source(s) need checkout recovery before sync or paid work: ${recovery.map((source) => source.source_id).join(', ')}`,
+        message: recovery.every((source) => source.recovery_mode === 'archive_resume')
+          ? `${recovery.length} source archive(s) were interrupted and need to be resumed: ${recovery.map((source) => source.source_id).join(', ')}`
+          : `${recovery.length} source(s) need checkout recovery before sync or paid work: ${recovery.map((source) => source.source_id).join(', ')}`,
         details,
         remediation_status: 'blocked',
       };

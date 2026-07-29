@@ -28,6 +28,14 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await engine.executeRaw('DELETE FROM minion_jobs');
+  await engine.executeRaw(
+    `UPDATE sources
+        SET archived = false,
+            archived_at = NULL,
+            archive_expires_at = NULL,
+            embedding_drain_token = NULL
+      WHERE id = 'default'`,
+  );
 });
 
 /** Capture process.exit and stdout/stderr writes for one runSyncTrigger call. */
@@ -86,6 +94,20 @@ describe('runSyncTrigger', () => {
     const { stderr, exitCode } = await capture(['--source', 'does-not-exist']);
     expect(exitCode).toBe(1);
     expect(stderr).toContain('not found');
+  });
+
+  test('interrupted source drain exits 1 with exact archive-resume guidance', async () => {
+    await engine.executeRaw(
+      `UPDATE sources SET embedding_drain_token = 'interrupted-drain' WHERE id = 'default'`,
+    );
+
+    const { stderr, exitCode } = await capture(['--source', 'default']);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('interrupted archive drain');
+    expect(stderr).toContain('gbrain sources archive default');
+
+    const jobs = await new MinionQueue(engine).getJobs({ name: 'sync', limit: 5 });
+    expect(jobs).toEqual([]);
   });
 
   test('valid trigger submits sync job + prints job_id=N to stdout', async () => {

@@ -28,10 +28,10 @@ function makeStub(
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
-      if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+      if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const target = params?.[0] as string;
         return (registeredSources.includes(target)
-          ? [{ id: target, archived: archivedIds.has(target) } as unknown as T]
+          ? [{ id: target, archived: archivedIds.has(target), draining: false } as unknown as T]
           : []);
       }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -109,7 +109,7 @@ describe('pre-v34 archived-column compatibility', () => {
     const engine = {
       kind: 'pglite' as const,
       executeRaw: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
           throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
         }
         if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -128,7 +128,7 @@ describe('pre-v34 archived-column compatibility', () => {
     const engine = {
       kind: 'pglite' as const,
       executeRaw: async (sql: string) => {
-        if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
           throw Object.assign(new Error('database unavailable'), { code: '57P01' });
         }
         if (sql.includes('SELECT id, local_path FROM sources')) return [];
@@ -146,10 +146,10 @@ describe('pre-v34 archived-column compatibility', () => {
     const engine = {
       kind: 'pglite' as const,
       executeRaw: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
           stateReads++;
           return params?.[0] === 'restored-source'
-            ? [{ id: 'restored-source', archived: false }]
+            ? [{ id: 'restored-source', archived: false, draining: false }]
             : [];
         }
         if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -337,13 +337,15 @@ describe('resolveSourceId priority 5 — sources.default config key', () => {
     expect(id).toBe('custom');
   });
 
-  test('falls through when the configured brain default is archived', async () => {
+  test('fails loudly when the configured brain default is archived', async () => {
     const engine = makeStub(
       ['default', 'retired'],
       [{ id: 'retired', local_path: '/retired', archived: true }],
       'retired',
     );
-    await expect(resolveSourceId(engine, null, '/some/random/dir')).resolves.toBe('default');
+    await expect(resolveSourceId(engine, null, '/some/random/dir')).rejects.toThrow(
+      /archived.*sources\.default/,
+    );
   });
 
   test('keeps a valid-but-unregistered brain default as a loud error', async () => {
@@ -373,10 +375,10 @@ describe('getDefaultSourcePath', () => {
     return {
       kind: 'pglite',
       executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
-        if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
           const target = params?.[0] as string;
           return (registeredSources.includes(target)
-            ? [{ id: target, archived: false } as unknown as T]
+            ? [{ id: target, archived: false, draining: false } as unknown as T]
             : []);
         }
         if (sql.includes('SELECT id FROM sources WHERE id = $1')) {

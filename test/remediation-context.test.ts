@@ -52,6 +52,39 @@ const LOCAL_CONTEXT_OPTS = {
   },
 };
 
+function hygieneSource(
+  sourceId: string,
+  classification: 'healthy' | 'archive_candidate',
+) {
+  const archiveCandidate = classification === 'archive_candidate';
+  return {
+    source_id: sourceId,
+    archived: false,
+    draining: false,
+    has_local_path: true,
+    shared_path_source_count: 1,
+    repo_state: archiveCandidate ? 'missing' as const : 'healthy' as const,
+    remote_recovery_configured: false,
+    managed_clone: false,
+    configured_default: false,
+    configured_default_known: true,
+    source_config_known: true,
+    dependent_row_count: 0,
+    dependent_data_known: true,
+    nonterminal_work_count: 0,
+    work_state_known: true,
+    live_sync_lock: false,
+    lock_state_known: true,
+    classification,
+    recovery_mode: archiveCandidate ? 'archive_review' as const : 'none' as const,
+    proposed_command_argv: archiveCandidate
+      ? ['gbrain', 'sources', 'archive', sourceId, '--if-hygiene-candidate']
+      : null,
+    veto_reasons: [],
+    safe_for_agent_review: true,
+  };
+}
+
 describe('loadRecommendationContext sync freshness', () => {
   beforeEach(() => {
     _setGitHeadProbeForTests(() => 'new-head');
@@ -86,6 +119,47 @@ describe('loadRecommendationContext sync freshness', () => {
       chunker_version: CHUNKER_VERSION,
       last_sync_at: hoursAgo(30),
     }), LOCAL_CONTEXT_OPTS);
+
+    expect(ctx.repoNeedsSync).toBe(true);
+  });
+
+  test('matched archive candidate suppresses sync pending archive review', async () => {
+    const ctx = await loadRecommendationContext(makeEngine({
+      id: 'gbrain',
+      local_path: '/brain',
+      last_commit: 'old-head',
+      chunker_version: CHUNKER_VERSION,
+      last_sync_at: hoursAgo(30),
+    }), {
+      ...LOCAL_CONTEXT_OPTS,
+      sourceHygienePacket: {
+        schema_version: 1,
+        filesystem_inspected: true,
+        sources: [hygieneSource('gbrain', 'archive_candidate')],
+      },
+    });
+
+    expect(ctx.repoNeedsSync).toBe(false);
+  });
+
+  test('unrelated archive candidate does not suppress a healthy selected source', async () => {
+    const ctx = await loadRecommendationContext(makeEngine({
+      id: 'gbrain',
+      local_path: '/brain',
+      last_commit: 'old-head',
+      chunker_version: CHUNKER_VERSION,
+      last_sync_at: hoursAgo(30),
+    }), {
+      ...LOCAL_CONTEXT_OPTS,
+      sourceHygienePacket: {
+        schema_version: 1,
+        filesystem_inspected: true,
+        sources: [
+          hygieneSource('gbrain', 'healthy'),
+          hygieneSource('empty-source', 'archive_candidate'),
+        ],
+      },
+    });
 
     expect(ctx.repoNeedsSync).toBe(true);
   });

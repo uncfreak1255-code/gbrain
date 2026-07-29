@@ -39,6 +39,7 @@ import { normalizeAliasList } from './search/alias-normalize.ts';
 import { isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
+import { withActiveSourceProviderLease } from './source-embedding-lease.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -714,7 +715,14 @@ export async function importFromContent(
     const wrappedTexts = prefix
       ? chunks.map((c) => wrapChunkForEmbedding(c.chunk_text, prefix, c.chunk_source))
       : chunks.map((c) => c.chunk_text);
-    const embeddings = await embedBatch(wrappedTexts);
+    const embeddings = await embedBatch(wrappedTexts, {
+      withProviderSubmission: (_batch, submit) =>
+        withActiveSourceProviderLease(
+          engine,
+          sourceId ?? 'default',
+          (leaseSignal) => submit(leaseSignal),
+        ),
+    });
     for (let i = 0; i < chunks.length; i++) {
       chunks[i].embedding = embeddings[i];
       // token_count tracks the wrapped string length so cost reporting
@@ -1151,7 +1159,14 @@ export async function importCodeFile(
   if (!opts.noEmbed && needsEmbedIndexes.length > 0) {
     try {
       const textsToEmbed = needsEmbedIndexes.map((i) => chunks[i]!.chunk_text);
-      const embeddings = await embedBatch(textsToEmbed);
+      const embeddings = await embedBatch(textsToEmbed, {
+        withProviderSubmission: (_batch, submit) =>
+          withActiveSourceProviderLease(
+            engine,
+            sourceId ?? 'default',
+            (leaseSignal) => submit(leaseSignal),
+          ),
+      });
       for (let j = 0; j < needsEmbedIndexes.length; j++) {
         const i = needsEmbedIndexes[j]!;
         chunks[i]!.embedding = embeddings[j]!;
@@ -1616,9 +1631,17 @@ export async function importImageFile(
   let embedding: Float32Array | null = null;
   if (!opts.noEmbed) {
     try {
-      const [vec] = await embedMultimodal([
-        { kind: 'image_base64', data: decoded.buf.toString('base64'), mime: decoded.mime },
-      ]);
+      const [vec] = await embedMultimodal(
+        [{ kind: 'image_base64', data: decoded.buf.toString('base64'), mime: decoded.mime }],
+        {
+          withProviderSubmission: (_inputs, submit) =>
+            withActiveSourceProviderLease(
+              engine,
+              opts.sourceId ?? 'default',
+              (leaseSignal) => submit(leaseSignal),
+            ),
+        },
+      );
       embedding = vec;
     } catch (err) {
       return {

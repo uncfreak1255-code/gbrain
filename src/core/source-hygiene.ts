@@ -8,7 +8,7 @@
 
 import type { BrainEngine } from './engine.ts';
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { inspectLock, syncLockId } from './db-lock.ts';
 import { type RepoState, validateRepoState } from './git-remote.ts';
@@ -33,6 +33,7 @@ export type SourceHygieneRepoState =
 export type SourceRecoveryMode =
   | 'none'
   | 'archive_review'
+  | 'archive_resume'
   | 'managed_clone_sync'
   | 'manual';
 
@@ -40,6 +41,8 @@ export type SourceRecoveryMode =
 export interface SourceHygieneEvidence {
   source_id: string;
   archived: boolean;
+  /** A committed archive drain exists and must be resumed or cancelled. */
+  draining: boolean;
   has_local_path: boolean;
   shared_path_source_count: number;
   repo_state: SourceHygieneRepoState;
@@ -92,6 +95,8 @@ export interface InspectSourceHygieneOpts {
   inspectFilesystem?: boolean;
   /** Focused deterministic test seam; production callers omit it. */
   probes?: Partial<SourceHygieneProbes>;
+  /** Internal archive recheck: classify this exact committed drain by its underlying evidence. */
+  expectedArchiveDrainSourceId?: string;
 }
 
 const DEFAULT_PROBES: SourceHygieneProbes = {
@@ -114,7 +119,7 @@ export function validateSourceRepoState(
   if (expectedRemoteUrl) return validateRepoState(localPath, expectedRemoteUrl);
   let stat;
   try {
-    stat = lstatSync(localPath);
+    stat = statSync(localPath);
   } catch (error: any) {
     return error?.code === 'ENOENT' ? 'missing' : 'not-a-dir';
   }
@@ -142,6 +147,16 @@ export function classifySourceHygieneEvidence(
 ): SourceHygieneDecision {
   if (evidence.archived) {
     return decision(evidence, 'not_applicable', 'none', null, [], true);
+  }
+  if (evidence.draining) {
+    return decision(
+      evidence,
+      'recovery_required',
+      'archive_resume',
+      ['gbrain', 'sources', 'archive', evidence.source_id],
+      ['embedding_drain_pending'],
+      true,
+    );
   }
   if (!evidence.has_local_path || evidence.repo_state === 'not_applicable') {
     return decision(evidence, 'not_applicable', 'none', null, [], true);
@@ -222,6 +237,7 @@ export function gateProtectedSourceWork(
   const dbOnlyTarget =
     target.classification === 'not_applicable' &&
     !target.archived &&
+    !target.draining &&
     !target.has_local_path &&
     target.repo_state === 'not_applicable';
   if (target.classification !== 'healthy' && !dbOnlyTarget) {
@@ -263,9 +279,16 @@ export async function inspectSourceHygiene(
       ? 'not_inspected'
       : 'not_applicable';
     let liveSyncLock: boolean | null = null;
-    let lockStateKnown = !hasLocalPath || source.archived === true;
+    const draining = source.embedding_drain_token != null;
+    const expectedArchiveDrain = source.id === opts.expectedArchiveDrainSourceId;
+    let lockStateKnown = !hasLocalPath || source.archived === true || draining;
 
-    if (inspectFilesystem && hasLocalPath && source.archived !== true) {
+    if (
+      inspectFilesystem
+      && hasLocalPath
+      && source.archived !== true
+      && (!draining || expectedArchiveDrain)
+    ) {
       repoState = probes.repoState(source.local_path!, remoteUrl);
       try {
         liveSyncLock = await probes.liveSyncLock(engine, source.id);
@@ -286,7 +309,10 @@ export async function inspectSourceHygiene(
     ? await readDependentDataCounts(engine, degradedSourceIds)
     : { known: true, counts: new Map<string, number>() };
   const work = degradedSourceIds.length > 0
-    ? await readNonterminalWorkCounts(engine, degradedSourceIds)
+    ? await readNonterminalWorkCounts(
+      engine,
+      sources.filter((source) => degradedSourceIds.includes(source.id)),
+    )
     : { known: true, counts: new Map<string, number>() };
 
   const decisions: SourceHygieneDecision[] = [];
@@ -313,6 +339,7 @@ export async function inspectSourceHygiene(
     const evidence: SourceHygieneEvidence = {
       source_id: source.id,
       archived: source.archived === true,
+      draining: source.embedding_drain_token != null,
       has_local_path: hasLocalPath,
       shared_path_source_count: hasLocalPath
         ? (pathCounts.get(source.local_path!) ?? 1)
@@ -334,7 +361,12 @@ export async function inspectSourceHygiene(
       live_sync_lock: liveSyncLock,
       lock_state_known: lockStateKnown,
     };
-    decisions.push(classifySourceHygieneEvidence(evidence));
+    const classified = classifySourceHygieneEvidence(
+      source.id === opts.expectedArchiveDrainSourceId
+        ? { ...evidence, draining: false }
+        : evidence,
+    );
+    decisions.push({ ...classified, draining: evidence.draining });
   }
 
   return {
@@ -423,7 +455,9 @@ async function readConfiguredDefault(
     const legacyRepoPath = await engine.getConfig('sync.repo_path');
     if (!legacyRepoPath) return { known: true, value: null };
     const matches = sources.filter(
-      (source) => source.archived !== true && source.local_path === legacyRepoPath,
+      (source) => source.archived !== true
+        && source.embedding_drain_token == null
+        && source.local_path === legacyRepoPath,
     );
     const conventionalDefault = matches.find((source) => source.id === 'default');
     if (conventionalDefault) return { known: true, value: conventionalDefault.id };
@@ -458,6 +492,9 @@ const EXTRA_SOURCE_REFERENCE_REGISTRY: readonly SourceReferenceColumn[] = [
 const NON_CONTENT_SOURCE_REFERENCE_TABLES = new Set([
   'extract_rollup_7d',
   'minion_jobs',
+  // Transient provider coordination is drained by the archive protocol and is
+  // not source-owned content. Counting it here would refuse instead of wait.
+  'source_embedding_leases',
 ]);
 
 async function readDependentDataCounts(
@@ -535,18 +572,32 @@ async function readDependentDataCounts(
 
 async function readNonterminalWorkCounts(
   engine: BrainEngine,
-  candidateSourceIds: string[],
+  candidateSources: Array<Pick<SourceRow, 'id' | 'local_path'>>,
 ): Promise<{ known: boolean; counts: Map<string, number> }> {
-  if (candidateSourceIds.length === 0) return { known: true, counts: new Map() };
+  if (candidateSources.length === 0) return { known: true, counts: new Map() };
   try {
     const rows = await engine.executeRaw<{ source_id: string; n: number }>(
-      `SELECT COALESCE(data->>'sourceId', data->>'source_id') AS source_id,
-              COUNT(*)::int AS n
-         FROM minion_jobs
-        WHERE COALESCE(data->>'sourceId', data->>'source_id') = ANY($1::text[])
-          AND status NOT IN ('completed', 'failed', 'dead', 'cancelled')
-        GROUP BY COALESCE(data->>'sourceId', data->>'source_id')`,
-      [candidateSourceIds],
+      `SELECT candidate.source_id,
+              COUNT(DISTINCT job.id)::int AS n
+         FROM minion_jobs job
+         JOIN unnest($1::text[], $2::text[]) AS candidate(source_id, local_path)
+           ON job.data->>'sourceId' = candidate.source_id
+           OR job.data->>'source_id' = candidate.source_id
+           OR (
+             job.name = 'sync'
+             AND NOT (
+               jsonb_typeof(job.data->'sourceId') = 'string'
+               AND COALESCE(job.data->>'sourceId', '') <> ''
+             )
+             AND candidate.local_path IS NOT NULL
+             AND job.data->>'repoPath' = candidate.local_path
+           )
+        WHERE job.status NOT IN ('completed', 'failed', 'dead', 'cancelled')
+        GROUP BY candidate.source_id`,
+      [
+        candidateSources.map((source) => source.id),
+        candidateSources.map((source) => source.local_path),
+      ],
     );
     const counts = new Map<string, number>();
     addCounts(counts, rows);

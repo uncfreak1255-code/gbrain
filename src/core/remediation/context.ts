@@ -95,8 +95,11 @@ export async function loadRecommendationContext(
         repoNeedsSync = !chunkerFresh || (!gitFresh && isPastSyncRemediationWindow(source.last_sync_at));
         const sourceDecision = sourceHygiene?.sources.find((row) => row.source_id === source.id);
         if (
-          sourceDecision?.classification === 'recovery_required' &&
-          sourceDecision.recovery_mode !== 'managed_clone_sync'
+          sourceDecision?.classification === 'archive_candidate' ||
+          (
+            sourceDecision?.classification === 'recovery_required' &&
+            sourceDecision.recovery_mode !== 'managed_clone_sync'
+          )
         ) {
           repoNeedsSync = false;
         }

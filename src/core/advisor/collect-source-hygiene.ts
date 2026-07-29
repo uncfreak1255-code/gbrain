@@ -10,16 +10,24 @@ export function sourceHygieneFindings(packet: SourceHygienePacket): AdvisorFindi
         source.recovery_mode === 'managed_clone_sync' &&
         source.safe_for_agent_review &&
         source.proposed_command_argv !== null;
+      const actionableDrainResume =
+        source.recovery_mode === 'archive_resume' &&
+        source.safe_for_agent_review &&
+        source.proposed_command_argv !== null;
       findings.push({
         id: `source_recovery_required:${source.source_id}`,
         severity: protectedData ? 'critical' : 'warn',
-        title: `Recover source ${source.source_id} before sync or paid work.`,
-        detail: source.recovery_mode === 'managed_clone_sync'
-          ? 'This is a managed checkout with trusted recovery metadata; sync is allowed only after the current evidence remains clear.'
-          : 'This source contains data or lacks enough proof for automatic cleanup. Preserve it and restore its checkout manually.',
+        title: source.recovery_mode === 'archive_resume'
+          ? `Finish the interrupted archive for source ${source.source_id}.`
+          : `Recover source ${source.source_id} before sync or paid work.`,
+        detail: source.recovery_mode === 'archive_resume'
+          ? 'The source is safely paused after an interrupted archive. Rerun the archive command to adopt the same drain and finish it.'
+          : source.recovery_mode === 'managed_clone_sync'
+            ? 'This is a managed checkout with trusted recovery metadata; sync is allowed only after the current evidence remains clear.'
+            : 'This source contains data or lacks enough proof for automatic cleanup. Preserve it and restore its checkout manually.',
         fix: { command_argv: source.proposed_command_argv },
         collector: 'source_hygiene',
-        ask_user: !actionableManagedRecovery,
+        ask_user: !(actionableManagedRecovery || actionableDrainResume),
         workspace_dependent: true,
       });
     } else if (source.classification === 'archive_candidate') {

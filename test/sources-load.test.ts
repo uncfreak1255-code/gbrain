@@ -6,10 +6,12 @@
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
   loadAllSources,
   fetchSource,
+  isSourceActive,
   parseSourceConfig,
   isSourceFederated,
 } from '../src/core/sources-load.ts';
@@ -86,6 +88,84 @@ describe('loadAllSources', () => {
     expect(target!.config).toBeDefined();
     expect(target!.created_at).toBeDefined();
   });
+
+  test('pre-v133 fallback preserves archived while synthesizing a null drain', async () => {
+    const queries: string[] = [];
+    const legacyEngine = {
+      executeRaw: async (sql: string) => {
+        queries.push(sql);
+        if (/newest_content_at, embedding_drain_token/.test(sql)) {
+          const error = Object.assign(
+            new Error('column "embedding_drain_token" does not exist'),
+            { code: '42703' },
+          );
+          throw error;
+        }
+        return [{
+          id: 'legacy-archived',
+          name: 'Legacy Archived',
+          local_path: null,
+          last_commit: null,
+          last_sync_at: null,
+          config: {},
+          created_at: new Date(),
+          archived: true,
+          newest_content_at: null,
+          embedding_drain_token: null,
+        }];
+      },
+    } as unknown as BrainEngine;
+
+    const included = await loadAllSources(legacyEngine, { includeArchived: true });
+    expect(included).toHaveLength(1);
+    expect(included[0]).toMatchObject({
+      archived: true,
+      embedding_drain_token: null,
+    });
+    expect(await loadAllSources(legacyEngine)).toEqual([]);
+    expect(queries.some(query =>
+      query.includes('archived, newest_content_at, NULL::text AS embedding_drain_token'),
+    )).toBe(true);
+  });
+
+  test('v34-v108 fallback keeps archived after both newest-column probes fail', async () => {
+    const queries: string[] = [];
+    const legacyEngine = {
+      executeRaw: async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes('archived, newest_content_at')) {
+          throw Object.assign(
+            new Error('column "newest_content_at" does not exist'),
+            { code: '42703' },
+          );
+        }
+        return [{
+          id: 'v34-archived',
+          name: 'V34 Archived',
+          local_path: null,
+          last_commit: null,
+          last_sync_at: null,
+          config: {},
+          created_at: new Date(),
+          archived: true,
+          newest_content_at: null,
+          embedding_drain_token: null,
+        }];
+      },
+    } as unknown as BrainEngine;
+
+    const included = await loadAllSources(legacyEngine, { includeArchived: true });
+    expect(included).toHaveLength(1);
+    expect(included[0]).toMatchObject({
+      archived: true,
+      newest_content_at: null,
+      embedding_drain_token: null,
+    });
+    expect(await loadAllSources(legacyEngine)).toEqual([]);
+    expect(queries.some(query =>
+      query.includes('archived, NULL::timestamptz AS newest_content_at'),
+    )).toBe(true);
+  });
 });
 
 describe('fetchSource', () => {
@@ -99,6 +179,50 @@ describe('fetchSource', () => {
   test('returns null for unknown id', async () => {
     const row = await fetchSource(engine, 'does-not-exist');
     expect(row).toBeNull();
+  });
+
+  test('pre-v133 single-row fallback keeps archived and exposes drain as null', async () => {
+    const queries: string[] = [];
+    const legacyEngine = {
+      executeRaw: async (sql: string) => {
+        queries.push(sql);
+        if (/newest_content_at, embedding_drain_token/.test(sql)) {
+          throw Object.assign(
+            new Error('column "embedding_drain_token" does not exist'),
+            { code: '42703' },
+          );
+        }
+        return [{
+          id: 'legacy-archived',
+          name: 'Legacy Archived',
+          local_path: null,
+          last_commit: null,
+          last_sync_at: null,
+          config: {},
+          created_at: new Date(),
+          archived: true,
+          newest_content_at: null,
+          embedding_drain_token: null,
+        }];
+      },
+    } as unknown as BrainEngine;
+
+    const row = await fetchSource(legacyEngine, 'legacy-archived');
+    expect(row).toMatchObject({
+      id: 'legacy-archived',
+      archived: true,
+      embedding_drain_token: null,
+    });
+    expect(queries).toHaveLength(2);
+  });
+});
+
+describe('isSourceActive', () => {
+  test('requires both unarchived state and no interrupted drain', () => {
+    expect(isSourceActive({ archived: false, embedding_drain_token: null })).toBe(true);
+    expect(isSourceActive({ archived: true, embedding_drain_token: null })).toBe(false);
+    expect(isSourceActive({ archived: false, embedding_drain_token: 'drain-token' })).toBe(false);
+    expect(isSourceActive(null)).toBe(false);
   });
 });
 

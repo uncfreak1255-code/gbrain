@@ -15,6 +15,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { embedStaleForSource } from '../src/core/embed-stale.ts';
+import { softDeleteSource } from '../src/core/destructive-guard.ts';
 import type { ChunkInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
@@ -226,5 +227,41 @@ describe('embedStaleForSource', () => {
     // 'other' source still has 3 stale chunks
     const otherStale = await engine.countStaleChunks({ sourceId: 'other' });
     expect(otherStale).toBe(3);
+  });
+
+  test('archived sources never reach the embedding provider', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config, archived)
+       VALUES ('archived-embed', 'archived-embed', '{}'::jsonb, false)`,
+    );
+    await engine.putPage('archived-page', {
+      type: 'note',
+      title: 'archived-page',
+      compiled_truth: '# archived\n\nseeded',
+    }, { sourceId: 'archived-embed' });
+    await engine.upsertChunks('archived-page', [{
+      chunk_index: 0,
+      chunk_text: 'archived stale chunk',
+      chunk_source: 'compiled_truth',
+      token_count: 4,
+      embedding: undefined,
+    }], { sourceId: 'archived-embed' });
+    expect(await softDeleteSource(engine, 'archived-embed')).not.toBeNull();
+
+    let providerCalls = 0;
+    const result = await embedStaleForSource(engine, 'archived-embed', {
+      embedFn: async (texts) => {
+        providerCalls++;
+        return fakeEmbedFn(texts);
+      },
+    });
+
+    expect(result.embedded).toBe(0);
+    expect(providerCalls).toBe(0);
+    expect(await engine.countStaleChunks({ sourceId: 'archived-embed' })).toBe(0);
+    expect(await engine.listStaleChunks({
+      sourceId: 'archived-embed',
+      batchSize: 10,
+    })).toEqual([]);
   });
 });

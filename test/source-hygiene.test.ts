@@ -1,10 +1,16 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { lstatSync, mkdtempSync, rmSync } from 'node:fs';
+import { lstatSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { archiveHygieneCandidate } from '../src/commands/sources.ts';
+import {
+  restoreSource,
+  softDeleteSource,
+  softDeleteSourceGuarded,
+} from '../src/core/destructive-guard.ts';
+import { beginSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
 import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -20,6 +26,7 @@ function evidence(overrides: Partial<SourceHygieneEvidence> = {}): SourceHygiene
   return {
     source_id: 'archive-me',
     archived: false,
+    draining: false,
     has_local_path: true,
     shared_path_source_count: 1,
     repo_state: 'missing',
@@ -123,6 +130,22 @@ describe('classifySourceHygieneEvidence', () => {
     expect(dbOnly).toMatchObject({ classification: 'not_applicable', safe_for_agent_review: true });
     expect(uninspected).toMatchObject({ classification: 'not_applicable', safe_for_agent_review: false });
     expect(uninspected.veto_reasons).toContain('filesystem_not_inspected');
+  });
+
+  test('surfaces an interrupted archive drain with the exact resume command', () => {
+    const draining = classifySourceHygieneEvidence(evidence({
+      source_id: 'stuck-drain',
+      draining: true,
+      repo_state: 'healthy',
+    }));
+
+    expect(draining).toMatchObject({
+      classification: 'recovery_required',
+      recovery_mode: 'archive_resume',
+      proposed_command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'],
+      veto_reasons: ['embedding_drain_pending'],
+      safe_for_agent_review: true,
+    });
   });
 });
 
@@ -366,6 +389,19 @@ describe('validateSourceRepoState', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test('follows a user-owned source symlink to a healthy Git checkout', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-source-hygiene-symlink-'));
+    const repo = join(root, 'repo');
+    const linkedPath = join(root, 'repo-link');
+    try {
+      execFileSync('git', ['init', '--quiet', repo]);
+      symlinkSync(repo, linkedPath, 'dir');
+      expect(validateSourceRepoState(linkedPath)).toBe('healthy');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('archive hygiene execution gate', () => {
@@ -385,7 +421,36 @@ describe('archive hygiene execution gate', () => {
     await db.disconnect();
   });
 
-  test('rereads the complete predicate inside the archive transaction', async () => {
+  test('a committed drain is visible, resumable, and does not survive restore', async () => {
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ('stuck-drain', 'stuck-drain', '{}'::jsonb)`,
+    );
+    const drain = await beginSourceArchiveDrain(db, 'stuck-drain');
+    expect(drain).not.toBeNull();
+
+    const packet = await inspectSourceHygiene(db, { inspectFilesystem: true });
+    expect(packet.sources.find((source) => source.source_id === 'stuck-drain')).toMatchObject({
+      draining: true,
+      classification: 'recovery_required',
+      recovery_mode: 'archive_resume',
+      proposed_command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'],
+    });
+
+    expect(await softDeleteSource(db, 'stuck-drain')).not.toBeNull();
+    expect(await restoreSource(db, 'stuck-drain')).toBe(true);
+    const rows = await db.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+    }>(
+      `SELECT archived, embedding_drain_token
+         FROM sources
+        WHERE id = 'stuck-drain'`,
+    );
+    expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
+  });
+
+  test('rereads the complete predicate after the committed drain and before finalization', async () => {
     const missingPath = join(tmpdir(), `gbrain-archive-race-${Date.now()}`);
     await db.executeRaw(
       `INSERT INTO sources (id, name, local_path, config)
@@ -409,6 +474,43 @@ describe('archive hygiene execution gate', () => {
       `SELECT archived FROM sources WHERE id = 'archive-race'`,
     );
     expect(rows[0]?.archived).toBe(false);
+  });
+
+  test('refuses finalization when hygiene-relevant source metadata changes after the guard', async () => {
+    const firstPath = join(tmpdir(), `gbrain-archive-meta-first-${Date.now()}`);
+    const secondPath = join(tmpdir(), `gbrain-archive-meta-second-${Date.now()}`);
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('archive-meta-race', 'archive-meta-race', $1, '{}'::jsonb)`,
+      [firstPath],
+    );
+
+    await expect(softDeleteSourceGuarded(
+      db,
+      'archive-meta-race',
+      async (guardEngine) => {
+        await guardEngine.executeRaw(
+          `UPDATE sources SET local_path = $2 WHERE id = $1`,
+          ['archive-meta-race', secondPath],
+        );
+        return { allowed: true, reason: 'archive_candidate' };
+      },
+    )).rejects.toThrow(/metadata changed after archive drain began/);
+
+    const rows = await db.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+      local_path: string | null;
+    }>(
+      `SELECT archived, embedding_drain_token, local_path
+         FROM sources
+        WHERE id = 'archive-meta-race'`,
+    );
+    expect(rows[0]).toMatchObject({
+      archived: false,
+      local_path: secondPath,
+    });
+    expect(rows[0]?.embedding_drain_token).not.toBeNull();
   });
 
   test('archives a still-empty candidate while preserving terminal receipts and derived rollups', async () => {
@@ -466,7 +568,50 @@ describe('archive hygiene execution gate', () => {
     ]);
   });
 
-  test('migration v124 guards every source-reference shape at the database boundary', async () => {
+  test('both source-id spellings and path-routed sync jobs veto archive', async () => {
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES
+         ('job-secondary-key', 'job-secondary-key', '/fixture/job-secondary-key', '{}'::jsonb),
+         ('job-equal-keys', 'job-equal-keys', '/fixture/job-equal-keys', '{}'::jsonb),
+         ('job-path-route', 'job-path-route', '/fixture/job-path-route', '{}'::jsonb),
+         ('job-path-ignored', 'job-path-ignored', '/fixture/job-path-ignored', '{}'::jsonb)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES
+         ('source-key-wrapper', 'waiting',
+          '{"sourceId":"default","source_id":"job-secondary-key"}'::jsonb),
+         ('equal-key-wrapper', 'waiting',
+          '{"sourceId":"job-equal-keys","source_id":"job-equal-keys"}'::jsonb),
+         ('sync', 'waiting', '{"repoPath":"/fixture/job-path-route"}'::jsonb),
+         ('sync', 'waiting',
+          '{"sourceId":"default","repoPath":"/fixture/job-path-ignored"}'::jsonb)`,
+    );
+
+    const packet = await inspectSourceHygiene(db, {
+      inspectFilesystem: true,
+      probes: {
+        repoState: () => 'missing',
+        liveSyncLock: async () => false,
+      },
+    });
+
+    for (const sourceId of ['job-secondary-key', 'job-equal-keys', 'job-path-route']) {
+      expect(packet.sources.find((source) => source.source_id === sourceId)).toMatchObject({
+        classification: 'recovery_required',
+        nonterminal_work_count: 1,
+        work_state_known: true,
+      });
+    }
+    expect(packet.sources.find((source) => source.source_id === 'job-path-ignored')).toMatchObject({
+      classification: 'archive_candidate',
+      nonterminal_work_count: 0,
+      work_state_known: true,
+    });
+  });
+
+  test('source guard migrations cover every direct and page-owned reference at the database boundary', async () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 124);
     expect(migration?.name).toBe('active_source_reference_write_guard');
     expect(migration?.idempotent).toBe(true);
@@ -501,10 +646,74 @@ describe('archive hygiene execution gate', () => {
         WHERE c.table_schema = 'public'
           AND tables_.table_type = 'BASE TABLE'
           AND c.column_name = 'source_id'
+          AND c.table_name <> 'source_embedding_leases'
           AND trigger_.oid IS NULL
         ORDER BY c.table_name`,
     );
     expect(uncovered).toEqual([]);
+
+    const uncoveredPageReferences = await db.executeRaw<{
+      table_name: string;
+      column_name: string;
+    }>(
+      `SELECT child_table.relname AS table_name,
+              child_column.attname AS column_name
+         FROM pg_constraint constraint_
+         JOIN pg_class child_table
+           ON child_table.oid = constraint_.conrelid
+         JOIN pg_namespace child_namespace
+           ON child_namespace.oid = child_table.relnamespace
+         JOIN pg_class parent_table
+           ON parent_table.oid = constraint_.confrelid
+         JOIN pg_namespace parent_namespace
+           ON parent_namespace.oid = parent_table.relnamespace
+         JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
+           AS child_key(attnum, ordinal_position) ON true
+         JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
+           AS parent_key(attnum, ordinal_position)
+           ON parent_key.ordinal_position = child_key.ordinal_position
+         JOIN pg_attribute child_column
+           ON child_column.attrelid = child_table.oid
+          AND child_column.attnum = child_key.attnum
+         JOIN pg_attribute parent_column
+           ON parent_column.attrelid = parent_table.oid
+          AND parent_column.attnum = parent_key.attnum
+         LEFT JOIN pg_trigger insert_trigger
+           ON insert_trigger.tgrelid = child_table.oid
+          AND insert_trigger.tgname = 'source_active_page_ref_insert_guard'
+          AND NOT insert_trigger.tgisinternal
+         LEFT JOIN pg_trigger update_trigger
+           ON update_trigger.tgrelid = child_table.oid
+          AND update_trigger.tgname = 'source_active_page_ref_update_guard'
+          AND NOT update_trigger.tgisinternal
+        WHERE constraint_.contype = 'f'
+          AND child_namespace.nspname = 'public'
+          AND parent_namespace.nspname = 'public'
+          AND parent_table.relname = 'pages'
+          AND parent_column.attname = 'id'
+          AND (insert_trigger.oid IS NULL OR update_trigger.oid IS NULL)
+        ORDER BY child_table.relname, child_column.attname`,
+    );
+    expect(uncoveredPageReferences).toEqual([]);
+    const chunkGuardDefinitions = await db.executeRaw<{ definition: string }>(
+      `SELECT pg_get_triggerdef(trigger_.oid) AS definition
+         FROM pg_trigger trigger_
+        WHERE trigger_.tgrelid = 'content_chunks'::regclass
+          AND trigger_.tgname IN (
+            'source_active_page_ref_insert_guard',
+            'source_active_page_ref_update_guard'
+          )
+          AND NOT trigger_.tgisinternal
+        ORDER BY trigger_.tgname`,
+    );
+    expect(chunkGuardDefinitions).toHaveLength(2);
+    for (const trigger of chunkGuardDefinitions) {
+      expect(trigger.definition).toContain('FOR EACH STATEMENT');
+    }
+    expect(chunkGuardDefinitions[0]?.definition).toContain('REFERENCING NEW TABLE AS new_rows');
+    expect(chunkGuardDefinitions[1]?.definition).toContain(
+      'REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows',
+    );
 
     const missingPath = join(tmpdir(), `gbrain-guard-archived-${Date.now()}`);
     await db.executeRaw(
@@ -544,12 +753,91 @@ describe('archive hygiene execution gate', () => {
        VALUES ('guard-active-client', 'guard-active-client', 'guard-active', ARRAY['guard-active'])`,
     );
     await db.executeRaw(
+      `INSERT INTO oauth_clients
+         (client_id, client_name, bound_source_id, federated_read)
+       VALUES ('guard-bound-only-client', 'guard-bound-only-client', 'guard-active', ARRAY[]::text[])`,
+    );
+    await db.executeRaw(
       `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
        VALUES ('guard-active', 'active/page', 'note', 'Active', 'active')`,
     );
     await db.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+       VALUES ('default', 'guard-target/page', 'note', 'Target', 'target')`,
+    );
+    await db.executeRaw(
+      `INSERT INTO content_chunks (page_id, chunk_index, chunk_text)
+       SELECT id, chunk_index, chunk_text
+         FROM pages
+         CROSS JOIN (VALUES
+           (0, 'active chunk'),
+           (1, 'rehome chunk')
+         ) AS chunks(chunk_index, chunk_text)
+        WHERE source_id = 'guard-active' AND slug = 'active/page'`,
+    );
+    // Regression: the page-owned guard must stay statement-scoped. This is a
+    // single bulk statement, not 500 row-level lock/query cycles.
+    await db.executeRaw(
+      `INSERT INTO content_chunks (page_id, chunk_index, chunk_text)
+       SELECT pages.id, series.chunk_index, 'bulk active chunk ' || series.chunk_index
+         FROM pages
+         CROSS JOIN generate_series(10, 509) AS series(chunk_index)
+        WHERE pages.source_id = 'guard-active' AND pages.slug = 'active/page'`,
+    );
+    const bulkChunkCount = await db.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count
+         FROM content_chunks chunks
+         JOIN pages ON pages.id = chunks.page_id
+        WHERE pages.source_id = 'guard-active'
+          AND pages.slug = 'active/page'
+          AND chunks.chunk_index BETWEEN 10 AND 509`,
+    );
+    expect(bulkChunkCount[0]?.count).toBe(500);
+    const embeddingType = await db.executeRaw<{ formatted_type: string }>(
+      `SELECT format_type(attribute.atttypid, attribute.atttypmod) AS formatted_type
+         FROM pg_attribute attribute
+        WHERE attribute.attrelid = 'content_chunks'::regclass
+          AND attribute.attname = 'embedding'
+          AND NOT attribute.attisdropped`,
+    );
+    const embeddingDimensions = Number(
+      embeddingType[0]?.formatted_type.match(/^vector\((\d+)\)$/)?.[1],
+    );
+    expect(embeddingDimensions).toBeGreaterThan(0);
+    const vectorLiteral = `[${Array.from(
+      { length: embeddingDimensions },
+      () => '0.01',
+    ).join(',')}]`;
+    // Keep the bulk-write regression realistic: UPDATE transition rows carry
+    // non-null vectors, while the guard projects only page_id and must finish
+    // within the test runner's normal timeout.
+    await db.executeRaw(
+      `UPDATE content_chunks chunks
+          SET embedding = $1::vector
+         FROM pages
+        WHERE pages.id = chunks.page_id
+          AND pages.source_id = 'guard-active'
+          AND pages.slug = 'active/page'
+          AND chunks.chunk_index BETWEEN 10 AND 509`,
+      [vectorLiteral],
+    );
+    const embeddedBulkChunkCount = await db.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count
+         FROM content_chunks chunks
+         JOIN pages ON pages.id = chunks.page_id
+        WHERE pages.source_id = 'guard-active'
+          AND pages.slug = 'active/page'
+          AND chunks.chunk_index BETWEEN 10 AND 509
+          AND chunks.embedding IS NOT NULL`,
+    );
+    expect(embeddedBulkChunkCount[0]?.count).toBe(500);
+    await db.executeRaw(
       `INSERT INTO minion_jobs (name, data)
        VALUES ('guard-active-job', '{"sourceId":"guard-active"}'::jsonb)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES ('sync', 'active', '{"repoPath":"/fixture/guard-active"}'::jsonb)`,
     );
     await db.executeRaw(
       `INSERT INTO config (key, value) VALUES ('sources.default', 'guard-active')
@@ -604,6 +892,21 @@ describe('archive hygiene execution gate', () => {
        VALUES ('guard-archived-job', '{"source_id":"guard-archived"}'::jsonb)`,
     );
     await rejectArchived(
+      `INSERT INTO minion_jobs (name, data)
+       VALUES ('sync', '{"repoPath":"${missingPath}"}'::jsonb)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, data)
+       VALUES (
+         'sync',
+         jsonb_build_object(
+           'sourceId', 'default',
+           'repoPath', $1::text
+         )
+       )`,
+      [missingPath],
+    );
+    await rejectArchived(
       `INSERT INTO gbrain_cycle_locks
          (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
        VALUES ('gbrain-sync:guard-archived', 1003, 'fixture', now() + interval '5 minutes', now())`,
@@ -624,9 +927,9 @@ describe('archive hygiene execution gate', () => {
       pathError = caught;
     }
     expect(pathError).toBeDefined();
-    expect(String(pathError)).toContain('matching source is archived');
+    expect(String(pathError)).toContain('source guard-archived is archived or draining');
 
-    await db.executeRaw(`UPDATE sources SET archived = true WHERE id = 'guard-active'`);
+    expect(await softDeleteSource(db, 'guard-active')).not.toBeNull();
     await rejectArchived(
       `UPDATE pages SET title = 'Blocked mutation'
         WHERE source_id = 'guard-active' AND slug = 'active/page'`,
@@ -636,8 +939,39 @@ describe('archive hygiene execution gate', () => {
         WHERE source_id = 'guard-active' AND slug = 'active/page'`,
     );
     await rejectArchived(
+      `UPDATE content_chunks
+          SET chunk_text = 'Blocked indirect mutation'
+        WHERE page_id = (
+          SELECT id FROM pages
+           WHERE source_id = 'guard-active' AND slug = 'active/page'
+        )`,
+    );
+    await rejectArchived(
+      `UPDATE content_chunks
+          SET page_id = (
+            SELECT id FROM pages
+             WHERE source_id = 'default' AND slug = 'guard-target/page'
+          )
+        WHERE page_id = (
+          SELECT id FROM pages
+           WHERE source_id = 'guard-active' AND slug = 'active/page'
+        ) AND chunk_index = 1`,
+    );
+    await rejectArchived(
       `UPDATE oauth_clients SET client_name = 'Blocked mutation'
         WHERE client_id = 'guard-active-client'`,
+    );
+    // Removing the scalar binding is cleanup, not a write to the archived
+    // source. This also preserves FK ON DELETE SET NULL compatibility.
+    await db.executeRaw(
+      `UPDATE oauth_clients
+          SET bound_source_id = NULL
+        WHERE client_id = 'guard-bound-only-client'`,
+    );
+    await rejectArchived(
+      `UPDATE oauth_clients
+          SET bound_source_id = 'guard-active'
+        WHERE client_id = 'guard-bound-only-client'`,
     );
     await rejectArchived(
       `UPDATE oauth_clients
@@ -648,6 +982,11 @@ describe('archive hygiene execution gate', () => {
       `UPDATE minion_jobs
           SET data = '{"sourceId":"default"}'::jsonb
         WHERE name = 'guard-active-job'`,
+    );
+    await db.executeRaw(
+      `UPDATE minion_jobs SET status = 'failed'
+        WHERE name = 'sync'
+          AND data->>'repoPath' = '/fixture/guard-active'`,
     );
     await rejectArchived(
       `UPDATE gbrain_cycle_locks
@@ -664,6 +1003,56 @@ describe('archive hygiene execution gate', () => {
       'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I',
     );
     expect(migration?.sql).not.toContain('UPDATE OF %I');
+  });
+
+  test('page deletion can clear nullable child references after the owner is archived', async () => {
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, config, archived)
+       VALUES ('guard-delete-owner', 'guard-delete-owner', '{}'::jsonb, false)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+       VALUES
+         ('guard-delete-owner', 'guard-delete/origin', 'note', 'Origin', 'origin'),
+         ('default', 'guard-delete/from', 'note', 'From', 'from'),
+         ('default', 'guard-delete/to', 'note', 'To', 'to')`,
+    );
+    await db.executeRaw(
+      `INSERT INTO files
+         (source_id, page_slug, page_id, filename, storage_path, content_hash)
+       SELECT 'default', 'guard-delete/origin', id,
+              'guard-delete.txt', 'guard-delete.txt', 'guard-delete-hash'
+         FROM pages
+        WHERE source_id = 'guard-delete-owner' AND slug = 'guard-delete/origin'`,
+    );
+    await db.executeRaw(
+      `INSERT INTO links
+         (from_page_id, to_page_id, origin_page_id, link_type, link_source)
+       SELECT from_page.id, to_page.id, origin_page.id, 'related', 'frontmatter'
+         FROM pages from_page
+         JOIN pages to_page
+           ON to_page.source_id = 'default' AND to_page.slug = 'guard-delete/to'
+         JOIN pages origin_page
+           ON origin_page.source_id = 'guard-delete-owner'
+          AND origin_page.slug = 'guard-delete/origin'
+        WHERE from_page.source_id = 'default' AND from_page.slug = 'guard-delete/from'`,
+    );
+
+    expect(await softDeleteSource(db, 'guard-delete-owner')).not.toBeNull();
+    await db.executeRaw(
+      `DELETE FROM pages
+        WHERE source_id = 'guard-delete-owner' AND slug = 'guard-delete/origin'`,
+    );
+
+    const files = await db.executeRaw<{ page_id: number | null }>(
+      `SELECT page_id FROM files WHERE storage_path = 'guard-delete.txt'`,
+    );
+    const links = await db.executeRaw<{ origin_page_id: number | null }>(
+      `SELECT origin_page_id FROM links WHERE link_source = 'frontmatter'
+        AND link_type = 'related'`,
+    );
+    expect(files).toEqual([{ page_id: null }]);
+    expect(links).toEqual([{ origin_page_id: null }]);
   });
 
   test('intermediate guards allow missing legacy sources but reject archived sources', async () => {
@@ -778,7 +1167,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '130');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(1);
+    expect(result.applied).toBe(3);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -789,7 +1178,64 @@ describe('archive hygiene execution gate', () => {
     expect(definitions[0]?.definition).toContain('to_jsonb(OLD)');
   });
 
-  test('PGLite schema replay preserves the final v131 guard on an already-upgraded brain', async () => {
+  test('migration v132 guards page-owned rows for an already-v131 brain', async () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 132);
+    expect(migration?.name).toBe('archived_source_indirect_reference_guard');
+    expect(migration?.idempotent).toBe(true);
+    expect(migration?.sql).toContain('enforce_active_source_page_reference_fn');
+    expect(migration?.sql).not.toContain('FROM old_rows changed');
+    expect(migration?.sql).toContain('enforce_active_source_page_rehome_fn');
+    expect(migration?.sql).not.toContain('to_jsonb(row_record)');
+    expect(migration?.sql).toContain('FOR EACH STATEMENT');
+    expect(migration?.sql).toContain("parent_table.relname = 'pages'");
+    expect(migration?.sql).toContain("parent_column.attname = 'id'");
+    expect(migration?.sql).toContain('pg_advisory_xact_lock_shared');
+    expect(migration?.sql).toContain("NEW.data->>'repoPath'");
+    expect(migration?.sql).toContain('path_source_refs_after');
+
+    await db.executeRaw(`
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `);
+    await db.executeRaw(`
+      CREATE OR REPLACE FUNCTION enforce_active_source_page_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql
+    `);
+    await db.setConfig('version', '131');
+    const result = await runMigrations(db);
+    expect(result.applied).toBe(2);
+    expect(result.current).toBe(LATEST_VERSION);
+
+    const definitions = await db.executeRaw<{ definition: string }>(
+      `SELECT pg_get_functiondef(
+         'enforce_active_source_page_reference_fn()'::regprocedure
+       ) AS definition`,
+    );
+    expect(definitions[0]?.definition).not.toContain('FROM old_rows changed');
+    expect(definitions[0]?.definition).not.toContain('to_jsonb(row_record)');
+    expect(definitions[0]?.definition).toContain('page source % is archived');
+    const jobDefinitions = await db.executeRaw<{ definition: string }>(
+      `SELECT pg_get_functiondef(
+         'enforce_active_source_job_status_fn()'::regprocedure
+       ) AS definition`,
+    );
+    expect(jobDefinitions[0]?.definition).toContain("NEW.data->>'repoPath'");
+    expect(jobDefinitions[0]?.definition).toContain('path_source_refs_after');
+  });
+
+  test('PGLite schema replay preserves the final v132 guards on an already-upgraded brain', async () => {
     const assertHardenedGuards = async () => {
       const hardened = await db.executeRaw<{ proname: string; proconfig: string[] | null }>(
         `SELECT proname, proconfig
@@ -797,11 +1243,12 @@ describe('archive hygiene execution gate', () => {
           WHERE proname IN (
             'enforce_active_source_reference_fn',
             'enforce_active_source_job_status_fn',
-            'enforce_active_source_config_fn'
+            'enforce_active_source_config_fn',
+            'enforce_active_source_page_reference_fn'
           )
           ORDER BY proname`,
       );
-      expect(hardened).toHaveLength(3);
+      expect(hardened).toHaveLength(4);
       for (const guard of hardened) {
         expect(guard.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
       }
@@ -824,11 +1271,7 @@ describe('archive hygiene execution gate', () => {
          'guard-replay-archived'
        )`,
     );
-    await db.executeRaw(
-      `UPDATE sources
-          SET archived = true, archived_at = now()
-        WHERE id = 'guard-replay-archived'`,
-    );
+    expect(await softDeleteSource(db, 'guard-replay-archived')).not.toBeNull();
     await expect(
       db.executeRaw(
         `UPDATE pages
@@ -882,10 +1325,7 @@ describe('archive hygiene execution gate', () => {
          ('finish-after-archive', 'active', '{"sourceId":"job-terminalize"}'::jsonb),
          ('continue-after-archive', 'waiting', '{"sourceId":"job-terminalize"}'::jsonb)`,
     );
-    await db.executeRaw(
-      `UPDATE sources SET archived = true, archived_at = now()
-        WHERE id = 'job-terminalize'`,
-    );
+    expect(await softDeleteSource(db, 'job-terminalize')).not.toBeNull();
 
     let progressError: unknown;
     try {
@@ -944,6 +1384,7 @@ interface FakeSourceRow {
   config: Record<string, unknown> | string;
   created_at: Date;
   archived: boolean;
+  embedding_drain_token: string | null;
   newest_content_at: Date | null;
 }
 
@@ -957,6 +1398,7 @@ function sourceRow(id: string, localPath: string | null, archived: boolean): Fak
     config: { federated: true },
     created_at: new Date('2026-01-01T00:00:00Z'),
     archived,
+    embedding_drain_token: null,
     newest_content_at: null,
   };
 }

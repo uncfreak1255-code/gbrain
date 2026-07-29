@@ -1262,7 +1262,7 @@ export class PostgresEngine implements BrainEngine {
     const rows = await sql`
       SELECT id, name, local_path, last_sync_at, config
         FROM sources
-       WHERE (${includeArchived} OR archived IS NOT TRUE)
+       WHERE (${includeArchived} OR (archived IS NOT TRUE AND embedding_drain_token IS NULL))
          AND (${!localPathOnly} OR local_path IS NOT NULL)
        ORDER BY (id = 'default') DESC, id
     `;
@@ -2255,6 +2255,8 @@ export class PostgresEngine implements BrainEngine {
       conds.push(`cc.embedding IS NULL`);
     }
     conds.push(`NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
+    conds.push(`s.archived IS NOT TRUE`);
+    conds.push(`s.embedding_drain_token IS NULL`);
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
@@ -2271,6 +2273,7 @@ export class PostgresEngine implements BrainEngine {
       `SELECT count(*)::int AS count
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params as Parameters<typeof this.sql.unsafe>[1],
     );
@@ -2285,6 +2288,7 @@ export class PostgresEngine implements BrainEngine {
       `SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params as Parameters<typeof this.sql.unsafe>[1],
     );
@@ -2313,7 +2317,10 @@ export class PostgresEngine implements BrainEngine {
       `UPDATE content_chunks cc
           SET embedding = NULL, embedded_at = NULL
          FROM pages p
+         JOIN sources s ON s.id = p.source_id
         WHERE cc.page_id = p.id
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND cc.embedding IS NOT NULL
           AND p.embedding_signature IS NOT NULL
           AND p.embedding_signature <> $1${srcClause}
@@ -2355,7 +2362,10 @@ export class PostgresEngine implements BrainEngine {
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
+          JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
           LIMIT ${limit}
@@ -2365,7 +2375,10 @@ export class PostgresEngine implements BrainEngine {
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
+          JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (
               p.updated_at < ${afterUpdated}::timestamptz
@@ -2383,7 +2396,10 @@ export class PostgresEngine implements BrainEngine {
                p.updated_at
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
+        JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND p.source_id = ${opts.sourceId}
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
@@ -2394,7 +2410,10 @@ export class PostgresEngine implements BrainEngine {
                p.updated_at
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
+        JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND p.source_id = ${opts.sourceId}
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (
@@ -2427,7 +2446,10 @@ export class PostgresEngine implements BrainEngine {
                cc.model, cc.token_count, p.source_id, cc.page_id
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
+        JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
         ORDER BY cc.page_id, cc.chunk_index
@@ -2440,7 +2462,10 @@ export class PostgresEngine implements BrainEngine {
              cc.model, cc.token_count, p.source_id, cc.page_id
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
+      JOIN sources s ON s.id = p.source_id
       WHERE cc.embedding IS NULL
+        AND s.archived IS NOT TRUE
+        AND s.embedding_drain_token IS NULL
         AND p.source_id = ${opts.sourceId}
         AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})

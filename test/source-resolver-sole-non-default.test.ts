@@ -38,10 +38,10 @@ function makeStub(sources: StubSource[], globalDefault: string | null = null) {
         return sources.filter(s => s.local_path !== null && s.archived !== true)
           .map(s => ({ id: s.id, local_path: s.local_path })) as unknown as T[];
       }
-      if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+      if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const id = (_params as string[])?.[0];
         return sources.filter(s => s.id === id)
-          .map(s => ({ id: s.id, archived: s.archived === true })) as unknown as T[];
+          .map(s => ({ id: s.id, archived: s.archived === true, draining: false })) as unknown as T[];
       }
       if (sql.includes('archived = false')) {
         return sources.filter(s => s.local_path !== null && s.id !== 'default' && s.archived !== true)

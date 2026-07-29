@@ -35,7 +35,7 @@ Source-scoped exports require a fresh or empty output directory, verify the page
 
 ### To take advantage of v0.47.1.0
 
-`gbrain upgrade` should apply migrations 124 through 131 automatically. If Doctor reports a partial migration, run:
+`gbrain upgrade` should apply migrations 124 through 133 automatically. If Doctor reports a partial migration, run:
 
 ```bash
 gbrain apply-migrations --yes
@@ -50,18 +50,19 @@ If the upgrade still looks incomplete, include `gbrain doctor --json` and `~/.gb
 ### Added
 - **Source-scoped recovery exports.** `gbrain export --source <id>` requires a fresh or empty output directory, paginates the complete source inside a consistent database snapshot, validates counts and unique slugs, confines output paths, and writes deterministic page hashes.
 - **A repeatable source-hygiene loop.** Repo-local maintenance guidance now separates investigation, adversarial review, and bounded repair, with a fresh readback after every action.
-- **Archived-source database guards.** Migrations 124 through 131 reject new or continued writes against known archived sources, including job progress, row re-homing, and source-owned updates that do not change `source_id`, while retaining compatibility with unresolved legacy source identifiers and serializing archive decisions before a registry row exists.
+- **Archived-source database guards.** Migrations 124 through 133 reject new or continued writes against known archived or draining sources, including job progress, path-routed sync jobs, row re-homing, source-owned updates that do not change `source_id`, and child rows that refer to archived-source pages. Page-owned checks use statement-level transition tables and dynamically project only page-reference columns, so bulk writes validate each page once without serializing large vector values. Scalar bindings can still be cleared for cleanup, and unresolved legacy source identifiers remain compatible.
+- **Durable per-source embedding leases.** Every source-owned text, code, image, contextual-retrieval, fact, and multimodal-reindex gateway submission now carries the exact owning source. Archive commits a drain marker, blocks new submissions and writes, waits for exact provider tokens without holding a database transaction, and exposes output only after the token completes against the same active source generation. Interrupted drains remain visible and resume with `gbrain sources archive <id>`.
 
 ### Changed
 - **Doctor, Planner, and Advisor share one source diagnosis.** Missing checkouts, database-only pages, empty duplicates, and healthy database-backed sources now produce consistent findings and remediation gates.
 - **Dream-quality receipts use one explicit clock.** A caller-supplied receipt timestamp now also controls promotion staleness scoring, so delayed or replayed evaluations stay deterministic.
-- **Archived sources leave normal routing.** Resolver and Doctor paths ignore soft-archived sources while retaining a narrow fallback for older schemas during upgrade.
+- **Archived sources leave normal work queues.** Resolver and Doctor paths ignore soft-archived sources, archived configured defaults fail loudly instead of silently falling through, and source-owned embedding submissions use short database transactions only to acquire, heartbeat, and complete durable tokens. Provider latency never holds a transaction or pool connection. Concurrent submissions for one active source may overlap; archive drains only that source, aborts or discards in-flight output, and rejects later gateway sub-batches and gateway-owned retries before provider egress. Older schemas retain a narrow upgrade fallback.
 
 ### Fixed
-- **Live upgrades keep legacy source identifiers writable and serialized.** Every intermediate archived-source guard migration distinguishes a missing legacy registry row from a known archived source while taking the shared lifecycle lock, preventing temporary write failures, row re-homing, or archive races as migrations 124 through 131 apply one at a time.
+- **Live upgrades keep legacy source identifiers writable and serialized.** Every intermediate archived-source guard migration distinguishes a missing legacy registry row from a known archived source while taking the shared lifecycle lock, preventing temporary write failures, row re-homing, or archive races as migrations 124 through 133 apply one at a time.
 
 ### For contributors
-- Focused unit, export, migration, and real-PostgreSQL concurrency tests cover consistent recovery snapshots, raw-key preservation, transactional archive rechecks, intermediate migration compatibility, queued-job races, terminalization, lock renewal, and all-update source guards.
+- Focused unit, export, migration, and real-PostgreSQL concurrency tests cover consistent recovery snapshots, raw-key preservation, post-drain archive rechecks with source-metadata compare-and-swap, intermediate migration compatibility, direct and path-routed queued-job races, 500-row non-null-vector guard updates, exact-source provider tokens, provider-versus-archive ordering, crash-resumable drains, page-owned references, terminalization, lock renewal, and all-update source guards. A structural inventory fails CI when a new document embedding path is not explicitly fenced or classified as query/smoke-only.
 
 ## [0.47.0.1] - 2026-07-27
 

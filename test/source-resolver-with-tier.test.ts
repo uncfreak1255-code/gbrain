@@ -29,10 +29,10 @@ function makeStub(
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
-      if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+      if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const target = params?.[0] as string;
         return (registeredSources.includes(target)
-          ? [{ id: target, archived: archivedIds.has(target) } as unknown as T]
+          ? [{ id: target, archived: archivedIds.has(target), draining: false } as unknown as T]
           : []);
       }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -93,7 +93,7 @@ describe('resolveSourceWithTier pre-v34 compatibility', () => {
     const engine = {
       kind: 'pglite' as const,
       executeRaw: async (sql: string, params?: unknown[]) => {
-        if (sql.includes('SELECT id, archived FROM sources WHERE id = $1')) {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
           throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
         }
         if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -276,16 +276,15 @@ describe('resolveSourceWithTier — tier 5 (brain_default)', () => {
     expect(result.detail).toContain('sources.default');
   });
 
-  test('archived brain default falls through to the seed default', async () => {
+  test('archived brain default fails loudly instead of returning the seed default', async () => {
     const engine = makeStub(
       ['default', 'retired'],
       [{ id: 'retired', local_path: '/retired', archived: true }],
       'retired',
     );
-    await expect(resolveSourceWithTier(engine, null, '/tmp/no-dotfile-here')).resolves.toMatchObject({
-      source_id: 'default',
-      tier: 'seed_default',
-    });
+    await expect(resolveSourceWithTier(engine, null, '/tmp/no-dotfile-here')).rejects.toThrow(
+      /archived.*sources\.default/,
+    );
   });
 
   test('valid-but-unregistered brain default remains a loud error', async () => {

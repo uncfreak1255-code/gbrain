@@ -741,6 +741,7 @@ async function processPage(
         sessionId,
         source: PER_SEGMENT_SOURCE_PREFIX,
         engine: state.engine,
+        sourceId: state.sourceId,
         abortSignal: state.signal,
       });
     } catch (err) {
