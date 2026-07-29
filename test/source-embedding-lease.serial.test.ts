@@ -7,6 +7,7 @@ import {
   __setSourceEmbeddingLeaseTimingsForTests,
   beginSourceArchiveDrain,
   SourceEmbeddingLeaseLostError,
+  waitForSourceEmbeddingLeases,
   withActiveSourceProviderLease,
 } from '../src/core/source-embedding-lease.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -246,6 +247,35 @@ describe('source embedding provider leases', () => {
       );
       expect(state).toEqual([{ archived: false, draining: true, leases: 1 }]);
     }
+  });
+
+  test('shared Postgres leases are never reclaimed from hostname and PID alone', async () => {
+    __setSourceEmbeddingLeaseTimingsForTests({ archivePollMs: 1, archiveWaitMs: 10 });
+    let deleteAttempted = false;
+    const sharedEngine = {
+      kind: 'postgres' as const,
+      executeRaw: async <T>(sql: string): Promise<T[]> => {
+        if (sql.includes('DELETE FROM public.source_embedding_leases')) {
+          deleteAttempted = true;
+          return [{ lease_token: 'same-host-token' }] as T[];
+        }
+        return [{
+          lease_token: 'same-host-token',
+          owner_host: hostname(),
+          owner_pid: 2147483647,
+          owner_instance: 'remote-machine-instance',
+        }] as T[];
+      },
+    } as unknown as BrainEngine;
+
+    await expect(waitForSourceEmbeddingLeases(sharedEngine, {
+      sourceId: 'shared-source',
+      token: 'drain-token',
+      epoch: 1,
+      localPath: null,
+      configJson: '{}',
+    })).rejects.toThrow('require operator review');
+    expect(deleteAttempted).toBe(false);
   });
 });
 

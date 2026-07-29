@@ -76,6 +76,13 @@ async function reclaimProvablyDeadLocalOwners(
   drain: SourceArchiveDrain,
   rows: ProviderLeaseOwnerRow[],
 ): Promise<number> {
+  // A shared Postgres brain can have workers on different machines with the
+  // same hostname and PID. Without a machine-unique identity, a local
+  // process.kill(pid, 0) result cannot prove that a Postgres lease owner is
+  // dead. PGLite is single-owner under its exclusive data-directory lock, so
+  // hostname + PID remains sufficient there.
+  if (engine.kind !== 'pglite') return 0;
+
   let reclaimed = 0;
   for (const row of rows) {
     const ownerPid = Number(row.owner_pid);
