@@ -1388,14 +1388,20 @@ describe('archive hygiene execution gate', () => {
        VALUES
          ('sync', 'waiting', -30, '{"sourceId":"claim-archived"}'::jsonb),
          ('sync', 'waiting', -20, '{"source_id":"claim-archived"}'::jsonb),
-         ('sync', 'waiting', -10, '{"repoPath":"/fixture/claim-draining"}'::jsonb),
-         ('sync', 'waiting', 0, '{"sourceId":"claim-healthy"}'::jsonb)`,
+         ('sync', 'waiting', -10, '{"repoPath":"/fixture/claim-draining"}'::jsonb)`,
     );
 
     expect(await softDeleteSource(db, 'claim-archived')).not.toBeNull();
     expect(await beginSourceArchiveDrain(db, 'claim-draining')).not.toBeNull();
 
+    await db.setConfig('version', String(LATEST_VERSION));
     const queue = new MinionQueue(db);
+    const submitted = await queue.add(
+      'sync',
+      { sourceId: 'claim-healthy' },
+      { maxWaiting: 1 },
+    );
+    expect(submitted.data).toEqual({ sourceId: 'claim-healthy' });
     const claimed = await queue.claim('healthy-token', 30_000, 'default', ['sync']);
     expect(claimed).toMatchObject({
       status: 'active',

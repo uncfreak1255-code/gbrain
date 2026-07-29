@@ -42,6 +42,32 @@ const DEFAULT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MiB
 
 const TERMINAL_STATUSES = ['completed', 'failed', 'dead', 'cancelled'] as const;
 
+/**
+ * A waiting job whose source is archived or mid-drain cannot safely run.
+ * Keep claim and submission backpressure on the same eligibility rule so an
+ * inactive row can neither wedge the worker nor absorb a healthy submission.
+ */
+function activeSourceJobPredicate(jobAlias: 'candidate'): string {
+  return `NOT EXISTS (
+    SELECT 1
+      FROM sources AS source
+     WHERE (source.archived IS TRUE OR source.embedding_drain_token IS NOT NULL)
+       AND (
+         ${jobAlias}.data->>'sourceId' = source.id
+         OR ${jobAlias}.data->>'source_id' = source.id
+         OR (
+           ${jobAlias}.name = 'sync'
+           AND NOT (
+             jsonb_typeof(${jobAlias}.data->'sourceId') = 'string'
+             AND COALESCE(${jobAlias}.data->>'sourceId', '') <> ''
+           )
+           AND source.local_path IS NOT NULL
+           AND ${jobAlias}.data->>'repoPath' = source.local_path
+         )
+       )
+  )`;
+}
+
 export class MinionQueue {
   readonly maxSpawnDepth: number;
   readonly maxAttachmentBytes: number;
@@ -172,24 +198,26 @@ export class MinionQueue {
         );
         const waitingCountRows = await tx.executeRaw<{ count: string }>(
           `SELECT count(*)::text AS count
-           FROM minion_jobs
-           WHERE name = $1 AND queue = $2 AND status = 'waiting'
+           FROM minion_jobs AS candidate
+           WHERE candidate.name = $1 AND candidate.queue = $2 AND candidate.status = 'waiting'
+             AND ${activeSourceJobPredicate('candidate')}
              AND (
-               ($3::text IS NULL AND stagger_key IS NULL) OR
-               stagger_key = $3::text
+               ($3::text IS NULL AND candidate.stagger_key IS NULL) OR
+               candidate.stagger_key = $3::text
              )`,
           [jobName, backpressureQueue, backpressureKey]
         );
         const waitingCount = parseInt(waitingCountRows[0]?.count ?? '0', 10);
         if (waitingCount >= maxWaiting) {
           const existingWaiting = await tx.executeRaw<Record<string, unknown>>(
-            `SELECT * FROM minion_jobs
-             WHERE name = $1 AND queue = $2 AND status = 'waiting'
+            `SELECT candidate.* FROM minion_jobs AS candidate
+             WHERE candidate.name = $1 AND candidate.queue = $2 AND candidate.status = 'waiting'
+               AND ${activeSourceJobPredicate('candidate')}
                AND (
-                 ($3::text IS NULL AND stagger_key IS NULL) OR
-                 stagger_key = $3::text
+                 ($3::text IS NULL AND candidate.stagger_key IS NULL) OR
+                 candidate.stagger_key = $3::text
                )
-             ORDER BY created_at DESC, id DESC
+             ORDER BY candidate.created_at DESC, candidate.id DESC
              LIMIT 1`,
             [jobName, backpressureQueue, backpressureKey]
           );
@@ -639,24 +667,7 @@ export class MinionQueue {
          WHERE candidate.queue = $3
            AND candidate.status = 'waiting'
            AND candidate.name = ANY($4)
-           AND NOT EXISTS (
-             SELECT 1
-               FROM sources AS source
-              WHERE (source.archived IS TRUE OR source.embedding_drain_token IS NOT NULL)
-                AND (
-                  candidate.data->>'sourceId' = source.id
-                  OR candidate.data->>'source_id' = source.id
-                  OR (
-                    candidate.name = 'sync'
-                    AND NOT (
-                      jsonb_typeof(candidate.data->'sourceId') = 'string'
-                      AND COALESCE(candidate.data->>'sourceId', '') <> ''
-                    )
-                    AND source.local_path IS NOT NULL
-                    AND candidate.data->>'repoPath' = source.local_path
-                  )
-                )
-           )
+           AND ${activeSourceJobPredicate('candidate')}
          ORDER BY candidate.priority ASC, candidate.created_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
