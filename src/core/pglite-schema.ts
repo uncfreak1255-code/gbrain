@@ -3,7 +3,9 @@
  *
  * Differences from Postgres:
  * - No RLS block (no role system in embedded PGLite)
- * - No pg_advisory_lock (single connection)
+ * - No cross-process advisory-lock coordination (single connection). PGLite
+ *   exposes the transaction-scoped advisory-lock functions used by shared
+ *   trigger SQL; its process-level single-writer lock is the concurrency gate.
  *
  * As of v0.27.1 the `files` table mirrors the Postgres shape on PGLite —
  * v0.18 originally omitted it because file attachments required Supabase
