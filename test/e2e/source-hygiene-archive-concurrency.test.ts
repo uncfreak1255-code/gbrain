@@ -89,6 +89,84 @@ describeE2E('source hygiene archive/write concurrency', () => {
     }
   }, 30_000);
 
+  test('archived rows cannot escape by replacing scalar, array, or JSON source references', async () => {
+    const sourceId = 'archived-rehome-e2e';
+    const pageSlug = 'archive/rehome-e2e';
+    const jobName = 'archive-rehome-e2e';
+    const writer = new PostgresEngine();
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+
+    const expectArchivedError = async (sql: string) => {
+      let error: unknown;
+      try {
+        await writer.executeRaw(sql);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeDefined();
+      expect(String(error)).toContain('is archived');
+    };
+
+    try {
+      await writer.executeRaw(
+        `INSERT INTO sources (id, name, config, archived)
+         VALUES ($1, $1, '{}'::jsonb, false)`,
+        [sourceId],
+      );
+      await writer.executeRaw(
+        `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+         VALUES ($1, $2, 'note', 'Archive rehome', 'archive rehome')`,
+        [sourceId, pageSlug],
+      );
+      await writer.executeRaw(
+        `INSERT INTO eval_candidates
+           (tool_name, query, source_ids, vector_enabled, expansion_applied, latency_ms, remote)
+         VALUES ('query', 'archive rehome', ARRAY[$1], false, false, 1, false)`,
+        [sourceId],
+      );
+      await writer.executeRaw(
+        `INSERT INTO minion_jobs (name, data)
+         VALUES ($1, jsonb_build_object('sourceId', $2::text))`,
+        [jobName, sourceId],
+      );
+      await writer.executeRaw(
+        `UPDATE sources SET archived = true, archived_at = now() WHERE id = $1`,
+        [sourceId],
+      );
+
+      await expectArchivedError(
+        `UPDATE pages SET source_id = 'default'
+          WHERE source_id = '${sourceId}' AND slug = '${pageSlug}'`,
+      );
+      await expectArchivedError(
+        `UPDATE eval_candidates SET source_ids = ARRAY['default']
+          WHERE query = 'archive rehome'`,
+      );
+      await expectArchivedError(
+        `UPDATE minion_jobs SET data = '{"sourceId":"default"}'::jsonb
+          WHERE name = '${jobName}'`,
+      );
+
+      await writer.executeRaw(
+        `UPDATE minion_jobs SET status = 'failed' WHERE name = $1`,
+        [jobName],
+      );
+    } finally {
+      await writer.executeRaw(
+        `UPDATE sources SET archived = false, archived_at = NULL WHERE id = $1`,
+        [sourceId],
+      ).catch(() => {});
+      await writer.executeRaw(`DELETE FROM minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM eval_candidates WHERE query = 'archive rehome'`).catch(() => {});
+      await writer.executeRaw(
+        `DELETE FROM pages WHERE source_id = $1 AND slug = $2`,
+        [sourceId, pageSlug],
+      ).catch(() => {});
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await writer.disconnect();
+    }
+  }, 30_000);
+
   test('intermediate guards allow missing legacy sources but reject archived sources', async () => {
     const referenceGuard = MIGRATIONS.find((entry) => entry.version === 124);
     const jobGuard = MIGRATIONS.find((entry) => entry.version === 126);

@@ -1090,7 +1090,7 @@ CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
 CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
   ON page_aliases (source_id, slug);
 
--- Source lifecycle write guard (migrations v124-v130). Mirrored from schema.sql
+-- Source lifecycle write guard (migrations v124-v131). Mirrored from schema.sql
 -- so fresh PGLite snapshots and replayed schemas enforce the same lock protocol.
 CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
 RETURNS trigger
@@ -1105,36 +1105,65 @@ BEGIN
   IF TG_ARGV[0] = 'scalar' THEN
     source_ref := to_jsonb(NEW)->>TG_ARGV[1];
     IF source_ref IS NOT NULL THEN
-      source_refs := ARRAY[source_ref];
+      source_refs := array_append(source_refs, source_ref);
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+      source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+      IF source_ref IS NOT NULL THEN
+        source_refs := array_append(source_refs, source_ref);
+      END IF;
     END IF;
   ELSIF TG_ARGV[0] = 'array' THEN
     raw_ref := to_jsonb(NEW)->TG_ARGV[1];
     IF jsonb_typeof(raw_ref) = 'array' THEN
-      SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-        INTO source_refs
-        FROM jsonb_array_elements_text(raw_ref) AS values_(value);
+      source_refs := source_refs || ARRAY(
+        SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+      );
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+      raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+      IF jsonb_typeof(raw_ref) = 'array' THEN
+        source_refs := source_refs || ARRAY(
+          SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+        );
+      END IF;
     END IF;
   ELSIF TG_ARGV[0] = 'json_source_keys' THEN
     raw_ref := to_jsonb(NEW)->TG_ARGV[1];
     IF jsonb_typeof(raw_ref) = 'object' THEN
-      SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-        INTO source_refs
-        FROM (
-          VALUES (raw_ref->>'sourceId'), (raw_ref->>'source_id')
-        ) AS values_(value)
-       WHERE value IS NOT NULL;
+      source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+      raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+      IF jsonb_typeof(raw_ref) = 'object' THEN
+        source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+      END IF;
     END IF;
   ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
     source_ref := to_jsonb(NEW)->>TG_ARGV[1];
     IF source_ref LIKE 'gbrain-sync:%' THEN
       source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
       IF source_ref <> '' THEN
-        source_refs := ARRAY[source_ref];
+        source_refs := array_append(source_refs, source_ref);
+      END IF;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+      source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+      IF source_ref LIKE 'gbrain-sync:%' THEN
+        source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+        IF source_ref <> '' THEN
+          source_refs := array_append(source_refs, source_ref);
+        END IF;
       END IF;
     END IF;
   ELSE
     RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
   END IF;
+
+  SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+    INTO source_refs
+    FROM unnest(source_refs) AS values_(value)
+   WHERE value IS NOT NULL;
 
   IF cardinality(source_refs) > 0 THEN
     PERFORM pg_advisory_xact_lock_shared(
@@ -1174,11 +1203,13 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::TEXT[])
+  source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+  IF TG_OP = 'UPDATE' THEN
+    source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+  END IF;
+  SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
     INTO source_refs
-    FROM (
-      VALUES (NEW.data->>'sourceId'), (NEW.data->>'source_id')
-    ) AS values_(value)
+    FROM unnest(source_refs) AS values_(value)
    WHERE value IS NOT NULL;
 
   IF cardinality(source_refs) > 0 THEN

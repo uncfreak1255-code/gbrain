@@ -5517,36 +5517,65 @@ export const MIGRATIONS: Migration[] = [
         IF TG_ARGV[0] = 'scalar' THEN
           source_ref := to_jsonb(NEW)->>TG_ARGV[1];
           IF source_ref IS NOT NULL THEN
-            source_refs := ARRAY[source_ref];
+            source_refs := array_append(source_refs, source_ref);
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref IS NOT NULL THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'array' THEN
           raw_ref := to_jsonb(NEW)->TG_ARGV[1];
           IF jsonb_typeof(raw_ref) = 'array' THEN
-            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-              INTO source_refs
-              FROM jsonb_array_elements_text(raw_ref) AS values_(value);
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'json_source_keys' THEN
           raw_ref := to_jsonb(NEW)->TG_ARGV[1];
           IF jsonb_typeof(raw_ref) = 'object' THEN
-            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-              INTO source_refs
-              FROM (
-                VALUES (raw_ref->>'sourceId'), (raw_ref->>'source_id')
-              ) AS values_(value)
-             WHERE value IS NOT NULL;
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
           source_ref := to_jsonb(NEW)->>TG_ARGV[1];
           IF source_ref LIKE 'gbrain-sync:%' THEN
             source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
             IF source_ref <> '' THEN
-              source_refs := ARRAY[source_ref];
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
             END IF;
           END IF;
         ELSE
           RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
         END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
 
         IF cardinality(source_refs) > 0 THEN
           PERFORM pg_advisory_xact_lock_shared(
@@ -5740,11 +5769,13 @@ export const MIGRATIONS: Migration[] = [
           RETURN NEW;
         END IF;
 
-        SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::TEXT[])
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
           INTO source_refs
-          FROM (
-            VALUES (NEW.data->>'sourceId'), (NEW.data->>'source_id')
-          ) AS values_(value)
+          FROM unnest(source_refs) AS values_(value)
          WHERE value IS NOT NULL;
 
         IF cardinality(source_refs) > 0 THEN
@@ -5870,36 +5901,65 @@ export const MIGRATIONS: Migration[] = [
         IF TG_ARGV[0] = 'scalar' THEN
           source_ref := to_jsonb(NEW)->>TG_ARGV[1];
           IF source_ref IS NOT NULL THEN
-            source_refs := ARRAY[source_ref];
+            source_refs := array_append(source_refs, source_ref);
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref IS NOT NULL THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'array' THEN
           raw_ref := to_jsonb(NEW)->TG_ARGV[1];
           IF jsonb_typeof(raw_ref) = 'array' THEN
-            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-              INTO source_refs
-              FROM jsonb_array_elements_text(raw_ref) AS values_(value);
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'json_source_keys' THEN
           raw_ref := to_jsonb(NEW)->TG_ARGV[1];
           IF jsonb_typeof(raw_ref) = 'object' THEN
-            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-              INTO source_refs
-              FROM (
-                VALUES (raw_ref->>'sourceId'), (raw_ref->>'source_id')
-              ) AS values_(value)
-             WHERE value IS NOT NULL;
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
           source_ref := to_jsonb(NEW)->>TG_ARGV[1];
           IF source_ref LIKE 'gbrain-sync:%' THEN
             source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
             IF source_ref <> '' THEN
-              source_refs := ARRAY[source_ref];
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
             END IF;
           END IF;
         ELSE
           RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
         END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
 
         IF cardinality(source_refs) > 0 THEN
           PERFORM pg_advisory_xact_lock_shared(
@@ -5939,11 +5999,13 @@ export const MIGRATIONS: Migration[] = [
           RETURN NEW;
         END IF;
 
-        SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::TEXT[])
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
           INTO source_refs
-          FROM (
-            VALUES (NEW.data->>'sourceId'), (NEW.data->>'source_id')
-          ) AS values_(value)
+          FROM unnest(source_refs) AS values_(value)
          WHERE value IS NOT NULL;
 
         IF cardinality(source_refs) > 0 THEN
@@ -6035,36 +6097,65 @@ export const MIGRATIONS: Migration[] = [
         IF TG_ARGV[0] = 'scalar' THEN
           source_ref := to_jsonb(NEW)->>TG_ARGV[1];
           IF source_ref IS NOT NULL THEN
-            source_refs := ARRAY[source_ref];
+            source_refs := array_append(source_refs, source_ref);
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref IS NOT NULL THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'array' THEN
           raw_ref := to_jsonb(NEW)->TG_ARGV[1];
           IF jsonb_typeof(raw_ref) = 'array' THEN
-            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-              INTO source_refs
-              FROM jsonb_array_elements_text(raw_ref) AS values_(value);
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'json_source_keys' THEN
           raw_ref := to_jsonb(NEW)->TG_ARGV[1];
           IF jsonb_typeof(raw_ref) = 'object' THEN
-            SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-              INTO source_refs
-              FROM (
-                VALUES (raw_ref->>'sourceId'), (raw_ref->>'source_id')
-              ) AS values_(value)
-             WHERE value IS NOT NULL;
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
           END IF;
         ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
           source_ref := to_jsonb(NEW)->>TG_ARGV[1];
           IF source_ref LIKE 'gbrain-sync:%' THEN
             source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
             IF source_ref <> '' THEN
-              source_refs := ARRAY[source_ref];
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
             END IF;
           END IF;
         ELSE
           RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
         END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
 
         IF cardinality(source_refs) > 0 THEN
           PERFORM pg_advisory_xact_lock_shared(
@@ -6104,11 +6195,13 @@ export const MIGRATIONS: Migration[] = [
           RETURN NEW;
         END IF;
 
-        SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::TEXT[])
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
           INTO source_refs
-          FROM (
-            VALUES (NEW.data->>'sourceId'), (NEW.data->>'source_id')
-          ) AS values_(value)
+          FROM unnest(source_refs) AS values_(value)
          WHERE value IS NOT NULL;
 
         IF cardinality(source_refs) > 0 THEN
@@ -6172,6 +6265,159 @@ export const MIGRATIONS: Migration[] = [
               USING ERRCODE = '23503';
           END IF;
         END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    version: 131,
+    name: 'archived_source_update_escape_guard',
+    // v130 originally inspected only NEW references. Replacing an archived
+    // row's source with an active source could therefore re-home the row and
+    // bypass the lifecycle boundary. Reinstall both guards under a new
+    // migration number so brains already stamped at v130 are repaired by the
+    // direct apply-migrations path as well as by schema replay.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := array_append(source_refs, source_ref);
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref IS NOT NULL THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
         RETURN NEW;
       END;
       $fn$ LANGUAGE plpgsql;

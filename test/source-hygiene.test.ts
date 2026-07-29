@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { archiveHygieneCandidate } from '../src/commands/sources.ts';
-import { MIGRATIONS } from '../src/core/migrate.ts';
+import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 import {
@@ -632,8 +632,22 @@ describe('archive hygiene execution gate', () => {
         WHERE source_id = 'guard-active' AND slug = 'active/page'`,
     );
     await rejectArchived(
+      `UPDATE pages SET source_id = 'default'
+        WHERE source_id = 'guard-active' AND slug = 'active/page'`,
+    );
+    await rejectArchived(
       `UPDATE oauth_clients SET client_name = 'Blocked mutation'
         WHERE client_id = 'guard-active-client'`,
+    );
+    await rejectArchived(
+      `UPDATE oauth_clients
+          SET bound_source_id = 'default', federated_read = ARRAY['default']
+        WHERE client_id = 'guard-active-client'`,
+    );
+    await rejectArchived(
+      `UPDATE minion_jobs
+          SET data = '{"sourceId":"default"}'::jsonb
+        WHERE name = 'guard-active-job'`,
     );
     await rejectArchived(
       `UPDATE gbrain_cycle_locks
@@ -738,12 +752,44 @@ describe('archive hygiene execution gate', () => {
     expect(migration?.sql).toContain('pg_advisory_xact_lock_shared');
     expect(migration?.sql).toContain("hashtextextended('gbrain:source-lifecycle', 0)");
     expect(migration?.sql).toContain('cardinality(source_refs) > 0');
+    expect(migration?.sql).toContain('to_jsonb(OLD)');
+    expect(migration?.sql).toContain("OLD.data->>'sourceId'");
     expect(
       migration?.sql.match(/SET search_path = pg_catalog, public, pg_temp/g),
     ).toHaveLength(3);
   });
 
-  test('PGLite schema replay preserves the final v130 guard on an already-upgraded brain', async () => {
+  test('migration v131 repairs OLD-reference guards for an already-v130 brain', async () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 131);
+    expect(migration?.name).toBe('archived_source_update_escape_guard');
+    expect(migration?.idempotent).toBe(true);
+    expect(migration?.sql).toContain('to_jsonb(OLD)');
+    expect(migration?.sql).toContain("OLD.data->>'sourceId'");
+
+    await db.executeRaw(`
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql
+    `);
+    await db.setConfig('version', '130');
+    const result = await runMigrations(db);
+    expect(result.applied).toBe(1);
+    expect(result.current).toBe(LATEST_VERSION);
+
+    const definitions = await db.executeRaw<{ definition: string }>(
+      `SELECT pg_get_functiondef(
+         'enforce_active_source_reference_fn()'::regprocedure
+       ) AS definition`,
+    );
+    expect(definitions[0]?.definition).toContain('to_jsonb(OLD)');
+  });
+
+  test('PGLite schema replay preserves the final v131 guard on an already-upgraded brain', async () => {
     const assertHardenedGuards = async () => {
       const hardened = await db.executeRaw<{ proname: string; proconfig: string[] | null }>(
         `SELECT proname, proconfig
@@ -764,6 +810,32 @@ describe('archive hygiene execution gate', () => {
     await assertHardenedGuards();
     await db.initSchema();
     await assertHardenedGuards();
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, archived)
+       VALUES ('guard-replay-archived', 'guard-replay-archived', false)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO pages (slug, type, title, compiled_truth, source_id)
+       VALUES (
+         'guard-replay-page',
+         'note',
+         'guard-replay-page',
+         '# replay',
+         'guard-replay-archived'
+       )`,
+    );
+    await db.executeRaw(
+      `UPDATE sources
+          SET archived = true, archived_at = now()
+        WHERE id = 'guard-replay-archived'`,
+    );
+    await expect(
+      db.executeRaw(
+        `UPDATE pages
+            SET source_id = 'default'
+          WHERE slug = 'guard-replay-page'`,
+      ),
+    ).rejects.toThrow('source guard-replay-archived is archived');
     await db.executeRaw(
       `INSERT INTO minion_jobs (name, data)
        VALUES ('guard-replay-missing-job', '{"sourceId":"guard-replay-missing"}'::jsonb)`,
