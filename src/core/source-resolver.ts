@@ -101,6 +101,8 @@ interface SourcePathMatch {
   pathLen: number;
 }
 
+type AutomaticSourceState = 'active' | 'archived' | 'draining';
+
 interface GitWorktreeInfo {
   commonDir: string;
   topLevel: string;
@@ -226,14 +228,14 @@ export async function resolveSourceId(
 
   // 3. .gbrain-source dotfile walk-up.
   const dotfile = readDotfileWalk(cwd);
-  const dotfileActive = dotfile
-    ? await sourceIsActiveOrThrowIfMissing(engine, dotfile)
+  const dotfileState = dotfile
+    ? await sourceStateOrThrowIfMissing(engine, dotfile)
     : null;
-  if (dotfile && dotfileActive) {
+  if (dotfile && dotfileState === 'active') {
     return dotfile;
   }
-  if (dotfile && dotfileActive === false) {
-    throw archivedAutomaticRouteError(dotfile, '.gbrain-source');
+  if (dotfile && dotfileState !== null && dotfileState !== 'active') {
+    throw inactiveAutomaticRouteError(dotfile, '.gbrain-source', dotfileState);
   }
 
   // 4. Registered source whose local_path contains CWD.
@@ -243,7 +245,9 @@ export async function resolveSourceId(
   const activeBest = pickRegisteredPathMatch(registered.filter((row) => !row.archived && !row.draining), cwd);
   const archivedBest = pickRegisteredPathMatch(registered.filter((row) => row.archived || row.draining), cwd);
   if (archivedBest && (!activeBest || archivedBest.pathLen > activeBest.pathLen)) {
-    throw archivedAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`);
+    const source = registered.find((row) => row.id === archivedBest.id);
+    const state: AutomaticSourceState = source?.archived ? 'archived' : 'draining';
+    throw inactiveAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`, state);
   }
   if (activeBest) return activeBest.id;
 
@@ -253,9 +257,9 @@ export async function resolveSourceId(
   // to tier 6 rather than throwing. Resolver stays robust to bad config.
   const globalDefault = await engine.getConfig('sources.default');
   if (globalDefault && isValidSourceId(globalDefault)) {
-    const globalDefaultActive = await sourceIsActiveOrThrowIfMissing(engine, globalDefault);
-    if (globalDefaultActive) return globalDefault;
-    throw archivedAutomaticRouteError(globalDefault, 'sources.default');
+    const globalDefaultState = await sourceStateOrThrowIfMissing(engine, globalDefault);
+    if (globalDefaultState === 'active') return globalDefault;
+    throw inactiveAutomaticRouteError(globalDefault, 'sources.default', globalDefaultState);
   }
 
   // 5.5. Single-non-default-source convenience (v0.41.13, #1434).
@@ -358,7 +362,7 @@ async function assertSourceExists(engine: BrainEngine, id: string): Promise<void
  * the pre-archive resolver contract. Pre-v34 brains do not have the archived
  * column, so every existing source is active there.
  */
-async function sourceIsActiveOrThrowIfMissing(engine: BrainEngine, id: string): Promise<boolean> {
+async function sourceStateOrThrowIfMissing(engine: BrainEngine, id: string): Promise<AutomaticSourceState> {
   try {
     const rows = await engine.executeRaw<{ id: string; archived: boolean; draining: boolean }>(
       `SELECT id, archived, embedding_drain_token IS NOT NULL AS draining
@@ -366,7 +370,9 @@ async function sourceIsActiveOrThrowIfMissing(engine: BrainEngine, id: string): 
       [id],
     );
     if (rows.length === 0) throw sourceNotFoundError(id);
-    return rows[0].archived !== true && rows[0].draining !== true;
+    if (rows[0].archived === true) return 'archived';
+    if (rows[0].draining === true) return 'draining';
+    return 'active';
   } catch (error) {
     if (isUndefinedColumnError(error, 'embedding_drain_token')) {
       try {
@@ -375,16 +381,16 @@ async function sourceIsActiveOrThrowIfMissing(engine: BrainEngine, id: string): 
           [id],
         );
         if (rows.length === 0) throw sourceNotFoundError(id);
-        return rows[0].archived !== true;
+        return rows[0].archived === true ? 'archived' : 'active';
       } catch (legacyError) {
         if (!isUndefinedColumnError(legacyError, 'archived')) throw legacyError;
         await assertSourceExists(engine, id);
-        return true;
+        return 'active';
       }
     }
     if (isUndefinedColumnError(error, 'archived')) {
       await assertSourceExists(engine, id);
-      return true;
+      return 'active';
     }
     throw error;
   }
@@ -398,7 +404,18 @@ function sourceNotFoundError(id: string): Error {
   );
 }
 
-function archivedAutomaticRouteError(id: string, signal: string): Error {
+function inactiveAutomaticRouteError(
+  id: string,
+  signal: string,
+  state: Exclude<AutomaticSourceState, 'active'>,
+): Error {
+  if (state === 'draining') {
+    return new Error(
+      `Source "${id}" has an interrupted archive drain and cannot be selected automatically from ${signal}. ` +
+      `Resume it with \`gbrain sources archive ${id}\` before running normal commands. ` +
+      `Use --source ${id} only for an intentional archive or admin operation.`,
+    );
+  }
   return new Error(
     `Source "${id}" is archived and cannot be selected automatically from ${signal}. ` +
     `Restore it or update the stale route before running normal commands. ` +
@@ -497,14 +514,14 @@ export async function resolveSourceWithTier(
 
   // 3. .gbrain-source dotfile walk-up.
   const dotfile = readDotfileWalk(cwd);
-  const dotfileActive = dotfile
-    ? await sourceIsActiveOrThrowIfMissing(engine, dotfile)
+  const dotfileState = dotfile
+    ? await sourceStateOrThrowIfMissing(engine, dotfile)
     : null;
-  if (dotfile && dotfileActive) {
+  if (dotfile && dotfileState === 'active') {
     return { source_id: dotfile, tier: 'dotfile', detail: `.gbrain-source` };
   }
-  if (dotfile && dotfileActive === false) {
-    throw archivedAutomaticRouteError(dotfile, '.gbrain-source');
+  if (dotfile && dotfileState !== null && dotfileState !== 'active') {
+    throw inactiveAutomaticRouteError(dotfile, '.gbrain-source', dotfileState);
   }
 
   // 4. Registered source whose local_path contains CWD.
@@ -512,7 +529,9 @@ export async function resolveSourceWithTier(
   const activeBest = pickRegisteredPathMatch(registered.filter((row) => !row.archived && !row.draining), cwd);
   const archivedBest = pickRegisteredPathMatch(registered.filter((row) => row.archived || row.draining), cwd);
   if (archivedBest && (!activeBest || archivedBest.pathLen > activeBest.pathLen)) {
-    throw archivedAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`);
+    const source = registered.find((row) => row.id === archivedBest.id);
+    const state: AutomaticSourceState = source?.archived ? 'archived' : 'draining';
+    throw inactiveAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`, state);
   }
   if (activeBest) {
     return { source_id: activeBest.id, tier: 'local_path', detail: activeBest.detail };
@@ -521,11 +540,11 @@ export async function resolveSourceWithTier(
   // 5. Brain-level default. Silent-fallback (P1-F) like tier 5 in resolveSourceId.
   const globalDefault = await engine.getConfig('sources.default');
   if (globalDefault && isValidSourceId(globalDefault)) {
-    const globalDefaultActive = await sourceIsActiveOrThrowIfMissing(engine, globalDefault);
-    if (globalDefaultActive) {
+    const globalDefaultState = await sourceStateOrThrowIfMissing(engine, globalDefault);
+    if (globalDefaultState === 'active') {
       return { source_id: globalDefault, tier: 'brain_default', detail: 'sources.default config' };
     }
-    throw archivedAutomaticRouteError(globalDefault, 'sources.default');
+    throw inactiveAutomaticRouteError(globalDefault, 'sources.default', globalDefaultState);
   }
 
   // 5.5. Single-non-default-source convenience (v0.41.13, #1434).

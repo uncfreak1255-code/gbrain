@@ -82,6 +82,17 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
         /Source "retired" is archived.*\.gbrain-source/,
       );
     });
+
+    test('interrupted-drain dotfile source names the archive resume command', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config, embedding_drain_token)
+         VALUES ('stuck-drain', 'stuck-drain', '{}'::jsonb, 'resume-token')`,
+      );
+      writeFileSync(join(cwd, '.gbrain-source'), 'stuck-drain\n');
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /interrupted archive drain.*gbrain sources archive stuck-drain/,
+      );
+    });
   });
 
   describe('tier 5 — brain_default config', () => {

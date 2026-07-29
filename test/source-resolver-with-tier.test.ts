@@ -22,17 +22,18 @@ import { withEnv } from './helpers/with-env.ts';
 // Stub engine same shape as source-resolver.test.ts
 function makeStub(
   registeredSources: string[],
-  paths: Array<{ id: string; local_path: string; archived?: boolean }>,
+  paths: Array<{ id: string; local_path: string; archived?: boolean; draining?: boolean }>,
   defaultKey: string | null,
 ): BrainEngine {
   const archivedIds = new Set(paths.filter((path) => path.archived).map((path) => path.id));
+  const drainingIds = new Set(paths.filter((path) => path.draining).map((path) => path.id));
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
       if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const target = params?.[0] as string;
         return (registeredSources.includes(target)
-          ? [{ id: target, archived: archivedIds.has(target), draining: false } as unknown as T]
+          ? [{ id: target, archived: archivedIds.has(target), draining: drainingIds.has(target) } as unknown as T]
           : []);
       }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -42,7 +43,7 @@ function makeStub(
           : []);
       }
       if (sql.includes('SELECT id, local_path')) {
-        return paths.map((path) => ({ archived: false, ...path })) as unknown as T[];
+        return paths.map((path) => ({ archived: false, draining: false, ...path })) as unknown as T[];
       }
       return [];
     },
@@ -265,6 +266,17 @@ describe('resolveSourceWithTier — tier 4 (local_path)', () => {
       /archived.*cannot be selected automatically/,
     );
   });
+
+  test('interrupted-drain checkout path names the archive resume command', async () => {
+    const engine = makeStub(
+      ['default', 'stuck-drain'],
+      [{ id: 'stuck-drain', local_path: '/work/stuck', draining: true }],
+      null,
+    );
+    await expect(resolveSourceWithTier(engine, null, '/work/stuck/pages')).rejects.toThrow(
+      /interrupted archive drain.*gbrain sources archive stuck-drain/,
+    );
+  });
 });
 
 describe('resolveSourceWithTier — tier 5 (brain_default)', () => {
@@ -284,6 +296,17 @@ describe('resolveSourceWithTier — tier 5 (brain_default)', () => {
     );
     await expect(resolveSourceWithTier(engine, null, '/tmp/no-dotfile-here')).rejects.toThrow(
       /archived.*sources\.default/,
+    );
+  });
+
+  test('interrupted-drain brain default names the archive resume command', async () => {
+    const engine = makeStub(
+      ['default', 'stuck-drain'],
+      [{ id: 'stuck-drain', local_path: '/not-the-cwd', draining: true }],
+      'stuck-drain',
+    );
+    await expect(resolveSourceWithTier(engine, null, '/tmp/no-dotfile-here')).rejects.toThrow(
+      /interrupted archive drain.*gbrain sources archive stuck-drain/,
     );
   });
 
