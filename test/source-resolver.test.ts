@@ -40,11 +40,8 @@ function makeStub(
           ? [{ id: target } as unknown as T]
           : []);
       }
-      if (sql.includes('SELECT id, local_path FROM sources')) {
-        const visiblePaths = sql.includes('archived = false')
-          ? paths.filter((path) => !path.archived)
-          : paths;
-        return visiblePaths as unknown as T[];
+      if (sql.includes('SELECT id, local_path')) {
+        return paths.map((path) => ({ archived: false, ...path })) as unknown as T[];
       }
       return [];
     },
@@ -92,7 +89,7 @@ describe('pre-v34 archived-column compatibility', () => {
     const engine = {
       kind: 'pglite' as const,
       executeRaw: async (sql: string) => {
-        if (sql.includes('archived = false')) {
+        if (sql.includes('SELECT id, local_path, archived')) {
           throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
         }
         if (sql.includes('SELECT id, local_path FROM sources')) {
@@ -235,14 +232,29 @@ describe('resolveSourceId priority 3 — .gbrain-source dotfile walk-up', () => 
     expect(id).toBe('default');
   });
 
-  test('falls through when a valid dotfile names an archived source', async () => {
+  test('refuses an archived dotfile rather than silently routing to default', async () => {
     writeFileSync(join(tmpdirPath, '.gbrain-source'), 'retired\n');
     const engine = makeStub(
       ['default', 'retired'],
       [{ id: 'retired', local_path: '/retired', archived: true }],
       null,
     );
-    await expect(resolveSourceId(engine, null, tmpdirPath)).resolves.toBe('default');
+    await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(/archived.*cannot be selected automatically/);
+  });
+
+  test('refuses an archived dotfile even when an active local path also matches', async () => {
+    writeFileSync(join(tmpdirPath, '.gbrain-source'), 'retired\n');
+    const engine = makeStub(
+      ['default', 'retired', 'active'],
+      [
+        { id: 'retired', local_path: '/retired', archived: true },
+        { id: 'active', local_path: tmpdirPath },
+      ],
+      null,
+    );
+    await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(
+      /archived.*cannot be selected automatically/,
+    );
   });
 
   test('keeps valid-but-unregistered dotfiles as loud errors', async () => {
@@ -302,6 +314,17 @@ describe('resolveSourceId priority 4 — registered local_path longest-prefix ma
     );
     const id = await resolveSourceId(engine, null, '/tmp/shared-brain/pages');
     expect(id).toBe('default');
+  });
+
+  test('refuses an archived checkout path rather than silently routing to default', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/tmp/retired-brain', archived: true }],
+      null,
+    );
+    await expect(resolveSourceId(engine, null, '/tmp/retired-brain/pages')).rejects.toThrow(
+      /archived.*cannot be selected automatically/,
+    );
   });
 });
 
@@ -369,10 +392,10 @@ describe('getDefaultSourcePath', () => {
           }
           return [];
         }
-        if (sql.includes('SELECT id, local_path FROM sources')) {
+        if (sql.includes('SELECT id, local_path')) {
           return Object.entries(sourcePaths)
             .filter(([_, p]) => p !== null)
-            .map(([id, local_path]) => ({ id, local_path }) as unknown as T);
+            .map(([id, local_path]) => ({ id, local_path, archived: false }) as unknown as T);
         }
         return [];
       },
@@ -414,6 +437,9 @@ describe('getDefaultSourcePath', () => {
         }
         if (sql.includes('SELECT local_path FROM sources WHERE id = $1')) {
           return [{ local_path: null } as unknown as T];
+        }
+        if (sql.includes('SELECT id, local_path, archived')) {
+          throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
         }
         if (sql.includes('SELECT id, local_path FROM sources')) {
           return [];

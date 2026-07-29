@@ -4,6 +4,7 @@ version: 0.1.0
 description: Self-evolving skill optimization via SkillOpt-paper-grounded text-space optimizer.
 triggers:
   - "optimize this skill"
+  - "improve this skill"
   - "tune the skill against the benchmark"
   - "make the skill better"
   - "run skillopt"
@@ -183,6 +184,11 @@ When invoked, this skill produces:
 
 ## Related skills
 
-- `skillify` — scaffolds a new skill (use BEFORE skillopt)
-- `skillpack-check` — audits skill conformance (item 13 surfaces skillopt status)
+- `skillify` — scaffolds a new skill (use BEFORE skillopt); `gbrain skillify
+  check` is the 12-item conformance audit (item 11 surfaces the cross-modal
+  eval receipt; no health surface reports skillopt status today — run state
+  lives in the skill's own `skillopt/history.json`)
+- `skill-creator` — creates or structurally extends a skill (new coverage,
+  new phases); skill-optimizer improves execution quality of an existing
+  skill against a benchmark without touching its routing surface
 - `conventions/quality.md` — output quality standards skillopt enforces via judges

@@ -8,7 +8,7 @@ description: |
 triggers:
   - "create a skill"
   - "new skill"
-  - "improve this skill"
+  - "extend this skill"
 tools:
   - search
   - list_pages
@@ -16,6 +16,19 @@ mutating: true
 ---
 
 # Skill Creator
+
+## When NOT to use this skill
+
+Three meta-skills share this space; route by intent:
+
+- **skill-creator** (this skill) — a capability is missing, or an existing
+  skill needs structural extension (new coverage, new phases, new triggers).
+- **skill-optimizer** — an existing skill's *execution quality* should improve
+  against a benchmark ("optimize this skill", "make the skill better",
+  "run skillopt"). It never touches the routing surface.
+- **skillify** — an existing *feature* needs the full conformance treatment
+  ("skillify this", "make this proper"): 12-item checklist, cross-modal eval,
+  tests.
 
 ## Contract
 
@@ -29,7 +42,7 @@ This skill guarantees:
 ## Phases
 
 1. **Identify the gap.** What capability is missing? What user intent has no skill?
-2. **MECE check.** Review `skills/manifest.json` and `skills/RESOLVER.md`. Does any existing skill already cover this? If so, extend it instead of creating a new one.
+2. **MECE check.** Review `skills/manifest.json`, `skills/RESOLVER.md`, and the `triggers:` frontmatter of neighboring skills. Does any existing skill already cover this? If so, extend it instead of creating a new one. (Frontmatter `triggers:` are the canonical routing surface for downstream skillpack consumers per `_AGENT_README.md`; manifest.json and RESOLVER.md remain host-repo conformance surfaces read by `check-resolvable` and the conformance tests — update all three.)
 3. **Create SKILL.md.** Use this template:
 
 ```yaml

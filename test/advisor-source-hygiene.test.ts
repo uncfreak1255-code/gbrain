@@ -108,4 +108,14 @@ describe('source-hygiene advisor collector', () => {
 
     await expect(collectSourceHygiene.collect(ctx)).resolves.toEqual([]);
   });
+
+  test('missing remote flag fails closed before any engine or filesystem probe', async () => {
+    const ctx = {
+      engine: new Proxy({}, {
+        get() { throw new Error('untrusted engine must not be touched'); },
+      }),
+    } as unknown as AdvisorContext;
+
+    await expect(collectSourceHygiene.collect(ctx)).resolves.toEqual([]);
+  });
 });

@@ -41,11 +41,8 @@ function makeStub(
           ? [{ id: target } as unknown as T]
           : []);
       }
-      if (sql.includes('SELECT id, local_path FROM sources')) {
-        const visiblePaths = sql.includes('archived = false')
-          ? paths.filter((path) => !path.archived)
-          : paths;
-        return visiblePaths as unknown as T[];
+      if (sql.includes('SELECT id, local_path')) {
+        return paths.map((path) => ({ archived: false, ...path })) as unknown as T[];
       }
       return [];
     },
@@ -75,7 +72,7 @@ describe('resolveSourceWithTier pre-v34 compatibility', () => {
     const engine = {
       kind: 'pglite' as const,
       executeRaw: async (sql: string) => {
-        if (sql.includes('archived = false')) {
+        if (sql.includes('SELECT id, local_path, archived')) {
           throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
         }
         if (sql.includes('SELECT id, local_path FROM sources')) {
@@ -195,7 +192,7 @@ describe('resolveSourceWithTier — tier 3 (dotfile)', () => {
     expect(result.tier).toBe('dotfile');
   });
 
-  test('archived dotfile falls through to an active local-path source', async () => {
+  test('archived dotfile refuses routing even when an active local path also matches', async () => {
     writeFileSync(join(scratchDir, '.gbrain-source'), 'retired\n');
     const engine = makeStub(
       ['default', 'retired', 'active'],
@@ -205,10 +202,9 @@ describe('resolveSourceWithTier — tier 3 (dotfile)', () => {
       ],
       null,
     );
-    await expect(resolveSourceWithTier(engine, null, scratchDir)).resolves.toMatchObject({
-      source_id: 'active',
-      tier: 'local_path',
-    });
+    await expect(resolveSourceWithTier(engine, null, scratchDir)).rejects.toThrow(
+      /archived.*cannot be selected automatically/,
+    );
   });
 
   test('valid-but-unregistered dotfile remains a loud error', async () => {
@@ -257,6 +253,17 @@ describe('resolveSourceWithTier — tier 4 (local_path)', () => {
     const result = await resolveSourceWithTier(engine, null, '/work/shared/pages');
     expect(result.source_id).toBe('default');
     expect(result.tier).toBe('local_path');
+  });
+
+  test('refuses an archived checkout path rather than reporting seed_default', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/work/retired', archived: true }],
+      null,
+    );
+    await expect(resolveSourceWithTier(engine, null, '/work/retired/pages')).rejects.toThrow(
+      /archived.*cannot be selected automatically/,
+    );
   });
 });
 

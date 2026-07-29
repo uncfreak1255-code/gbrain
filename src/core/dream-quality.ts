@@ -88,7 +88,7 @@ export function extractDreamSummarySlugs(markdown: string): string[] {
 
 export function scoreDreamPage(
   page: Page,
-  opts: { now?: Date } = {},
+  opts: { now?: Date; staleDays?: number } = {},
 ): DreamQualityPageScore {
   const frontmatter = page.frontmatter ?? {};
   const text = `${page.title}\n${page.compiled_truth ?? ''}\n${page.timeline ?? ''}`;
@@ -141,7 +141,7 @@ function formatFrontmatterValue(value: unknown): string {
   return String(value);
 }
 
-function inferPromotionOwner(page: Page, text: string, opts: { now?: Date }): {
+function inferPromotionOwner(page: Page, text: string, opts: { now?: Date; staleDays?: number }): {
   owner: DreamPromotionOwner;
   reason: string | null;
   next: string | null;

@@ -64,18 +64,20 @@ function readDotfileWalk(startDir: string): string | null {
 interface RegisteredSourcePath {
   id: string;
   local_path: string;
+  archived: boolean;
 }
 
-async function loadActiveRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourcePath[]> {
+async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourcePath[]> {
   try {
     return await engine.executeRaw<RegisteredSourcePath>(
-      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL AND archived = false`,
+      `SELECT id, local_path, archived FROM sources WHERE local_path IS NOT NULL`,
     );
   } catch (error) {
     if (!isUndefinedColumnError(error, 'archived')) throw error;
-    return engine.executeRaw<RegisteredSourcePath>(
+    const rows = await engine.executeRaw<Omit<RegisteredSourcePath, 'archived'>>(
       `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
     );
+    return rows.map((row) => ({ ...row, archived: false }));
   }
 }
 
@@ -210,16 +212,26 @@ export async function resolveSourceId(
 
   // 3. .gbrain-source dotfile walk-up.
   const dotfile = readDotfileWalk(cwd);
-  if (dotfile && await sourceIsActiveOrThrowIfMissing(engine, dotfile)) {
+  const dotfileActive = dotfile
+    ? await sourceIsActiveOrThrowIfMissing(engine, dotfile)
+    : null;
+  if (dotfile && dotfileActive) {
     return dotfile;
+  }
+  if (dotfile && dotfileActive === false) {
+    throw archivedAutomaticRouteError(dotfile, '.gbrain-source');
   }
 
   // 4. Registered source whose local_path contains CWD.
   //    Uses longest-prefix match so nested-path configurations (e.g.
   //    gstack at ~/gstack + plans at ~/gstack/plans) pick the deepest.
-  const registered = await loadActiveRegisteredPaths(engine);
-  const best = pickRegisteredPathMatch(registered, cwd);
-  if (best) return best.id;
+  const registered = await loadRegisteredPaths(engine);
+  const activeBest = pickRegisteredPathMatch(registered.filter((row) => !row.archived), cwd);
+  const archivedBest = pickRegisteredPathMatch(registered.filter((row) => row.archived), cwd);
+  if (archivedBest && (!activeBest || archivedBest.pathLen > activeBest.pathLen)) {
+    throw archivedAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`);
+  }
+  if (activeBest) return activeBest.id;
 
   // 5. Brain-level default.
   // Silent-fallback tier per codex P1-F: an invalid `sources.default` config
@@ -339,6 +351,14 @@ function sourceNotFoundError(id: string): Error {
   );
 }
 
+function archivedAutomaticRouteError(id: string, signal: string): Error {
+  return new Error(
+    `Source "${id}" is archived and cannot be selected automatically from ${signal}. ` +
+    `Restore it or update the stale route before running normal commands. ` +
+    `Use --source ${id} only for an intentional restore or admin operation.`,
+  );
+}
+
 /**
  * Get the local_path of the resolved source (per the resolveSourceId chain).
  *
@@ -430,14 +450,26 @@ export async function resolveSourceWithTier(
 
   // 3. .gbrain-source dotfile walk-up.
   const dotfile = readDotfileWalk(cwd);
-  if (dotfile && await sourceIsActiveOrThrowIfMissing(engine, dotfile)) {
+  const dotfileActive = dotfile
+    ? await sourceIsActiveOrThrowIfMissing(engine, dotfile)
+    : null;
+  if (dotfile && dotfileActive) {
     return { source_id: dotfile, tier: 'dotfile', detail: `.gbrain-source` };
+  }
+  if (dotfile && dotfileActive === false) {
+    throw archivedAutomaticRouteError(dotfile, '.gbrain-source');
   }
 
   // 4. Registered source whose local_path contains CWD.
-  const registered = await loadActiveRegisteredPaths(engine);
-  const best = pickRegisteredPathMatch(registered, cwd);
-  if (best) return { source_id: best.id, tier: 'local_path', detail: best.detail };
+  const registered = await loadRegisteredPaths(engine);
+  const activeBest = pickRegisteredPathMatch(registered.filter((row) => !row.archived), cwd);
+  const archivedBest = pickRegisteredPathMatch(registered.filter((row) => row.archived), cwd);
+  if (archivedBest && (!activeBest || archivedBest.pathLen > activeBest.pathLen)) {
+    throw archivedAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`);
+  }
+  if (activeBest) {
+    return { source_id: activeBest.id, tier: 'local_path', detail: activeBest.detail };
+  }
 
   // 5. Brain-level default. Silent-fallback (P1-F) like tier 5 in resolveSourceId.
   const globalDefault = await engine.getConfig('sources.default');

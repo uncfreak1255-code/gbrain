@@ -42,7 +42,7 @@ export const collectSourceHygiene: AdvisorCollector = {
   id: 'source_hygiene',
   async collect(ctx) {
     // Trust boundary: return before importing or calling any filesystem helper.
-    if (ctx.remote) return [];
+    if (ctx.remote !== false) return [];
     const { inspectSourceHygiene } = await import('../source-hygiene.ts');
     const packet = await inspectSourceHygiene(ctx.engine, { inspectFilesystem: true });
     return sourceHygieneFindings(packet);

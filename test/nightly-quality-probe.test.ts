@@ -331,6 +331,18 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
     expect(check.message).toMatch(/gbrain config set autopilot\.nightly_quality_probe\.enabled true/);
   });
 
+  test('disabled + recent non-pass events still reads disabled', async () => {
+    const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
+    const events = [
+      { outcome: 'rate_limited', ts: '2026-05-21T03:00:00Z' },
+      { outcome: 'no_embedding_key', ts: '2026-05-22T03:00:00Z' },
+    ];
+    const check = computeNightlyQualityProbeHealthCheck(false, events);
+    expect(check.status).toBe('ok');
+    expect(check.message).toMatch(/disabled \(opt-in\)/);
+    expect(check.message).not.toMatch(/non-PASS/);
+  });
+
   test('enabled + no events → ok pending', async () => {
     const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
     const check = computeNightlyQualityProbeHealthCheck(true, []);
