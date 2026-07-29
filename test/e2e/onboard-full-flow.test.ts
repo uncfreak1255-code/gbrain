@@ -12,7 +12,12 @@
 // once the Minion worker test harness lands the per-handler stub seam.
 
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import { MinionWorker } from '../../src/core/minions/worker.ts';
 import { computeRemediationPlan } from '../../src/core/remediation/index.ts';
 import { runRemediation } from '../../src/core/remediation/run.ts';
 import { captureMetric } from '../../src/core/onboard/impact-capture.ts';
@@ -379,6 +384,76 @@ describe('onboard E2E — runRemediation with extras', () => {
     });
     expect(result.submitted.map((s) => s.id)).toContain('test.synthetic.run');
     expect(result.submitted.find((s) => s.id === 'test.synthetic.run')?.status).toBe('dry_run');
+  });
+
+  test('fresh source recovery suppresses the first paid step before queue submission', async () => {
+    const local = new PGLiteEngine();
+    await local.connect({});
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-remediation-source-'));
+    execFileSync('git', ['init', repoPath], { stdio: 'ignore' });
+    try {
+      await local.initSchema();
+      await local.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config, archived)
+         VALUES ('remediation-race-source', 'remediation-race-source', $1, '{}'::jsonb, false)`,
+        [repoPath],
+      );
+      await local.setConfig('sources.default', 'remediation-race-source');
+      await local.setConfig('sync.repo_path', repoPath);
+
+      const paidStep = makeRemediationStep({
+        id: 'test.paid.source-race',
+        job: 'test-paid-job',
+        params: {},
+        severity: 'critical',
+        est_seconds: 10,
+        est_usd_cost: 0.1,
+        rationale: 'prove queue-time source recheck',
+        status: 'remediable',
+      });
+      const worker = new MinionWorker(local, { pollInterval: 5 });
+      worker.register('test-paid-job', async () => ({ ok: true }));
+      const workerPromise = worker.start();
+      let removedBeforeSubmission = false;
+      try {
+        const result = await runRemediation(
+          local,
+          {
+            targetScore: 0,
+            maxJobs: 1,
+            maxUsd: 1,
+            extraRemediations: [paidStep],
+            inspectLocalSourcePaths: true,
+          },
+          {
+            onStepStart: () => {
+              rmSync(repoPath, { recursive: true, force: true });
+              removedBeforeSubmission = true;
+            },
+          },
+        );
+
+        expect(removedBeforeSubmission).toBe(true);
+        expect(result.submitted).toEqual([{
+          step: 1,
+          id: 'test.paid.source-race',
+          job_id: null,
+          status: 'skipped_recheck',
+        }]);
+        const queued = await local.executeRaw<{ count: number }>(
+          `SELECT count(*)::int AS count
+             FROM minion_jobs
+            WHERE name = 'test-paid-job'`,
+        );
+        expect(queued[0]?.count).toBe(0);
+      } finally {
+        worker.stop();
+        await workerPromise;
+      }
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+      await local.disconnect();
+    }
   });
 });
 

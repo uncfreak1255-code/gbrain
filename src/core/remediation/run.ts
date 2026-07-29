@@ -256,7 +256,7 @@ export async function runRemediation(
     const totalSteps = recs.length;
     const attemptedIds = new Set<string>(completedFromCheckpoint);
     while (recs.length > 0 && stepCount < maxJobs) {
-      const step = recs[0];
+      let step = recs[0];
       if (!step) break;
       stepCount++;
 
@@ -283,6 +283,37 @@ export async function runRemediation(
       hooks.onStepStart?.(stepCount, totalSteps, step);
       attemptedIds.add(step.id);
       try {
+        // Re-read the canonical recommendation immediately before submission,
+        // including the first step. The initial plan and the post-step D7
+        // refresh are both snapshots; a local source checkout can become
+        // recovery_required while an operator is observing onStepStart. Do not
+        // enqueue paid/protected work that the fresh planner now suppresses.
+        if (opts.inspectLocalSourcePaths === true) {
+          const submissionHealth = await engine.getHealth();
+          const submissionCtx = await loadRecommendationContext(engine, {
+            inspectLocalSourcePaths: true,
+          });
+          const refreshedStep = computeRecommendations(
+            submissionHealth,
+            submissionCtx,
+            extraRemediations,
+          ).find((candidate) => candidate.status === 'remediable' && candidate.id === step.id);
+          if (!refreshedStep) {
+            const skippedResult: StepResult = {
+              step: stepCount,
+              id: step.id,
+              job_id: null,
+              status: 'skipped_recheck',
+            };
+            submitted.push(skippedResult);
+            abortedIds.add(step.id);
+            hooks.onStepEnd?.(skippedResult);
+            recs.shift();
+            continue;
+          }
+          step = refreshedStep;
+        }
+
         const isProtected = !!step.protected;
         await scopeTerminalRemediationIdempotencyKey(
           engine,
