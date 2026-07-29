@@ -262,7 +262,7 @@ describe('source embedding provider leases', () => {
         return [{
           lease_token: 'same-host-token',
           owner_host: hostname(),
-          owner_pid: 2147483647,
+          owner_pid: 999999,
           owner_instance: 'remote-machine-instance',
         }] as T[];
       },
