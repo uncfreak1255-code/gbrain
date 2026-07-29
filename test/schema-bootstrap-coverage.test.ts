@@ -129,6 +129,11 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   { kind: 'column', table: 'sources', column: 'archived' },
   { kind: 'column', table: 'sources', column: 'archived_at' },
   { kind: 'column', table: 'sources', column: 'archive_expires_at' },
+  // v133 lifecycle functions execute during current-schema replay before a
+  // pre-v18 brain can run its historical migration chain. The bootstrap's
+  // recreated sources table must therefore include the provider-drain state.
+  { kind: 'column', table: 'sources', column: 'embedding_drain_token' },
+  { kind: 'column', table: 'sources', column: 'embedding_drain_epoch' },
   // v0.37.0 (v79) — forward-referenced by `CREATE INDEX
   // pages_last_retrieved_at_idx ON pages (last_retrieved_at)`. Pre-v79 brains
   // have pages without this column; bootstrap adds it before SCHEMA_SQL
@@ -185,11 +190,13 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
       DROP INDEX IF EXISTS idx_pages_source_id;
       ALTER TABLE pages DROP COLUMN IF EXISTS source_id;
+      DROP TABLE IF EXISTS source_embedding_leases;
       DROP TABLE IF EXISTS sources CASCADE;
 
       DROP INDEX IF EXISTS idx_links_source;
       DROP INDEX IF EXISTS idx_links_origin;
       ALTER TABLE links DROP CONSTRAINT IF EXISTS links_from_to_type_source_origin_unique;
+      DROP TRIGGER IF EXISTS source_active_page_rehome_f22216da1e39c629 ON links;
       ALTER TABLE links DROP COLUMN IF EXISTS link_source;
       ALTER TABLE links DROP COLUMN IF EXISTS origin_page_id;
 
@@ -234,6 +241,7 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
 
       DROP INDEX IF EXISTS idx_files_source_id;
       DROP INDEX IF EXISTS idx_files_page_id;
+      DROP TRIGGER IF EXISTS source_active_page_rehome_732ed68f6da91f3b ON files;
       ALTER TABLE files DROP COLUMN IF EXISTS source_id;
       ALTER TABLE files DROP COLUMN IF EXISTS page_id;
 
@@ -306,10 +314,12 @@ test('after bootstrap, PGLITE_SCHEMA_SQL replays without crashing on missing for
       ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
       DROP INDEX IF EXISTS idx_pages_source_id;
       ALTER TABLE pages DROP COLUMN IF EXISTS source_id;
+      DROP TABLE IF EXISTS source_embedding_leases;
       DROP TABLE IF EXISTS sources CASCADE;
       DROP INDEX IF EXISTS idx_links_source;
       DROP INDEX IF EXISTS idx_links_origin;
       ALTER TABLE links DROP CONSTRAINT IF EXISTS links_from_to_type_source_origin_unique;
+      DROP TRIGGER IF EXISTS source_active_page_rehome_f22216da1e39c629 ON links;
       ALTER TABLE links DROP COLUMN IF EXISTS link_source;
       ALTER TABLE links DROP COLUMN IF EXISTS origin_page_id;
       DROP INDEX IF EXISTS pages_deleted_at_purge_idx;

@@ -422,6 +422,8 @@ export class PostgresEngine implements BrainEngine {
       sources_archived_exists: boolean;
       sources_archived_at_exists: boolean;
       sources_archive_expires_at_exists: boolean;
+      sources_embedding_drain_token_exists: boolean;
+      sources_embedding_drain_epoch_exists: boolean;
     }[]>`
       SELECT
         EXISTS (SELECT 1 FROM information_schema.tables
@@ -480,6 +482,10 @@ export class PostgresEngine implements BrainEngine {
                 WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'archived_at') AS sources_archived_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'archive_expires_at') AS sources_archive_expires_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'embedding_drain_token') AS sources_embedding_drain_token_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'embedding_drain_epoch') AS sources_embedding_drain_epoch_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'last_retrieved_at') AS pages_last_retrieved_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -551,6 +557,12 @@ export class PostgresEngine implements BrainEngine {
       && (!probe.sources_archived_exists
           || !probe.sources_archived_at_exists
           || !probe.sources_archive_expires_at_exists);
+    // v133: current schema replay installs source lifecycle
+    // functions before historical migrations run. Those functions compile
+    // against these columns, including while v34 backfills archived sources.
+    const needsSourcesDrain = probe.sources_exists
+      && (!probe.sources_embedding_drain_token_exists
+          || !probe.sources_embedding_drain_epoch_exists);
     // v0.37.0 (v79): pages_last_retrieved_at_idx in SCHEMA_SQL references
     // last_retrieved_at. Pre-v79 brains crash without the column; bootstrap
     // adds it before SCHEMA_SQL replay creates the index. v79 runs later
@@ -604,7 +616,7 @@ export class PostgresEngine implements BrainEngine {
         && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsChunksEmbeddingImage && !needsPagesRecency
         && !needsIngestLogSourceId && !needsFilesBootstrap
-        && !needsOauthClientsBootstrap && !needsSourcesArchive
+        && !needsOauthClientsBootstrap && !needsSourcesArchive && !needsSourcesDrain
         && !needsPagesLastRetrievedAt
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
@@ -616,10 +628,9 @@ export class PostgresEngine implements BrainEngine {
     if (needsPagesBootstrap) {
       // Mirror schema-embedded.ts's `sources` shape so the subsequent
       // SCHEMA_SQL CREATE TABLE IF NOT EXISTS is a true no-op.
-      // Archive columns (v34) are folded in here so a pre-v18 brain doesn't
-      // need needsSourcesArchive to also fire — bootstrap creates a complete
-      // v34-shape sources in one go. needsSourcesArchive then only fires on
-      // the pre-v34 case (sources exists, archive cols don't).
+      // Archive columns (v34) and provider-drain columns (v133) are folded in
+      // here so schema replay can install the current lifecycle guards before
+      // the historical migration chain runs.
       await conn.unsafe(`
         CREATE TABLE IF NOT EXISTS sources (
           id                 TEXT PRIMARY KEY,
@@ -631,6 +642,8 @@ export class PostgresEngine implements BrainEngine {
           archived           BOOLEAN NOT NULL DEFAULT FALSE,
           archived_at        TIMESTAMPTZ,
           archive_expires_at TIMESTAMPTZ,
+          embedding_drain_token TEXT,
+          embedding_drain_epoch BIGINT NOT NULL DEFAULT 0,
           created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO sources (id, name, config)
@@ -786,6 +799,16 @@ export class PostgresEngine implements BrainEngine {
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archive_expires_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsSourcesDrain) {
+      // v133 lifecycle functions are part of the current schema blob, so a
+      // retained pre-v133 sources table needs their row fields before replay.
+      // Migration v133 later recreates the lease table and final guards.
+      await conn.unsafe(`
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS embedding_drain_token TEXT;
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS embedding_drain_epoch BIGINT NOT NULL DEFAULT 0;
       `);
     }
 

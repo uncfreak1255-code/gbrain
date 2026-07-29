@@ -1591,6 +1591,14 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archive_expires_at TIMESTAMPTZ;
       `);
 
+      // Current schema replay happens before historical migrations and may
+      // install v133's committed-drain archive guard on a v33 brain. That
+      // future-only guard must not reject v34's canonical JSONB backfill.
+      // Migration v133 recreates the guard after the drain protocol exists.
+      await engine.runMigration(34, `
+        DROP TRIGGER IF EXISTS source_archive_transition_guard ON sources;
+      `);
+
       // 2. Backfill from JSONB shape used by pre-v0.26.5 cherry-picks of PR #595.
       //    Idempotent: subsequent re-runs find zero matching rows.
       await engine.runMigration(34, `
