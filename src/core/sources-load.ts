@@ -101,7 +101,7 @@ async function querySourcesCompat(
   for (const projection of projections) {
     try {
       return await engine.executeRaw<SourceRow>(
-        `SELECT ${projection} FROM sources ${suffix}`,
+        `SELECT ${projection} FROM public.sources ${suffix}`,
         params,
       );
     } catch (error) {
@@ -112,7 +112,7 @@ async function querySourcesCompat(
   // Historical pre-v0.26.5 schema: archived itself does not exist. Only this
   // final rung may synthesize archived=false.
   const rows = await engine.executeRaw<SourceRow>(
-    `SELECT ${SOURCE_BASE_PROJECTION} FROM sources ${suffix}`,
+    `SELECT ${SOURCE_BASE_PROJECTION} FROM public.sources ${suffix}`,
     params,
   );
   return rows.map((row) => ({

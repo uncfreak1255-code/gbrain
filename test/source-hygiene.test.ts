@@ -1664,7 +1664,17 @@ function makeEngine(
       if (/\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE)\b/i.test(sql)) {
         throw new Error(`unexpected mutation: ${sql}`);
       }
-      if (sql.includes('FROM sources')) return sources;
+      if (sql.includes('FROM public.sources')) return sources;
+      if (sql.includes('FROM public.config')) {
+        const key = String(params?.[0]);
+        if (key === 'sources.default' && opts.configuredDefault != null) {
+          return [{ value: opts.configuredDefault }];
+        }
+        if (key === 'sync.repo_path' && opts.syncRepoPath != null) {
+          return [{ value: opts.syncRepoPath }];
+        }
+        return [];
+      }
       if (sql.includes('information_schema.columns')) {
         return [
           { table_name: 'pages', column_name: 'source_id' },
@@ -1674,31 +1684,31 @@ function makeEngine(
           { table_name: 'minion_jobs', column_name: 'data' },
         ];
       }
-      if (sql.includes('FROM "pages"')) {
+      if (sql.includes('FROM public."pages"')) {
         const candidates = new Set((params?.[0] as string[] | undefined) ?? []);
         return Object.entries(opts.dependentCounts ?? {})
           .filter(([sourceId]) => candidates.has(sourceId))
           .map(([source_id, n]) => ({ source_id, n }));
       }
-      if (sql.includes('FROM "oauth_clients"') && sql.includes('"bound_source_id"')) {
+      if (sql.includes('FROM public."oauth_clients"') && sql.includes('"bound_source_id"')) {
         const candidates = new Set((params?.[0] as string[] | undefined) ?? []);
         return Object.entries(opts.boundSourceCounts ?? {})
           .filter(([sourceId]) => candidates.has(sourceId))
           .map(([source_id, n]) => ({ source_id, n }));
       }
-      if (sql.includes('FROM "oauth_clients"') && sql.includes('"federated_read"')) {
+      if (sql.includes('FROM public."oauth_clients"') && sql.includes('"federated_read"')) {
         const sourceId = String(params?.[0]);
         return [{ source_id: sourceId, n: opts.federatedReadCounts?.[sourceId] ?? 0 }];
       }
-      if (sql.includes('FROM "eval_candidates"')) {
+      if (sql.includes('FROM public."eval_candidates"')) {
         const sourceId = String(params?.[0]);
         return [{ source_id: sourceId, n: opts.sourceIdArrayCounts?.[sourceId] ?? 0 }];
       }
-      if (sql.includes('FROM "minion_jobs"')) {
+      if (sql.includes('FROM public."minion_jobs"')) {
         const sourceId = String(params?.[0]);
         return [{ source_id: sourceId, n: opts.jsonReferenceCounts?.[sourceId] ?? 0 }];
       }
-      if (sql.includes('FROM minion_jobs')) {
+      if (sql.includes('FROM public.minion_jobs')) {
         if (!sql.includes("data->>'sourceId'") || !sql.includes("data->>'source_id'")) {
           throw new Error('work query must cover both source-id payload spellings');
         }

@@ -488,10 +488,10 @@ async function readConfiguredDefault(
   sources: SourceRow[],
 ): Promise<{ known: boolean; value: string | null }> {
   try {
-    const explicitSourceId = await engine.getConfig('sources.default');
+    const explicitSourceId = await readPublicConfigValue(engine, 'sources.default');
     if (explicitSourceId) return { known: true, value: explicitSourceId };
 
-    const legacyRepoPath = await engine.getConfig('sync.repo_path');
+    const legacyRepoPath = await readPublicConfigValue(engine, 'sync.repo_path');
     if (!legacyRepoPath) return { known: true, value: null };
     const matches = sources.filter(
       (source) => source.archived !== true
@@ -505,6 +505,17 @@ async function readConfiguredDefault(
   } catch {
     return { known: false, value: null };
   }
+}
+
+async function readPublicConfigValue(
+  engine: BrainEngine,
+  key: string,
+): Promise<string | null> {
+  const rows = await engine.executeRaw<{ value: string }>(
+    `SELECT value FROM public.config WHERE key = $1`,
+    [key],
+  );
+  return rows[0]?.value ?? null;
 }
 
 type SourceReferenceKind = 'scalar' | 'array' | 'json_source_keys';
@@ -580,7 +591,7 @@ async function readDependentDataCounts(
       if (reference.kind === 'scalar') {
         const rows = await engine.executeRaw<{ source_id: string; n: number }>(
           `SELECT ${column} AS source_id, COUNT(*)::int AS n
-             FROM ${table}
+             FROM public.${table}
             WHERE ${column} = ANY($1::text[])
             GROUP BY ${column}`,
           [candidateSourceIds],
@@ -595,7 +606,7 @@ async function readDependentDataCounts(
           : `(${column}->>'sourceId' = $1 OR ${column}->>'source_id' = $1)`;
         const rows = await engine.executeRaw<{ source_id: string; n: number }>(
           `SELECT $1::text AS source_id, COUNT(*)::int AS n
-             FROM ${table}
+             FROM public.${table}
             WHERE ${predicate}`,
           [sourceId],
         );
@@ -618,7 +629,7 @@ async function readNonterminalWorkCounts(
     const rows = await engine.executeRaw<{ source_id: string; n: number }>(
       `SELECT candidate.source_id,
               COUNT(DISTINCT job.id)::int AS n
-         FROM minion_jobs job
+         FROM public.minion_jobs job
          JOIN unnest($1::text[], $2::text[]) AS candidate(source_id, local_path)
            ON job.data->>'sourceId' = candidate.source_id
            OR job.data->>'source_id' = candidate.source_id

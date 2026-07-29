@@ -21,6 +21,8 @@ import {
   SourceEmbeddingLeaseLostError,
 } from '../../src/core/source-embedding-lease.ts';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
+import { inspectSourceHygiene } from '../../src/core/source-hygiene.ts';
+import { syncLockId } from '../../src/core/db-lock.ts';
 
 const describeE2E = hasDatabase() ? describe : describe.skip;
 
@@ -160,6 +162,137 @@ describeE2E('source hygiene archive/write concurrency', () => {
       });
     } finally {
       await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await writer.disconnect();
+    }
+  }, 30_000);
+
+  test('hygiene safety counts ignore caller-controlled temporary shadow tables', async () => {
+    const sourceId = 'hygiene-count-shadow-e2e';
+    const jobName = 'hygiene-count-shadow-job-e2e';
+    const pageSlug = 'hygiene/count-shadow-e2e';
+    const lockId = syncLockId(sourceId);
+    const cycleLockId = `gbrain-cycle:${sourceId}`;
+    const writer = new PostgresEngine();
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+    const previousDefault = await writer.getConfig('sources.default');
+
+    try {
+      await writer.setConfig('sources.default', sourceId);
+      await writer.executeRaw(`DELETE FROM public.gbrain_cycle_locks WHERE id = $1`, [lockId]);
+      await writer.executeRaw(`DELETE FROM public.gbrain_cycle_locks WHERE id = $1`, [cycleLockId]);
+      await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]);
+      await writer.executeRaw(
+        `DELETE FROM public.pages WHERE source_id = $1 AND slug = $2`,
+        [sourceId, pageSlug],
+      );
+      await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await writer.executeRaw(
+        `INSERT INTO public.sources (id, name, local_path, config, archived)
+         VALUES ($1, $1, '/missing/hygiene-count-shadow-e2e', '{}'::jsonb, false)`,
+        [sourceId],
+      );
+      await writer.executeRaw(
+        `INSERT INTO public.pages (source_id, slug, type, title, compiled_truth)
+         VALUES ($1, $2, 'note', 'Count shadow', 'count shadow')`,
+        [sourceId, pageSlug],
+      );
+      await writer.executeRaw(
+        `INSERT INTO public.minion_jobs (name, data)
+         VALUES ($1, jsonb_build_object('sourceId', $2::text))`,
+        [jobName, sourceId],
+      );
+      await writer.executeRaw(
+        `INSERT INTO public.gbrain_cycle_locks
+           (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
+         VALUES ($1, 999999, 'shadow-test', now() + interval '5 minutes', now())`,
+        [lockId],
+      );
+      await writer.executeRaw(
+        `INSERT INTO public.gbrain_cycle_locks
+           (id, holder_pid, holder_host, ttl_expires_at, last_refreshed_at)
+         VALUES ($1, 999998, 'shadow-test', now() + interval '5 minutes', now())`,
+        [cycleLockId],
+      );
+
+      await writer.withReservedConnection(async (conn) => {
+        try {
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.config`);
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.gbrain_cycle_locks`);
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.pages`);
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.minion_jobs`);
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.sources`);
+          await conn.executeRaw(`CREATE TEMP TABLE sources (LIKE public.sources INCLUDING DEFAULTS)`);
+          await conn.executeRaw(
+            `INSERT INTO pg_temp.sources (id, name, local_path, config, archived)
+             VALUES ($1, $1, NULL, '{}'::jsonb, false)`,
+            [sourceId],
+          );
+          await conn.executeRaw(`CREATE TEMP TABLE pages (source_id text)`);
+          await conn.executeRaw(
+            `CREATE TEMP TABLE minion_jobs (
+               id bigint,
+               name text,
+               data jsonb,
+               status text
+             )`,
+          );
+          await conn.executeRaw(`CREATE TEMP TABLE config (LIKE public.config INCLUDING DEFAULTS)`);
+          await conn.executeRaw(
+            `CREATE TEMP TABLE gbrain_cycle_locks
+               (LIKE public.gbrain_cycle_locks INCLUDING DEFAULTS)`,
+          );
+          await conn.executeRaw(`SET search_path = pg_temp, public`);
+
+          const scoped = {
+            kind: 'postgres',
+            sql: async (parts: TemplateStringsArray, ...values: unknown[]) => {
+              let statement = parts[0] ?? '';
+              for (let index = 0; index < values.length; index += 1) {
+                statement += `$${index + 1}${parts[index + 1] ?? ''}`;
+              }
+              return conn.executeRaw(statement, values);
+            },
+            executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
+              conn.executeRaw<T>(sql, params),
+          } as unknown as BrainEngine;
+          const packet = await inspectSourceHygiene(scoped, {
+            inspectFilesystem: true,
+            probes: {
+              repoState: () => 'missing',
+            },
+          });
+          const decision = packet.sources.find((source) => source.source_id === sourceId);
+          expect(decision).toMatchObject({
+            classification: 'recovery_required',
+            configured_default: true,
+            dependent_row_count: 1,
+            nonterminal_work_count: 1,
+            live_sync_lock: true,
+            live_cycle_lock: true,
+          });
+        } finally {
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.config`).catch(() => {});
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.gbrain_cycle_locks`).catch(() => {});
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.pages`).catch(() => {});
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.minion_jobs`).catch(() => {});
+          await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.sources`).catch(() => {});
+          await conn.executeRaw(`RESET search_path`).catch(() => {});
+        }
+      });
+    } finally {
+      if (previousDefault == null) {
+        await writer.unsetConfig('sources.default').catch(() => {});
+      } else {
+        await writer.setConfig('sources.default', previousDefault).catch(() => {});
+      }
+      await writer.executeRaw(`DELETE FROM public.gbrain_cycle_locks WHERE id = $1`, [lockId]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM public.gbrain_cycle_locks WHERE id = $1`, [cycleLockId]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await writer.executeRaw(
+        `DELETE FROM public.pages WHERE source_id = $1 AND slug = $2`,
+        [sourceId, pageSlug],
+      ).catch(() => {});
       await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
       await writer.disconnect();
     }
