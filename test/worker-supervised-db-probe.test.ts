@@ -37,12 +37,19 @@ afterAll(async () => {
  *  Returns a restore fn that removes the instance override (falls back to the
  *  prototype method). */
 function breakLivenessProbe(eng: PGLiteEngine): () => void {
-  const real = eng.executeRaw.bind(eng);
-  (eng as { executeRaw: unknown }).executeRaw = async (sql: string, params?: unknown[]) => {
+  const real = eng.executeRaw;
+  (eng as { executeRaw: unknown }).executeRaw = async function (
+    this: PGLiteEngine,
+    sql: string,
+    params?: unknown[],
+  ) {
     if (typeof sql === 'string' && sql.trim() === 'SELECT 1') {
       throw new Error('probe boom (simulated dead pool)');
     }
-    return real(sql, params as never);
+    // PGLite transaction engines inherit instance overrides from the outer
+    // engine. Preserve the call receiver so non-probe SQL stays on the active
+    // transaction instead of deadlocking against the outer connection.
+    return real.call(this, sql, params as never);
   };
   return () => { delete (eng as { executeRaw?: unknown }).executeRaw; };
 }
