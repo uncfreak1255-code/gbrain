@@ -71,13 +71,15 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
       expect(resolved).toBe('default');
     });
 
-    test('soft-archived dotfile source falls through to an active lower tier', async () => {
+    test('soft-archived dotfile source is rejected instead of bypassed by a lower tier', async () => {
       await engine.executeRaw(
         `INSERT INTO sources (id, name, config, archived)
          VALUES ('retired', 'retired', '{}'::jsonb, true)`,
       );
       writeFileSync(join(cwd, '.gbrain-source'), 'retired\n');
-      await expect(resolveSourceId(engine, null, cwd)).resolves.toBe('default');
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /Source "retired" is archived.*\.gbrain-source/,
+      );
     });
   });
 
