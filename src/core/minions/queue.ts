@@ -619,6 +619,10 @@ export class MinionQueue {
     // Direct (session-mode) pool: claim opens the lock that renewLock then
     // heartbeats. Both must live on a connection the transaction-mode pooler
     // won't recycle mid-hold, or the lock orphans and the worker wedges.
+    // Skip source-bound jobs whose source is archived or mid-drain. They may
+    // predate the lifecycle guard, and repeatedly selecting one would roll the
+    // claim back before later healthy work can run. The trigger still closes
+    // the race when a source becomes inactive after this statement's snapshot.
     const rows = await this.engine.executeRawDirect<Record<string, unknown>>(
       `UPDATE minion_jobs SET
         status = 'active',
@@ -631,9 +635,29 @@ export class MinionQueue {
         started_at = COALESCE(started_at, now()),
         updated_at = now()
        WHERE id = (
-         SELECT id FROM minion_jobs
-         WHERE queue = $3 AND status = 'waiting' AND name = ANY($4)
-         ORDER BY priority ASC, created_at ASC
+         SELECT candidate.id FROM minion_jobs AS candidate
+         WHERE candidate.queue = $3
+           AND candidate.status = 'waiting'
+           AND candidate.name = ANY($4)
+           AND NOT EXISTS (
+             SELECT 1
+               FROM sources AS source
+              WHERE (source.archived IS TRUE OR source.embedding_drain_token IS NOT NULL)
+                AND (
+                  candidate.data->>'sourceId' = source.id
+                  OR candidate.data->>'source_id' = source.id
+                  OR (
+                    candidate.name = 'sync'
+                    AND NOT (
+                      jsonb_typeof(candidate.data->'sourceId') = 'string'
+                      AND COALESCE(candidate.data->>'sourceId', '') <> ''
+                    )
+                    AND source.local_path IS NOT NULL
+                    AND candidate.data->>'repoPath' = source.local_path
+                  )
+                )
+           )
+         ORDER BY candidate.priority ASC, candidate.created_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )

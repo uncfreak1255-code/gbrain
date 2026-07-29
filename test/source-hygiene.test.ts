@@ -10,6 +10,7 @@ import {
   softDeleteSource,
   softDeleteSourceGuarded,
 } from '../src/core/destructive-guard.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { beginSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
 import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -1371,6 +1372,50 @@ describe('archive hygiene execution gate', () => {
     expect(rows).toEqual([
       { name: 'continue-after-archive', status: 'waiting' },
       { name: 'finish-after-archive', status: 'failed' },
+    ]);
+  });
+
+  test('claim skips archived and draining source jobs without wedging healthy work', async () => {
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES
+         ('claim-archived', 'claim-archived', '/fixture/claim-archived', '{}'::jsonb),
+         ('claim-draining', 'claim-draining', '/fixture/claim-draining', '{}'::jsonb),
+         ('claim-healthy', 'claim-healthy', '/fixture/claim-healthy', '{}'::jsonb)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, priority, data)
+       VALUES
+         ('sync', 'waiting', -30, '{"sourceId":"claim-archived"}'::jsonb),
+         ('sync', 'waiting', -20, '{"source_id":"claim-archived"}'::jsonb),
+         ('sync', 'waiting', -10, '{"repoPath":"/fixture/claim-draining"}'::jsonb),
+         ('sync', 'waiting', 0, '{"sourceId":"claim-healthy"}'::jsonb)`,
+    );
+
+    expect(await softDeleteSource(db, 'claim-archived')).not.toBeNull();
+    expect(await beginSourceArchiveDrain(db, 'claim-draining')).not.toBeNull();
+
+    const queue = new MinionQueue(db);
+    const claimed = await queue.claim('healthy-token', 30_000, 'default', ['sync']);
+    expect(claimed).toMatchObject({
+      status: 'active',
+      data: { sourceId: 'claim-healthy' },
+    });
+    expect(await queue.claim('empty-token', 30_000, 'default', ['sync'])).toBeNull();
+
+    const blocked = await db.executeRaw<{
+      status: string;
+      attempts_started: number;
+    }>(
+      `SELECT status, attempts_started
+         FROM minion_jobs
+        WHERE priority < 0
+        ORDER BY priority`,
+    );
+    expect(blocked).toEqual([
+      { status: 'waiting', attempts_started: 0 },
+      { status: 'waiting', attempts_started: 0 },
+      { status: 'waiting', attempts_started: 0 },
     ]);
   });
 });
