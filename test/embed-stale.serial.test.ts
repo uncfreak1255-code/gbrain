@@ -11,11 +11,12 @@
  * Why PGLite: validates the engine.listStaleChunks/getChunks/upsertChunks
  * roundtrip the helper depends on, not just the loop control flow.
  */
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, afterEach, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { embedStaleForSource } from '../src/core/embed-stale.ts';
 import { softDeleteSource } from '../src/core/destructive-guard.ts';
+import { __setSourceEmbeddingLeaseTimingsForTests } from '../src/core/source-embedding-lease.ts';
 import type { ChunkInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
@@ -64,7 +65,33 @@ function fakeEmbedFn(texts: string[]): Promise<Float32Array[]> {
   );
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function within<T>(promise: Promise<T>, ms = 2_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 describe('embedStaleForSource', () => {
+  afterEach(() => {
+    __setSourceEmbeddingLeaseTimingsForTests();
+  });
+
   test('empty stale set returns done:true with zero embedded', async () => {
     const result = await embedStaleForSource(engine, 'default', {
       embedFn: fakeEmbedFn,
@@ -94,6 +121,76 @@ describe('embedStaleForSource', () => {
     // Verify DB: zero stale remaining for default.
     const stale = await engine.countStaleChunks({ sourceId: 'default' });
     expect(stale).toBe(0);
+  });
+
+  test('archive aborts and waits for an in-flight stale embedding submission', async () => {
+    __setSourceEmbeddingLeaseTimingsForTests({
+      heartbeatMs: 10,
+      archivePollMs: 5,
+      archiveWaitMs: 2_000,
+      dbOperationMs: 500,
+    });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ('leased-backfill', 'leased-backfill', '{}'::jsonb)`,
+    );
+    await engine.putPage('leased', {
+      type: 'note',
+      title: 'leased',
+      compiled_truth: '# leased\n\nseeded',
+    }, { sourceId: 'leased-backfill' });
+    await engine.upsertChunks('leased', [{
+      chunk_index: 0,
+      chunk_text: 'leased stale chunk',
+      chunk_source: 'compiled_truth',
+      token_count: 4,
+      embedding: undefined,
+    }], { sourceId: 'leased-backfill' });
+
+    const started = deferred();
+    const aborted = deferred();
+    const release = deferred();
+    const backfill = embedStaleForSource(engine, 'leased-backfill', {
+      embedFn: async (texts, { abortSignal }) => {
+        abortSignal?.addEventListener('abort', () => aborted.resolve(), { once: true });
+        started.resolve();
+        await release.promise;
+        return fakeEmbedFn(texts);
+      },
+    });
+    await within(started.promise);
+
+    let archiveSettled = false;
+    const archive = softDeleteSource(engine, 'leased-backfill').finally(() => {
+      archiveSettled = true;
+    });
+    await within(aborted.promise);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(archiveSettled).toBe(false);
+    const inFlight = await engine.executeRaw<{
+      draining: boolean;
+      leases: number;
+    }>(
+      `SELECT source.embedding_drain_token IS NOT NULL AS draining,
+              count(lease.lease_token)::int AS leases
+         FROM sources source
+         LEFT JOIN source_embedding_leases lease ON lease.source_id = source.id
+        WHERE source.id = 'leased-backfill'
+        GROUP BY source.id`,
+    );
+    expect(inFlight).toEqual([{ draining: true, leases: 1 }]);
+
+    release.resolve();
+    const result = await within(backfill);
+    expect(result.embedded).toBe(0);
+    await expect(within(archive)).resolves.not.toBeNull();
+    const chunks = await engine.executeRaw<{ embedded: boolean }>(
+      `SELECT embedding IS NOT NULL AS embedded
+         FROM content_chunks chunk
+         JOIN pages page ON page.id = chunk.page_id
+        WHERE page.source_id = 'leased-backfill'`,
+    );
+    expect(chunks).toEqual([{ embedded: false }]);
   });
 
   test('respects batchSize for cursor pagination', async () => {

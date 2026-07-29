@@ -19,12 +19,13 @@ const DOCUMENT_EMBED_EXPORTS = new Set([
   'embed',
   'embedOne',
   'embedBatch',
+  'embedBatchWithBackoff',
   'embedMultimodal',
   'embedMultimodalSafe',
 ]);
 
 function isEmbeddingModule(moduleName: string): boolean {
-  return /(?:^|\/)(?:embedding|ai\/gateway)(?:\.ts)?$/.test(moduleName);
+  return /(?:^|\/)(?:embedding|ai\/gateway|commands\/embed)(?:\.ts)?$/.test(moduleName);
 }
 
 function tsFiles(dir: string): string[] {
@@ -154,6 +155,7 @@ describe('source embedding provider callsite inventory', () => {
       // One guarded production branch plus the explicit engine-less smoke
       // fallback. Production callers are pinned to sourceId below.
       'src/core/facts/extract.ts:extractFactsFromTurn:embedOne x2',
+      'src/core/embed-stale.ts:embedOneKey:embedBatchWithBackoff x1',
       'src/core/import-file.ts:importCodeFile:embedBatch x1',
       'src/core/import-file.ts:importFromContent:embedBatch x1',
       'src/core/import-file.ts:importImageFile:embedMultimodal x1',
@@ -177,6 +179,7 @@ describe('source embedding provider callsite inventory', () => {
       ['src/core/contextual-retrieval-service.ts', [/withActiveSourceProviderLease/, /args\.sourceId/]],
       ['src/core/cycle/extract-facts.ts', [/withActiveSourceProviderLease/, /sourceId/]],
       ['src/core/facts/extract.ts', [/withActiveSourceProviderLease/, /input\.sourceId/]],
+      ['src/core/embed-stale.ts', [/withActiveSourceProviderLease/, /keySourceId/, /withProviderSubmission/]],
       ['src/commands/reindex-multimodal.ts', [/withActiveSourceProviderLease/, /page\.source_id/]],
       ['src/commands/embed.ts', [/withActiveSourceProviderLease/, /sourceId/]],
     ];
