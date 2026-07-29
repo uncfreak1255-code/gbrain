@@ -10,8 +10,8 @@ import {
   softDeleteSource,
   softDeleteSourceGuarded,
 } from '../src/core/destructive-guard.ts';
-import { MinionQueue } from '../src/core/minions/queue.ts';
-import { beginSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
+import { isSourceLifecycleClaimRace, MinionQueue } from '../src/core/minions/queue.ts';
+import { beginSourceArchiveDrain, cancelSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
 import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -1375,7 +1375,7 @@ describe('archive hygiene execution gate', () => {
     ]);
   });
 
-  test('claim skips archived and draining source jobs without wedging healthy work', async () => {
+  test('claim cancels archived jobs, holds draining jobs, and preserves parents', async () => {
     await db.executeRaw(
       `INSERT INTO sources (id, name, local_path, config)
        VALUES
@@ -1390,9 +1390,20 @@ describe('archive hygiene execution gate', () => {
          ('sync', 'waiting', -20, '{"source_id":"claim-archived"}'::jsonb),
          ('sync', 'waiting', -10, '{"repoPath":"/fixture/claim-draining"}'::jsonb)`,
     );
+    const parents = await db.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES ('aggregate', 'waiting-children', '{}'::jsonb)
+       RETURNING id`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, priority, parent_job_id, data)
+       VALUES ('sync', 'waiting', -40, $1, '{"sourceId":"claim-archived"}'::jsonb)`,
+      [parents[0]!.id],
+    );
 
     expect(await softDeleteSource(db, 'claim-archived')).not.toBeNull();
-    expect(await beginSourceArchiveDrain(db, 'claim-draining')).not.toBeNull();
+    const drain = await beginSourceArchiveDrain(db, 'claim-draining');
+    expect(drain).not.toBeNull();
 
     await db.setConfig('version', String(LATEST_VERSION));
     const queue = new MinionQueue(db);
@@ -1419,9 +1430,111 @@ describe('archive hygiene execution gate', () => {
         ORDER BY priority`,
     );
     expect(blocked).toEqual([
+      { status: 'cancelled', attempts_started: 0 },
+      { status: 'cancelled', attempts_started: 0 },
+      { status: 'cancelled', attempts_started: 0 },
       { status: 'waiting', attempts_started: 0 },
-      { status: 'waiting', attempts_started: 0 },
-      { status: 'waiting', attempts_started: 0 },
+    ]);
+    expect(await queue.getJob(parents[0]!.id)).toMatchObject({ status: 'waiting' });
+    const childDone = await db.executeRaw<{ count: number }>(
+      `SELECT count(*)::int AS count
+         FROM minion_inbox
+        WHERE job_id = $1 AND payload->>'type' = 'child_done'`,
+      [parents[0]!.id],
+    );
+    expect(childDone[0]?.count).toBe(1);
+
+    await cancelSourceArchiveDrain(db, drain!);
+    const resumed = await queue.claim('resumed-token', 30_000, 'default', ['sync']);
+    expect(resumed).toMatchObject({
+      status: 'active',
+      data: { repoPath: '/fixture/claim-draining' },
+    });
+  });
+
+  test('claim race classifier accepts only the exact source lifecycle guard', () => {
+    expect(isSourceLifecycleClaimRace(Object.assign(
+      new Error('Cannot write minion_jobs: source race-source is archived or draining'),
+      { code: '23503' },
+    ))).toBe(true);
+    expect(isSourceLifecycleClaimRace(Object.assign(
+      new Error('Cannot write minion_jobs.data: source race-source is archived'),
+      { sqlState: '23503' },
+    ))).toBe(true);
+    expect(isSourceLifecycleClaimRace(Object.assign(
+      new Error('insert or update violates foreign key constraint'),
+      { code: '23503' },
+    ))).toBe(false);
+    expect(isSourceLifecycleClaimRace(Object.assign(
+      new Error('Cannot write minion_jobs: source race-source is archived or draining'),
+      { code: '40001' },
+    ))).toBe(false);
+  });
+
+  test('delayed promotion skips inactive sources and later terminalizes their jobs', async () => {
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES
+         ('delay-archived', 'delay-archived', '{}'::jsonb),
+         ('delay-healthy', 'delay-healthy', '{}'::jsonb)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, delay_until, data)
+       VALUES
+         ('sync', 'delayed', now() - interval '1 minute', '{"sourceId":"delay-archived"}'::jsonb),
+         ('sync', 'delayed', now() - interval '1 minute', '{"sourceId":"delay-healthy"}'::jsonb)`,
+    );
+    expect(await softDeleteSource(db, 'delay-archived')).not.toBeNull();
+
+    await db.setConfig('version', String(LATEST_VERSION));
+    const queue = new MinionQueue(db);
+    const promoted = await queue.promoteDelayed();
+    expect(promoted).toHaveLength(1);
+    expect(promoted[0]?.data).toEqual({ sourceId: 'delay-healthy' });
+
+    const claimed = await queue.claim('delay-token', 30_000, 'default', ['sync']);
+    expect(claimed?.data).toEqual({ sourceId: 'delay-healthy' });
+    const inactive = await db.executeRaw<{ status: string }>(
+      `SELECT status FROM minion_jobs
+        WHERE data->>'sourceId' = 'delay-archived'`,
+    );
+    expect(inactive).toEqual([{ status: 'cancelled' }]);
+  });
+
+  test('stalled recovery terminalizes inactive sources without rolling back healthy requeues', async () => {
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES
+         ('stall-archived', 'stall-archived', '{}'::jsonb),
+         ('stall-healthy', 'stall-healthy', '{}'::jsonb)`,
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs
+         (name, status, lock_token, lock_until, stalled_counter, max_stalled, data)
+       VALUES
+         ('sync', 'active', 'archived-token', now() - interval '1 minute', 0, 3,
+          '{"sourceId":"stall-archived"}'::jsonb),
+         ('sync', 'active', 'healthy-token', now() - interval '1 minute', 0, 3,
+          '{"sourceId":"stall-healthy"}'::jsonb)`,
+    );
+    expect(await softDeleteSource(db, 'stall-archived')).not.toBeNull();
+
+    await db.setConfig('version', String(LATEST_VERSION));
+    const queue = new MinionQueue(db);
+    const result = await queue.handleStalled();
+    expect(result.dead).toEqual([]);
+    expect(result.requeued).toHaveLength(1);
+    expect(result.requeued[0]?.data).toEqual({ sourceId: 'stall-healthy' });
+
+    const statuses = await db.executeRaw<{ source_id: string; status: string }>(
+      `SELECT data->>'sourceId' AS source_id, status
+         FROM minion_jobs
+        WHERE data->>'sourceId' IN ('stall-archived', 'stall-healthy')
+        ORDER BY source_id`,
+    );
+    expect(statuses).toEqual([
+      { source_id: 'stall-archived', status: 'cancelled' },
+      { source_id: 'stall-healthy', status: 'waiting' },
     ]);
   });
 });

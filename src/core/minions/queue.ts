@@ -11,7 +11,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type {
   MinionJob, MinionJobInput, MinionJobStatus, InboxMessage, TokenUpdate,
-  MinionQueueOpts, ChildDoneMessage, Attachment, AttachmentInput,
+  MinionQueueOpts, ChildDoneMessage, ChildOutcome, Attachment, AttachmentInput,
 } from './types.ts';
 import { rowToMinionJob, rowToInboxMessage, rowToAttachment } from './types.ts';
 import { validateAttachment } from './attachments.ts';
@@ -47,25 +47,62 @@ const TERMINAL_STATUSES = ['completed', 'failed', 'dead', 'cancelled'] as const;
  * Keep claim and submission backpressure on the same eligibility rule so an
  * inactive row can neither wedge the worker nor absorb a healthy submission.
  */
-function activeSourceJobPredicate(jobAlias: 'candidate'): string {
-  return `NOT EXISTS (
-    SELECT 1
-      FROM sources AS source
-     WHERE (source.archived IS TRUE OR source.embedding_drain_token IS NOT NULL)
-       AND (
-         ${jobAlias}.data->>'sourceId' = source.id
-         OR ${jobAlias}.data->>'source_id' = source.id
-         OR (
-           ${jobAlias}.name = 'sync'
-           AND NOT (
-             jsonb_typeof(${jobAlias}.data->'sourceId') = 'string'
-             AND COALESCE(${jobAlias}.data->>'sourceId', '') <> ''
-           )
-           AND source.local_path IS NOT NULL
-           AND ${jobAlias}.data->>'repoPath' = source.local_path
-         )
-       )
+function sourceReferencePredicate(
+  jobAlias: 'candidate',
+  sourceAlias: 'source',
+): string {
+  return `(
+    ${jobAlias}.data->>'sourceId' = ${sourceAlias}.id
+    OR ${jobAlias}.data->>'source_id' = ${sourceAlias}.id
+    OR (
+      ${jobAlias}.name = 'sync'
+      AND NOT (
+        jsonb_typeof(${jobAlias}.data->'sourceId') = 'string'
+        AND COALESCE(${jobAlias}.data->>'sourceId', '') <> ''
+      )
+      AND ${sourceAlias}.local_path IS NOT NULL
+      AND ${jobAlias}.data->>'repoPath' = ${sourceAlias}.local_path
+    )
   )`;
+}
+
+function sourceJobPredicate(
+  jobAlias: 'candidate',
+  sourceUnavailable: string,
+): string {
+  return `EXISTS (
+    SELECT 1
+      FROM public.sources AS source
+     WHERE ${sourceUnavailable}
+       AND ${sourceReferencePredicate(jobAlias, 'source')}
+  )`;
+}
+
+function activeSourceJobPredicate(jobAlias: 'candidate'): string {
+  return `NOT (${sourceJobPredicate(
+    jobAlias,
+    '(source.archived IS TRUE OR source.embedding_drain_token IS NOT NULL)',
+  )})`;
+}
+
+function archivedSourceJobPredicate(jobAlias: 'candidate'): string {
+  return sourceJobPredicate(jobAlias, 'source.archived IS TRUE');
+}
+
+/** A source lifecycle guard may close the claim snapshot race. Treat only the
+ * exact minion_jobs guard as a clean no-claim; unrelated FK violations remain
+ * fatal and visible. Supports the v132 and v133 guard message shapes. */
+export function isSourceLifecycleClaimRace(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const raw = error as { code?: unknown; sqlState?: unknown; message?: unknown };
+  const code = typeof raw.code === 'string'
+    ? raw.code
+    : typeof raw.sqlState === 'string'
+      ? raw.sqlState
+      : '';
+  const message = typeof raw.message === 'string' ? raw.message : '';
+  return code === '23503'
+    && /Cannot write minion_jobs(?:\.data)?: source .+ is archived(?: or draining)?/i.test(message);
 }
 
 export class MinionQueue {
@@ -415,6 +452,248 @@ export class MinionQueue {
     return rows.length > 0;
   }
 
+  private async cancelJobRoots(
+    tx: BrainEngine,
+    rootIds: number[],
+  ): Promise<Record<string, unknown>[]> {
+    if (rootIds.length === 0) return [];
+    const targets = await tx.executeRaw<{ id: number | string }>(
+      `WITH RECURSIVE descendants(id) AS (
+          SELECT id FROM minion_jobs WHERE id = ANY($1::bigint[])
+          UNION
+          SELECT m.id
+            FROM minion_jobs m
+            JOIN descendants ON m.parent_job_id = descendants.id
+        )
+        SELECT id FROM descendants`,
+      [rootIds],
+    );
+    const targetIds = targets.map((row) => Number(row.id));
+    if (targetIds.length === 0) return [];
+
+    // Every queue path that terminalizes a child locks ancestors first. Lock
+    // the ancestors of the complete cancellation set (which includes every
+    // non-leaf target), then explicitly lock the remaining targets by id.
+    // This keeps cancellation in the same parent-before-child order as
+    // completeJob/failJob and prevents PostgreSQL's UPDATE plan from choosing
+    // physical row order and deadlocking a concurrent completion. UNION above
+    // makes corrupt cycles finite; the id tie-break is shared by every caller.
+    await this.lockFailureAncestors(tx, targetIds);
+    await tx.executeRaw(
+      `SELECT id FROM minion_jobs
+        WHERE id = ANY($1::bigint[])
+        ORDER BY id
+        FOR UPDATE`,
+      [targetIds],
+    );
+
+    const rows = await tx.executeRaw<Record<string, unknown>>(
+      `UPDATE minion_jobs SET
+          status = 'cancelled',
+          lock_token = NULL,
+          lock_until = NULL,
+          finished_at = now(),
+          updated_at = now()
+         WHERE id = ANY($1::bigint[])
+           AND status IN ('waiting','active','delayed','waiting-children','paused')
+         RETURNING *`,
+      [targetIds],
+    );
+    if (rows.length === 0) return [];
+
+    // v0.15: emit child_done(outcome='cancelled') for every cancelled row
+    // that had a parent. Without this, an aggregator waiting for N
+    // child_done messages hangs forever when a child is cancelled. Also
+    // unblock parents whose last non-terminal child we just cancelled.
+    const parentIds = new Set<number>();
+    for (const r of rows) {
+      const childId = Number(r.id);
+      const parentJobId = r.parent_job_id == null ? null : Number(r.parent_job_id);
+      const name = r.name as string;
+      if (parentJobId == null) continue;
+      parentIds.add(parentJobId);
+      const childDone: ChildDoneMessage = {
+        type: 'child_done',
+        child_id: childId,
+        job_name: name,
+        result: null,
+        outcome: 'cancelled',
+        error: 'cancelled',
+      };
+      await tx.executeRaw(
+        `INSERT INTO minion_inbox (job_id, sender, payload)
+         SELECT $1, 'minions', $2::jsonb
+         WHERE EXISTS (
+           SELECT 1 FROM minion_jobs
+           WHERE id = $1 AND status NOT IN ('completed','failed','dead','cancelled')
+         )`,
+        [parentJobId, childDone],
+      );
+    }
+
+    for (const parentId of parentIds) {
+      await tx.executeRaw(
+        `UPDATE minion_jobs SET status = 'waiting', updated_at = now()
+         WHERE id = $1 AND status = 'waiting-children'
+           AND NOT EXISTS (
+             SELECT 1 FROM minion_jobs
+             WHERE parent_job_id = $1
+               AND status NOT IN ('completed', 'failed', 'dead', 'cancelled')
+           )`,
+        [parentId],
+      );
+    }
+    return rows;
+  }
+
+  /** Lock every ancestor of the jobs before a terminal child transition.
+   * Parent-first serialization prevents concurrent sibling completions from
+   * each observing the other as nonterminal and stranding an aggregator. */
+  private async lockFailureAncestors(tx: BrainEngine, jobIds: number[]): Promise<void> {
+    if (jobIds.length === 0) return;
+    await tx.executeRaw(
+      `WITH RECURSIVE ancestor_ids(id, depth, path) AS (
+         SELECT parent_job_id, 1, ARRAY[id, parent_job_id]::bigint[]
+           FROM minion_jobs
+          WHERE id = ANY($1::bigint[]) AND parent_job_id IS NOT NULL
+         UNION ALL
+         SELECT job.parent_job_id, ancestor.depth + 1,
+                ancestor.path || job.parent_job_id
+           FROM minion_jobs AS job
+           JOIN ancestor_ids AS ancestor ON job.id = ancestor.id
+          WHERE job.parent_job_id IS NOT NULL
+            AND NOT job.parent_job_id = ANY(ancestor.path)
+       ), ordered_ancestors AS (
+         SELECT id, max(depth) AS depth
+           FROM ancestor_ids
+          GROUP BY id
+       )
+       SELECT parent.id
+         FROM minion_jobs AS parent
+         JOIN ordered_ancestors AS ancestor ON ancestor.id = parent.id
+        ORDER BY ancestor.depth DESC, parent.id
+        FOR UPDATE OF parent`,
+      [jobIds],
+    );
+  }
+
+  /** Apply child_done, on_child_fail, dependency removal, and recursive
+   * fail_parent propagation for rows that have already become terminal. */
+  private async applyTerminalFailureEffects(
+    tx: BrainEngine,
+    initial: Array<{
+      row: Record<string, unknown>;
+      outcome: Exclude<ChildOutcome, 'complete' | 'cancelled'>;
+      error: string;
+    }>,
+    parentPolicy: 'honor' | 'resolve' = 'honor',
+  ): Promise<void> {
+    let pending = [...initial];
+    const processed = new Set<number>();
+    while (pending.length > 0) {
+      const wave = pending
+        .map((failure) => ({ failure, job: rowToMinionJob(failure.row) }))
+        .filter(({ job }) => {
+          if (processed.has(job.id)) return false;
+          processed.add(job.id);
+          return job.parent_job_id !== null;
+        });
+      pending = [];
+
+      // All receipts in a wave land before any fail_parent transition makes
+      // the parent terminal and closes the inbox EXISTS guard.
+      for (const { failure, job } of wave) {
+        const childDone: ChildDoneMessage = {
+          type: 'child_done', child_id: job.id, job_name: job.name, result: null,
+          outcome: failure.outcome, error: failure.error,
+        };
+        await tx.executeRaw(
+          `INSERT INTO minion_inbox (job_id, sender, payload)
+           SELECT $1, 'minions', $2::jsonb
+           WHERE EXISTS (
+             SELECT 1 FROM minion_jobs
+              WHERE id = $1 AND status NOT IN ('completed','failed','dead','cancelled')
+           )`,
+          [job.parent_job_id, childDone],
+        );
+      }
+
+      const byParent = new Map<number, typeof wave>();
+      for (const entry of wave) {
+        const parentId = entry.job.parent_job_id!;
+        const entries = byParent.get(parentId) ?? [];
+        entries.push(entry);
+        byParent.set(parentId, entries);
+      }
+      for (const [parentId, entries] of [...byParent.entries()].sort(([a], [b]) => a - b)) {
+        const fatal = parentPolicy === 'honor'
+          ? entries.find(({ job }) => job.on_child_fail === 'fail_parent')
+          : undefined;
+        if (fatal) {
+          const parentError = `child job ${fatal.job.id} failed: ${fatal.failure.error}`;
+          const parentRows = await tx.executeRaw<Record<string, unknown>>(
+            `UPDATE minion_jobs SET status = 'failed',
+               error_text = $1, finished_at = now(), updated_at = now()
+             WHERE id = $2 AND status = 'waiting-children'
+             RETURNING *`,
+            [parentError, parentId],
+          );
+          if (parentRows.length > 0) {
+            pending.push({ row: parentRows[0], outcome: 'failed', error: parentError });
+          }
+          continue;
+        }
+
+        for (const { job } of entries) {
+          if (parentPolicy === 'honor' && job.on_child_fail === 'remove_dep') {
+            await tx.executeRaw(
+              `UPDATE minion_jobs SET parent_job_id = NULL, updated_at = now() WHERE id = $1`,
+              [job.id],
+            );
+          }
+        }
+        await tx.executeRaw(
+          `UPDATE minion_jobs SET status = 'waiting', updated_at = now()
+           WHERE id = $1 AND status = 'waiting-children'
+             AND NOT EXISTS (
+               SELECT 1 FROM minion_jobs
+                WHERE parent_job_id = $1
+                  AND status NOT IN ('completed', 'failed', 'dead', 'cancelled')
+             )`,
+          [parentId],
+        );
+      }
+    }
+  }
+
+  /** Dead-letter selected non-running jobs while preserving every parent-side
+   * queue invariant. Used by bounded administrative sweeps such as budget halt. */
+  async deadLetterJobs(
+    ids: number[],
+    errorText: string,
+    opts: { parentPolicy?: 'honor' | 'resolve' } = {},
+  ): Promise<MinionJob[]> {
+    if (ids.length === 0) return [];
+    return this.engine.transaction(async (tx) => {
+      await this.lockFailureAncestors(tx, ids);
+      const rows = await tx.executeRaw<Record<string, unknown>>(
+        `UPDATE minion_jobs SET status = 'dead', error_text = $2,
+           finished_at = now(), lock_token = NULL, lock_until = NULL,
+           updated_at = now()
+         WHERE id = ANY($1::bigint[])
+           AND status IN ('waiting', 'delayed', 'waiting-children', 'paused')
+         RETURNING *`,
+        [ids, errorText],
+      );
+      await this.applyTerminalFailureEffects(
+        tx,
+        rows.map((row) => ({ row, outcome: 'dead' as const, error: errorText })),
+        opts.parentPolicy,
+      );
+      return rows.map(rowToMinionJob);
+    });
+  }
+
   /**
    * Cancel a job and cascade-kill all descendants in one statement.
    *
@@ -422,91 +701,93 @@ export class MinionQueue {
    * snapshots the parent_job_id chain at statement start. A descendant
    * re-parented BEFORE the cancel call is excluded; one re-parented DURING
    * the call may still get cancelled (cancel wins if seen in the snapshot).
-   * Re-parented descendants whose parent_job_id is NULL'd by
-   * removeChildDependency naturally fall out of the recursive walk.
-   *
-   * Active descendants get lock_token = NULL — same path pause uses, so the
-   * worker's renewLock will fail next tick and AbortController fires.
-   *
-   * Returns the *root* (the job matching id), not an arbitrary descendant.
+   * Active descendants lose their lock so the worker aborts on its next
+   * renewal tick. Returns the requested root, not an arbitrary descendant.
    */
   async cancelJob(id: number): Promise<MinionJob | null> {
     return this.engine.transaction(async (tx) => {
-      const rows = await tx.executeRaw<Record<string, unknown>>(
-        `WITH RECURSIVE descendants AS (
-          SELECT id, 0 AS d FROM minion_jobs WHERE id = $1
-          UNION ALL
-          SELECT m.id, descendants.d + 1
-            FROM minion_jobs m
-            JOIN descendants ON m.parent_job_id = descendants.id
-            WHERE descendants.d < 100
-        )
-        UPDATE minion_jobs SET
-          status = 'cancelled',
-          lock_token = NULL,
-          lock_until = NULL,
-          finished_at = now(),
-          updated_at = now()
-         WHERE id IN (SELECT id FROM descendants)
-           AND status IN ('waiting','active','delayed','waiting-children','paused')
-         RETURNING *`,
-        [id]
-      );
-      if (rows.length === 0) return null;
-
-      // v0.15: emit child_done(outcome='cancelled') for every cancelled row
-      // that had a parent. Without this, an aggregator waiting for N
-      // child_done messages hangs forever when a child is cancelled (codex
-      // iteration 3). Also unblock any aggregator parents whose last
-      // non-terminal child we just cancelled.
-      const parentIds = new Set<number>();
-      for (const r of rows) {
-        const childId = r.id as number;
-        const parentJobId = r.parent_job_id as number | null;
-        const name = r.name as string;
-        // Skip the root if it's the caller's cancel target AND has no parent.
-        // Descendants whose parent got cancelled in the same sweep still
-        // benefit from the inbox message — their parent exits waiting-children
-        // via the resolve sweep below even though the parent is itself
-        // cancelled (EXISTS guard on inbox INSERT handles it).
-        if (parentJobId == null) continue;
-        parentIds.add(parentJobId);
-        const childDone: ChildDoneMessage = {
-          type: 'child_done',
-          child_id: childId,
-          job_name: name,
-          result: null,
-          outcome: 'cancelled',
-          error: 'cancelled',
-        };
-        await tx.executeRaw(
-          `INSERT INTO minion_inbox (job_id, sender, payload)
-           SELECT $1, 'minions', $2::jsonb
-           WHERE EXISTS (
-             SELECT 1 FROM minion_jobs
-             WHERE id = $1 AND status NOT IN ('completed','failed','dead','cancelled')
-           )`,
-          [parentJobId, childDone]
-        );
-      }
-
-      // Resolve any non-cancelled aggregator parents sitting on
-      // waiting-children whose last open child we just cancelled.
-      for (const parentId of parentIds) {
-        await tx.executeRaw(
-          `UPDATE minion_jobs SET status = 'waiting', updated_at = now()
-           WHERE id = $1 AND status = 'waiting-children'
-             AND NOT EXISTS (
-               SELECT 1 FROM minion_jobs
-               WHERE parent_job_id = $1
-                 AND status NOT IN ('completed', 'failed', 'dead', 'cancelled')
-             )`,
-          [parentId]
-        );
-      }
-
-      const root = rows.find(r => (r.id as number) === id);
+      const rows = await this.cancelJobRoots(tx, [id]);
+      const root = rows.find((row) => Number(row.id) === id);
       return root ? rowToMinionJob(root) : null;
+    });
+  }
+
+  /**
+   * Terminalize archived-source work that can no longer run, preserving the same
+   * descendant cancellation, child_done inbox, and parent-unblock semantics
+   * as an explicit cancelJob() call. This also repairs poison rows created by
+   * older runtimes before source lifecycle guards existed. Draining is
+   * intentionally excluded: a denied archive reopens the source and its held
+   * jobs must remain resumable.
+   */
+  async cancelArchivedSourceJobs(): Promise<MinionJob[]> {
+    return this.engine.transaction(async (tx) => {
+      const snapshot = await tx.executeRaw<{ id: number | string }>(
+        `SELECT candidate.id
+           FROM minion_jobs AS candidate
+          WHERE candidate.status IN ('waiting','active','delayed','waiting-children','paused')
+            AND ${archivedSourceJobPredicate('candidate')}
+          ORDER BY candidate.id`,
+      );
+      const snapshotIds = snapshot.map((row) => Number(row.id));
+      await this.lockFailureAncestors(tx, snapshotIds);
+      const roots = snapshotIds.length === 0
+        ? []
+        : await tx.executeRaw<{ id: number | string }>(
+            `SELECT candidate.id
+               FROM minion_jobs AS candidate
+              WHERE candidate.id = ANY($1::bigint[])
+                AND candidate.status IN ('waiting','active','delayed','waiting-children','paused')
+                AND ${archivedSourceJobPredicate('candidate')}
+              ORDER BY candidate.id
+              FOR UPDATE SKIP LOCKED`,
+            [snapshotIds],
+          );
+      const rootIds = roots.map((row) => Number(row.id));
+      if (rootIds.length === 0) return [];
+
+      // Restore is a supported soft-delete transition. Job rows are locked
+      // first to match worker transitions, then the exact archived source rows
+      // are locked and the predicate is rechecked. If restore committed first,
+      // these roots disappear; if cleanup locks first, restore waits until the
+      // archived work is terminalized. The final check is restricted to the
+      // IDs actually returned here: a path-overlapping source archived after
+      // this statement snapshot is deferred to the next cleanup pass rather
+      // than becoming an unlocked phantom match.
+      const lockedSources = await tx.executeRaw<{ id: string }>(
+        `SELECT source.id
+           FROM public.sources AS source
+          WHERE source.archived IS TRUE
+            AND EXISTS (
+              SELECT 1 FROM minion_jobs AS candidate
+               WHERE candidate.id = ANY($1::bigint[])
+                 AND ${sourceReferencePredicate('candidate', 'source')}
+            )
+          ORDER BY source.id
+          FOR UPDATE OF source`,
+        [rootIds],
+      );
+      const lockedSourceIds = lockedSources.map((row) => row.id);
+      if (lockedSourceIds.length === 0) return [];
+      const stillArchived = await tx.executeRaw<{ id: number | string }>(
+        `SELECT candidate.id
+           FROM minion_jobs AS candidate
+          WHERE candidate.id = ANY($1::bigint[])
+            AND candidate.status IN ('waiting','active','delayed','waiting-children','paused')
+            AND EXISTS (
+              SELECT 1 FROM public.sources AS source
+               WHERE source.id = ANY($2::text[])
+                 AND source.archived IS TRUE
+                 AND ${sourceReferencePredicate('candidate', 'source')}
+            )
+          ORDER BY candidate.id`,
+        [rootIds, lockedSourceIds],
+      );
+      const rows = await this.cancelJobRoots(
+        tx,
+        stillArchived.map((row) => Number(row.id)),
+      );
+      return rows.map(rowToMinionJob);
     });
   }
 
@@ -643,6 +924,7 @@ export class MinionQueue {
    */
   async claim(lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[]): Promise<MinionJob | null> {
     if (registeredNames.length === 0) return null;
+    await this.cancelArchivedSourceJobs();
 
     // Direct (session-mode) pool: claim opens the lock that renewLock then
     // heartbeats. Both must live on a connection the transaction-mode pooler
@@ -651,8 +933,10 @@ export class MinionQueue {
     // predate the lifecycle guard, and repeatedly selecting one would roll the
     // claim back before later healthy work can run. The trigger still closes
     // the race when a source becomes inactive after this statement's snapshot.
-    const rows = await this.engine.executeRawDirect<Record<string, unknown>>(
-      `UPDATE minion_jobs SET
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.engine.executeRawDirect<Record<string, unknown>>(
+        `UPDATE minion_jobs SET
         status = 'active',
         lock_token = $1,
         lock_until = now() + ($2::double precision * interval '1 millisecond'),
@@ -673,8 +957,12 @@ export class MinionQueue {
          LIMIT 1
        )
        RETURNING *`,
-      [lockToken, lockDurationMs, queue, registeredNames]
-    );
+        [lockToken, lockDurationMs, queue, registeredNames]
+      );
+    } catch (error) {
+      if (isSourceLifecycleClaimRace(error)) return null;
+      throw error;
+    }
     return rows.length > 0 ? rowToMinionJob(rows[0]) : null;
   }
 
@@ -692,6 +980,16 @@ export class MinionQueue {
    */
   async handleTimeouts(): Promise<MinionJob[]> {
     return this.engine.transaction(async (tx) => {
+      const candidates = await tx.executeRaw<{ id: number | string }>(
+        `SELECT id FROM minion_jobs
+          WHERE status = 'active'
+            AND timeout_at IS NOT NULL
+            AND timeout_at < now()
+            AND lock_until > now()
+          ORDER BY id`,
+      );
+      const candidateIds = candidates.map((row) => Number(row.id));
+      await this.lockFailureAncestors(tx, candidateIds);
       const rows = await tx.executeRaw<Record<string, unknown>>(
         // #1737: count the timed-out run as a spent attempt (terminal, no retry),
         // mirroring handleWallClockTimeouts + handleStalled. handleTimeouts is the
@@ -709,11 +1007,13 @@ export class MinionQueue {
           lock_until = NULL,
           finished_at = now(),
           updated_at = now()
-         WHERE status = 'active'
+         WHERE id = ANY($1::bigint[])
+           AND status = 'active'
            AND timeout_at IS NOT NULL
            AND timeout_at < now()
            AND lock_until > now()
-         RETURNING *`
+         RETURNING *`,
+        [candidateIds],
       );
 
       // v0.15: emit child_done(outcome='timeout') for every timed-out job that
@@ -774,6 +1074,20 @@ export class MinionQueue {
    */
   async handleWallClockTimeouts(lockDurationMs: number): Promise<MinionJob[]> {
     return this.engine.transaction(async (tx) => {
+      const candidates = await tx.executeRaw<{ id: number | string }>(
+        `SELECT id FROM minion_jobs
+          WHERE status = 'active'
+            AND started_at IS NOT NULL
+            AND EXTRACT(EPOCH FROM (now() - started_at)) * 1000 >
+              CASE
+                WHEN timeout_ms IS NOT NULL THEN timeout_ms * 2
+                ELSE $1::double precision * 2 * GREATEST(max_stalled, 1)
+              END
+          ORDER BY id`,
+        [lockDurationMs],
+      );
+      const candidateIds = candidates.map((row) => Number(row.id));
+      await this.lockFailureAncestors(tx, candidateIds);
       const rows = await tx.executeRaw<Record<string, unknown>>(
         `UPDATE minion_jobs SET
           status = 'dead',
@@ -783,7 +1097,8 @@ export class MinionQueue {
           lock_until = NULL,
           finished_at = now(),
           updated_at = now()
-         WHERE status = 'active'
+         WHERE id = ANY($2::bigint[])
+           AND status = 'active'
            AND started_at IS NOT NULL
            AND EXTRACT(EPOCH FROM (now() - started_at)) * 1000 >
              CASE
@@ -791,7 +1106,7 @@ export class MinionQueue {
                ELSE $1::double precision * 2 * GREATEST(max_stalled, 1)
              END
          RETURNING *`,
-        [lockDurationMs]
+        [lockDurationMs, candidateIds]
       );
 
       const parentIds = new Set<number>();
@@ -966,19 +1281,7 @@ export class MinionQueue {
     backoffMs?: number
   ): Promise<MinionJob | null> {
     return this.engine.transaction(async (tx) => {
-      // Lock the parent row first so concurrent sibling completions/failures
-      // serialize on the parent — same race fix as completeJob.
-      const peek = await tx.executeRaw<{ parent_job_id: number | null }>(
-        `SELECT parent_job_id FROM minion_jobs WHERE id = $1`,
-        [id]
-      );
-      const parentId = peek[0]?.parent_job_id ?? null;
-      if (parentId) {
-        await tx.executeRaw(
-          `SELECT id FROM minion_jobs WHERE id = $1 FOR UPDATE`,
-          [parentId]
-        );
-      }
+      if (newStatus !== 'delayed') await this.lockFailureAncestors(tx, [id]);
 
       const rows = await tx.executeRaw<Record<string, unknown>>(
         `UPDATE minion_jobs SET
@@ -996,74 +1299,12 @@ export class MinionQueue {
       const failed = rowToMinionJob(rows[0]);
       const terminal = newStatus === 'failed' || newStatus === 'dead';
 
-      // Parent hook on terminal failure.
-      if (terminal && failed.parent_job_id) {
-        // v0.15: emit child_done(outcome='failed') BEFORE any parent-terminal
-        // update. Insertion order matters because `completeJob`'s inbox-write
-        // EXISTS guard skips writes once the parent is 'failed' — if we let
-        // the fail_parent UPDATE run first, this inbox row would be dropped
-        // for aggregator-style parents that still want to count it (codex).
-        const childDone: ChildDoneMessage = {
-          type: 'child_done',
-          child_id: failed.id,
-          job_name: failed.name,
-          result: null,
+      if (terminal) {
+        await this.applyTerminalFailureEffects(tx, [{
+          row: rows[0],
           outcome: newStatus === 'dead' ? 'dead' : 'failed',
           error: errorText,
-        };
-        await tx.executeRaw(
-          `INSERT INTO minion_inbox (job_id, sender, payload)
-           SELECT $1, 'minions', $2::jsonb
-           WHERE EXISTS (
-             SELECT 1 FROM minion_jobs
-             WHERE id = $1 AND status NOT IN ('completed','failed','dead','cancelled')
-           )`,
-          [failed.parent_job_id, childDone]
-        );
-
-        if (failed.on_child_fail === 'fail_parent') {
-          await tx.executeRaw(
-            `UPDATE minion_jobs SET status = 'failed',
-              error_text = $1, finished_at = now(), updated_at = now()
-             WHERE id = $2 AND status = 'waiting-children'`,
-            [`child job ${failed.id} failed: ${errorText}`, failed.parent_job_id]
-          );
-        } else if (failed.on_child_fail === 'remove_dep') {
-          await tx.executeRaw(
-            `UPDATE minion_jobs SET parent_job_id = NULL, updated_at = now() WHERE id = $1`,
-            [failed.id]
-          );
-          // After dropping the dep, try to resolve the parent if all OTHER
-          // kids are terminal. Terminal set includes 'failed' (v0.15).
-          await tx.executeRaw(
-            `UPDATE minion_jobs SET status = 'waiting', updated_at = now()
-             WHERE id = $1 AND status = 'waiting-children'
-               AND NOT EXISTS (
-                 SELECT 1 FROM minion_jobs
-                 WHERE parent_job_id = $1
-                   AND status NOT IN ('completed', 'failed', 'dead', 'cancelled')
-               )`,
-            [failed.parent_job_id]
-          );
-        } else {
-          // 'ignore' / 'continue': parent stays in waiting-children waiting on
-          // siblings. With v0.15 terminal-set expansion + child_done emission
-          // above, an aggregator sibling-count model now works: all N children
-          // reach terminal → completeJob on a sibling (or the LAST terminal
-          // transition here) flips parent → waiting once no non-terminal kids
-          // remain. Run the resolve check here so the last child transitioning
-          // via THIS code path still unblocks the parent.
-          await tx.executeRaw(
-            `UPDATE minion_jobs SET status = 'waiting', updated_at = now()
-             WHERE id = $1 AND status = 'waiting-children'
-               AND NOT EXISTS (
-                 SELECT 1 FROM minion_jobs
-                 WHERE parent_job_id = $1
-                   AND status NOT IN ('completed', 'failed', 'dead', 'cancelled')
-               )`,
-            [failed.parent_job_id]
-          );
-        }
+        }]);
       }
 
       // remove_on_fail cleanup AFTER parent hook.
@@ -1190,7 +1431,14 @@ export class MinionQueue {
     const rows = await this.lockRetry(() => this.engine.executeRaw<Record<string, unknown>>(
       `UPDATE minion_jobs SET status = 'waiting', delay_until = NULL,
         lock_token = NULL, lock_until = NULL, updated_at = now()
-       WHERE status = 'delayed' AND delay_until <= now()
+       WHERE id IN (
+         SELECT candidate.id
+           FROM minion_jobs AS candidate
+          WHERE candidate.status = 'delayed'
+            AND candidate.delay_until <= now()
+            AND ${activeSourceJobPredicate('candidate')}
+          FOR UPDATE SKIP LOCKED
+       )
        RETURNING *`
     ));
     return rows.map(rowToMinionJob);
@@ -1198,40 +1446,71 @@ export class MinionQueue {
 
   /** Detect and handle stalled jobs. Single CTE, no off-by-one. Returns affected jobs. */
   async handleStalled(): Promise<{ requeued: MinionJob[]; dead: MinionJob[] }> {
-    const rows = await this.engine.executeRaw<Record<string, unknown> & { action: string }>(
-      `WITH stalled AS (
-        SELECT id, stalled_counter, max_stalled
-        FROM minion_jobs
-        WHERE status = 'active' AND lock_until < now()
-        FOR UPDATE SKIP LOCKED
-      ),
-      requeued AS (
-        UPDATE minion_jobs SET
-          status = 'waiting', stalled_counter = stalled_counter + 1,
-          lock_token = NULL, lock_until = NULL, updated_at = now()
-        WHERE id IN (SELECT id FROM stalled WHERE stalled_counter + 1 < max_stalled)
-        RETURNING *, 'requeued' as action
-      ),
-      dead_lettered AS (
-        UPDATE minion_jobs SET
-          status = 'dead', stalled_counter = stalled_counter + 1,
-          attempts_made = attempts_made + 1,
-          error_text = 'max stalled count exceeded',
-          lock_token = NULL, lock_until = NULL, finished_at = now(), updated_at = now()
-        WHERE id IN (SELECT id FROM stalled WHERE stalled_counter + 1 >= max_stalled)
-        RETURNING *, 'dead' as action
-      )
-      SELECT * FROM requeued UNION ALL SELECT * FROM dead_lettered`
-    );
+    // An archive can race a running job after claim(). Terminalize that source's
+    // work before the bulk requeue so the lifecycle trigger cannot roll back
+    // healthy stalled jobs in the same statement. The predicate below is the
+    // second, race-closing fence if a source changes state between transactions.
+    await this.cancelArchivedSourceJobs();
+    return this.engine.transaction(async (tx) => {
+      const candidates = await tx.executeRaw<{ id: number | string }>(
+        `SELECT candidate.id
+           FROM minion_jobs AS candidate
+          WHERE candidate.status = 'active' AND candidate.lock_until < now()
+            AND ${activeSourceJobPredicate('candidate')}
+          ORDER BY candidate.id`,
+      );
+      const candidateIds = candidates.map((row) => Number(row.id));
+      if (candidateIds.length === 0) return { requeued: [], dead: [] };
+      await this.lockFailureAncestors(tx, candidateIds);
 
-    const requeued: MinionJob[] = [];
-    const dead: MinionJob[] = [];
-    for (const r of rows) {
-      const job = rowToMinionJob(r);
-      if (r.action === 'requeued') requeued.push(job);
-      else dead.push(job);
-    }
-    return { requeued, dead };
+      const rows = await tx.executeRaw<Record<string, unknown> & { action: string }>(
+        `WITH stalled AS (
+          SELECT candidate.id, candidate.stalled_counter, candidate.max_stalled
+          FROM minion_jobs AS candidate
+          WHERE candidate.id = ANY($1::bigint[])
+            AND candidate.status = 'active' AND candidate.lock_until < now()
+            AND ${activeSourceJobPredicate('candidate')}
+          FOR UPDATE SKIP LOCKED
+        ),
+        requeued AS (
+          UPDATE minion_jobs SET
+            status = 'waiting', stalled_counter = stalled_counter + 1,
+            lock_token = NULL, lock_until = NULL, updated_at = now()
+          WHERE id IN (SELECT id FROM stalled WHERE stalled_counter + 1 < max_stalled)
+          RETURNING *, 'requeued' as action
+        ),
+        dead_lettered AS (
+          UPDATE minion_jobs SET
+            status = 'dead', stalled_counter = stalled_counter + 1,
+            attempts_made = attempts_made + 1,
+            error_text = 'max stalled count exceeded',
+            lock_token = NULL, lock_until = NULL, finished_at = now(), updated_at = now()
+          WHERE id IN (SELECT id FROM stalled WHERE stalled_counter + 1 >= max_stalled)
+          RETURNING *, 'dead' as action
+        )
+        SELECT * FROM requeued UNION ALL SELECT * FROM dead_lettered`,
+        [candidateIds],
+      );
+
+      const requeued: MinionJob[] = [];
+      const dead: MinionJob[] = [];
+      const terminalRows: Record<string, unknown>[] = [];
+      for (const row of rows) {
+        const job = rowToMinionJob(row);
+        if (row.action === 'requeued') requeued.push(job);
+        else {
+          dead.push(job);
+          terminalRows.push(row);
+        }
+      }
+      await this.applyTerminalFailureEffects(
+        tx,
+        terminalRows.map((row) => ({
+          row, outcome: 'dead' as const, error: 'max stalled count exceeded',
+        })),
+      );
+      return { requeued, dead };
+    });
   }
 
   /**
@@ -1258,14 +1537,22 @@ export class MinionQueue {
 
   /** Fail the parent when a child fails with fail_parent policy. */
   async failParent(parentId: number, childId: number, errorText: string): Promise<MinionJob | null> {
-    const rows = await this.engine.executeRaw<Record<string, unknown>>(
-      `UPDATE minion_jobs SET status = 'failed',
-        error_text = $1, finished_at = now(), updated_at = now()
-       WHERE id = $2 AND status = 'waiting-children'
-       RETURNING *`,
-      [`child job ${childId} failed: ${errorText}`, parentId]
-    );
-    return rows.length > 0 ? rowToMinionJob(rows[0]) : null;
+    return this.engine.transaction(async (tx) => {
+      await this.lockFailureAncestors(tx, [parentId]);
+      const parentError = `child job ${childId} failed: ${errorText}`;
+      const rows = await tx.executeRaw<Record<string, unknown>>(
+        `UPDATE minion_jobs SET status = 'failed',
+          error_text = $1, finished_at = now(), updated_at = now()
+         WHERE id = $2 AND status = 'waiting-children'
+         RETURNING *`,
+        [parentError, parentId],
+      );
+      if (rows.length === 0) return null;
+      await this.applyTerminalFailureEffects(tx, [{
+        row: rows[0], outcome: 'failed', error: parentError,
+      }]);
+      return rowToMinionJob(rows[0]);
+    });
   }
 
   /** Pause a waiting or active job. For active jobs, clears the lock so the worker's

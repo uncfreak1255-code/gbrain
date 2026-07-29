@@ -10,6 +10,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import postgres from 'postgres';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import type { BrainEngine } from '../../src/core/engine.ts';
+import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { archiveHygieneCandidate } from '../../src/commands/sources.ts';
 import { softDeleteSource } from '../../src/core/destructive-guard.ts';
 import { MIGRATIONS } from '../../src/core/migrate.ts';
@@ -92,6 +94,468 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
       await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
       await writer.disconnect();
+    }
+  }, 30_000);
+
+  test('queue cleanup and claim ignore a caller-controlled temporary sources table', async () => {
+    const sourceId = 'queue-search-path-shadow-e2e';
+    const jobName = 'queue-search-path-shadow-e2e';
+    const writer = new PostgresEngine();
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]);
+      await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await writer.executeRaw(
+        `INSERT INTO public.sources (id, name, config, archived)
+         VALUES ($1, $1, '{}'::jsonb, false)`,
+        [sourceId],
+      );
+      await writer.executeRaw(
+        `INSERT INTO public.minion_jobs (name, data)
+         VALUES ($1, jsonb_build_object('sourceId', $2::text))`,
+        [jobName, sourceId],
+      );
+
+      await writer.withReservedConnection(async (conn) => {
+        await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.sources`);
+        await conn.executeRaw(
+          `CREATE TEMP TABLE sources (
+             id text PRIMARY KEY,
+             archived boolean NOT NULL,
+             embedding_drain_token text,
+             local_path text
+           )`,
+        );
+        await conn.executeRaw(
+          `INSERT INTO pg_temp.sources (id, archived) VALUES ($1, true)`,
+          [sourceId],
+        );
+        await conn.executeRaw(`SET search_path = pg_temp, public`);
+
+        const scoped = {
+          executeRaw: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
+            conn.executeRaw<T>(sql, params),
+          executeRawDirect: <T = Record<string, unknown>>(sql: string, params?: unknown[]) =>
+            conn.executeRaw<T>(sql, params),
+          transaction: async <T>(fn: (tx: BrainEngine) => Promise<T>): Promise<T> => {
+            await conn.executeRaw('BEGIN');
+            try {
+              const result = await fn(scoped as unknown as BrainEngine);
+              await conn.executeRaw('COMMIT');
+              return result;
+            } catch (error) {
+              await conn.executeRaw('ROLLBACK');
+              throw error;
+            }
+          },
+        } as unknown as BrainEngine;
+        const queue = new MinionQueue(scoped);
+        expect(await queue.cancelArchivedSourceJobs()).toEqual([]);
+        const claimed = await queue.claim('shadow-token', 30_000, 'default', [jobName]);
+        expect(claimed).toMatchObject({ name: jobName, status: 'active' });
+
+        await conn.executeRaw(`DROP TABLE IF EXISTS pg_temp.sources`);
+        await conn.executeRaw(`RESET search_path`);
+      });
+    } finally {
+      await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await writer.disconnect();
+    }
+  }, 30_000);
+
+  test('cascade cancellation locks parent before child during concurrent completion', async () => {
+    const parentName = 'cancel-lock-order-parent-e2e';
+    const childName = 'cancel-lock-order-child-e2e';
+    const completer = new PostgresEngine();
+    const canceller = new PostgresEngine();
+    await completer.connect({ database_url: process.env.DATABASE_URL! });
+    await canceller.connect({ database_url: process.env.DATABASE_URL! });
+    const parentLocked = deferred();
+    const releaseCompletion = deferred();
+    let completionTx: Promise<void> | null = null;
+    let parentId: number | null = null;
+    let childId: number | null = null;
+
+    try {
+      await completer.executeRaw(
+        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2)`,
+        [parentName, childName],
+      );
+      const parents = await completer.executeRaw<{ id: number | string }>(
+        `INSERT INTO public.minion_jobs (name, status)
+         VALUES ($1, 'waiting') RETURNING id`,
+        [parentName],
+      );
+      parentId = Number(parents[0].id);
+      const children = await completer.executeRaw<{ id: number | string }>(
+        `INSERT INTO public.minion_jobs
+           (name, status, parent_job_id, lock_token, lock_until, started_at)
+         VALUES ($1, 'active', $2, 'completion-token', now() + interval '5 minutes', now())
+         RETURNING id`,
+        [childName, parentId],
+      );
+      childId = Number(children[0].id);
+
+      // Match the normal add-child layout: inserting the child is followed by
+      // updating the parent to waiting-children, which places the live parent
+      // tuple after the child. The old bulk UPDATE then locked child first.
+      await completer.executeRaw(
+        `UPDATE public.minion_jobs
+            SET status = 'waiting-children', updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [parentId],
+      );
+      const layout = await completer.executeRaw<{ child_first: boolean }>(
+        `SELECT child.ctid < parent.ctid AS child_first
+           FROM public.minion_jobs AS child
+           JOIN public.minion_jobs AS parent ON parent.id = $1
+          WHERE child.id = $2`,
+        [parentId, childId],
+      );
+      expect(layout[0]?.child_first).toBe(true);
+
+      completionTx = completer.transaction(async (tx) => {
+        await tx.executeRaw(
+          `SELECT id FROM public.minion_jobs WHERE id = $1 FOR UPDATE`,
+          [parentId],
+        );
+        parentLocked.resolve();
+        await releaseCompletion.promise;
+        await tx.executeRaw(
+          `UPDATE public.minion_jobs
+              SET status = 'completed', lock_token = NULL, lock_until = NULL,
+                  finished_at = now(), updated_at = now()
+            WHERE id = $1 AND status = 'active'`,
+          [childId],
+        );
+      });
+      await parentLocked.promise;
+
+      let cancellationSettled = false;
+      const cancellation = new MinionQueue(canceller).cancelJob(parentId)
+        .finally(() => { cancellationSettled = true; });
+      await wait(100);
+      expect(cancellationSettled).toBe(false);
+
+      releaseCompletion.resolve();
+      const [, cancelled] = await Promise.all([completionTx, cancellation]);
+      expect(cancelled).toMatchObject({ id: parentId, status: 'cancelled' });
+      const finalRows = await completer.executeRaw<{ id: number | string; status: string }>(
+        `SELECT id, status FROM public.minion_jobs
+          WHERE id = ANY($1::bigint[]) ORDER BY id`,
+        [[parentId, childId]],
+      );
+      expect(finalRows).toEqual([
+        { id: parentId, status: 'cancelled' },
+        { id: childId, status: 'completed' },
+      ]);
+    } finally {
+      releaseCompletion.resolve();
+      await completionTx?.catch(() => {});
+      const ids = [childId, parentId].filter((id): id is number => id !== null);
+      if (ids.length > 0) {
+        await completer.executeRaw(
+          `DELETE FROM public.minion_jobs WHERE id = ANY($1::bigint[])`,
+          [ids],
+        ).catch(() => {});
+      }
+      await Promise.all([completer.disconnect(), canceller.disconnect()]);
+    }
+  }, 30_000);
+
+  test('archived-job cleanup does not cancel work after a concurrent restore wins', async () => {
+    const sourceId = 'cleanup-restore-race-e2e';
+    const jobName = 'cleanup-restore-race-job-e2e';
+    const cleaner = new PostgresEngine();
+    const restorer = new PostgresEngine();
+    await cleaner.connect({ database_url: process.env.DATABASE_URL! });
+    await restorer.connect({ database_url: process.env.DATABASE_URL! });
+    const restoreUpdated = deferred();
+    const releaseRestore = deferred();
+    let restoreTx: Promise<void> | null = null;
+
+    try {
+      await cleaner.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]);
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await cleaner.executeRaw(
+        `INSERT INTO public.sources (id, name, config, archived)
+         VALUES ($1, $1, '{}'::jsonb, false)`,
+        [sourceId],
+      );
+      await cleaner.executeRaw(
+        `INSERT INTO public.minion_jobs (name, status, data)
+         VALUES ($1, 'waiting', jsonb_build_object('sourceId', $2::text))`,
+        [jobName, sourceId],
+      );
+      expect(await softDeleteSource(cleaner, sourceId)).toMatchObject({ id: sourceId });
+
+      restoreTx = restorer.transaction(async (tx) => {
+        await tx.executeRaw(
+          `UPDATE public.sources
+              SET archived = false, archived_at = NULL, archive_expires_at = NULL
+            WHERE id = $1 AND archived IS TRUE`,
+          [sourceId],
+        );
+        restoreUpdated.resolve();
+        await releaseRestore.promise;
+      });
+      await restoreUpdated.promise;
+
+      let cleanupSettled = false;
+      const cleanup = new MinionQueue(cleaner).cancelArchivedSourceJobs()
+        .finally(() => { cleanupSettled = true; });
+      await wait(100);
+      expect(cleanupSettled).toBe(false);
+
+      releaseRestore.resolve();
+      await restoreTx;
+      expect(await cleanup).toEqual([]);
+      const finalRows = await cleaner.executeRaw<{ archived: boolean; status: string }>(
+        `SELECT source.archived, job.status
+           FROM public.sources AS source
+           JOIN public.minion_jobs AS job ON job.name = $2
+          WHERE source.id = $1`,
+        [sourceId, jobName],
+      );
+      expect(finalRows).toEqual([{ archived: false, status: 'waiting' }]);
+    } finally {
+      releaseRestore.resolve();
+      await restoreTx?.catch(() => {});
+      await cleaner.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([cleaner.disconnect(), restorer.disconnect()]);
+    }
+  }, 30_000);
+
+  test('cleanup ignores a newly archived path-overlap source it did not lock', async () => {
+    const sourceA = 'cleanup-path-phantom-a-e2e';
+    const sourceB = 'cleanup-path-phantom-b-e2e';
+    const sharedPath = '/tmp/gbrain-cleanup-path-phantom-e2e';
+    const cleaner = new PostgresEngine();
+    const lifecycleA = new PostgresEngine();
+    const lifecycleB = new PostgresEngine();
+    await cleaner.connect({ database_url: process.env.DATABASE_URL! });
+    await lifecycleA.connect({ database_url: process.env.DATABASE_URL! });
+    await lifecycleB.connect({ database_url: process.env.DATABASE_URL! });
+    const restoreAUpdated = deferred();
+    const releaseRestoreA = deferred();
+    const restoreBUpdated = deferred();
+    const releaseRestoreB = deferred();
+    let restoreATx: Promise<void> | null = null;
+    let restoreBTx: Promise<void> | null = null;
+    let jobId: number | null = null;
+
+    try {
+      await cleaner.executeRaw(
+        `DELETE FROM public.minion_jobs
+          WHERE name = 'sync' AND data->>'repoPath' = $1`,
+        [sharedPath],
+      );
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id IN ($1, $2)`, [sourceA, sourceB]);
+      await cleaner.executeRaw(
+        `INSERT INTO public.sources (id, name, local_path, config, archived)
+         VALUES
+           ($1, $1, $3, '{}'::jsonb, false),
+           ($2, $2, $3, '{}'::jsonb, false)`,
+        [sourceA, sourceB, sharedPath],
+      );
+      const jobs = await cleaner.executeRaw<{ id: number | string }>(
+        `INSERT INTO public.minion_jobs (name, status, data)
+         VALUES ('sync', 'waiting', jsonb_build_object('repoPath', $1::text))
+         RETURNING id`,
+        [sharedPath],
+      );
+      jobId = Number(jobs[0].id);
+      expect(await softDeleteSource(cleaner, sourceA)).toMatchObject({ id: sourceA });
+
+      restoreATx = lifecycleA.transaction(async (tx) => {
+        await tx.executeRaw(
+          `UPDATE public.sources SET archived = false, archived_at = NULL,
+             archive_expires_at = NULL WHERE id = $1 AND archived IS TRUE`,
+          [sourceA],
+        );
+        restoreAUpdated.resolve();
+        await releaseRestoreA.promise;
+      });
+      await restoreAUpdated.promise;
+
+      let cleanupSettled = false;
+      const cleanup = new MinionQueue(cleaner).cancelArchivedSourceJobs()
+        .finally(() => { cleanupSettled = true; });
+      await wait(100);
+      expect(cleanupSettled).toBe(false);
+
+      // The cleanup source-lock statement already has its snapshot and is
+      // waiting on A. Archive B after that snapshot, then hold B's restore
+      // uncommitted. B must not become an unlocked match in the later recheck.
+      expect(await softDeleteSource(lifecycleB, sourceB)).toMatchObject({ id: sourceB });
+      restoreBTx = lifecycleB.transaction(async (tx) => {
+        await tx.executeRaw(
+          `UPDATE public.sources SET archived = false, archived_at = NULL,
+             archive_expires_at = NULL WHERE id = $1 AND archived IS TRUE`,
+          [sourceB],
+        );
+        restoreBUpdated.resolve();
+        await releaseRestoreB.promise;
+      });
+      await restoreBUpdated.promise;
+
+      releaseRestoreA.resolve();
+      await restoreATx;
+      expect(await cleanup).toEqual([]);
+      releaseRestoreB.resolve();
+      await restoreBTx;
+
+      const finalRows = await cleaner.executeRaw<{ id: string; archived: boolean }>(
+        `SELECT id, archived FROM public.sources
+          WHERE id IN ($1, $2) ORDER BY id`,
+        [sourceA, sourceB],
+      );
+      expect(finalRows).toEqual([
+        { id: sourceA, archived: false },
+        { id: sourceB, archived: false },
+      ]);
+      const jobRows = await cleaner.executeRaw<{ status: string }>(
+        `SELECT status FROM public.minion_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(jobRows).toEqual([{ status: 'waiting' }]);
+    } finally {
+      releaseRestoreA.resolve();
+      releaseRestoreB.resolve();
+      await Promise.all([restoreATx?.catch(() => {}), restoreBTx?.catch(() => {})]);
+      if (jobId !== null) {
+        await cleaner.executeRaw(`DELETE FROM public.minion_jobs WHERE id = $1`, [jobId]).catch(() => {});
+      }
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id IN ($1, $2)`, [sourceA, sourceB]).catch(() => {});
+      await Promise.all([
+        cleaner.disconnect(), lifecycleA.disconnect(), lifecycleB.disconnect(),
+      ]);
+    }
+  }, 30_000);
+
+  test('claim treats an archive trigger race as a clean miss and continues', async () => {
+    const archivedSource = 'claim-race-archived-e2e';
+    const healthySource = 'claim-race-healthy-e2e';
+    const archivedJob = 'claim-race-archived-job-e2e';
+    const healthyJob = 'claim-race-healthy-job-e2e';
+    const pauseLock = 42_428_901;
+    const worker = new PostgresEngine();
+    const archiver = new PostgresEngine();
+    const blocker = new PostgresEngine();
+    await worker.connect({ database_url: process.env.DATABASE_URL! });
+    await archiver.connect({ database_url: process.env.DATABASE_URL! });
+    await blocker.connect({ database_url: process.env.DATABASE_URL! });
+    const lockReady = deferred();
+    const releaseLock = deferred();
+    let blockerRun: Promise<void> | null = null;
+
+    try {
+      await worker.executeRaw(
+        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2)`,
+        [archivedJob, healthyJob],
+      );
+      await worker.executeRaw(
+        `DELETE FROM public.sources WHERE id IN ($1, $2)`,
+        [archivedSource, healthySource],
+      );
+      await worker.executeRaw(
+        `INSERT INTO public.sources (id, name, config, archived)
+         VALUES ($1, $1, '{}'::jsonb, false), ($2, $2, '{}'::jsonb, false)`,
+        [archivedSource, healthySource],
+      );
+      await worker.executeRaw(
+        `INSERT INTO public.minion_jobs (name, priority, data)
+         VALUES
+           ($1, -10, jsonb_build_object('sourceId', $2::text)),
+           ($3, 0, jsonb_build_object('sourceId', $4::text))`,
+        [archivedJob, archivedSource, healthyJob, healthySource],
+      );
+      await worker.executeRaw(`
+        CREATE OR REPLACE FUNCTION public.gbrain_test_pause_claim_fn()
+        RETURNS trigger AS $fn$
+        BEGIN
+          IF NEW.status = 'active' THEN
+            PERFORM pg_advisory_xact_lock(${pauseLock});
+          END IF;
+          RETURN NEW;
+        END;
+        $fn$ LANGUAGE plpgsql;
+        DROP TRIGGER IF EXISTS aa_gbrain_test_pause_claim ON public.minion_jobs;
+        CREATE TRIGGER aa_gbrain_test_pause_claim
+          BEFORE UPDATE ON public.minion_jobs
+          FOR EACH ROW EXECUTE FUNCTION public.gbrain_test_pause_claim_fn();
+      `);
+
+      blockerRun = blocker.withReservedConnection(async (conn) => {
+        await conn.executeRaw(`SELECT pg_advisory_lock($1)`, [pauseLock]);
+        lockReady.resolve();
+        await releaseLock.promise;
+        await conn.executeRaw(`SELECT pg_advisory_unlock($1)`, [pauseLock]);
+      });
+      await lockReady.promise;
+
+      const queue = new MinionQueue(worker);
+      const racedClaim = queue.claim(
+        'claim-race-token', 30_000, 'default', [archivedJob, healthyJob],
+      );
+      let observedBlockedClaim = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const rows = await archiver.executeRaw<{ blocked: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname = current_database()
+                AND wait_event_type = 'Lock'
+                AND lower(COALESCE(wait_event, '')) = 'advisory'
+                AND query ILIKE '%UPDATE minion_jobs SET%'
+           ) AS blocked`,
+        );
+        if (rows[0]?.blocked) {
+          observedBlockedClaim = true;
+          break;
+        }
+        await wait(25);
+      }
+      expect(observedBlockedClaim).toBe(true);
+      expect(await softDeleteSource(archiver, archivedSource)).toMatchObject({ id: archivedSource });
+      releaseLock.resolve();
+      await blockerRun;
+      expect(await racedClaim).toBeNull();
+
+      await worker.executeRaw(
+        `DROP TRIGGER IF EXISTS aa_gbrain_test_pause_claim ON public.minion_jobs`,
+      );
+      const healthy = await queue.claim(
+        'claim-after-race-token', 30_000, 'default', [archivedJob, healthyJob],
+      );
+      expect(healthy).toMatchObject({ name: healthyJob, status: 'active' });
+      const archivedState = await worker.executeRaw<{ status: string }>(
+        `SELECT status FROM public.minion_jobs WHERE name = $1`,
+        [archivedJob],
+      );
+      expect(archivedState).toEqual([{ status: 'cancelled' }]);
+    } finally {
+      releaseLock.resolve();
+      await blockerRun?.catch(() => {});
+      await worker.executeRaw(
+        `DROP TRIGGER IF EXISTS aa_gbrain_test_pause_claim ON public.minion_jobs`,
+      ).catch(() => {});
+      await worker.executeRaw(
+        `DROP FUNCTION IF EXISTS public.gbrain_test_pause_claim_fn()`,
+      ).catch(() => {});
+      await worker.executeRaw(
+        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2)`,
+        [archivedJob, healthyJob],
+      ).catch(() => {});
+      await worker.executeRaw(
+        `DELETE FROM public.sources WHERE id IN ($1, $2)`,
+        [archivedSource, healthySource],
+      ).catch(() => {});
+      await worker.disconnect();
+      await archiver.disconnect();
+      await blocker.disconnect();
     }
   }, 30_000);
 
