@@ -206,7 +206,11 @@ jobs:
     needs: cache-check
     if: needs.cache-check.outputs.hit != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Shard 4 carries the migration-heavy Dream suite. It took 10m18s on
+    # clean master (run 30313805725) and can exceed 15m under runner variance,
+    # so keep a bounded ceiling without turning healthy execution into a
+    # timeout failure.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
