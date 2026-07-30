@@ -10,8 +10,11 @@ export function sourceHygieneFindings(packet: SourceHygienePacket): AdvisorFindi
         source.recovery_mode === 'managed_clone_sync' &&
         source.safe_for_agent_review &&
         source.proposed_command_argv !== null;
-      const actionableDrainResume =
+      const actionableHygieneDrainResume =
         source.recovery_mode === 'archive_resume' &&
+        source.drain_requires_hygiene_candidate === true &&
+        source.dependent_data_known &&
+        source.dependent_row_count === 0 &&
         source.safe_for_agent_review &&
         source.proposed_command_argv !== null;
       findings.push({
@@ -31,7 +34,7 @@ export function sourceHygieneFindings(packet: SourceHygienePacket): AdvisorFindi
             : 'This source contains data or lacks enough proof for automatic cleanup. Preserve it and restore its checkout manually.',
         fix: { command_argv: source.proposed_command_argv },
         collector: 'source_hygiene',
-        ask_user: !(actionableManagedRecovery || actionableDrainResume),
+        ask_user: !(actionableManagedRecovery || actionableHygieneDrainResume),
         workspace_dependent: true,
       });
     } else if (source.classification === 'archive_candidate') {

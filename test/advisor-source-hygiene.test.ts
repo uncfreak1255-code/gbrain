@@ -61,12 +61,15 @@ describe('source-hygiene advisor collector', () => {
     expect(findings[0]?.fix.command_argv).toBeNull();
   });
 
-  test('surfaces an interrupted drain as an agent-runnable archive resume', () => {
+  test('surfaces an interrupted hygiene-candidate drain as an agent-runnable guarded resume', () => {
     const findings = sourceHygieneFindings(packet([
       decision('stuck-drain', 'recovery_required', {
         draining: true,
+        drain_requires_hygiene_candidate: true,
         recovery_mode: 'archive_resume',
-        proposed_command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'],
+        proposed_command_argv: [
+          'gbrain', 'sources', 'archive', 'stuck-drain', '--if-hygiene-candidate',
+        ],
         safe_for_agent_review: true,
       }),
     ]));
@@ -75,7 +78,50 @@ describe('source-hygiene advisor collector', () => {
       id: 'source_recovery_required:stuck-drain',
       severity: 'warn',
       ask_user: false,
-      fix: { command_argv: ['gbrain', 'sources', 'archive', 'stuck-drain'] },
+      fix: {
+        command_argv: [
+          'gbrain', 'sources', 'archive', 'stuck-drain', '--if-hygiene-candidate',
+        ],
+      },
+    });
+  });
+
+  test('requires approval before resuming an interrupted manual archive', () => {
+    const findings = sourceHygieneFindings(packet([
+      decision('manual-drain', 'recovery_required', {
+        draining: true,
+        drain_requires_hygiene_candidate: false,
+        recovery_mode: 'archive_resume',
+        proposed_command_argv: ['gbrain', 'sources', 'archive', 'manual-drain'],
+        safe_for_agent_review: true,
+      }),
+    ]));
+
+    expect(findings[0]).toMatchObject({
+      id: 'source_recovery_required:manual-drain',
+      ask_user: true,
+      fix: { command_argv: ['gbrain', 'sources', 'archive', 'manual-drain'] },
+    });
+  });
+
+  test('requires approval when a hygiene-candidate drain now owns data', () => {
+    const findings = sourceHygieneFindings(packet([
+      decision('populated-drain', 'recovery_required', {
+        draining: true,
+        drain_requires_hygiene_candidate: true,
+        dependent_row_count: 1,
+        recovery_mode: 'archive_resume',
+        proposed_command_argv: [
+          'gbrain', 'sources', 'archive', 'populated-drain', '--if-hygiene-candidate',
+        ],
+        safe_for_agent_review: true,
+      }),
+    ]));
+
+    expect(findings[0]).toMatchObject({
+      id: 'source_recovery_required:populated-drain',
+      severity: 'critical',
+      ask_user: true,
     });
   });
 
