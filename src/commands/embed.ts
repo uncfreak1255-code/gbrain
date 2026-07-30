@@ -523,11 +523,18 @@ async function embedPage(
   sourceId?: string,
   signal?: AbortSignal,
 ) {
-  const opts = sourceId ? { sourceId } : undefined;
-  const page = await engine.getPage(slug, opts);
+  const lookupOpts = sourceId ? { sourceId } : undefined;
+  const page = await engine.getPage(slug, lookupOpts);
   if (!page) {
     throw new Error(`Page not found: ${slug}`);
   }
+
+  // A bare slug lookup may resolve to a page outside the default source. Once
+  // the row is loaded, its source_id is authoritative for every later read,
+  // provider lease, and write. Otherwise `gbrain embed <slug>` can acquire a
+  // lease for "default" while embedding and updating another source.
+  const resolvedSourceId = sourceId ?? page.source_id;
+  const opts = { sourceId: resolvedSourceId };
 
   // Get existing chunks or create new ones.
   // In dryRun, we still chunk the text locally to count what WOULD be
@@ -580,7 +587,7 @@ async function embedPage(
   const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text), {
     abortSignal: signal,
     withProviderSubmission: (_texts, submit) =>
-      withActiveEmbeddingSource(engine, sourceId ?? 'default', submit),
+      withActiveEmbeddingSource(engine, resolvedSourceId, submit),
   });
   const embeddingMap = new Map<number, Float32Array>();
   for (let j = 0; j < toEmbed.length; j++) {
@@ -603,7 +610,10 @@ async function embedPage(
   // page is mixed — don't claim it's current. `embed --all` fully re-embeds
   // such a page and then stamps it.
   if (toEmbed.length === chunks.length) {
-    await engine.setPageEmbeddingSignature(slug, { sourceId, signature: currentEmbeddingSignature() });
+    await engine.setPageEmbeddingSignature(slug, {
+      sourceId: resolvedSourceId,
+      signature: currentEmbeddingSignature(),
+    });
   }
   result.embedded += toEmbed.length;
   result.pages_processed++;

@@ -583,6 +583,79 @@ describe('runEmbedCore --dry-run never calls the embedding model', () => {
     expect(result.embedded).toBe(0);
   });
 
+  test('direct --slugs without --source uses the loaded page source for leases and writes', async () => {
+    const scopedReads: Array<{ slug: string; opts: unknown }> = [];
+    const scopedWrites: Array<{ slug: string; opts: unknown }> = [];
+    const signatureWrites: Array<{ slug: string; opts: unknown }> = [];
+    const sourceChecks: string[] = [];
+    const engine = mockEngine({
+      getPage: async (slug: string, opts: unknown) => {
+        expect(slug).toBe('non-default-page');
+        expect(opts).toBeUndefined();
+        return {
+          slug,
+          source_id: 'media-corpus',
+          compiled_truth: 'text',
+          timeline: '',
+        };
+      },
+      getChunks: async (slug: string, opts: unknown) => {
+        scopedReads.push({ slug, opts });
+        return [{
+          chunk_index: 0,
+          chunk_text: 'non-default source content',
+          chunk_source: 'compiled_truth',
+          embedded_at: null,
+          token_count: 4,
+        }];
+      },
+      executeRaw: async (sql: string, params: unknown[]) => {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM public.sources')) {
+          sourceChecks.push(String(params[0]));
+          return [{
+            id: params[0],
+            archived: false,
+            embedding_drain_token: null,
+            embedding_drain_epoch: 0,
+          }];
+        }
+        if (sql.includes('SELECT archived') && sql.includes('FROM public.sources')) {
+          sourceChecks.push(String(params[0]));
+          return [{
+            archived: false,
+            embedding_drain_token: null,
+            embedding_drain_epoch: 0,
+          }];
+        }
+        return [];
+      },
+      upsertChunks: async (slug: string, _chunks: unknown, opts: unknown) => {
+        scopedWrites.push({ slug, opts });
+      },
+      setPageEmbeddingSignature: async (slug: string, opts: unknown) => {
+        signatureWrites.push({ slug, opts });
+      },
+    });
+
+    const result = await runEmbedCore(engine, { slugs: ['non-default-page'] });
+
+    expect(sourceChecks).toEqual(['media-corpus', 'media-corpus']);
+    expect(scopedReads).toEqual([
+      { slug: 'non-default-page', opts: { sourceId: 'media-corpus' } },
+    ]);
+    expect(scopedWrites).toEqual([
+      { slug: 'non-default-page', opts: { sourceId: 'media-corpus' } },
+    ]);
+    expect(signatureWrites).toEqual([
+      {
+        slug: 'non-default-page',
+        opts: { sourceId: 'media-corpus', signature: 'test:model:1536' },
+      },
+    ]);
+    expect(totalEmbedCalls).toBe(1);
+    expect(result.embedded).toBe(1);
+  });
+
   test('non-dry-run path reports accurate embedded count (regression guard)', async () => {
     const { runEmbedCore } = await import('../src/commands/embed.ts');
     const chunksBySlug = new Map<string, any[]>([
