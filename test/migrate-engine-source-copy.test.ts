@@ -42,7 +42,9 @@ beforeAll(async () => {
   await edgeSource.initSchema();
   await edgeTarget.connect({});
   await edgeTarget.initSchema();
-}, 30_000);
+// This fixture deliberately initializes six isolated PGLite databases. The
+// full 132-migration setup can exceed Bun's 30s hook default on loaded CI.
+}, 120_000);
 
 afterAll(async () => {
   await source.disconnect();
