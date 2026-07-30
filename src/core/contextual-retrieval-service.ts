@@ -447,16 +447,21 @@ async function tryBuildPhase1(opts: {
 
     let synopsisResult: GeneratePerChunkSynopsisResult;
     try {
-      synopsisResult = await generatePerChunkSynopsis({
-        documentText: sourceText,
-        chunkText: c.chunk_text,
-        pageTitle: page.title,
-        pageSlug: args.pageSlug,
-        sourceId: args.sourceId,
-        chunkIndex: c.chunk_index,
-        model: haikuModel,
-        abortSignal: args.abortSignal,
-      });
+      synopsisResult = await withActiveSourceProviderLease(
+        args.engine,
+        args.sourceId,
+        (leaseSignal) => generatePerChunkSynopsis({
+          documentText: sourceText,
+          chunkText: c.chunk_text,
+          pageTitle: page.title,
+          pageSlug: args.pageSlug,
+          sourceId: args.sourceId,
+          chunkIndex: c.chunk_index,
+          model: haikuModel,
+          abortSignal: leaseSignal,
+        }),
+        args.abortSignal,
+      );
     } finally {
       if (args.releaseSynopsisLease) {
         try {

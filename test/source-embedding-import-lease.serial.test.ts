@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import {
+  __setChatTransportForTests,
   __setEmbedTransportForTests,
   configureGateway,
   embed,
   resetGateway,
   withBudgetTracker,
+  type ChatResult,
 } from '../src/core/ai/gateway.ts';
 import { BudgetTracker } from '../src/core/budget/budget-tracker.ts';
 import {
@@ -18,6 +20,7 @@ import {
   withActiveSourceProviderLease,
   type SourceArchiveDrain,
 } from '../src/core/source-embedding-lease.ts';
+import { reembedPageWithContextualRetrieval } from '../src/core/contextual-retrieval-service.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -46,6 +49,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  __setChatTransportForTests(null);
   __setEmbedTransportForTests(null);
   resetGateway();
 });
@@ -103,6 +107,127 @@ describe('source-owned markdown import embedding lease', () => {
     expect(providerCalls).toBe(0);
 
     if (drain) await cancelSourceArchiveDrain(engine, drain);
+  });
+
+  test('a draining source is rejected before contextual synopsis provider egress', async () => {
+    let chatProviderCalls = 0;
+    let embedProviderCalls = 0;
+    __setChatTransportForTests(async () => {
+      chatProviderCalls++;
+      return {
+        text: 'A synopsis that must never be generated while the source drains.',
+        blocks: [],
+        model: 'anthropic:claude-haiku-4-5-20251001',
+        providerId: 'anthropic',
+        stopReason: 'end',
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+        },
+      };
+    });
+    __setEmbedTransportForTests(async ({ values }: { values: string[] }) => {
+      embedProviderCalls++;
+      return {
+        embeddings: values.map(() => Array.from({ length: 1536 }, () => 0.01)),
+        usage: { tokens: values.length },
+      } as never;
+    });
+
+    await importFromContent(
+      engine,
+      'topics/draining-contextual-reindex',
+      '# Draining contextual reindex\n\nThis page needs a paid contextual synopsis.',
+      { sourceId: 'docs-source' },
+    );
+    chatProviderCalls = 0;
+    embedProviderCalls = 0;
+
+    const drain = await beginSourceArchiveDrain(engine, 'docs-source');
+    expect(drain).not.toBeNull();
+    try {
+      await expect(reembedPageWithContextualRetrieval({
+        engine,
+        pageSlug: 'topics/draining-contextual-reindex',
+        sourceId: 'docs-source',
+        globalMode: 'per_chunk_synopsis',
+      })).rejects.toThrow(/archived, draining, or unavailable/);
+      expect(chatProviderCalls).toBe(0);
+      expect(embedProviderCalls).toBe(0);
+    } finally {
+      if (drain) await cancelSourceArchiveDrain(engine, drain);
+    }
+  });
+
+  test('a drain that starts during contextual synopsis discards its output before embedding', async () => {
+    let chatProviderCalls = 0;
+    let embedProviderCalls = 0;
+    let markChatStarted!: () => void;
+    let releaseChat!: () => void;
+    const chatStarted = new Promise<void>((resolve) => {
+      markChatStarted = resolve;
+    });
+    const chatMayFinish = new Promise<void>((resolve) => {
+      releaseChat = resolve;
+    });
+    __setChatTransportForTests(async (): Promise<ChatResult> => {
+      chatProviderCalls++;
+      markChatStarted();
+      await chatMayFinish;
+      return {
+        text: 'This paid result began before the drain and must be discarded afterward.',
+        blocks: [],
+        model: 'anthropic:claude-haiku-4-5-20251001',
+        providerId: 'anthropic',
+        stopReason: 'end',
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+        },
+      };
+    });
+    __setEmbedTransportForTests(async ({ values }: { values: string[] }) => {
+      embedProviderCalls++;
+      return {
+        embeddings: values.map(() => Array.from({ length: 1536 }, () => 0.01)),
+        usage: { tokens: values.length },
+      } as never;
+    });
+
+    await importFromContent(
+      engine,
+      'topics/contextual-reindex-drain-race',
+      '# Contextual reindex drain race\n\nThis page starts synopsis work before its source drains.',
+      { sourceId: 'docs-source' },
+    );
+    chatProviderCalls = 0;
+    embedProviderCalls = 0;
+
+    const reembed = reembedPageWithContextualRetrieval({
+      engine,
+      pageSlug: 'topics/contextual-reindex-drain-race',
+      sourceId: 'docs-source',
+      globalMode: 'per_chunk_synopsis',
+    });
+    await chatStarted;
+    const drain = await beginSourceArchiveDrain(engine, 'docs-source');
+    expect(drain).not.toBeNull();
+    expect(await engine.executeRaw(`SELECT lease_token FROM source_embedding_leases`)).toHaveLength(1);
+    releaseChat();
+
+    try {
+      await expect(reembed).rejects.toThrow(/provider output was discarded/);
+      expect(chatProviderCalls).toBe(1);
+      expect(embedProviderCalls).toBe(0);
+      expect(await engine.executeRaw(`SELECT lease_token FROM source_embedding_leases`)).toEqual([]);
+    } finally {
+      releaseChat();
+      if (drain) await cancelSourceArchiveDrain(engine, drain);
+    }
   });
 
   test('a lease rejection before provider egress records no fictitious spend', async () => {
