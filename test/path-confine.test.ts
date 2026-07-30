@@ -55,10 +55,10 @@ function stubEngine(ids: string[]): BrainEngine {
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
-      if (sql.includes('SELECT id, archived, embedding_drain_token IS NOT NULL AS draining')) {
+      if (sql.includes('SELECT id, archived, embedding_drain_token')) {
         const target = params?.[0];
         return (ids.includes(target as string)
-          ? [{ id: target, archived: false, draining: false } as unknown as T]
+          ? [{ id: target, archived: false, embedding_drain_token: null } as unknown as T]
           : []);
       }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {

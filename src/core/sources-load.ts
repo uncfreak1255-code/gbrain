@@ -17,6 +17,7 @@
  * A shared helper hits the bar at lower cost.
  */
 import type { BrainEngine } from './engine.ts';
+import { sourceArchiveDrainPurpose } from './source-embedding-lease.ts';
 
 export interface SourceRow {
   id: string;
@@ -124,9 +125,12 @@ async function querySourcesCompat(
 }
 
 /** Recovery guidance shared by single-source active-work entry points. */
-export function sourceDrainResumeMessage(sourceId: string): string {
+export function sourceDrainResumeMessage(sourceId: string, drainToken?: string | null): string {
+  const candidateFlag = sourceArchiveDrainPurpose(drainToken ?? null) === 'hygiene_candidate'
+    ? ' --if-hygiene-candidate'
+    : '';
   return `Source "${sourceId}" has an interrupted archive drain; resume with `
-    + `\`gbrain sources archive ${sourceId}\` before continuing.`;
+    + `\`gbrain sources archive ${sourceId}${candidateFlag}\` before continuing.`;
 }
 
 /**

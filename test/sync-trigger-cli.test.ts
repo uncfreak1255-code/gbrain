@@ -12,6 +12,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runSyncTrigger } from '../src/commands/sync.ts';
+import { runSources } from '../src/commands/sources.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 
 let engine: PGLiteEngine;
@@ -98,16 +99,58 @@ describe('runSyncTrigger', () => {
 
   test('interrupted source drain exits 1 with exact archive-resume guidance', async () => {
     await engine.executeRaw(
-      `UPDATE sources SET embedding_drain_token = 'interrupted-drain' WHERE id = 'default'`,
+      `UPDATE sources
+          SET embedding_drain_token = 'hygiene-candidate:interrupted-drain',
+              embedding_drain_epoch = embedding_drain_epoch + 1
+        WHERE id = 'default'`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO source_embedding_leases
+         (lease_token, source_id, source_epoch, owner_host, owner_pid, owner_instance)
+       SELECT 'fenced-default-lease', id, embedding_drain_epoch - 1,
+              'test-host', 1, 'test-instance'
+         FROM sources WHERE id = 'default'`,
     );
 
     const { stderr, exitCode } = await capture(['--source', 'default']);
     expect(exitCode).toBe(1);
     expect(stderr).toContain('interrupted archive drain');
-    expect(stderr).toContain('gbrain sources archive default');
+    expect(stderr).toContain('gbrain sources archive default --if-hygiene-candidate');
 
     const jobs = await new MinionQueue(engine).getJobs({ name: 'sync', limit: 5 });
     expect(jobs).toEqual([]);
+
+    await runSources(engine, ['archive', 'default', '--if-hygiene-candidate']);
+    const recovered = await engine.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+    }>(
+      `SELECT archived, embedding_drain_token FROM sources WHERE id = 'default'`,
+    );
+    expect(recovered).toEqual([{ archived: false, embedding_drain_token: null }]);
+    const leases = await engine.executeRaw<{ count: number }>(
+      `SELECT count(*)::int AS count
+         FROM source_embedding_leases WHERE source_id = 'default'`,
+    );
+    expect(leases).toEqual([{ count: 0 }]);
+
+    const resumed = await capture(['--source', 'default']);
+    expect(resumed.exitCode).toBeNull();
+  });
+
+  test('manual default drain recovery omits the hygiene guard and keeps default active', async () => {
+    await engine.executeRaw(
+      `UPDATE sources SET embedding_drain_token = 'manual:interrupted-drain'
+        WHERE id = 'default'`,
+    );
+    await runSources(engine, ['archive', 'default']);
+    const rows = await engine.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+    }>(
+      `SELECT archived, embedding_drain_token FROM sources WHERE id = 'default'`,
+    );
+    expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
   });
 
   test('valid trigger submits sync job + prints job_id=N to stdout', async () => {

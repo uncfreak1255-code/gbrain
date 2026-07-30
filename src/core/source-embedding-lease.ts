@@ -47,6 +47,12 @@ export interface StaleSourceEmbeddingLeaseRecovery {
   remaining: number;
 }
 
+export interface DefaultSourceDrainRecovery {
+  status: 'recovered' | 'not_draining' | 'purpose_mismatch';
+  purpose: SourceArchiveDrainPurpose | null;
+  revokedLeases: number;
+}
+
 interface ProviderLeaseOwnerRow {
   lease_token: string;
   owner_host: string;
@@ -451,6 +457,71 @@ export async function beginSourceArchiveDrain(
       purpose,
       localPath: source.local_path,
       configJson: source.config_json,
+    };
+  });
+}
+
+/**
+ * Recover the protected default source from an interrupted archive drain.
+ *
+ * The default source may be fenced by a crash between begin-drain and the CLI
+ * archive guard. It must never be archived, so recovery clears the exact drain
+ * generation instead. Any provider leases that predate the drain are already
+ * epoch-fenced from publishing; deleting them here makes that discard explicit
+ * before the source accepts new provider work.
+ */
+export async function recoverDefaultSourceArchiveDrain(
+  engine: BrainEngine,
+  expectedPurpose: SourceArchiveDrainPurpose,
+): Promise<DefaultSourceDrainRecovery> {
+  return engine.transaction(async (tx) => {
+    await tx.executeRaw(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended('gbrain:source-lifecycle', 0)
+       )`,
+    );
+    const rows = await tx.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+      embedding_drain_epoch: number | string;
+    }>(
+      `SELECT archived, embedding_drain_token, embedding_drain_epoch
+         FROM public.sources
+        WHERE id = 'default'
+        FOR UPDATE`,
+    );
+    const source = rows[0];
+    if (!source || source.archived || source.embedding_drain_token === null) {
+      return { status: 'not_draining', purpose: null, revokedLeases: 0 };
+    }
+
+    const purpose = sourceArchiveDrainPurpose(source.embedding_drain_token);
+    if (purpose !== expectedPurpose) {
+      return { status: 'purpose_mismatch', purpose, revokedLeases: 0 };
+    }
+
+    const revoked = await tx.executeRaw<{ lease_token: string }>(
+      `DELETE FROM public.source_embedding_leases
+        WHERE source_id = 'default'
+      RETURNING lease_token`,
+    );
+    const cleared = await tx.executeRaw<{ id: string }>(
+      `UPDATE public.sources
+          SET embedding_drain_token = NULL
+        WHERE id = 'default'
+          AND archived IS NOT TRUE
+          AND embedding_drain_token = $1
+          AND embedding_drain_epoch = $2
+      RETURNING id`,
+      [source.embedding_drain_token, Number(source.embedding_drain_epoch)],
+    );
+    if (cleared.length !== 1) {
+      throw new Error('Could not recover interrupted archive drain for protected default source');
+    }
+    return {
+      status: 'recovered',
+      purpose,
+      revokedLeases: revoked.length,
     };
   });
 }

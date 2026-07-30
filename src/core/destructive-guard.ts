@@ -208,6 +208,9 @@ export async function softDeleteSourceGuarded(
   guard?: (engine: BrainEngine) => Promise<SoftDeleteGuardDecision>,
   purpose: SourceArchiveDrainPurpose = 'manual',
 ): Promise<{ result: SoftDeletedSource | null; reason: string }> {
+  if (sourceId === 'default') {
+    return { result: null, reason: 'protected_default' };
+  }
   const drain = await beginSourceArchiveDrain(engine, sourceId, purpose);
   if (!drain) return { result: null, reason: 'source_not_active' };
   if (drain.purpose === 'hygiene_candidate' && purpose !== 'hygiene_candidate') {

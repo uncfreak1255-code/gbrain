@@ -66,13 +66,16 @@ interface RegisteredSourcePath {
   local_path: string;
   archived: boolean;
   draining: boolean;
+  drain_requires_hygiene_candidate: boolean;
 }
 
 async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourcePath[]> {
   try {
     return await engine.executeRaw<RegisteredSourcePath>(
       `SELECT id, local_path, archived,
-              embedding_drain_token IS NOT NULL AS draining
+              embedding_drain_token IS NOT NULL AS draining,
+              embedding_drain_token LIKE 'hygiene-candidate:%'
+                AS drain_requires_hygiene_candidate
          FROM sources WHERE local_path IS NOT NULL`,
     );
   } catch (error) {
@@ -81,16 +84,32 @@ async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourc
       && !isUndefinedColumnError(error, 'archived')
     ) throw error;
     try {
-      const rows = await engine.executeRaw<Omit<RegisteredSourcePath, 'draining'>>(
+      const rows = await engine.executeRaw<
+        Omit<RegisteredSourcePath, 'draining' | 'drain_requires_hygiene_candidate'>
+      >(
         `SELECT id, local_path, archived FROM sources WHERE local_path IS NOT NULL`,
       );
-      return rows.map((row) => ({ ...row, draining: false }));
+      return rows.map((row) => ({
+        ...row,
+        draining: false,
+        drain_requires_hygiene_candidate: false,
+      }));
     } catch (legacyError) {
       if (!isUndefinedColumnError(legacyError, 'archived')) throw legacyError;
-      const rows = await engine.executeRaw<Omit<RegisteredSourcePath, 'archived' | 'draining'>>(
+      const rows = await engine.executeRaw<
+        Omit<
+          RegisteredSourcePath,
+          'archived' | 'draining' | 'drain_requires_hygiene_candidate'
+        >
+      >(
         `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
       );
-      return rows.map((row) => ({ ...row, archived: false, draining: false }));
+      return rows.map((row) => ({
+        ...row,
+        archived: false,
+        draining: false,
+        drain_requires_hygiene_candidate: false,
+      }));
     }
   }
 }
@@ -101,7 +120,11 @@ interface SourcePathMatch {
   pathLen: number;
 }
 
-type AutomaticSourceState = 'active' | 'archived' | 'draining';
+type AutomaticSourceState =
+  | 'active'
+  | 'archived'
+  | 'draining'
+  | 'hygiene_candidate_draining';
 
 interface GitWorktreeInfo {
   commonDir: string;
@@ -246,7 +269,11 @@ export async function resolveSourceId(
   const archivedBest = pickRegisteredPathMatch(registered.filter((row) => row.archived || row.draining), cwd);
   if (archivedBest && (!activeBest || archivedBest.pathLen > activeBest.pathLen)) {
     const source = registered.find((row) => row.id === archivedBest.id);
-    const state: AutomaticSourceState = source?.archived ? 'archived' : 'draining';
+    const state: AutomaticSourceState = source?.archived
+      ? 'archived'
+      : source?.drain_requires_hygiene_candidate
+        ? 'hygiene_candidate_draining'
+        : 'draining';
     throw inactiveAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`, state);
   }
   if (activeBest) return activeBest.id;
@@ -364,14 +391,21 @@ async function assertSourceExists(engine: BrainEngine, id: string): Promise<void
  */
 async function sourceStateOrThrowIfMissing(engine: BrainEngine, id: string): Promise<AutomaticSourceState> {
   try {
-    const rows = await engine.executeRaw<{ id: string; archived: boolean; draining: boolean }>(
-      `SELECT id, archived, embedding_drain_token IS NOT NULL AS draining
+    const rows = await engine.executeRaw<{
+      id: string;
+      archived: boolean;
+      embedding_drain_token: string | null;
+    }>(
+      `SELECT id, archived, embedding_drain_token
          FROM sources WHERE id = $1`,
       [id],
     );
     if (rows.length === 0) throw sourceNotFoundError(id);
     if (rows[0].archived === true) return 'archived';
-    if (rows[0].draining === true) return 'draining';
+    if (rows[0].embedding_drain_token?.startsWith('hygiene-candidate:')) {
+      return 'hygiene_candidate_draining';
+    }
+    if (rows[0].embedding_drain_token !== null) return 'draining';
     return 'active';
   } catch (error) {
     if (isUndefinedColumnError(error, 'embedding_drain_token')) {
@@ -409,10 +443,13 @@ function inactiveAutomaticRouteError(
   signal: string,
   state: Exclude<AutomaticSourceState, 'active'>,
 ): Error {
-  if (state === 'draining') {
+  if (state === 'draining' || state === 'hygiene_candidate_draining') {
+    const candidateFlag = state === 'hygiene_candidate_draining'
+      ? ' --if-hygiene-candidate'
+      : '';
     return new Error(
       `Source "${id}" has an interrupted archive drain and cannot be selected automatically from ${signal}. ` +
-      `Resume it with \`gbrain sources archive ${id}\` before running normal commands. ` +
+      `Resume it with \`gbrain sources archive ${id}${candidateFlag}\` before running normal commands. ` +
       `Use --source ${id} only for an intentional archive or admin operation.`,
     );
   }
@@ -530,7 +567,11 @@ export async function resolveSourceWithTier(
   const archivedBest = pickRegisteredPathMatch(registered.filter((row) => row.archived || row.draining), cwd);
   if (archivedBest && (!activeBest || archivedBest.pathLen > activeBest.pathLen)) {
     const source = registered.find((row) => row.id === archivedBest.id);
-    const state: AutomaticSourceState = source?.archived ? 'archived' : 'draining';
+    const state: AutomaticSourceState = source?.archived
+      ? 'archived'
+      : source?.drain_requires_hygiene_candidate
+        ? 'hygiene_candidate_draining'
+        : 'draining';
     throw inactiveAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`, state);
   }
   if (activeBest) {

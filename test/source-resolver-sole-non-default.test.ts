@@ -34,14 +34,24 @@ function makeStub(sources: StubSource[], globalDefault: string | null = null) {
       //   1. tier 4 (local_path match): SELECT id, local_path FROM sources WHERE local_path IS NOT NULL
       //   2. assertSourceExists: SELECT id FROM sources WHERE id = $1
       //   3. tier 5.5 (sole_non_default): SELECT id FROM sources WHERE local_path IS NOT NULL AND id != 'default' AND archived = false
-      if (sql.includes('SELECT id, local_path FROM sources WHERE local_path IS NOT NULL')) {
+      if (sql.includes('SELECT id, local_path') && sql.includes('FROM sources WHERE local_path IS NOT NULL')) {
         return sources.filter(s => s.local_path !== null && s.archived !== true)
-          .map(s => ({ id: s.id, local_path: s.local_path })) as unknown as T[];
+          .map(s => ({
+            id: s.id,
+            local_path: s.local_path,
+            archived: false,
+            draining: false,
+            drain_requires_hygiene_candidate: false,
+          })) as unknown as T[];
       }
       if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const id = (_params as string[])?.[0];
         return sources.filter(s => s.id === id)
-          .map(s => ({ id: s.id, archived: s.archived === true, draining: false })) as unknown as T[];
+          .map(s => ({
+            id: s.id,
+            archived: s.archived === true,
+            embedding_drain_token: null,
+          })) as unknown as T[];
       }
       if (sql.includes('archived = false')) {
         return sources.filter(s => s.local_path !== null && s.id !== 'default' && s.archived !== true)

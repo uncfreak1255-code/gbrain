@@ -657,7 +657,7 @@ export async function runDream(
         process.exit(1);
       }
       if (src.embedding_drain_token != null) {
-        console.error(sourceDrainResumeMessage(resolvedSourceId));
+        console.error(sourceDrainResumeMessage(resolvedSourceId, src.embedding_drain_token));
         process.exit(1);
       }
     }

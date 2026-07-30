@@ -1721,7 +1721,7 @@ export async function registerBuiltinHandlers(
           report: {
             reason: 'source_draining',
             source_id: rawSourceId,
-            recovery: sourceDrainResumeMessage(rawSourceId),
+            recovery: sourceDrainResumeMessage(rawSourceId, source.embedding_drain_token),
           },
         };
       }

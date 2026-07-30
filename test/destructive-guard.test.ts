@@ -195,6 +195,17 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     expect(await softDeleteSource(engine, 'sd-unknown-xyz')).toBeNull();
   });
 
+  test('softDeleteSource never starts an archive drain for the protected default source', async () => {
+    expect(await softDeleteSource(engine, 'default')).toBeNull();
+    const rows = await engine.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+    }>(
+      `SELECT archived, embedding_drain_token FROM sources WHERE id = 'default'`,
+    );
+    expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
+  });
+
   test('softDeleteSource flips federated:false in JSONB but archived state is column-based', async () => {
     const id = 'sd-jsonb';
     await seedSource(engine, id, { withPages: 1 });

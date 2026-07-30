@@ -1118,7 +1118,7 @@ See also:
       );
       process.exit(1);
     }
-    console.error(sourceDrainResumeMessage(sourceIdArg));
+    console.error(sourceDrainResumeMessage(sourceIdArg, source.embedding_drain_token));
     process.exit(1);
   }
 

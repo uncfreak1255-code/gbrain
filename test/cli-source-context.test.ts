@@ -16,7 +16,7 @@ function resolverEngine(opts: {
         return [{
           id: params?.[0],
           archived: opts.archived === true,
-          draining: false,
+          embedding_drain_token: null,
         }] as T[];
       }
       return [];
@@ -28,6 +28,11 @@ function resolverEngine(opts: {
 }
 
 describe('CLI operation context source routing', () => {
+  test('keeps an active configured default as the CLI source', async () => {
+    const context = await makeContext(resolverEngine({ defaultSource: 'primary' }), {});
+    expect(context.sourceId).toBe('primary');
+  });
+
   test('propagates an archived automatic-route failure instead of writing to default', async () => {
     const engine = resolverEngine({ defaultSource: 'retired', archived: true });
     await expect(makeContext(engine, {})).rejects.toThrow(

@@ -31,7 +31,7 @@ function makeStub(
       if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const target = params?.[0] as string;
         return (registeredSources.includes(target)
-          ? [{ id: target, archived: archivedIds.has(target), draining: false } as unknown as T]
+          ? [{ id: target, archived: archivedIds.has(target), embedding_drain_token: null } as unknown as T]
           : []);
       }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -41,7 +41,12 @@ function makeStub(
           : []);
       }
       if (sql.includes('SELECT id, local_path')) {
-        return paths.map((path) => ({ archived: false, ...path })) as unknown as T[];
+        return paths.map((path) => ({
+          archived: false,
+          draining: false,
+          drain_requires_hygiene_candidate: false,
+          ...path,
+        })) as unknown as T[];
       }
       return [];
     },
@@ -149,7 +154,7 @@ describe('pre-v34 archived-column compatibility', () => {
         if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
           stateReads++;
           return params?.[0] === 'restored-source'
-            ? [{ id: 'restored-source', archived: false, draining: false }]
+            ? [{ id: 'restored-source', archived: false, embedding_drain_token: null }]
             : [];
         }
         if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -378,7 +383,7 @@ describe('getDefaultSourcePath', () => {
         if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
           const target = params?.[0] as string;
           return (registeredSources.includes(target)
-            ? [{ id: target, archived: false, draining: false } as unknown as T]
+            ? [{ id: target, archived: false, embedding_drain_token: null } as unknown as T]
             : []);
         }
         if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -397,7 +402,13 @@ describe('getDefaultSourcePath', () => {
         if (sql.includes('SELECT id, local_path')) {
           return Object.entries(sourcePaths)
             .filter(([_, p]) => p !== null)
-            .map(([id, local_path]) => ({ id, local_path, archived: false }) as unknown as T);
+            .map(([id, local_path]) => ({
+              id,
+              local_path,
+              archived: false,
+              draining: false,
+              drain_requires_hygiene_candidate: false,
+            }) as unknown as T);
         }
         return [];
       },

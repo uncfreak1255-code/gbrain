@@ -12,6 +12,7 @@ import {
   loadAllSources,
   fetchSource,
   isSourceActive,
+  sourceDrainResumeMessage,
   parseSourceConfig,
   isSourceFederated,
 } from '../src/core/sources-load.ts';
@@ -223,6 +224,17 @@ describe('isSourceActive', () => {
     expect(isSourceActive({ archived: true, embedding_drain_token: null })).toBe(false);
     expect(isSourceActive({ archived: false, embedding_drain_token: 'drain-token' })).toBe(false);
     expect(isSourceActive(null)).toBe(false);
+  });
+});
+
+describe('sourceDrainResumeMessage', () => {
+  test('prints the exact command required by each drain purpose', () => {
+    expect(sourceDrainResumeMessage('manual-source', 'manual:token')).toContain(
+      '`gbrain sources archive manual-source`',
+    );
+    expect(sourceDrainResumeMessage('candidate-source', 'hygiene-candidate:token')).toContain(
+      '`gbrain sources archive candidate-source --if-hygiene-candidate`',
+    );
   });
 });
 

@@ -33,7 +33,11 @@ function makeStub(
       if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const target = params?.[0] as string;
         return (registeredSources.includes(target)
-          ? [{ id: target, archived: archivedIds.has(target), draining: drainingIds.has(target) } as unknown as T]
+          ? [{
+              id: target,
+              archived: archivedIds.has(target),
+              embedding_drain_token: drainingIds.has(target) ? 'manual:stub-token' : null,
+            } as unknown as T]
           : []);
       }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {

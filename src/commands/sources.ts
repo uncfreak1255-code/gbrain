@@ -56,10 +56,14 @@ import {
   loadAllSources,
   parseSourceConfig,
   isSourceFederated,
+  sourceDrainResumeMessage,
   type SourceRow as LoadedSourceRow,
 } from '../core/sources-load.ts';
 import { buildSourcePlanReport, type SourcePlanInput } from '../core/source-plan.ts';
-import { revokeStaleSourceEmbeddingLeases } from '../core/source-embedding-lease.ts';
+import {
+  recoverDefaultSourceArchiveDrain,
+  revokeStaleSourceEmbeddingLeases,
+} from '../core/source-embedding-lease.ts';
 
 // ── Validation ──────────────────────────────────────────────
 
@@ -542,11 +546,6 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  if (id === 'default') {
-    console.error('Error: cannot archive the "default" source.');
-    process.exit(3);
-  }
-
   const hygieneCandidate = args.includes('--if-hygiene-candidate');
   const revokeStaleLeases = args.includes('--revoke-stale-leases');
   const confirmDestructive = args.includes('--confirm-destructive');
@@ -560,6 +559,27 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
       + 'Late provider output will be discarded after revocation.',
     );
     process.exit(5);
+  }
+
+  if (id === 'default') {
+    const expectedPurpose = hygieneCandidate ? 'hygiene_candidate' : 'manual';
+    const recovery = await recoverDefaultSourceArchiveDrain(engine, expectedPurpose);
+    if (recovery.status === 'purpose_mismatch') {
+      const actualToken = recovery.purpose === 'hygiene_candidate'
+        ? 'hygiene-candidate:recovery'
+        : 'manual:recovery';
+      console.error(sourceDrainResumeMessage(id, actualToken));
+      process.exit(4);
+    }
+    if (recovery.status === 'not_draining') {
+      console.error('Error: cannot archive the "default" source.');
+      process.exit(3);
+    }
+    console.log(
+      `Recovered protected default source from its interrupted ${recovery.purpose} archive drain; `
+      + `the source remains active and ${recovery.revokedLeases} fenced provider lease(s) were discarded.`,
+    );
+    return;
   }
 
   if (hygieneCandidate) {
@@ -1410,7 +1430,7 @@ async function runAudit(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(1);
   }
   if (!isSourceActive(src) && src.embedding_drain_token != null) {
-    console.error(sourceDrainResumeMessage(sourceId));
+    console.error(sourceDrainResumeMessage(sourceId, src.embedding_drain_token));
     process.exit(1);
   }
   if (!src.local_path) {
