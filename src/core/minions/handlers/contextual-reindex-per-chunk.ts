@@ -23,9 +23,9 @@
  *   - Rate-lease acquire/release per Haiku call (shared key across the
  *     whole worker pool so concurrent page jobs don't blow the 50 RPM
  *     default per D26 P0-3).
- *   - Source-id derivation from page-id (D27 P2-1 defense-in-depth
- *     against stale/malicious payloads that try to apply source-level
- *     trust decisions from the wrong source).
+ *   - Exact source-qualified page lookup (D27 P2-1 defense-in-depth against
+ *     stale/malicious payloads that try to apply source-level trust decisions
+ *     from the wrong source). Unqualified duplicate slugs fail closed.
  *   - Result classification into Minion success/throw semantics so the
  *     queue retries transient failures and dead-letters permanents.
  *
@@ -67,14 +67,9 @@ function resolveMaxConcurrent(): number {
 }
 
 /**
- * Job payload shape. Per D27 P2-1, only the `page_id` is authoritative;
- * the handler loads the page row and DERIVES source_id from it. Any
- * `source_id` field in the payload that mismatches the loaded value
- * triggers UnrecoverableError (stale/malicious payload defense).
- *
- * `expected_source_id` is optional — when present, the handler verifies
- * it matches the loaded page's source_id. Lets the submitter (mode-switch
- * hook with known per-source plans) catch its own staleness.
+ * Job payload shape. `(expected_source_id, page_slug)` is exact authority
+ * when the source is present. A bare page_slug remains compatible only when
+ * it is unique across active sources.
  */
 export interface ContextualReindexJobData {
   page_slug: string;
@@ -97,12 +92,14 @@ export function makeContextualReindexHandler(opts: MakeContextualReindexHandlerO
   ): Promise<{ ok: true; mode_applied: string; chunks_embedded: number }> {
     const data = parseJobData(ctx.data);
 
-    // Load page row to derive the authoritative source_id (D27 P2-1).
-    // Without sourceId we can't do a lookup at all — fall back to
-    // 'default' for the initial lookup, then if the page isn't found
-    // there, surface as unrecoverable (the submitter should have
-    // included expected_source_id).
-    let foundPage = await tryLoadPageAcrossSources(engine, data.page_slug);
+    // Resolve exact source authority before any provider-capable work. A
+    // source-qualified job never probes another source, and an unqualified
+    // duplicate slug fails closed instead of selecting the first match.
+    const foundPage = await tryLoadPageAcrossSources(
+      engine,
+      data.page_slug,
+      data.expected_source_id,
+    );
     if (!foundPage) {
       throw new UnrecoverableError(
         `Page not found for slug '${data.page_slug}'. ` +
@@ -193,29 +190,36 @@ function parseJobData(raw: Record<string, unknown> | undefined): ContextualReind
 }
 
 /**
- * Try loading the page in every source the engine knows about. Stops at
- * first match. Most brains are single-source; federated brains may have
- * the same slug in multiple sources but the page_id (and indirectly
- * source_id) is the authoritative tiebreaker per D27 P2-1.
+ * Load an exact source-qualified page when source authority is available.
+ * Legacy unqualified jobs remain compatible only when the slug is unique
+ * across active sources.
  */
 async function tryLoadPageAcrossSources(
   engine: BrainEngine,
   pageSlug: string,
+  expectedSourceId?: string,
 ): Promise<{ source_id: string } | null> {
-  // First try default. Most brains live here.
-  const defaultPage = await engine.getPage(pageSlug, { sourceId: 'default' });
-  if (defaultPage) return { source_id: defaultPage.source_id };
-
-  // Fall back to walking sources.
-  const sources = await engine.executeRaw<{ id: string }>(
-    `SELECT id FROM sources WHERE archived = false`,
-  );
-  for (const { id } of sources) {
-    if (id === 'default') continue; // already tried
-    const p = await engine.getPage(pageSlug, { sourceId: id });
-    if (p) return { source_id: p.source_id };
+  if (expectedSourceId) {
+    const page = await engine.getPage(pageSlug, { sourceId: expectedSourceId });
+    return page ? { source_id: page.source_id } : null;
   }
-  return null;
+
+  const sources = await engine.executeRaw<{ id: string }>(
+    `SELECT id FROM public.sources WHERE archived = false ORDER BY id`,
+  );
+  const matches: Array<{ source_id: string }> = [];
+  for (const { id } of sources) {
+    const page = await engine.getPage(pageSlug, { sourceId: id });
+    if (page) matches.push({ source_id: page.source_id });
+  }
+  if (matches.length > 1) {
+    throw new UnrecoverableError(
+      `Ambiguous page slug '${pageSlug}' exists in sources `
+      + `${matches.map((page) => `'${page.source_id}'`).join(', ')}; `
+      + 'expected_source_id is required.',
+    );
+  }
+  return matches[0] ?? null;
 }
 
 function classifyResult(

@@ -1,6 +1,16 @@
 import { createHash } from 'node:crypto';
-import { writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
-import { join, dirname, isAbsolute, relative, resolve, sep } from 'path';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'fs';
+import { basename, join, dirname, isAbsolute, relative, resolve, sep } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
 import { createProgress } from '../core/progress.ts';
@@ -9,6 +19,7 @@ import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
 import { isValidSourceId } from '../core/source-id.ts';
 import type { PageType, RawData } from '../core/types.ts';
+import { renameDirectoryNoReplace } from '../core/atomic-directory-publish.ts';
 
 interface ExportManifestPage {
   slug: string;
@@ -25,6 +36,23 @@ interface ExportManifest {
   page_count: number;
   raw_sidecar_count: number;
   pages: ExportManifestPage[];
+}
+
+interface PrivateScopedExportStaging {
+  /** Exposed for focused race tests; production callers only use write/publish. */
+  root: string;
+  destination: string;
+  assertOwned(): void;
+  writeFile(relativePath: string, contents: string): void;
+  tryPublish(beforeNativeRenameForTests?: () => void): boolean;
+  cleanup(): void;
+  [Symbol.dispose](): void;
+}
+
+interface ScopedExportRootIdentity {
+  realPath: string;
+  device: bigint;
+  inode: bigint;
 }
 
 function failExport(message: string): never {
@@ -79,26 +107,241 @@ function confinedOutputPath(outDir: string, relativePath: string): string {
   return candidate;
 }
 
-function assertFreshScopedOutputDirectory(outDir: string): void {
-  const root = resolve(outDir);
-  if (!existsSync(root)) return;
+function rawSidecarRelativePath(slug: string): string {
+  const slugParts = slug.split('/');
+  return join(
+    ...slugParts.slice(0, -1),
+    '.raw',
+    `${slugParts[slugParts.length - 1]}.json`,
+  );
+}
 
-  let entries: string[];
+function filesystemErrorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function scopedExportRootIdentity(root: string): ScopedExportRootIdentity {
+  const stats = statSync(root, { bigint: true });
+  if (!stats.isDirectory()) {
+    throw new Error(`${JSON.stringify(root)} is not a directory.`);
+  }
+  return {
+    realPath: realpathSync(root),
+    device: stats.dev,
+    inode: stats.ino,
+  };
+}
+
+function sameScopedExportRoot(
+  left: ScopedExportRootIdentity,
+  right: ScopedExportRootIdentity,
+): boolean {
+  return left.realPath === right.realPath
+    && sameFilesystemObject(left, right);
+}
+
+function sameFilesystemObject(
+  left: ScopedExportRootIdentity,
+  right: ScopedExportRootIdentity,
+): boolean {
+  return left.device === right.device && left.inode === right.inode;
+}
+
+function pathEntryExists(path: string): boolean {
   try {
-    entries = readdirSync(root);
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (filesystemErrorCode(error) === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function createPrivateScopedExportStaging(outDir: string): PrivateScopedExportStaging {
+  const requestedRoot = resolve(outDir);
+  const requestedParent = dirname(requestedRoot);
+  try {
+    mkdirSync(requestedParent, { recursive: true });
   } catch {
     failExport(
-      `gbrain export --source requires --dir to name an absent or empty directory; `
-      + `${JSON.stringify(outDir)} is not a readable directory.`,
+      `gbrain export --source could not create the parent directory for ${JSON.stringify(outDir)}.`,
     );
   }
-  if (entries.length > 0) {
+
+  let canonicalParent: string;
+  try {
+    canonicalParent = realpathSync(requestedParent);
+  } catch {
     failExport(
-      `gbrain export --source requires --dir to be absent or empty; `
-      + `${JSON.stringify(outDir)} already contains ${entries.length} item(s). `
+      `gbrain export --source could not identify the destination filesystem for `
+      + `${JSON.stringify(outDir)}.`,
+    );
+  }
+
+  const destinationName = basename(requestedRoot);
+  const destination = join(canonicalParent, destinationName);
+  if (!destinationName || pathEntryExists(destination)) {
+    failExport(
+      `gbrain export --source requires --dir to be absent; `
+      + `${JSON.stringify(outDir)} already exists. `
       + 'Choose a fresh recovery directory.',
     );
   }
+  let destinationParentIdentity: ScopedExportRootIdentity;
+  try {
+    destinationParentIdentity = scopedExportRootIdentity(requestedParent);
+  } catch {
+    failExport(
+      `gbrain export --source could not identify the destination parent for `
+      + `${JSON.stringify(outDir)}.`,
+    );
+  }
+
+  let root: string | null = null;
+  try {
+    root = mkdtempSync(join(canonicalParent, `.${destinationName}.gbrain-export-stage-`));
+    chmodSync(root, 0o700);
+  } catch {
+    if (root) {
+      try { rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    failExport(
+      `gbrain export --source could not create private staging next to ${JSON.stringify(outDir)}.`,
+    );
+  }
+  const stagingRoot = root;
+
+  let stagedRoot: ScopedExportRootIdentity;
+  try {
+    stagedRoot = scopedExportRootIdentity(stagingRoot);
+  } catch {
+    try { rmSync(stagingRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+    failExport(
+      `gbrain export --source could not identify its private staging directory for `
+      + `${JSON.stringify(outDir)}.`,
+    );
+  }
+
+  let published = false;
+  let cleaned = false;
+  const ownershipError = (): Error => new Error(
+    `gbrain export --source lost its private staging directory for ${JSON.stringify(outDir)}; `
+    + 'stop and use a fresh recovery directory.',
+  );
+  const ownsStaging = (): boolean => {
+    try {
+      return sameScopedExportRoot(stagedRoot, scopedExportRootIdentity(stagingRoot));
+    } catch {
+      return false;
+    }
+  };
+  const assertOwned = (): void => {
+    if (published || cleaned || !ownsStaging()) throw ownershipError();
+  };
+  const assertDestinationParentOwned = (): void => {
+    try {
+      const current = scopedExportRootIdentity(requestedParent);
+      if (sameScopedExportRoot(destinationParentIdentity, current)) return;
+    } catch {
+      // Fall through to one stable error for rename/replacement/symlink races.
+    }
+    throw new Error(
+      `gbrain export --source destination parent changed before publish for `
+      + `${JSON.stringify(outDir)}; the private staging directory was not published.`,
+    );
+  };
+
+  const ensurePrivateParent = (filePath: string): void => {
+    const parentRelative = relative(stagingRoot, dirname(filePath));
+    let current = stagingRoot;
+    if (parentRelative === '') return;
+    for (const segment of parentRelative.split(sep)) {
+      current = join(current, segment);
+      assertOwned();
+      try {
+        mkdirSync(current, { mode: 0o700 });
+      } catch (error) {
+        if (filesystemErrorCode(error) !== 'EEXIST') throw error;
+      }
+      const stats = lstatSync(current);
+      if (!stats.isDirectory() || stats.isSymbolicLink()) {
+        throw new Error(
+          `gbrain export --source refused a non-directory or symlink inside private staging: `
+          + `${JSON.stringify(relative(stagingRoot, current))}.`,
+        );
+      }
+    }
+  };
+
+  const writeFile = (relativePath: string, contents: string): void => {
+    assertOwned();
+    const filePath = confinedOutputPath(stagingRoot, relativePath);
+    ensurePrivateParent(filePath);
+    assertOwned();
+    // `wx` is exclusive and refuses an existing leaf (including a symlink).
+    writeFileSync(filePath, contents, { flag: 'wx', mode: 0o600 });
+    assertOwned();
+  };
+
+  const tryPublish = (beforeNativeRenameForTests?: () => void): boolean => {
+    assertOwned();
+    assertDestinationParentOwned();
+    const manifestPath = join(stagingRoot, '.gbrain-export-manifest.json');
+    const manifestStats = lstatSync(manifestPath);
+    if (!manifestStats.isFile() || manifestStats.isSymbolicLink()) {
+      throw new Error('gbrain export --source cannot publish staging without a regular manifest.');
+    }
+    beforeNativeRenameForTests?.();
+    if (!renameDirectoryNoReplace(stagingRoot, destination)) return false;
+    const publishedRoot = scopedExportRootIdentity(destination);
+    if (!sameFilesystemObject(stagedRoot, publishedRoot)) {
+      throw new Error('gbrain export --source published an unexpected directory identity.');
+    }
+    published = true;
+    return true;
+  };
+
+  const cleanup = (): void => {
+    if (published || cleaned) return;
+    if (!ownsStaging()) throw ownershipError();
+    rmSync(stagingRoot, { recursive: true, force: false });
+    cleaned = true;
+  };
+
+  const dispose = (): void => {
+    if (published || cleaned || !ownsStaging()) return;
+    try {
+      rmSync(stagingRoot, { recursive: true, force: false });
+      cleaned = true;
+    } catch {
+      // Preserve the primary failure. A private staging directory that cannot
+      // be proven ours remains hidden and the destination stays absent.
+    }
+  };
+
+  try {
+    assertOwned();
+    const mode = statSync(stagingRoot).mode & 0o777;
+    if (mode !== 0o700) throw new Error('private staging mode is not 0700');
+    assertOwned();
+  } catch {
+    if (ownsStaging()) dispose();
+    failExport(
+      `gbrain export --source could not secure private staging for ${JSON.stringify(outDir)}.`,
+    );
+  }
+
+  return {
+    root: stagingRoot,
+    destination,
+    assertOwned,
+    writeFile,
+    tryPublish,
+    cleanup,
+    [Symbol.dispose]: dispose,
+  };
 }
 
 function assertNonCollidingScopedWriteSet(
@@ -135,10 +378,9 @@ function assertNonCollidingScopedWriteSet(
     addFile(pagePath);
 
     if ((rawBySlug.get(page.slug) ?? []).length > 0) {
-      const slugParts = page.slug.split('/');
       const rawPath = confinedOutputPath(
         outDir,
-        join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
+        rawSidecarRelativePath(page.slug),
       );
       addFile(rawPath);
     }
@@ -389,8 +631,14 @@ export async function runExport(engine: BrainEngine, args: string[]) {
       confinedOutputPath(outDir, `${page.slug}.md`);
     }
     assertNonCollidingScopedWriteSet(outDir, pages, scopedRaw ?? new Map());
-    assertFreshScopedOutputDirectory(outDir);
+    if (sourcePageCount === undefined) {
+      failExport('complete source page count was not captured.');
+    }
   }
+
+  using scopedStaging = sourceId ? createPrivateScopedExportStaging(outDir) : null;
+  let exported = 0;
+  let manifestReceipt: string | null = null;
 
   if (restoreOnly) {
     console.log(`Restoring ${pages.length} db_only pages to ${outDir}/`);
@@ -402,7 +650,6 @@ export async function runExport(engine: BrainEngine, args: string[]) {
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('export.pages', pages.length);
 
-  let exported = 0;
   let rawSidecarCount = 0;
   const manifestPages: ExportManifestPage[] = [];
 
@@ -418,11 +665,14 @@ export async function runExport(engine: BrainEngine, args: string[]) {
         { type: page.type, title: page.title, tags },
       );
 
-      const filePath = sourceId
-        ? confinedOutputPath(outDir, `${page.slug}.md`)
-        : join(outDir, `${page.slug}.md`);
-      mkdirSync(dirname(filePath), { recursive: true });
-      writeFileSync(filePath, md);
+      const pageRelativePath = `${page.slug}.md`;
+      if (sourceId) {
+        scopedStaging!.writeFile(pageRelativePath, md);
+      } else {
+        const filePath = join(outDir, pageRelativePath);
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, md);
+      }
 
       // Export raw data as sidecar JSON
       const rawData = sourceId
@@ -430,20 +680,10 @@ export async function runExport(engine: BrainEngine, args: string[]) {
         : await engine.getRawData(page.slug);
       let rawSidecarSha256: string | null = null;
       if (rawData.length > 0) {
-        const slugParts = page.slug.split('/');
+        const rawRelativePath = rawSidecarRelativePath(page.slug);
         const rawPath = sourceId
-          ? confinedOutputPath(
-              outDir,
-              join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
-            )
-          : join(
-              outDir,
-              ...slugParts.slice(0, -1),
-              '.raw',
-              `${slugParts[slugParts.length - 1]}.json`,
-            );
-        mkdirSync(dirname(rawPath), { recursive: true });
-
+          ? confinedOutputPath(outDir, rawRelativePath)
+          : join(outDir, rawRelativePath);
         const rawObj = Object.create(null) as Record<string, unknown>;
         const orderedRawData = sourceId
           ? [...rawData].sort((left, right) => compareCodePoints(left.source, right.source))
@@ -454,7 +694,12 @@ export async function runExport(engine: BrainEngine, args: string[]) {
         const rawJson = sourceId
           ? canonicalJson(rawObj)
           : JSON.stringify(rawObj, null, 2) + '\n';
-        writeFileSync(rawPath, rawJson);
+        if (sourceId) {
+          scopedStaging!.writeFile(rawRelativePath, rawJson);
+        } else {
+          mkdirSync(dirname(rawPath), { recursive: true });
+          writeFileSync(rawPath, rawJson);
+        }
         rawSidecarSha256 = sha256(rawJson);
         rawSidecarCount++;
       }
@@ -477,30 +722,32 @@ export async function runExport(engine: BrainEngine, args: string[]) {
     throw error;
   }
 
-  let manifestReceipt: string | null = null;
   try {
     if (sourceId) {
-      if (sourcePageCount === undefined) {
-        failExport('complete source page count was not captured.');
-      }
       const manifest: ExportManifest = {
         schema_version: 1,
         source_id: sourceId,
-        source_page_count: sourcePageCount,
+        source_page_count: sourcePageCount!,
         page_count: exported,
         raw_sidecar_count: rawSidecarCount,
         pages: manifestPages,
       };
       const manifestJson = JSON.stringify(manifest, null, 2) + '\n';
       const manifestPath = confinedOutputPath(outDir, '.gbrain-export-manifest.json');
-      mkdirSync(dirname(manifestPath), { recursive: true });
-      writeFileSync(manifestPath, manifestJson);
+      scopedStaging!.writeFile('.gbrain-export-manifest.json', manifestJson);
       manifestReceipt = `Manifest: ${manifestPath} sha256=${sha256(manifestJson)} `
         + `pages=${exported} raw_sidecars=${rawSidecarCount}`;
     }
   } catch (error) {
     progress.finish('failed');
     throw error;
+  }
+  if (sourceId && !scopedStaging!.tryPublish()) {
+    progress.finish('failed');
+    failExport(
+      `gbrain export --source requires --dir to remain absent until publish; `
+      + `${JSON.stringify(outDir)} became occupied. Choose a fresh recovery directory.`,
+    );
   }
   progress.finish();
 
@@ -519,5 +766,6 @@ export const __testing = {
   compareCodePoints,
   canonicalJson,
   assertNonCollidingScopedWriteSet,
+  createPrivateScopedExportStaging,
   loadCompleteScopedPages,
 };

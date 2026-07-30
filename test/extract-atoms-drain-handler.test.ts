@@ -55,19 +55,21 @@ describe('extract-atoms-drain handler', () => {
   });
 
   test('handler rechecks source hygiene immediately before the spend-capable drain', () => {
-    const handler = JOBS_SOURCE.slice(JOBS_SOURCE.indexOf("worker.register('extract-atoms-drain'"));
-    const nextHandler = handler.indexOf("worker.register('embed-backfill'");
+    const sharedGate = JOBS_SOURCE.slice(
+      JOBS_SOURCE.indexOf('async function executionTimeSpendBlock('),
+      JOBS_SOURCE.indexOf('async function resolveContextualReindexSourceId('),
+    );
+    expect(sharedGate).toContain('inspectSourceHygiene(engine');
+    expect(sharedGate).toContain('gateProtectedSourceWork(packet, sourceId)');
+    expect(sharedGate).toContain("reason: 'source_hygiene_blocked'");
+
+    const handler = JOBS_SOURCE.slice(JOBS_SOURCE.indexOf("registerProviderHandler('extract-atoms-drain'"));
+    const nextHandler = handler.indexOf("registerProviderHandler(\n    'embed-backfill'");
     const body = handler.slice(0, nextHandler);
-    expect(body).toContain('inspectSourceHygiene(engine');
-    expect(body).toContain('gateProtectedSourceWork(sourceHygiene, hygieneSourceId)');
     expect(body).toContain("job.data.sourceId : undefined");
-    expect(body).toContain("const hygieneSourceId = sourceId ?? 'default'");
     expect(body).toContain('runExtractAtomsDrainForSource(engine, {\n        sourceId,');
     expect(body).not.toContain('source_hygiene_source_id_missing');
-    expect(body.indexOf('inspectSourceHygiene(engine')).toBeLessThan(
-      body.indexOf('runExtractAtomsDrainForSource(engine'),
-    );
-    expect(body).toContain("reason: 'source_hygiene_blocked'");
-    expect(body).toContain('block_reason: sourceGate.reason');
+    expect(body).toContain("phase: 'extract_atoms'");
+    expect(body).toContain(": 'default'");
   });
 });

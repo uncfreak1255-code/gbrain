@@ -11,11 +11,27 @@
 
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { __testing as exportTesting, runExport } from '../src/commands/export.ts';
+import {
+  __testing as atomicPublishTesting,
+  renameDirectoryNoReplace,
+} from '../src/core/atomic-directory-publish.ts';
 import { __resetMissingStorageWarning } from '../src/core/storage-config.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
@@ -199,6 +215,154 @@ describe('export --restore-only resolution chain (D5)', () => {
 });
 
 describe('source-scoped recovery export', () => {
+  test('keeps source bytes in mode-0700 private staging until atomic publish', () => {
+    using staging = exportTesting.createPrivateScopedExportStaging(outDir);
+    expect(statSync(staging.root).mode & 0o777).toBe(0o700);
+    expect(existsSync(outDir)).toBe(false);
+
+    staging.writeFile('notes/private.md', 'private source bytes\n');
+    staging.writeFile('.gbrain-export-manifest.json', '{"page_count":1}\n');
+
+    expect(existsSync(join(staging.root, 'notes/private.md'))).toBe(true);
+    expect(existsSync(outDir)).toBe(false);
+    expect(staging.tryPublish()).toBe(true);
+    expect(readFileSync(join(outDir, 'notes/private.md'), 'utf8')).toBe('private source bytes\n');
+  });
+
+  test('refuses an injected child symlink before writing source bytes', () => {
+    const external = join(tmp, 'external');
+    mkdirSync(external);
+    using staging = exportTesting.createPrivateScopedExportStaging(outDir);
+    symlinkSync(external, join(staging.root, 'notes'), 'dir');
+
+    expect(() => staging.writeFile('notes/private.md', 'must not escape\n'))
+      .toThrow(/symlink.*private staging/i);
+    expect(existsSync(join(external, 'private.md'))).toBe(false);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  test('rejects a retargeted destination-parent symlink before publish', () => {
+    const firstParent = join(tmp, 'first-parent');
+    const secondParent = join(tmp, 'second-parent');
+    const linkedParent = join(tmp, 'linked-parent');
+    mkdirSync(firstParent);
+    mkdirSync(secondParent);
+    symlinkSync(firstParent, linkedParent, 'dir');
+    const linkedOut = join(linkedParent, 'recovery');
+    using staging = exportTesting.createPrivateScopedExportStaging(linkedOut);
+    staging.writeFile('.gbrain-export-manifest.json', '{"complete":true}\n');
+
+    rmSync(linkedParent);
+    symlinkSync(secondParent, linkedParent, 'dir');
+
+    expect(() => staging.tryPublish()).toThrow(/destination parent changed/i);
+    expect(existsSync(join(firstParent, 'recovery'))).toBe(false);
+    expect(existsSync(join(secondParent, 'recovery'))).toBe(false);
+  });
+
+  test('detects private staging root replacement before writing source bytes', () => {
+    const moved = join(tmp, 'moved-stage');
+    using staging = exportTesting.createPrivateScopedExportStaging(outDir);
+    renameSync(staging.root, moved);
+    mkdirSync(staging.root, { mode: 0o700 });
+
+    expect(() => staging.writeFile('notes/private.md', 'must not land in replacement\n'))
+      .toThrow(/lost.*private staging/i);
+    expect(existsSync(join(staging.root, 'notes/private.md'))).toBe(false);
+    expect(existsSync(join(moved, 'notes/private.md'))).toBe(false);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  test('two completed exporters cannot replace the first published directory', () => {
+    using first = exportTesting.createPrivateScopedExportStaging(outDir);
+    using second = exportTesting.createPrivateScopedExportStaging(outDir);
+    first.writeFile('winner.txt', 'first\n');
+    first.writeFile('.gbrain-export-manifest.json', '{"winner":"first"}\n');
+    second.writeFile('winner.txt', 'second\n');
+    second.writeFile('.gbrain-export-manifest.json', '{"winner":"second"}\n');
+
+    expect(first.tryPublish()).toBe(true);
+    expect(second.tryPublish()).toBe(false);
+    expect(readFileSync(join(outDir, 'winner.txt'), 'utf8')).toBe('first\n');
+    expect(readFileSync(join(outDir, '.gbrain-export-manifest.json'), 'utf8'))
+      .toBe('{"winner":"first"}\n');
+  });
+
+  test('does not replace an empty destination created at the final publish boundary', () => {
+    using staging = exportTesting.createPrivateScopedExportStaging(outDir);
+    staging.writeFile('.gbrain-export-manifest.json', '{"complete":true}\n');
+    let occupiedIdentity: { dev: bigint; ino: bigint } | null = null;
+
+    expect(staging.tryPublish(() => {
+      mkdirSync(outDir);
+      const stats = lstatSync(outDir, { bigint: true });
+      occupiedIdentity = { dev: stats.dev, ino: stats.ino };
+    })).toBe(false);
+    expect(readdirSync(outDir)).toEqual([]);
+    const after = lstatSync(outDir, { bigint: true });
+    expect(occupiedIdentity).not.toBeNull();
+    expect({ dev: after.dev, ino: after.ino }).toEqual(occupiedIdentity!);
+    expect(existsSync(join(staging.root, '.gbrain-export-manifest.json'))).toBe(true);
+  });
+
+  test('native no-replace publication fails closed on unsupported and filesystem errors', () => {
+    expect(() => atomicPublishTesting.supportedAtomicRenamePlatform('win32'))
+      .toThrow(/unsupported.*win32/i);
+
+    const source = join(tmp, 'native-error-source');
+    const destination = join(tmp, 'missing-parent', 'destination');
+    mkdirSync(source);
+    writeFileSync(join(source, '.gbrain-export-manifest.json'), '{}\n');
+
+    expect(() => renameDirectoryNoReplace(source, destination)).toThrow(/errno=/i);
+    expect(existsSync(source)).toBe(true);
+    expect(existsSync(destination)).toBe(false);
+  });
+
+  test('rejects a dangling destination symlink as an occupied path', async () => {
+    await seedSourceVariant('default', 'default');
+    symlinkSync(join(tmp, 'missing-target'), outDir, 'dir');
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toMatch(/requires --dir to be absent|already exists/i);
+    expect(lstatSync(outDir).isSymbolicLink()).toBe(true);
+  });
+
+  test('crash-shaped staging residue stays private and cannot contaminate a retry', () => {
+    const crashed = exportTesting.createPrivateScopedExportStaging(outDir);
+    crashed.writeFile('notes/private.md', 'old partial bytes\n');
+    const residue = crashed.root;
+
+    using retry = exportTesting.createPrivateScopedExportStaging(outDir);
+    retry.writeFile('notes/private.md', 'complete retry bytes\n');
+    retry.writeFile('.gbrain-export-manifest.json', '{"complete":true}\n');
+    expect(retry.tryPublish()).toBe(true);
+
+    expect(readFileSync(join(outDir, 'notes/private.md'), 'utf8')).toBe('complete retry bytes\n');
+    expect(readFileSync(join(residue, 'notes/private.md'), 'utf8')).toBe('old partial bytes\n');
+    expect(statSync(residue).mode & 0o777).toBe(0o700);
+    crashed.cleanup();
+    expect(existsSync(residue)).toBe(false);
+  });
+
+  test('removes private staging when a scoped export write fails', async () => {
+    await engine.putPage(
+      `${'x'.repeat(5_000)}/child`,
+      { type: 'note', title: 'Too long', compiled_truth: 'write must fail after claim' },
+      { sourceId: 'default' },
+    );
+
+    await expect(runExport(engine, ['--dir', outDir, '--source', 'default']))
+      .rejects.toBeDefined();
+
+    expect(existsSync(outDir)).toBe(false);
+    expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(false);
+    expect(readdirSync(tmp).some((entry) => entry.startsWith('.out.gbrain-export-stage-')))
+      .toBe(false);
+  });
+
   test('refuses a non-empty output directory so stale pages cannot contaminate recovery', async () => {
     await seedSourceVariant('default', 'default');
     mkdirSync(outDir, { recursive: true });
@@ -207,21 +371,23 @@ describe('source-scoped recovery export', () => {
     await tryRunExport(['--dir', outDir, '--source', 'default']);
 
     expect(exitCode).toBe(1);
-    expect(stderr.join('\n')).toMatch(/absent or empty|fresh recovery directory/i);
+    expect(stderr.join('\n')).toMatch(/requires --dir to be absent|already exists/i);
     expect(readFileSync(join(outDir, 'stale-page.md'), 'utf8')).toBe('stale recovery data\n');
     expect(existsSync(join(outDir, 'notes/shared.md'))).toBe(false);
     expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(false);
   });
 
-  test('accepts an existing empty output directory', async () => {
+  test('rejects an existing empty output directory without replacing it', async () => {
     await seedSourceVariant('default', 'default');
     mkdirSync(outDir, { recursive: true });
 
     await tryRunExport(['--dir', outDir, '--source', 'default']);
 
-    expect(exitCode).toBeNull();
-    expect(existsSync(join(outDir, 'notes/shared.md'))).toBe(true);
-    expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(true);
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toMatch(/requires --dir to be absent|already exists/i);
+    expect(readdirSync(outDir)).toEqual([]);
+    expect(existsSync(join(outDir, 'notes/shared.md'))).toBe(false);
+    expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(false);
   });
 
   test('isolates same-slug body, tags, and raw data in both source directions', async () => {
@@ -414,6 +580,20 @@ describe('source-scoped recovery export', () => {
     expect(existsSync(join(outDir, '.gbrain-export-manifest.json/x.md'))).toBe(false);
     expect(stdout.join('\n')).not.toContain('Manifest:');
     expect(stdout.join('\n')).not.toContain('Exported 1 pages');
+  });
+
+  test('exports legacy claim-marker-shaped slugs inside private staging', async () => {
+    await engine.putPage(
+      '.gbrain-export-in-progress/child',
+      { type: 'note', title: 'Claim collision', compiled_truth: 'page body' },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBeNull();
+    expect(existsSync(join(outDir, '.gbrain-export-in-progress/child.md'))).toBe(true);
+    expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(true);
   });
 
   test('uses locale-independent code-point ordering for canonical receipts', () => {
