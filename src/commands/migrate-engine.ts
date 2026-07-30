@@ -10,12 +10,21 @@
  */
 
 import { createEngine } from '../core/engine-factory.ts';
-import { loadConfig, saveConfig, toEngineConfig, gbrainPath, effectiveEnvDatabaseUrl, type GBrainConfig } from '../core/config.ts';
+import { ensureGitignore, loadConfig, toEngineConfig, gbrainPath, effectiveEnvDatabaseUrl, type GBrainConfig } from '../core/config.ts';
 import type { BrainEngine, ReservedConnection } from '../core/engine.ts';
 import type { EngineConfig } from '../core/types.ts';
-import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
 import { createHash, randomUUID } from 'crypto';
-import { resolve } from 'path';
+import { dirname, resolve } from 'path';
+import { Database } from 'bun:sqlite';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { executeRawJsonb } from '../core/sql-query.ts';
@@ -77,12 +86,99 @@ function getManifestPath(): string {
   return gbrainPath('migrate-manifest.json');
 }
 
+function getCutoverJournalPath(): string {
+  return gbrainPath('migrate-cutover-journal.json');
+}
+
+function getMigrateHostLockPath(): string {
+  return gbrainPath('migrate-engine.lock.sqlite');
+}
+
+function hasMigrateCutoverJournal(): boolean {
+  return existsSync(getCutoverJournalPath());
+}
+
 export interface MigrateManifest {
   completed_slugs: string[];
   target_engine: string;
   target_id?: string;
   schema_version?: number;
   started_at: string;
+  requires_target_reset?: boolean;
+}
+
+export interface MigrateCutoverJournal {
+  schema_version: 1;
+  target_engine: 'postgres' | 'pglite';
+  target_id: string;
+  target_config_digest: string;
+  previous_config_contents: string | null;
+  created_at: string;
+}
+
+/**
+ * Serialize every migration sharing one GBRAIN_HOME. The manifest, cutover
+ * journal, and config are host-global even when two commands target different
+ * databases, so a per-target advisory lock alone cannot protect them.
+ *
+ * SQLite's exclusive transaction is a kernel-backed process lock: acquisition
+ * is atomic, a second process fails closed with SQLITE_BUSY, and process death
+ * releases it without a stale lockfile reclamation race. The persistent file
+ * contains no brain data or credentials and remains mode 0600.
+ */
+export async function withMigrateHostLock<T>(run: () => Promise<T>): Promise<T> {
+  const path = getMigrateHostLockPath();
+  mkdirSync(dirname(path), { recursive: true });
+  let lockDb: Database | undefined;
+  try {
+    lockDb = new Database(path, { create: true, strict: true });
+    chmodSync(path, 0o600);
+    lockDb.run('PRAGMA busy_timeout = 0');
+    lockDb.run('BEGIN EXCLUSIVE');
+  } catch (error) {
+    try { lockDb?.close(); } catch { /* preserve the acquisition error */ }
+    if (String((error as { code?: unknown }).code ?? '').startsWith('SQLITE_BUSY')) {
+      throw new Error(
+        'Another migrate-engine command is already using this GBrain home; wait for it to finish and rerun',
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+
+  let result: T | undefined;
+  let operationError: unknown;
+  try {
+    result = await run();
+  } catch (error) {
+    operationError = error;
+  }
+
+  let releaseError: unknown;
+  try {
+    lockDb!.run('ROLLBACK');
+  } catch (error) {
+    releaseError = error;
+  }
+  try {
+    lockDb!.close();
+  } catch (error) {
+    releaseError = releaseError === undefined
+      ? error
+      : new AggregateError([releaseError, error], 'Host-global migration lock rollback and close both failed');
+  }
+
+  if (operationError !== undefined) {
+    if (releaseError !== undefined) {
+      throw new AggregateError(
+        [operationError, releaseError],
+        'Migration failed and its host-global lock could not be released cleanly',
+      );
+    }
+    throw operationError;
+  }
+  if (releaseError !== undefined) throw releaseError;
+  return result as T;
 }
 
 /**
@@ -163,8 +259,29 @@ export function migrationTargetId(config: EngineConfig): string {
     .digest('hex');
 }
 
-export function manifestMatchesTarget(manifest: MigrateManifest, targetId: string): boolean {
-  return manifest.schema_version === 2 && manifest.target_id === targetId;
+export function manifestMatchesTarget(
+  manifest: unknown,
+  targetId: string,
+  targetEngine: 'postgres' | 'pglite',
+): manifest is MigrateManifest {
+  if (
+    typeof manifest !== 'object'
+    || manifest === null
+    || Array.isArray(manifest)
+  ) return false;
+  const row = manifest as Partial<MigrateManifest>;
+  return row.schema_version === 2
+    && row.target_id === targetId
+    && /^[0-9a-f]{64}$/.test(row.target_id)
+    && row.target_engine === targetEngine
+    && Array.isArray(row.completed_slugs)
+    && row.completed_slugs.every((key) => typeof key === 'string')
+    && typeof row.started_at === 'string'
+    && Number.isFinite(Date.parse(row.started_at))
+    && (
+      row.requires_target_reset === undefined
+      || typeof row.requires_target_reset === 'boolean'
+    );
 }
 
 interface SourceMigrationRow {
@@ -243,6 +360,28 @@ function migrationDrainFromTargetState(
   };
 }
 
+function writePrivateFileAtomic(path: string, contents: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporaryPath = `${path}.tmp.${process.pid}.${randomUUID()}`;
+  try {
+    writeFileSync(temporaryPath, contents, { mode: 0o600 });
+    chmodSync(temporaryPath, 0o600);
+    renameSync(temporaryPath, path);
+    chmodSync(path, 0o600);
+  } catch (error) {
+    if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+    throw error;
+  }
+}
+
+export function writeMigrateConfigCutover(config: GBrainConfig): void {
+  writePrivateFileAtomic(
+    gbrainPath('config.json'),
+    JSON.stringify(config, null, 2) + '\n',
+  );
+  ensureGitignore();
+}
+
 function loadManifest(): MigrateManifest | null {
   const path = getManifestPath();
   if (!existsSync(path)) return null;
@@ -254,12 +393,190 @@ function loadManifest(): MigrateManifest | null {
 }
 
 function saveManifest(manifest: MigrateManifest): void {
-  writeFileSync(getManifestPath(), JSON.stringify(manifest, null, 2));
+  writePrivateFileAtomic(
+    getManifestPath(),
+    JSON.stringify(manifest, null, 2) + '\n',
+  );
 }
 
 function clearManifest(): void {
   const path = getManifestPath();
   if (existsSync(path)) unlinkSync(path);
+}
+
+function resetManifestForCutoverRecovery(
+  targetId: string,
+  targetEngine: 'postgres' | 'pglite',
+  startedAt: string,
+): void {
+  const manifest = loadManifest();
+  if (manifest && !manifestMatchesTarget(manifest, targetId, targetEngine)) {
+    throw new Error(
+      'The migration manifest belongs to a different target; refusing cutover recovery cleanup',
+    );
+  }
+  saveManifest(manifest
+    ? { ...manifest, completed_slugs: [], requires_target_reset: true }
+    : {
+        schema_version: 2,
+        target_engine: targetEngine,
+        target_id: targetId,
+        completed_slugs: [],
+        started_at: startedAt,
+        requires_target_reset: true,
+      });
+}
+
+function configDigest(config: GBrainConfig): string {
+  return createHash('sha256').update(JSON.stringify(config)).digest('hex');
+}
+
+function readConfigFileContents(): string | null {
+  const path = gbrainPath('config.json');
+  return existsSync(path) ? readFileSync(path, 'utf-8') : null;
+}
+
+export function createMigrateCutoverJournal(
+  targetId: string,
+  targetConfig: GBrainConfig,
+  previousConfigContents: string | null,
+): MigrateCutoverJournal {
+  return {
+    schema_version: 1,
+    target_engine: targetConfig.engine,
+    target_id: targetId,
+    target_config_digest: configDigest(targetConfig),
+    previous_config_contents: previousConfigContents,
+    created_at: new Date().toISOString(),
+  };
+}
+
+export function writeMigrateCutoverJournal(journal: MigrateCutoverJournal): void {
+  writePrivateFileAtomic(
+    getCutoverJournalPath(),
+    JSON.stringify(journal, null, 2) + '\n',
+  );
+}
+
+function loadMigrateCutoverJournal(): MigrateCutoverJournal | null {
+  const path = getCutoverJournalPath();
+  if (!existsSync(path)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf-8'));
+  } catch (error) {
+    throw new Error(
+      'The engine-migration cutover journal is unreadable; refusing to change config. '
+      + 'Inspect migrate-cutover-journal.json before retrying.',
+      { cause: error },
+    );
+  }
+  if (
+    typeof parsed !== 'object'
+    || parsed === null
+    || Array.isArray(parsed)
+  ) {
+    throw new Error('The engine-migration cutover journal has an invalid shape; refusing config recovery');
+  }
+  const row = parsed as Partial<MigrateCutoverJournal>;
+  if (
+    row.schema_version !== 1
+    || (row.target_engine !== 'postgres' && row.target_engine !== 'pglite')
+    || typeof row.target_id !== 'string'
+    || !/^[0-9a-f]{64}$/.test(row.target_id)
+    || typeof row.target_config_digest !== 'string'
+    || !/^[0-9a-f]{64}$/.test(row.target_config_digest)
+    || (row.previous_config_contents !== null && typeof row.previous_config_contents !== 'string')
+    || typeof row.created_at !== 'string'
+  ) {
+    throw new Error('The engine-migration cutover journal failed validation; refusing config recovery');
+  }
+  return row as MigrateCutoverJournal;
+}
+
+function clearMigrateCutoverJournal(): void {
+  const path = getCutoverJournalPath();
+  if (existsSync(path)) unlinkSync(path);
+}
+
+function restoreConfigFile(contents: string | null): void {
+  const path = gbrainPath('config.json');
+  if (contents === null) {
+    if (existsSync(path)) unlinkSync(path);
+    return;
+  }
+  writePrivateFileAtomic(path, contents);
+}
+
+/**
+ * Recover a process death after the file config changed but before the target
+ * transaction's commit was observable. The journal is deliberately restored
+ * before runMigrateEngine's same-engine early exit. We conservatively roll
+ * back even if the target commit actually succeeded; the retained manifest
+ * then re-stages and re-copies from the source on the operator's next run.
+ */
+export function recoverInterruptedMigrateCutover(expectedTargetId: string): void {
+  const journal = loadMigrateCutoverJournal();
+  if (!journal) return;
+  if (journal.target_id !== expectedTargetId) {
+    throw new Error(
+      'An interrupted engine cutover belongs to a different target; refusing to discard its recovery journal. '
+      + 'Rerun the original migration target first.',
+    );
+  }
+
+  const currentContents = readConfigFileContents();
+  if (currentContents === journal.previous_config_contents) {
+    // The process may have died after the journal write but before the config
+    // switch. The source can change while it is down, so the target still
+    // needs a fenced reset instead of trusting the pre-crash skip list.
+    resetManifestForCutoverRecovery(
+      journal.target_id,
+      journal.target_engine,
+      journal.created_at,
+    );
+    clearMigrateCutoverJournal();
+    return;
+  }
+
+  let currentConfig: unknown;
+  try {
+    currentConfig = currentContents === null ? null : JSON.parse(currentContents);
+  } catch (error) {
+    throw new Error(
+      'Config no longer matches either side of the interrupted engine cutover; '
+      + 'refusing automatic recovery.',
+      { cause: error },
+    );
+  }
+  const currentMatchesTarget = Boolean(
+    currentConfig
+    && typeof currentConfig === 'object'
+    && !Array.isArray(currentConfig)
+    && (currentConfig as { engine?: unknown }).engine === journal.target_engine
+    && configDigest(currentConfig as GBrainConfig) === journal.target_config_digest,
+  );
+  if (!currentMatchesTarget) {
+    throw new Error(
+      'Config changed after an interrupted engine cutover; refusing to overwrite the newer config. '
+      + 'Inspect migrate-cutover-journal.json and config.json before retrying.',
+    );
+  }
+
+  // The source may have changed while the process was down. Re-copy every
+  // page instead of trusting the pre-crash completed-slug set. Reconstruct a
+  // missing receipt, but never overwrite one owned by a different target.
+  resetManifestForCutoverRecovery(
+    journal.target_id,
+    journal.target_engine,
+    journal.created_at,
+  );
+  restoreConfigFile(journal.previous_config_contents);
+  clearMigrateCutoverJournal();
+  throw new Error(
+    'Recovered an interrupted engine-migration cutover by restoring the previous config. '
+    + 'Rerun the same gbrain migrate command to complete the migration.',
+  );
 }
 
 function normalizeSourceConfig(value: unknown): Record<string, unknown> {
@@ -875,7 +1192,25 @@ export async function finalizeArchivedSourceRowsForMigration(
   return archivedRows.length;
 }
 
-export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]): Promise<void> {
+export async function runMigrateEngine(
+  args: string[],
+  connectSource: () => Promise<BrainEngine>,
+  disconnectSource: (engine: BrainEngine) => Promise<void> = (engine) => engine.disconnect(),
+): Promise<void> {
+  return withMigrateHostLock(async () => {
+    // Resolve and connect the source only after host-global ownership. A
+    // process that waited behind another migration must not keep using the
+    // engine/config snapshot it observed before that migration's cutover.
+    const sourceEngine = await connectSource();
+    try {
+      return await runMigrateEngineWithHostLock(sourceEngine, args);
+    } finally {
+      await disconnectSource(sourceEngine);
+    }
+  });
+}
+
+async function runMigrateEngineWithHostLock(sourceEngine: BrainEngine, args: string[]): Promise<void> {
   const opts = parseArgs(args);
   const config = loadConfig();
   if (!config) {
@@ -885,6 +1220,15 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
 
   // Check source != target
   if (config.engine === opts.targetEngine) {
+    if (hasMigrateCutoverJournal()) {
+      // Recovery must happen before the same-engine exit, but only after the
+      // target-wide live-owner lock is acquired. Otherwise a second command
+      // could mistake the first command's in-flight journal for a crash and
+      // restore config underneath its open cutover transaction.
+      await withTargetMigrationSessionLock(sourceEngine, async () => {
+        recoverInterruptedMigrateCutover(migrationTargetId(toEngineConfig(config)));
+      });
+    }
     console.error(`Already using ${opts.targetEngine} engine. Nothing to migrate.`);
     process.exit(1);
   }
@@ -915,6 +1259,10 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
 
   try {
     await withTargetMigrationSessionLock(targetEngine, async () => {
+      // When config still points at the source, a stale journal means the
+      // prior command died or rolled back before publishing its target config.
+      // Clear/validate it only while holding this exact target's live lock.
+      recoverInterruptedMigrateCutover(targetId);
       await targetEngine.initSchema();
 
   // `--force` deletes page-owned data, not arbitrary source registrations.
@@ -968,7 +1316,7 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   // safe. A matching v2 manifest proves that the existing rows belong to an
   // interrupted migration to this exact target, so that case resumes in place.
   let manifest = loadManifest();
-  if (manifest && !manifestMatchesTarget(manifest, targetId)) {
+  if (manifest && !manifestMatchesTarget(manifest, targetId, opts.targetEngine)) {
     console.log('Previous migration was to a different target. Starting fresh.');
     manifest = null;
     clearManifest();
@@ -976,18 +1324,26 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
 
   // Check if target has data.
   const targetStats = await targetEngine.getStats();
-  const canResume = manifest !== null && manifestMatchesTarget(manifest, targetId);
+  const canResume = manifest !== null
+    && manifestMatchesTarget(manifest, targetId, opts.targetEngine);
   if (targetStats.page_count > 0 && !opts.force && !canResume) {
     console.error(`Target brain is not empty (${targetStats.page_count} pages).`);
     console.error('Run with --force to overwrite target pages, or migrate to an empty brain.');
     process.exit(1);
   }
 
-  const wipeTargetPages = targetStats.page_count > 0 && opts.force;
+  const recoveryRequiresTargetReset = canResume
+    && manifest?.requires_target_reset === true;
+  const wipeTargetPages = recoveryRequiresTargetReset
+    || (targetStats.page_count > 0 && opts.force);
   if (wipeTargetPages) {
-    console.log('--force: preparing to wipe target pages under migration fences...');
-    manifest = null;
-    clearManifest();
+    console.log(recoveryRequiresTargetReset
+      ? 'Recovered cutover: preparing a fresh target copy under migration fences...'
+      : '--force: preparing to wipe target pages under migration fences...');
+    if (!recoveryRequiresTargetReset) {
+      manifest = null;
+      clearManifest();
+    }
   } else if (opts.force || (targetStats.page_count === 0 && (manifest?.completed_slugs.length ?? 0) > 0)) {
     // `--force` always means a fresh copy. An empty target also cannot contain
     // pages named by a partial manifest, so carrying those skip keys forward
@@ -1027,6 +1383,17 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
         );
       },
     );
+    if (recoveryRequiresTargetReset) {
+      // The fenced wipe invalidates every old completion key. Keep reset
+      // authority true through the complete recopy and cutover; if this run
+      // dies later, the next run wipes again before trusting any keys.
+      manifest = {
+        ...manifest!,
+        completed_slugs: [],
+        requires_target_reset: true,
+      };
+      saveManifest(manifest);
+    }
   }
 
   // Continue the matching manifest, or create a fresh one.
@@ -1202,19 +1569,33 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     assertSourceMigrationLifecycleSnapshot(sourceLifecycle);
     const archivedRows = sourceLifecycle.filter((row) => row.archived);
     archivedSourceCount = archivedRows.length;
+    // Persist the exact rollback receipt before the file-plane switch. The
+    // target transaction below keeps every source behind its lifecycle lock
+    // until config is written and commit succeeds. A process death at any
+    // point leaves this journal for the next migrate invocation.
+    writeMigrateCutoverJournal(createMigrateCutoverJournal(
+      targetId,
+      newConfig,
+      previousConfigContents,
+    ));
     await finalizeTargetSourceRowsForMigrationCutover(
       targetEngine,
       sourceLifecycle,
-      () => { saveConfig(newConfig); },
-      () => {
-        if (previousConfigContents === null) {
-          if (existsSync(configFilePath)) unlinkSync(configFilePath);
-          return;
-        }
-        writeFileSync(configFilePath, previousConfigContents, { mode: 0o600 });
-      },
+      () => { writeMigrateConfigCutover(newConfig); },
+      () => { restoreConfigFile(previousConfigContents); },
     );
   });
+  // finalizeTargetSourceRowsForMigrationCutover returns only after the target
+  // commit is confirmed. First make any surviving resume receipt demand a
+  // full recopy, then remove the stronger cutover journal. If the process dies
+  // between these steps, recovery still has either the journal or a harmless
+  // empty completed-slug set.
+  resetManifestForCutoverRecovery(
+    targetId,
+    opts.targetEngine,
+    new Date().toISOString(),
+  );
+  clearMigrateCutoverJournal();
   if (archivedSourceCount > 0) {
     console.log(`Restored archive state for ${archivedSourceCount} source row(s).`);
   }

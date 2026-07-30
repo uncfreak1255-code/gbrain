@@ -1639,6 +1639,19 @@ async function handleCliOnly(command: string, args: string[]) {
     }
   }
 
+  // Engine migration owns a host-global config/manifest/journal lock. Resolve
+  // and connect its source only after that lock is held so a waiter cannot use
+  // the pre-cutover engine selected before another migration completed.
+  if (command === 'migrate') {
+    const { runMigrateEngine } = await import('./commands/migrate-engine.ts');
+    await runMigrateEngine(
+      args,
+      () => connectEngine(),
+      async (engine) => { await finishCliTeardown({ engine }); },
+    );
+    return;
+  }
+
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
   try {
@@ -1687,12 +1700,7 @@ async function handleCliOnly(command: string, args: string[]) {
         await runConfig(engine, args);
         break;
       }
-      // doctor is handled before connectEngine() above
-      case 'migrate': {
-        const { runMigrateEngine } = await import('./commands/migrate-engine.ts');
-        await runMigrateEngine(engine, args);
-        break;
-      }
+      // doctor and migrate are handled before connectEngine() above
       case 'eval': {
         // v0.32 EXP-5: `eval takes-quality {run,trend,regress}` requires a
         // brain (samples takes from DB / reads runs table). `replay` was
