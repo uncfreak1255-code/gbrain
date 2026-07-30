@@ -7488,10 +7488,62 @@ export const MIGRATIONS: Migration[] = [
       END;
       $fn$ LANGUAGE plpgsql;
 
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          SELECT archived, embedding_drain_token IS NOT NULL
+            INTO source_archived, source_draining
+            FROM public.sources
+           WHERE id = NEW.value
+           FOR SHARE;
+          IF FOUND AND (source_archived OR source_draining) THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is archived or draining', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          PERFORM id
+            FROM public.sources
+           WHERE local_path = NEW.value
+             AND archived = false
+             AND embedding_drain_token IS NULL
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM public.sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived or draining'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
       DROP TRIGGER IF EXISTS source_active_job_data_guard ON public.minion_jobs;
       CREATE TRIGGER source_active_job_data_guard
         BEFORE INSERT OR UPDATE ON public.minion_jobs
         FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+
+      DROP TRIGGER IF EXISTS source_active_config_guard ON public.config;
+      CREATE TRIGGER source_active_config_guard
+        BEFORE INSERT OR UPDATE OF key, value ON public.config
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_config_fn();
     `,
   },
 ];

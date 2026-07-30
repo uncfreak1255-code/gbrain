@@ -18,7 +18,7 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { archiveHygieneCandidate } from '../../src/commands/sources.ts';
 import { purgeArchivedSource, softDeleteSource } from '../../src/core/destructive-guard.ts';
-import { MIGRATIONS } from '../../src/core/migrate.ts';
+import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../../src/core/migrate.ts';
 import { withActiveEmbeddingSource } from '../../src/commands/embed.ts';
 import {
   beginSourceArchiveDrain,
@@ -1937,6 +1937,60 @@ describeE2E('source hygiene archive/write concurrency', () => {
         `DELETE FROM public.sources WHERE id IN ($1, $2)`,
         [archivedId, activeId],
       ).catch(() => {});
+      await engine.disconnect().catch(() => {});
+    }
+  }, 30_000);
+
+  test('v136 upgrade restores active-owner semantics for legacy sync.repo_path config', async () => {
+    const archivedId = 'shared-config-archived-e2e';
+    const activeId = 'shared-config-active-e2e';
+    const sharedPath = '/tmp/gbrain-shared-config-owner-e2e';
+    const engine = new PostgresEngine();
+    await engine.connect({ database_url: process.env.DATABASE_URL! });
+    const previousRepoPath = await engine.getConfig('sync.repo_path');
+
+    try {
+      await engine.executeRaw(`DELETE FROM public.config WHERE key = 'sync.repo_path'`);
+      await engine.executeRaw(`DELETE FROM public.sources WHERE id IN ($1, $2)`, [archivedId, activeId]);
+      await engine.executeRaw(`DROP TRIGGER IF EXISTS source_active_config_guard ON public.config`);
+      await engine.executeRaw(`
+        CREATE TRIGGER source_active_config_guard
+          BEFORE INSERT OR UPDATE OF key, value ON public.config
+          FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn('config', 'value')
+      `);
+      await engine.setConfig('version', '135');
+
+      const migrated = await runMigrations(engine);
+      expect(migrated).toMatchObject({ applied: 1, current: LATEST_VERSION });
+      const triggers = await engine.executeRaw<{ definition: string }>(
+        `SELECT pg_get_triggerdef(oid) AS definition
+           FROM pg_trigger
+          WHERE tgname = 'source_active_config_guard'
+            AND NOT tgisinternal`,
+      );
+      expect(triggers[0]?.definition).toContain('enforce_active_source_config_fn');
+
+      await engine.executeRaw(
+        `INSERT INTO public.sources (id, name, local_path, config)
+         VALUES ($1, $1, $3, '{}'::jsonb), ($2, $2, $3, '{}'::jsonb)`,
+        [archivedId, activeId, sharedPath],
+      );
+      expect(await softDeleteSource(engine, archivedId)).not.toBeNull();
+      await expect(engine.setConfig('sync.repo_path', sharedPath)).resolves.toBeUndefined();
+
+      const drain = await beginSourceArchiveDrain(engine, activeId);
+      expect(drain).not.toBeNull();
+      await expect(engine.setConfig('sync.repo_path', sharedPath)).rejects.toThrow(
+        /matching source is archived or draining/,
+      );
+      await cancelSourceArchiveDrain(engine, drain!);
+    } finally {
+      await engine.executeRaw(`DELETE FROM public.config WHERE key = 'sync.repo_path'`).catch(() => {});
+      await engine.executeRaw(`DELETE FROM public.sources WHERE id IN ($1, $2)`, [archivedId, activeId]).catch(() => {});
+      if (previousRepoPath !== null) {
+        await engine.setConfig('sync.repo_path', previousRepoPath).catch(() => {});
+      }
+      await engine.setConfig('version', String(LATEST_VERSION)).catch(() => {});
       await engine.disconnect().catch(() => {});
     }
   }, 30_000);

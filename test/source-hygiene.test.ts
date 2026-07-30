@@ -1130,7 +1130,7 @@ describe('archive hygiene execution gate', () => {
       pathError = caught;
     }
     expect(pathError).toBeDefined();
-    expect(String(pathError)).toContain('source guard-archived is archived or draining');
+    expect(String(pathError)).toContain('matching source is archived or draining');
 
     expect(await softDeleteSource(db, 'guard-active')).not.toBeNull();
     await rejectArchived(
@@ -1740,13 +1740,62 @@ describe('archive hygiene execution gate', () => {
     expect(await queue.getJob(doomed[0]!.id)).toMatchObject({ status: 'cancelled' });
   });
 
-  test('migration v136 restores active-owner semantics for path-only source jobs', () => {
+  test('migration v136 restores active-owner semantics for path-only jobs and config', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 136);
     expect(migration?.name).toBe('active_path_source_job_resolution');
     expect(migration?.idempotent).toBe(true);
     expect(migration?.sql).toContain("NEW.data->'source_id'");
     expect(migration?.sql).toContain('matched_active');
     expect(migration?.sql).toContain('enforce_active_source_job_status_fn');
+    expect(migration?.sql).toContain('enforce_active_source_config_fn');
+    expect(migration?.sql).toContain('source_active_config_guard');
+  });
+
+  test('migration v136 repairs the upgraded config guard for a shared active path owner', async () => {
+    const sharedPath = '/fixture/v136-shared-config-owner';
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES
+         ('v136-config-archived', 'v136-config-archived', $1, '{}'::jsonb),
+         ('v136-config-active', 'v136-config-active', $1, '{}'::jsonb)`,
+      [sharedPath],
+    );
+    expect(await softDeleteSource(db, 'v136-config-archived')).not.toBeNull();
+
+    // Reproduce the v133-v135 upgrade state: the generic reference guard
+    // rejects a path when any matching owner is archived, even if another
+    // matching owner is active.
+    await db.executeRaw('DROP TRIGGER IF EXISTS source_active_config_guard ON config');
+    await db.executeRaw(`
+      CREATE TRIGGER source_active_config_guard
+        BEFORE INSERT OR UPDATE OF key, value ON config
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn('config', 'value')
+    `);
+    await db.setConfig('version', '135');
+
+    const result = await runMigrations(db);
+    expect(result).toMatchObject({ applied: 1, current: LATEST_VERSION });
+    const triggers = await db.executeRaw<{ definition: string }>(
+      `SELECT pg_get_triggerdef(oid) AS definition
+         FROM pg_trigger
+        WHERE tgname = 'source_active_config_guard'
+          AND NOT tgisinternal`,
+    );
+    expect(triggers[0]?.definition).toContain('enforce_active_source_config_fn');
+
+    await expect(db.executeRaw(
+      `INSERT INTO config (key, value) VALUES ('sync.repo_path', $1)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [sharedPath],
+    )).resolves.toEqual(expect.any(Array));
+
+    const drain = await beginSourceArchiveDrain(db, 'v136-config-active');
+    expect(drain).not.toBeNull();
+    await expect(db.executeRaw(
+      `UPDATE config SET value = $1 WHERE key = 'sync.repo_path'`,
+      [sharedPath],
+    )).rejects.toThrow(/matching source is archived or draining/);
+    await cancelSourceArchiveDrain(db, drain!);
   });
 
   test('claim race classifier accepts only the exact source lifecycle guard', () => {
