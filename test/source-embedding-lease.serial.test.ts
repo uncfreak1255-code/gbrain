@@ -6,6 +6,7 @@ import { softDeleteSource } from '../src/core/destructive-guard.ts';
 import {
   __setSourceEmbeddingLeaseTimingsForTests,
   beginSourceArchiveDrain,
+  revokeStaleSourceEmbeddingLeases,
   SourceEmbeddingLeaseLostError,
   waitForSourceEmbeddingLeases,
   withActiveSourceProviderLease,
@@ -276,6 +277,46 @@ describe('source embedding provider leases', () => {
       configJson: '{}',
     })).rejects.toThrow('require operator review');
     expect(deleteAttempted).toBe(false);
+  });
+
+  test('explicit stale-lease recovery is gated and targets leases fenced by the active drain', async () => {
+    await addSource('operator-recovery');
+    const beforeDrain = await db.executeRaw<{ embedding_drain_epoch: number | string }>(
+      `SELECT embedding_drain_epoch FROM sources WHERE id = 'operator-recovery'`,
+    );
+    await db.executeRaw(
+      `INSERT INTO source_embedding_leases
+         (lease_token, source_id, source_epoch, owner_host, owner_pid, owner_instance,
+          acquired_at, heartbeat_at)
+       VALUES
+         ('stale-token', 'operator-recovery', $1, 'remote-a', 111, 'instance-a',
+          now() - interval '20 minutes', now() - interval '20 minutes'),
+         ('fresh-token', 'operator-recovery', $1, 'remote-b', 222, 'instance-b',
+          now(), now())`,
+      [Number(beforeDrain[0]!.embedding_drain_epoch)],
+    );
+    const drain = await beginSourceArchiveDrain(db, 'operator-recovery');
+    expect(drain?.epoch).toBe(Number(beforeDrain[0]!.embedding_drain_epoch) + 1);
+
+    await expect(revokeStaleSourceEmbeddingLeases(db, 'operator-recovery', {
+      confirmDestructive: false,
+    })).rejects.toThrow('--confirm-destructive');
+    await expect(revokeStaleSourceEmbeddingLeases(db, 'operator-recovery', {
+      confirmDestructive: true,
+    })).resolves.toEqual({ revoked: 1, remaining: 1 });
+    expect(await db.executeRaw<{ lease_token: string }>(
+      `SELECT lease_token FROM source_embedding_leases ORDER BY lease_token`,
+    )).toEqual([{ lease_token: 'fresh-token' }]);
+
+    await db.executeRaw(
+      `UPDATE source_embedding_leases
+          SET heartbeat_at = now() - interval '20 minutes'
+        WHERE lease_token = 'fresh-token'`,
+    );
+    await expect(revokeStaleSourceEmbeddingLeases(db, 'operator-recovery', {
+      confirmDestructive: true,
+    })).resolves.toEqual({ revoked: 1, remaining: 0 });
+    await expect(softDeleteSource(db, 'operator-recovery')).resolves.not.toBeNull();
   });
 });
 

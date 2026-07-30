@@ -13,11 +13,12 @@ import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { archiveHygieneCandidate } from '../../src/commands/sources.ts';
-import { softDeleteSource } from '../../src/core/destructive-guard.ts';
+import { purgeArchivedSource, softDeleteSource } from '../../src/core/destructive-guard.ts';
 import { MIGRATIONS } from '../../src/core/migrate.ts';
 import { withActiveEmbeddingSource } from '../../src/commands/embed.ts';
 import {
   beginSourceArchiveDrain,
+  revokeStaleSourceEmbeddingLeases,
   SourceEmbeddingLeaseLostError,
 } from '../../src/core/source-embedding-lease.ts';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
@@ -164,6 +165,180 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await writer.executeRaw(`DELETE FROM public.minion_jobs WHERE name = $1`, [jobName]).catch(() => {});
       await writer.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
       await writer.disconnect();
+    }
+  }, 30_000);
+
+  test('purge waits for locked jobs and makes failed jobs non-retryable before source deletion', async () => {
+    const sourceId = 'purge-locked-job-e2e';
+    const waitingName = 'purge-locked-waiting-e2e';
+    const failedName = 'purge-locked-failed-e2e';
+    const lateChildName = 'purge-late-child-e2e';
+    const cleaner = new PostgresEngine();
+    const locker = new PostgresEngine();
+    const childAdder = new PostgresEngine();
+    await cleaner.connect({ database_url: process.env.DATABASE_URL! });
+    await locker.connect({ database_url: process.env.DATABASE_URL! });
+    await childAdder.connect({ database_url: process.env.DATABASE_URL! });
+    const rowLocked = deferred();
+    const releaseRow = deferred();
+    let lockTx: Promise<void> | null = null;
+
+    try {
+      await cleaner.executeRaw(
+        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2, $3)`,
+        [waitingName, failedName, lateChildName],
+      );
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await cleaner.executeRaw(
+        `INSERT INTO public.sources (id, name, config, archived)
+         VALUES ($1, $1, '{}'::jsonb, false)`,
+        [sourceId],
+      );
+      await cleaner.executeRaw(
+        `INSERT INTO public.minion_jobs (name, status, data)
+         VALUES
+           ($1, 'waiting', jsonb_build_object('sourceId', $3::text)),
+           ($2, 'failed', jsonb_build_object('sourceId', $3::text))`,
+        [waitingName, failedName, sourceId],
+      );
+      expect(await softDeleteSource(cleaner, sourceId)).toMatchObject({ id: sourceId });
+      const seededJobs = await cleaner.executeRaw<{ id: number | string; name: string }>(
+        `SELECT id, name FROM public.minion_jobs WHERE name IN ($1, $2)`,
+        [waitingName, failedName],
+      );
+      const failedId = Number(seededJobs.find((job) => job.name === failedName)!.id);
+      const waitingId = Number(seededJobs.find((job) => job.name === waitingName)!.id);
+
+      lockTx = locker.transaction(async (tx) => {
+        await tx.executeRaw(
+          `SELECT id FROM public.minion_jobs WHERE name = $1 FOR UPDATE`,
+          [waitingName],
+        );
+        rowLocked.resolve();
+        await releaseRow.promise;
+      });
+      await rowLocked.promise;
+
+      let purgeSettled = false;
+      const purge = purgeArchivedSource(cleaner, sourceId)
+        .finally(() => { purgeSettled = true; });
+      await wait(100);
+      expect(purgeSettled).toBe(false);
+      let childSettled = false;
+      const childAttempt = new MinionQueue(childAdder).add(lateChildName, {}, {
+        parent_job_id: waitingId,
+      }).then(
+        (child) => child,
+        (error: unknown) => error,
+      ).finally(() => { childSettled = true; });
+      await wait(50);
+      expect(childSettled).toBe(false);
+      releaseRow.resolve();
+      await lockTx;
+      await expect(purge).resolves.toBe(true);
+      const childResult = await childAttempt;
+      expect(childResult).toBeInstanceOf(Error);
+      expect(String(childResult)).toContain('cannot add child to terminal parent');
+
+      expect(await cleaner.executeRaw(
+        `SELECT id FROM public.sources WHERE id = $1`,
+        [sourceId],
+      )).toEqual([]);
+      expect(await cleaner.executeRaw<{ name: string; status: string }>(
+        `SELECT name, status FROM public.minion_jobs
+          WHERE name IN ($1, $2) ORDER BY name`,
+        [waitingName, failedName],
+      )).toEqual([
+        { name: failedName, status: 'cancelled' },
+        { name: waitingName, status: 'cancelled' },
+      ]);
+      expect(await new MinionQueue(cleaner).retryJob(failedId)).toBeNull();
+    } finally {
+      releaseRow.resolve();
+      await lockTx?.catch(() => {});
+      await cleaner.executeRaw(
+        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2, $3)`,
+        [waitingName, failedName, lateChildName],
+      ).catch(() => {});
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([cleaner.disconnect(), locker.disconnect(), childAdder.disconnect()]);
+    }
+  }, 30_000);
+
+  test('stale-lease revocation rechecks a concurrent fresh heartbeat before deletion', async () => {
+    const sourceId = 'stale-lease-heartbeat-e2e';
+    const leaseToken = 'stale-lease-heartbeat-token-e2e';
+    const revoker = new PostgresEngine();
+    const heartbeater = new PostgresEngine();
+    await revoker.connect({ database_url: process.env.DATABASE_URL! });
+    await heartbeater.connect({ database_url: process.env.DATABASE_URL! });
+    const heartbeatWritten = deferred();
+    const releaseHeartbeat = deferred();
+    let heartbeatTx: Promise<void> | null = null;
+
+    try {
+      await revoker.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await revoker.executeRaw(
+        `INSERT INTO public.sources (id, name, config, archived)
+         VALUES ($1, $1, '{}'::jsonb, false)`,
+        [sourceId],
+      );
+      const beforeDrain = await revoker.executeRaw<{ embedding_drain_epoch: number | string }>(
+        `SELECT embedding_drain_epoch FROM public.sources WHERE id = $1`,
+        [sourceId],
+      );
+      await revoker.executeRaw(
+        `INSERT INTO public.source_embedding_leases
+           (lease_token, source_id, source_epoch, owner_host, owner_pid, owner_instance,
+            acquired_at, heartbeat_at)
+         VALUES ($1, $2, $3, 'remote-host', 999999, 'remote-instance',
+                 now() - interval '20 minutes', now() - interval '20 minutes')`,
+        [leaseToken, sourceId, Number(beforeDrain[0]!.embedding_drain_epoch)],
+      );
+      const drain = await beginSourceArchiveDrain(revoker, sourceId);
+      expect(drain?.epoch).toBe(Number(beforeDrain[0]!.embedding_drain_epoch) + 1);
+
+      heartbeatTx = heartbeater.transaction(async (tx) => {
+        await tx.executeRaw(
+          `UPDATE public.source_embedding_leases
+              SET heartbeat_at = now()
+            WHERE lease_token = $1`,
+          [leaseToken],
+        );
+        heartbeatWritten.resolve();
+        await releaseHeartbeat.promise;
+      });
+      await heartbeatWritten.promise;
+
+      let revocationSettled = false;
+      const revocation = revokeStaleSourceEmbeddingLeases(revoker, sourceId, {
+        confirmDestructive: true,
+      }).finally(() => { revocationSettled = true; });
+      await wait(100);
+      expect(revocationSettled).toBe(false);
+      releaseHeartbeat.resolve();
+      await heartbeatTx;
+      await expect(revocation).resolves.toEqual({ revoked: 0, remaining: 1 });
+
+      await revoker.executeRaw(
+        `UPDATE public.source_embedding_leases
+            SET heartbeat_at = now() - interval '20 minutes'
+          WHERE lease_token = $1`,
+        [leaseToken],
+      );
+      await expect(revokeStaleSourceEmbeddingLeases(revoker, sourceId, {
+        confirmDestructive: true,
+      })).resolves.toEqual({ revoked: 1, remaining: 0 });
+      await expect(softDeleteSource(revoker, sourceId)).resolves.not.toBeNull();
+    } finally {
+      releaseHeartbeat.resolve();
+      await heartbeatTx?.catch(() => {});
+      await revoker.executeRaw(
+        `DELETE FROM public.source_embedding_leases WHERE lease_token = $1`,
+        [leaseToken],
+      ).catch(() => {});
+      await revoker.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([revoker.disconnect(), heartbeater.disconnect()]);
     }
   }, 30_000);
 

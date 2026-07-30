@@ -101,6 +101,52 @@ function assertFreshScopedOutputDirectory(outDir: string): void {
   }
 }
 
+function assertNonCollidingScopedWriteSet(
+  outDir: string,
+  pages: import('../core/types.ts').Page[],
+  rawBySlug: Map<string, RawData[]>,
+): void {
+  const root = resolve(outDir);
+  const files = new Set<string>([
+    confinedOutputPath(outDir, '.gbrain-export-manifest.json'),
+  ]);
+
+  for (const page of pages) {
+    const pagePath = confinedOutputPath(outDir, `${page.slug}.md`);
+    if (files.has(pagePath)) {
+      failExport(`duplicate export output path: ${JSON.stringify(relative(root, pagePath))}`);
+    }
+    files.add(pagePath);
+
+    if ((rawBySlug.get(page.slug) ?? []).length > 0) {
+      const slugParts = page.slug.split('/');
+      const rawPath = confinedOutputPath(
+        outDir,
+        join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
+      );
+      if (files.has(rawPath)) {
+        failExport(`duplicate export output path: ${JSON.stringify(relative(root, rawPath))}`);
+      }
+      files.add(rawPath);
+    }
+  }
+
+  for (const file of files) {
+    let parent = dirname(file);
+    while (parent !== root) {
+      if (files.has(parent)) {
+        failExport(
+          `export output path collision: ${JSON.stringify(relative(root, parent))} `
+          + 'would need to be both a file and a directory',
+        );
+      }
+      const next = dirname(parent);
+      if (next === parent) break;
+      parent = next;
+    }
+  }
+}
+
 async function parseScopedSource(engine: BrainEngine, args: string[]): Promise<string | undefined> {
   const sourceIdx = args.indexOf('--source');
   if (sourceIdx === -1) return undefined;
@@ -327,12 +373,8 @@ export async function runExport(engine: BrainEngine, args: string[]) {
     for (const page of pages) {
       assertSafeExportSlug(page.slug);
       confinedOutputPath(outDir, `${page.slug}.md`);
-      const slugParts = page.slug.split('/');
-      confinedOutputPath(
-        outDir,
-        join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
-      );
     }
+    assertNonCollidingScopedWriteSet(outDir, pages, scopedRaw ?? new Map());
     assertFreshScopedOutputDirectory(outDir);
   }
 
@@ -462,5 +504,6 @@ export async function runExport(engine: BrainEngine, args: string[]) {
 export const __testing = {
   compareCodePoints,
   canonicalJson,
+  assertNonCollidingScopedWriteSet,
   loadCompleteScopedPages,
 };

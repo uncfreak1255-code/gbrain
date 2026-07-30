@@ -1033,6 +1033,27 @@ describe('archive hygiene execution gate', () => {
       `UPDATE oauth_clients SET client_name = 'Blocked mutation'
         WHERE client_id = 'guard-active-client'`,
     );
+    await rejectArchived(
+      `UPDATE oauth_clients
+          SET deleted_at = now(), client_name = 'Blocked revocation piggyback'
+        WHERE client_id = 'guard-active-client'`,
+    );
+    await db.executeRaw(
+      `UPDATE oauth_clients SET deleted_at = now()
+        WHERE client_id = 'guard-active-client'`,
+    );
+    const revokedClient = await db.executeRaw<{
+      client_name: string;
+      revoked: boolean;
+    }>(
+      `SELECT client_name, deleted_at IS NOT NULL AS revoked
+         FROM oauth_clients
+        WHERE client_id = 'guard-active-client'`,
+    );
+    expect(revokedClient).toEqual([{
+      client_name: 'guard-active-client',
+      revoked: true,
+    }]);
     // Removing the scalar binding is cleanup, not a write to the archived
     // source. This also preserves FK ON DELETE SET NULL compatibility.
     await db.executeRaw(
@@ -1206,6 +1227,15 @@ describe('archive hygiene execution gate', () => {
     ).toHaveLength(3);
   });
 
+  test('migration v135 preserves pure OAuth revocation after source archive', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 135);
+    expect(migration?.name).toBe('archived_source_oauth_revocation_escape');
+    expect(migration?.idempotent).toBe(true);
+    expect(migration?.sql).toContain("TG_TABLE_NAME = 'oauth_clients'");
+    expect(migration?.sql).toContain("to_jsonb(NEW) - 'deleted_at'");
+    expect(migration?.sql).toContain("to_jsonb(OLD) - 'deleted_at'");
+  });
+
   test('migration v130 serializes writers with archive before a source row exists', () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 130);
     expect(migration?.name).toBe('source_lifecycle_advisory_lock');
@@ -1239,7 +1269,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '130');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(4);
+    expect(result.applied).toBe(5);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -1287,7 +1317,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '131');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(3);
+    expect(result.applied).toBe(4);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(

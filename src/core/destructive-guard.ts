@@ -20,6 +20,7 @@ import {
   lockSourceDrainForFinalize,
   waitForSourceEmbeddingLeases,
 } from './source-embedding-lease.ts';
+import { MinionQueue } from './minions/queue.ts';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -358,14 +359,91 @@ export async function listArchivedSources(
 export async function purgeExpiredSources(
   engine: BrainEngine,
 ): Promise<string[]> {
-  const rows = await engine.executeRaw<{ id: string }>(
-    `DELETE FROM sources
-     WHERE archived = true
-       AND archive_expires_at IS NOT NULL
-       AND archive_expires_at <= now()
-     RETURNING id`,
+  // Terminalize archived-source work while the registry row still exists.
+  // After deletion, the queue's legacy-identifier compatibility predicate
+  // would otherwise make an orphaned job claimable again.
+  const expired = await engine.executeRaw<{ id: string }>(
+    `SELECT id FROM sources
+      WHERE archived = true
+        AND archive_expires_at IS NOT NULL
+        AND archive_expires_at <= now()
+      ORDER BY id`,
   );
-  return rows.map((r) => r.id);
+  const expiredIds = expired.map((row) => row.id);
+  if (expiredIds.length === 0) return [];
+  return purgeArchivedSourceIds(engine, expiredIds, true);
+}
+
+/** Permanently remove one archived source after terminalizing queued work. */
+export async function purgeArchivedSource(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<boolean> {
+  const state = await engine.executeRaw<{ archived: boolean }>(
+    `SELECT archived FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  if (state[0]?.archived !== true) return false;
+  return (await purgeArchivedSourceIds(engine, [sourceId], false)).length === 1;
+}
+
+async function purgeArchivedSourceIds(
+  engine: BrainEngine,
+  sourceIds: readonly string[],
+  requireExpired: boolean,
+): Promise<string[]> {
+  const uniqueSourceIds = [...new Set(sourceIds)];
+  if (uniqueSourceIds.length === 0) return [];
+
+  // Purge is not ordinary best-effort queue maintenance. Wait for every
+  // matching row lock, cancel running/waiting descendants, and reclassify
+  // failed/dead rows so retryJob cannot revive them after the registry row is
+  // gone. The normal cleanup path retains SKIP LOCKED and leaves failed/dead
+  // receipts intact.
+  await new MinionQueue(engine).cancelArchivedSourceJobs(uniqueSourceIds, {
+    waitForLocks: true,
+    includeRetryableTerminal: true,
+  });
+
+  return engine.transaction(async (tx) => {
+    await tx.executeRaw(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended('gbrain:source-lifecycle', 0)
+       )`,
+    );
+    const locked = await tx.executeRaw<{ id: string }>(
+      `SELECT id FROM public.sources
+        WHERE id = ANY($1::text[])
+          AND archived = true
+          ${requireExpired
+            ? 'AND archive_expires_at IS NOT NULL AND archive_expires_at <= now()'
+            : ''}
+        ORDER BY id
+        FOR UPDATE`,
+      [uniqueSourceIds],
+    );
+    const lockedIds = locked.map((row) => row.id);
+    if (lockedIds.length === 0) return [];
+
+    const remaining = await new MinionQueue(tx).countRevivableArchivedSourceJobs(lockedIds);
+    if (remaining > 0) {
+      throw new Error(
+        `Refusing to purge ${lockedIds.join(', ')}: ${remaining} source job(s) remain runnable or retryable`,
+      );
+    }
+
+    const rows = await tx.executeRaw<{ id: string }>(
+      `DELETE FROM public.sources
+        WHERE id = ANY($1::text[])
+          AND archived = true
+          ${requireExpired
+            ? 'AND archive_expires_at IS NOT NULL AND archive_expires_at <= now()'
+            : ''}
+      RETURNING id`,
+      [lockedIds],
+    );
+    return rows.map((row) => row.id);
+  });
 }
 
 // ── Display Helpers ─────────────────────────────────────────

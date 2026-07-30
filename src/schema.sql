@@ -1411,6 +1411,17 @@ DECLARE
   source_archived BOOLEAN;
   source_draining BOOLEAN;
 BEGIN
+  -- Revoking an OAuth client must remain possible after its source is
+  -- archived. Permit only a pure deleted_at NULL -> non-NULL transition;
+  -- every source binding and every other client field must remain identical.
+  IF TG_TABLE_NAME = 'oauth_clients'
+     AND TG_OP = 'UPDATE'
+     AND (to_jsonb(OLD)->>'deleted_at') IS NULL
+     AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
+     AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
+    RETURN NEW;
+  END IF;
+
   IF TG_ARGV[0] = 'scalar' THEN
     source_ref := to_jsonb(NEW)->>TG_ARGV[1];
     IF source_ref IS NOT NULL THEN

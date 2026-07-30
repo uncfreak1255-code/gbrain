@@ -492,6 +492,16 @@ describe('MinionQueue: Dependencies', () => {
     expect(resolved2!.status).toBe('waiting');
   });
 
+  test('rejects a new child when its parent is already terminal', async () => {
+    const parent = await queue.add('terminal-parent', {});
+    await queue.cancelJob(parent.id);
+
+    await expect(queue.add('late-child', {}, {
+      parent_job_id: parent.id,
+    })).rejects.toThrow(`cannot add child to terminal parent ${parent.id} (status=cancelled)`);
+    expect(await queue.getJobs({ name: 'late-child' })).toEqual([]);
+  });
+
   test('child fail → fail_parent', async () => {
     const parent = await queue.add('enrich', {});
     await queue.add('sync', {}, { parent_job_id: parent.id, on_child_fail: 'fail_parent' });

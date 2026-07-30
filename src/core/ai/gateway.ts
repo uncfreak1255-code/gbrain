@@ -1443,9 +1443,22 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
 
   const allEmbeddings: Float32Array[] = [];
   let _embedThrew = false;
+  let submittedInputChars = 0;
+  const recordProviderSubmission = (submittedTexts: string[]) => {
+    submittedInputChars += submittedTexts.reduce((sum, text) => sum + text.length, 0);
+  };
   try {
     for (const batch of batches) {
-      const result = await embedSubBatch(batch, model, providerOpts, expected, recipe, modelId, opts);
+      const result = await embedSubBatch(
+        batch,
+        model,
+        providerOpts,
+        expected,
+        recipe,
+        modelId,
+        opts,
+        recordProviderSubmission,
+      );
       allEmbeddings.push(...result);
     }
     return allEmbeddings;
@@ -1453,15 +1466,14 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
     _embedThrew = true;
     throw err;
   } finally {
-    if (tracker) {
+    if (tracker && submittedInputChars > 0) {
       // Embed token usage is not surfaced by the AI SDK shape we use; charge
       // based on the truncated input character count using the recipe's
       // chars-per-token. On failure, A3 amended says charge the pessimistic
       // estimate too — embed has no output side, so the input estimate IS
       // the worst case.
       const charsPerToken = recipe.touchpoints?.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN;
-      const totalChars = truncated.reduce((s, t) => s + t.length, 0);
-      const inputTokens = Math.ceil(totalChars / Math.max(charsPerToken, 1));
+      const inputTokens = Math.ceil(submittedInputChars / Math.max(charsPerToken, 1));
       try {
         tracker.record({
           modelId: `${recipe.id}:${modelId}`,
@@ -1593,8 +1605,10 @@ async function embedSubBatch(
   recipe: Recipe,
   modelId: string,
   opts?: EmbedOpts,
+  onProviderSubmission?: (texts: string[]) => void,
 ): Promise<Float32Array[]> {
   const submit = async (leaseSignal?: AbortSignal): Promise<Float32Array[]> => {
+    onProviderSubmission?.(texts);
     const callerSignal = leaseSignal
       ? anySignal(leaseSignal, opts?.abortSignal)
       : opts?.abortSignal;
@@ -1659,8 +1673,14 @@ async function embedSubBatch(
     if (isTokenLimitError(err) && texts.length > MIN_SUB_BATCH) {
       shrinkOnMiss(recipe);
       const mid = Math.ceil(texts.length / 2);
-      const left = await embedSubBatch(texts.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId, opts);
-      const right = await embedSubBatch(texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts);
+      const left = await embedSubBatch(
+        texts.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId, opts,
+        onProviderSubmission,
+      );
+      const right = await embedSubBatch(
+        texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts,
+        onProviderSubmission,
+      );
       return [...left, ...right];
     }
     throw err;

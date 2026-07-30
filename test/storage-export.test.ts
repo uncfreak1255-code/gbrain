@@ -335,7 +335,7 @@ describe('source-scoped recovery export', () => {
     expect(manifest.pages[0]?.raw_record_count).toBe(2);
   });
 
-  test('does not write a recovery manifest when a page write fails', async () => {
+  test('rejects page file/directory collisions before writing recovery output', async () => {
     await engine.putPage(
       'notes/a',
       { type: 'note', title: 'File first', compiled_truth: 'first body' },
@@ -347,35 +347,29 @@ describe('source-scoped recovery export', () => {
       { sourceId: 'default' },
     );
 
-    let caught: NodeJS.ErrnoException | undefined;
-    try {
-      await runExport(engine, ['--dir', outDir, '--source', 'default']);
-    } catch (error) {
-      caught = error as NodeJS.ErrnoException;
-    }
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
 
-    expect(['EEXIST', 'ENOTDIR']).toContain(caught?.code ?? '');
-    expect(existsSync(join(outDir, 'notes/a.md'))).toBe(true);
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toContain('export output path collision');
+    expect(existsSync(outDir)).toBe(false);
+    expect(existsSync(join(outDir, 'notes/a.md'))).toBe(false);
     expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(false);
     expect(stdout.join('\n')).not.toContain('Manifest:');
   });
 
-  test('does not report a recovery receipt when the manifest write fails', async () => {
+  test('rejects manifest file/directory collisions before writing recovery output', async () => {
     await engine.putPage(
       '.gbrain-export-manifest.json/x',
       { type: 'note', title: 'Manifest collision', compiled_truth: 'page body' },
       { sourceId: 'default' },
     );
 
-    let caught: NodeJS.ErrnoException | undefined;
-    try {
-      await runExport(engine, ['--dir', outDir, '--source', 'default']);
-    } catch (error) {
-      caught = error as NodeJS.ErrnoException;
-    }
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
 
-    expect(caught?.code).toBe('EISDIR');
-    expect(existsSync(join(outDir, '.gbrain-export-manifest.json/x.md'))).toBe(true);
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toContain('export output path collision');
+    expect(existsSync(outDir)).toBe(false);
+    expect(existsSync(join(outDir, '.gbrain-export-manifest.json/x.md'))).toBe(false);
     expect(stdout.join('\n')).not.toContain('Manifest:');
     expect(stdout.join('\n')).not.toContain('Exported 1 pages');
   });

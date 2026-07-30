@@ -7,6 +7,7 @@ const DEFAULT_HEARTBEAT_MS = 15_000;
 const DEFAULT_ARCHIVE_POLL_MS = 50;
 const DEFAULT_ARCHIVE_WAIT_MS = 10 * 60_000;
 const DEFAULT_DB_OPERATION_MS = 30_000;
+const DEFAULT_STALE_LEASE_MS = 10 * 60_000;
 
 const PROCESS_OWNER_HOST = hostname();
 const PROCESS_OWNER_PID = process.pid;
@@ -28,6 +29,11 @@ export interface SourceArchiveDrain {
 
 export interface SourceDrainFinalizeState {
   status: 'ready' | 'already_archived';
+}
+
+export interface StaleSourceEmbeddingLeaseRecovery {
+  revoked: number;
+  remaining: number;
 }
 
 interface ProviderLeaseOwnerRow {
@@ -457,6 +463,73 @@ export async function waitForSourceEmbeddingLeases(
     }
     await sleep(archivePollMs);
   }
+}
+
+/**
+ * Explicit operator recovery for a crashed shared-database provider owner.
+ * Automatic Postgres reclamation stays fail-closed: this path requires a
+ * destructive confirmation, an already-committed source drain, a lease epoch
+ * fenced by that drain, and a heartbeat older than the conservative window.
+ */
+export async function revokeStaleSourceEmbeddingLeases(
+  engine: BrainEngine,
+  sourceId: string,
+  opts: { confirmDestructive: boolean },
+): Promise<StaleSourceEmbeddingLeaseRecovery> {
+  if (!opts.confirmDestructive) {
+    throw new Error(
+      `Refusing to revoke stale embedding leases for source "${sourceId}" without --confirm-destructive`,
+    );
+  }
+
+  return engine.transaction(async (tx) => {
+    await tx.executeRaw(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended('gbrain:source-lifecycle', 0)
+       )`,
+    );
+    const sources = await tx.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+      embedding_drain_epoch: number | string;
+    }>(
+      `SELECT archived, embedding_drain_token, embedding_drain_epoch
+         FROM public.sources
+        WHERE id = $1
+        FOR UPDATE`,
+      [sourceId],
+    );
+    const source = sources[0];
+    if (!source) throw new Error(`Source "${sourceId}" not found`);
+    if (source.archived || source.embedding_drain_token === null) {
+      throw new Error(
+        `Source "${sourceId}" is not in an active embedding drain; start or resume archive first`,
+      );
+    }
+    const epoch = Number(source.embedding_drain_epoch);
+    if (!Number.isSafeInteger(epoch) || epoch < 0) {
+      throw new Error(`Source "${sourceId}" has an invalid embedding drain epoch`);
+    }
+
+    const revoked = await tx.executeRaw<{ lease_token: string }>(
+      `DELETE FROM public.source_embedding_leases
+        WHERE source_id = $1
+          AND source_epoch < $2
+          AND heartbeat_at <= now() - ($3::bigint * interval '1 millisecond')
+      RETURNING lease_token`,
+      [sourceId, epoch, DEFAULT_STALE_LEASE_MS],
+    );
+    const remaining = await tx.executeRaw<{ count: number | string }>(
+      `SELECT count(*)::int AS count
+         FROM public.source_embedding_leases
+        WHERE source_id = $1`,
+      [sourceId],
+    );
+    return {
+      revoked: revoked.length,
+      remaining: Number(remaining[0]?.count ?? 0),
+    };
+  });
 }
 
 /**

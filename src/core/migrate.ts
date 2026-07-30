@@ -6807,6 +6807,17 @@ export const MIGRATIONS: Migration[] = [
         source_archived BOOLEAN;
         source_draining BOOLEAN;
       BEGIN
+        -- Security cleanup must remain possible after source archive. This is
+        -- deliberately narrower than a generic archived-row UPDATE escape:
+        -- only deleted_at may change, and only from NULL to non-NULL.
+        IF TG_TABLE_NAME = 'oauth_clients'
+           AND TG_OP = 'UPDATE'
+           AND (to_jsonb(OLD)->>'deleted_at') IS NULL
+           AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
+           AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
+          RETURN NEW;
+        END IF;
+
         IF TG_ARGV[0] = 'scalar' THEN
           source_refs := ARRAY[to_jsonb(NEW)->>TG_ARGV[1]];
           IF TG_OP = 'UPDATE' AND to_jsonb(NEW)->>TG_ARGV[1] IS NOT NULL THEN
@@ -7213,6 +7224,146 @@ export const MIGRATIONS: Migration[] = [
       CREATE TRIGGER source_active_sync_lock_guard
         BEFORE INSERT OR UPDATE ON public.gbrain_cycle_locks
         FOR EACH ROW EXECUTE FUNCTION enforce_active_source_lock_fn();
+    `,
+  },
+  {
+    version: 135,
+    name: 'archived_source_oauth_revocation_escape',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        repo_paths TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF TG_TABLE_NAME = 'oauth_clients'
+           AND TG_OP = 'UPDATE'
+           AND (to_jsonb(OLD)->>'deleted_at') IS NULL
+           AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
+           AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
+          RETURN NEW;
+        END IF;
+
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_refs := ARRAY[to_jsonb(NEW)->>TG_ARGV[1]];
+          IF TG_OP = 'UPDATE' AND to_jsonb(NEW)->>TG_ARGV[1] IS NOT NULL THEN
+            source_refs := source_refs || ARRAY[to_jsonb(OLD)->>TG_ARGV[1]];
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_refs := ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_refs := source_refs || ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'job' THEN
+          IF TG_OP = 'UPDATE'
+             AND NEW.data IS NOT DISTINCT FROM OLD.data
+             AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+            RETURN NEW;
+          END IF;
+          source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+          IF NEW.name = 'sync'
+             AND NOT (
+               jsonb_typeof(NEW.data->'sourceId') = 'string'
+               AND COALESCE(NEW.data->>'sourceId', '') <> ''
+             ) THEN
+            repo_paths := ARRAY[NEW.data->>'repoPath'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+            IF OLD.name = 'sync'
+               AND NOT (
+                 jsonb_typeof(OLD.data->'sourceId') = 'string'
+                 AND COALESCE(OLD.data->>'sourceId', '') <> ''
+               ) THEN
+              repo_paths := repo_paths || ARRAY[OLD.data->>'repoPath'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'config' THEN
+          IF NEW.key = 'sources.default' THEN source_refs := ARRAY[NEW.value]; END IF;
+          IF NEW.key = 'sync.repo_path' THEN repo_paths := ARRAY[NEW.value]; END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown source-drain guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs FROM unnest(source_refs) values_(value)
+         WHERE value IS NOT NULL AND value <> '';
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO repo_paths FROM unnest(repo_paths) values_(value)
+         WHERE value IS NOT NULL AND value <> '';
+        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_before
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        FOR source_ref, source_archived, source_draining IN
+          SELECT id, archived, embedding_drain_token IS NOT NULL
+            FROM public.sources
+           WHERE id = ANY(source_refs) OR local_path = ANY(repo_paths)
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          IF source_archived OR source_draining THEN
+            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
+              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_after
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
+          RAISE EXCEPTION 'Source path ownership changed while writing %', TG_TABLE_NAME
+            USING ERRCODE = '40001';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
     `,
   },
 ];

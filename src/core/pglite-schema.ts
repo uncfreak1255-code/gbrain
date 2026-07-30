@@ -1121,6 +1121,16 @@ DECLARE
   source_archived BOOLEAN;
   source_draining BOOLEAN;
 BEGIN
+  -- Keep security cleanup available after source archive, but allow only a
+  -- pure OAuth deleted_at NULL -> non-NULL revocation transition.
+  IF TG_TABLE_NAME = 'oauth_clients'
+     AND TG_OP = 'UPDATE'
+     AND (to_jsonb(OLD)->>'deleted_at') IS NULL
+     AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
+     AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
+    RETURN NEW;
+  END IF;
+
   IF TG_ARGV[0] = 'scalar' THEN
     source_ref := to_jsonb(NEW)->>TG_ARGV[1];
     IF source_ref IS NOT NULL THEN

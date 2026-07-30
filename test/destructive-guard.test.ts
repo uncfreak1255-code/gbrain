@@ -15,6 +15,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import {
   assessDestructiveImpact,
   checkDestructiveConfirmation,
@@ -22,6 +23,7 @@ import {
   restoreSource,
   listArchivedSources,
   purgeExpiredSources,
+  purgeArchivedSource,
   formatImpact,
   formatSoftDelete,
   SOFT_DELETE_TTL_HOURS,
@@ -262,6 +264,15 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     const recoverableId = 'pe-recoverable';
     await seedSource(engine, expiredId, { withPages: 2 });
     await seedSource(engine, recoverableId, { withPages: 1 });
+    await engine.executeRaw(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES
+         ('purge-source-job', 'waiting', jsonb_build_object('sourceId', $1::text)),
+         ('purge-failed-job', 'failed', jsonb_build_object('sourceId', $1::text)),
+         ('purge-dead-job', 'dead', jsonb_build_object('sourceId', $1::text)),
+         ('recoverable-source-job', 'waiting', jsonb_build_object('sourceId', $2::text))`,
+      [expiredId, recoverableId],
+    );
     await softDeleteSource(engine, expiredId);
     await softDeleteSource(engine, recoverableId);
     await engine.executeRaw(
@@ -276,6 +287,24 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
       [expiredId],
     );
     expect(remainingPages[0].n).toBe(0);
+    const jobs = await engine.executeRaw<{ id: number | string; name: string; status: string }>(
+      `SELECT id, name, status FROM minion_jobs
+        WHERE name IN ('purge-source-job', 'purge-failed-job', 'purge-dead-job')
+        ORDER BY name`,
+    );
+    expect(jobs.map(({ name, status }) => ({ name, status }))).toEqual([
+      { name: 'purge-dead-job', status: 'cancelled' },
+      { name: 'purge-failed-job', status: 'cancelled' },
+      { name: 'purge-source-job', status: 'cancelled' },
+    ]);
+    const queue = new MinionQueue(engine);
+    for (const job of jobs) {
+      expect(await queue.retryJob(Number(job.id))).toBeNull();
+    }
+    const recoverableJob = await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM minion_jobs WHERE name = 'recoverable-source-job'`,
+    );
+    expect(recoverableJob).toEqual([{ status: 'waiting' }]);
   });
 
   test('purgeExpiredSources is no-op when nothing is past TTL', async () => {
@@ -288,6 +317,26 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     );
     const purged = await purgeExpiredSources(engine);
     expect(purged).toEqual([]);
+  });
+
+  test('purgeArchivedSource terminalizes jobs before deleting one archived source', async () => {
+    const id = 'purge-one-source';
+    await seedSource(engine, id);
+    await engine.executeRaw(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES ('purge-one-job', 'waiting', jsonb_build_object('sourceId', $1::text))`,
+      [id],
+    );
+    expect(await purgeArchivedSource(engine, id)).toBe(false);
+    expect(await softDeleteSource(engine, id)).not.toBeNull();
+    expect(await purgeArchivedSource(engine, id)).toBe(true);
+    expect(await engine.executeRaw(
+      `SELECT id FROM sources WHERE id = $1`,
+      [id],
+    )).toEqual([]);
+    expect(await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM minion_jobs WHERE name = 'purge-one-job'`,
+    )).toEqual([{ status: 'cancelled' }]);
   });
 });
 

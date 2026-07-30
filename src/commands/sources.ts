@@ -37,6 +37,7 @@ import {
   restoreSource,
   listArchivedSources,
   purgeExpiredSources,
+  purgeArchivedSource,
   formatImpact,
   formatSoftDelete,
   SOFT_DELETE_TTL_HOURS,
@@ -58,6 +59,7 @@ import {
   type SourceRow as LoadedSourceRow,
 } from '../core/sources-load.ts';
 import { buildSourcePlanReport, type SourcePlanInput } from '../core/source-plan.ts';
+import { revokeStaleSourceEmbeddingLeases } from '../core/source-embedding-lease.ts';
 
 // ── Validation ──────────────────────────────────────────────
 
@@ -533,7 +535,10 @@ async function runSetCrMode(engine: BrainEngine, args: string[]): Promise<void> 
 async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
   const id = args[0];
   if (!id) {
-    console.error('Usage: gbrain sources archive <id>');
+    console.error(
+      'Usage: gbrain sources archive <id> [--if-hygiene-candidate] '
+      + '[--revoke-stale-leases --confirm-destructive]',
+    );
     process.exit(2);
   }
 
@@ -542,7 +547,22 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(3);
   }
 
-  if (args.includes('--if-hygiene-candidate')) {
+  const hygieneCandidate = args.includes('--if-hygiene-candidate');
+  const revokeStaleLeases = args.includes('--revoke-stale-leases');
+  const confirmDestructive = args.includes('--confirm-destructive');
+  if (hygieneCandidate && revokeStaleLeases) {
+    console.error('Error: --revoke-stale-leases cannot be combined with --if-hygiene-candidate.');
+    process.exit(2);
+  }
+  if (revokeStaleLeases && !confirmDestructive) {
+    console.error(
+      'Refusing stale lease revocation without --confirm-destructive. '
+      + 'Late provider output will be discarded after revocation.',
+    );
+    process.exit(5);
+  }
+
+  if (hygieneCandidate) {
     const attempt = await archiveHygieneCandidate(engine, id);
     if (!attempt.result) {
       console.error(
@@ -560,6 +580,16 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
   if (!impact) {
     console.error(`Source "${id}" not found.`);
     process.exit(4);
+  }
+
+  if (revokeStaleLeases) {
+    const recovery = await revokeStaleSourceEmbeddingLeases(engine, id, {
+      confirmDestructive,
+    });
+    console.log(
+      `Revoked ${recovery.revoked} stale embedding lease(s) for source "${id}"; `
+      + `${recovery.remaining} current lease(s) remain. Late provider output will be discarded.`,
+    );
   }
 
   const result = await softDeleteSource(engine, id);
@@ -678,7 +708,11 @@ async function runPurge(engine: BrainEngine, args: string[]): Promise<void> {
       process.exit(5);
     }
 
-    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
+    const deleted = await purgeArchivedSource(engine, id);
+    if (!deleted) {
+      console.error(`Source "${id}" is not archived; archive it before permanent purge.`);
+      process.exit(5);
+    }
     console.log(`Permanently deleted source "${id}" (${impact.pageCount} pages cascaded).`);
     return;
   }
@@ -1643,7 +1677,10 @@ Subcommands:
                                     Permanently delete a source and all its data.
                                     Shows impact preview. Requires --confirm-destructive
                                     when the source has data (pages/chunks/embeddings).
-  archive <id>                      Soft-delete: hide from search, preserve data for ${SOFT_DELETE_TTL_HOURS}h.
+  archive <id> [--if-hygiene-candidate]
+                                    Soft-delete: hide from search, preserve data for ${SOFT_DELETE_TTL_HOURS}h.
+                                    For a reviewed interrupted shared-DB drain:
+                                    --revoke-stale-leases --confirm-destructive
   restore <id> [--no-federate]      Un-archive a soft-deleted source.
   status [--json]                   v0.40.3.0 — read-only per-source dashboard:
                                     last sync, staleness, page count,

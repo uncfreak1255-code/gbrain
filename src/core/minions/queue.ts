@@ -286,6 +286,11 @@ export class MinionQueue {
           throw new Error(`parent_job_id ${opts.parent_job_id} not found`);
         }
         const parent = rowToMinionJob(parentRows[0]);
+        if (['completed', 'failed', 'dead', 'cancelled'].includes(parent.status)) {
+          throw new Error(
+            `cannot add child to terminal parent ${opts.parent_job_id} (status=${parent.status})`,
+          );
+        }
 
         depth = parent.depth + 1;
         if (depth > maxSpawnDepth) {
@@ -455,6 +460,7 @@ export class MinionQueue {
   private async cancelJobRoots(
     tx: BrainEngine,
     rootIds: number[],
+    opts?: { includeRetryableTerminal?: boolean },
   ): Promise<Record<string, unknown>[]> {
     if (rootIds.length === 0) return [];
     const targets = await tx.executeRaw<{ id: number | string }>(
@@ -479,13 +485,21 @@ export class MinionQueue {
     // physical row order and deadlocking a concurrent completion. UNION above
     // makes corrupt cycles finite; the id tie-break is shared by every caller.
     await this.lockFailureAncestors(tx, targetIds);
-    await tx.executeRaw(
-      `SELECT id FROM minion_jobs
+    const lockedTargets = await tx.executeRaw<{ id: number | string; status: string }>(
+      `SELECT id, status FROM minion_jobs
         WHERE id = ANY($1::bigint[])
         ORDER BY id
         FOR UPDATE`,
       [targetIds],
     );
+    const newlyTerminalizedIds = new Set(
+      lockedTargets
+        .filter((row) => ['waiting', 'active', 'delayed', 'waiting-children', 'paused'].includes(row.status))
+        .map((row) => Number(row.id)),
+    );
+    const cancellableStatuses = opts?.includeRetryableTerminal
+      ? "'waiting','active','delayed','waiting-children','paused','failed','dead'"
+      : "'waiting','active','delayed','waiting-children','paused'";
 
     const rows = await tx.executeRaw<Record<string, unknown>>(
       `UPDATE minion_jobs SET
@@ -495,7 +509,7 @@ export class MinionQueue {
           finished_at = now(),
           updated_at = now()
          WHERE id = ANY($1::bigint[])
-           AND status IN ('waiting','active','delayed','waiting-children','paused')
+           AND status IN (${cancellableStatuses})
          RETURNING *`,
       [targetIds],
     );
@@ -508,6 +522,10 @@ export class MinionQueue {
     const parentIds = new Set<number>();
     for (const r of rows) {
       const childId = Number(r.id);
+      // A failed/dead row already emitted its terminal effects. Purge may
+      // reclassify it as cancelled to make retry impossible, but must not emit
+      // a duplicate child_done or unblock its parent a second time.
+      if (!newlyTerminalizedIds.has(childId)) continue;
       const parentJobId = r.parent_job_id == null ? null : Number(r.parent_job_id);
       const name = r.name as string;
       if (parentJobId == null) continue;
@@ -720,14 +738,32 @@ export class MinionQueue {
    * intentionally excluded: a denied archive reopens the source and its held
    * jobs must remain resumable.
    */
-  async cancelArchivedSourceJobs(): Promise<MinionJob[]> {
+  async cancelArchivedSourceJobs(
+    sourceIds?: readonly string[],
+    opts?: { waitForLocks?: boolean; includeRetryableTerminal?: boolean },
+  ): Promise<MinionJob[]> {
+    const scopedSourceIds = sourceIds === undefined
+      ? null
+      : [...new Set(sourceIds)];
+    if (scopedSourceIds?.length === 0) return [];
+    const eligibleStatuses = opts?.includeRetryableTerminal
+      ? "'waiting','active','delayed','waiting-children','paused','failed','dead'"
+      : "'waiting','active','delayed','waiting-children','paused'";
+    const rootLockClause = opts?.waitForLocks ? 'FOR UPDATE' : 'FOR UPDATE SKIP LOCKED';
     return this.engine.transaction(async (tx) => {
       const snapshot = await tx.executeRaw<{ id: number | string }>(
         `SELECT candidate.id
            FROM minion_jobs AS candidate
-          WHERE candidate.status IN ('waiting','active','delayed','waiting-children','paused')
+          WHERE candidate.status IN (${eligibleStatuses})
             AND ${archivedSourceJobPredicate('candidate')}
+            AND ($1::text[] IS NULL OR EXISTS (
+              SELECT 1 FROM public.sources AS source
+               WHERE source.id = ANY($1::text[])
+                 AND source.archived IS TRUE
+                 AND ${sourceReferencePredicate('candidate', 'source')}
+            ))
           ORDER BY candidate.id`,
+        [scopedSourceIds],
       );
       const snapshotIds = snapshot.map((row) => Number(row.id));
       await this.lockFailureAncestors(tx, snapshotIds);
@@ -737,10 +773,10 @@ export class MinionQueue {
             `SELECT candidate.id
                FROM minion_jobs AS candidate
               WHERE candidate.id = ANY($1::bigint[])
-                AND candidate.status IN ('waiting','active','delayed','waiting-children','paused')
+                AND candidate.status IN (${eligibleStatuses})
                 AND ${archivedSourceJobPredicate('candidate')}
               ORDER BY candidate.id
-              FOR UPDATE SKIP LOCKED`,
+              ${rootLockClause}`,
             [snapshotIds],
           );
       const rootIds = roots.map((row) => Number(row.id));
@@ -758,6 +794,7 @@ export class MinionQueue {
         `SELECT source.id
            FROM public.sources AS source
           WHERE source.archived IS TRUE
+            AND ($2::text[] IS NULL OR source.id = ANY($2::text[]))
             AND EXISTS (
               SELECT 1 FROM minion_jobs AS candidate
                WHERE candidate.id = ANY($1::bigint[])
@@ -765,7 +802,7 @@ export class MinionQueue {
             )
           ORDER BY source.id
           FOR UPDATE OF source`,
-        [rootIds],
+        [rootIds, scopedSourceIds],
       );
       const lockedSourceIds = lockedSources.map((row) => row.id);
       if (lockedSourceIds.length === 0) return [];
@@ -773,7 +810,7 @@ export class MinionQueue {
         `SELECT candidate.id
            FROM minion_jobs AS candidate
           WHERE candidate.id = ANY($1::bigint[])
-            AND candidate.status IN ('waiting','active','delayed','waiting-children','paused')
+            AND candidate.status IN (${eligibleStatuses})
             AND EXISTS (
               SELECT 1 FROM public.sources AS source
                WHERE source.id = ANY($2::text[])
@@ -786,9 +823,31 @@ export class MinionQueue {
       const rows = await this.cancelJobRoots(
         tx,
         stillArchived.map((row) => Number(row.id)),
+        { includeRetryableTerminal: opts?.includeRetryableTerminal },
       );
       return rows.map(rowToMinionJob);
     });
+  }
+
+  /** Count source jobs that could run now or be revived through retryJob(). */
+  async countRevivableArchivedSourceJobs(sourceIds: readonly string[]): Promise<number> {
+    const scopedSourceIds = [...new Set(sourceIds)];
+    if (scopedSourceIds.length === 0) return 0;
+    const rows = await this.engine.executeRaw<{ count: number | string }>(
+      `SELECT count(*)::int AS count
+         FROM minion_jobs AS candidate
+        WHERE candidate.status IN (
+          'waiting','active','delayed','waiting-children','paused','failed','dead'
+        )
+          AND EXISTS (
+            SELECT 1 FROM public.sources AS source
+             WHERE source.id = ANY($1::text[])
+               AND source.archived IS TRUE
+               AND ${sourceReferencePredicate('candidate', 'source')}
+          )`,
+      [scopedSourceIds],
+    );
+    return Number(rows[0]?.count ?? 0);
   }
 
   /** Re-queue a failed or dead job for retry. */
