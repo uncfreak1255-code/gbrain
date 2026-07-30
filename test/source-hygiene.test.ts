@@ -1417,7 +1417,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '130');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(6);
+    expect(result.applied).toBe(7);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -1465,7 +1465,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '131');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(5);
+    expect(result.applied).toBe(6);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -1791,7 +1791,7 @@ describe('archive hygiene execution gate', () => {
     await db.setConfig('version', '135');
 
     const result = await runMigrations(db);
-    expect(result).toMatchObject({ applied: 1, current: LATEST_VERSION });
+    expect(result).toMatchObject({ applied: 2, current: LATEST_VERSION });
     const triggers = await db.executeRaw<{ definition: string }>(
       `SELECT pg_get_triggerdef(oid) AS definition
          FROM pg_trigger

@@ -13,6 +13,7 @@ import {
   assertTargetSourceIdsCompatibleForMigration,
   assertTargetSourceLifecycleCompatibleForMigration,
   assertTargetSourceLifecycleParityForMigration,
+  withMigrationSourceWriteFence,
 } from '../src/commands/migrate-engine.ts';
 
 let source: PGLiteEngine;
@@ -238,61 +239,74 @@ describe('migrate-engine source row copy', () => {
     );
 
     await copySourceRowsForMigration(source, target, { stageArchivedAsActive: true });
-    expect(await target.executeRaw(
-      `SELECT archived, archived_at, archive_expires_at FROM sources WHERE id = $1`,
+    const staged = (await target.executeRaw<{
+      archived: boolean;
+      archived_at: Date | string | null;
+      archive_expires_at: Date | string | null;
+      embedding_drain_token: string;
+      embedding_drain_epoch: number | string;
+    }>(
+      `SELECT archived, archived_at, archive_expires_at, embedding_drain_token,
+              embedding_drain_epoch
+         FROM sources
+        WHERE id = $1`,
       [sourceId],
-    )).toEqual([{
+    ))[0]!;
+    expect(staged).toMatchObject({
       archived: false,
       archived_at: null,
       archive_expires_at: null,
-    }]);
+    });
+    expect(staged.embedding_drain_token).toStartWith('migration:');
 
     const page = (await source.listPages({ sourceId, limit: 10 }))
       .find((candidate) => candidate.slug === slug);
     expect(page).toBeDefined();
-    await target.putPage(slug, {
-      type: page!.type,
-      title: page!.title,
-      compiled_truth: page!.compiled_truth,
-      timeline: page!.timeline,
-      frontmatter: page!.frontmatter,
-      content_hash: page!.content_hash,
-    }, sourceOpts);
-    const chunks = await source.getChunksWithEmbeddings(slug, sourceOpts);
-    await target.upsertChunks(slug, chunks.map((chunk) => ({
-      chunk_index: chunk.chunk_index,
-      chunk_text: chunk.chunk_text,
-      chunk_source: chunk.chunk_source,
-      embedding: chunk.embedding || undefined,
-      model: chunk.model,
-      token_count: chunk.token_count || undefined,
-    })), sourceOpts);
-    for (const tag of await source.getTags(slug, sourceOpts)) {
-      await target.addTag(slug, tag, sourceOpts);
-    }
-    for (const entry of await source.getTimeline(slug, sourceOpts)) {
-      await target.addTimelineEntry(slug, {
-        date: entry.date,
-        source: entry.source,
-        summary: entry.summary,
-        detail: entry.detail,
+    await withMigrationSourceWriteFence(target, sourceId, async (tx) => {
+      await tx.putPage(slug, {
+        type: page!.type,
+        title: page!.title,
+        compiled_truth: page!.compiled_truth,
+        timeline: page!.timeline,
+        frontmatter: page!.frontmatter,
+        content_hash: page!.content_hash,
       }, sourceOpts);
-    }
-    for (const raw of await source.getRawData(slug, undefined, sourceOpts)) {
-      await target.putRawData(slug, raw.source, raw.data, sourceOpts);
-    }
-    for (const link of await source.getLinks(slug, sourceOpts)) {
-      await target.addLink(
-        link.from_slug,
-        link.to_slug,
-        link.context,
-        link.link_type,
-        undefined,
-        undefined,
-        undefined,
-        { fromSourceId: sourceId, toSourceId: sourceId },
-      );
-    }
+      const chunks = await source.getChunksWithEmbeddings(slug, sourceOpts);
+      await tx.upsertChunks(slug, chunks.map((chunk) => ({
+        chunk_index: chunk.chunk_index,
+        chunk_text: chunk.chunk_text,
+        chunk_source: chunk.chunk_source,
+        embedding: chunk.embedding || undefined,
+        model: chunk.model,
+        token_count: chunk.token_count || undefined,
+      })), sourceOpts);
+      for (const tag of await source.getTags(slug, sourceOpts)) {
+        await tx.addTag(slug, tag, sourceOpts);
+      }
+      for (const entry of await source.getTimeline(slug, sourceOpts)) {
+        await tx.addTimelineEntry(slug, {
+          date: entry.date,
+          source: entry.source,
+          summary: entry.summary,
+          detail: entry.detail,
+        }, sourceOpts);
+      }
+      for (const raw of await source.getRawData(slug, undefined, sourceOpts)) {
+        await tx.putRawData(slug, raw.source, raw.data, sourceOpts);
+      }
+      for (const link of await source.getLinks(slug, sourceOpts)) {
+        await tx.addLink(
+          link.from_slug,
+          link.to_slug,
+          link.context,
+          link.link_type,
+          undefined,
+          undefined,
+          undefined,
+          { fromSourceId: sourceId, toSourceId: sourceId },
+        );
+      }
+    });
 
     expect(await finalizeArchivedSourceRowsForMigration(source, target)).toBe(1);
     const finalSource = await target.executeRaw<{
@@ -347,14 +361,16 @@ describe('migrate-engine source row copy', () => {
     expect(interruptedDrain?.purpose).toBe('migration');
     await copySourceRowsForMigration(source, target, { stageArchivedAsActive: true });
     expect(await target.executeRaw(
-      `SELECT archived, archived_at, archive_expires_at, embedding_drain_token
+      `SELECT archived, archived_at, archive_expires_at, embedding_drain_token,
+              embedding_drain_epoch
          FROM sources WHERE id = $1`,
       [sourceId],
     )).toEqual([{
       archived: false,
       archived_at: null,
       archive_expires_at: null,
-      embedding_drain_token: null,
+      embedding_drain_token: interruptedDrain!.token,
+      embedding_drain_epoch: interruptedDrain!.epoch,
     }]);
     expect(await finalizeArchivedSourceRowsForMigration(source, target)).toBe(1);
 
@@ -404,6 +420,9 @@ describe('migrate-engine source row copy', () => {
     await copySourceRowsForMigration(edgeSource, edgeTarget, {
       stageArchivedAsActive: true,
     });
+    const migrationDrain = await beginSourceArchiveDrain(edgeTarget, sourceId, 'migration');
+    expect(migrationDrain?.purpose).toBe('migration');
+    expect(await cancelSourceArchiveDrain(edgeTarget, migrationDrain!)).toBe(true);
     const manualDrain = await beginSourceArchiveDrain(edgeTarget, sourceId, 'manual');
     expect(manualDrain?.purpose).toBe('manual');
 
@@ -417,56 +436,6 @@ describe('migrate-engine source row copy', () => {
       [sourceId],
     ))[0]?.embedding_drain_token).toBe(manualDrain!.token);
     await cancelSourceArchiveDrain(edgeTarget, manualDrain!);
-  }, 60_000);
-
-  test('does not cancel a replacement migration drain before source staging', async () => {
-    const sourceId = 'replacement-target-drain';
-    await edgeSource.executeRaw(
-      `INSERT INTO sources (id, name, config)
-       VALUES ($1, 'Replacement Target Drain', '{}'::jsonb)`,
-      [sourceId],
-    );
-    expect((await softDeleteSourceGuarded(edgeSource, sourceId)).reason).toBe('archived');
-    await copySourceRowsForMigration(edgeSource, edgeTarget, {
-      stageArchivedAsActive: true,
-    });
-    const observed = await beginSourceArchiveDrain(edgeTarget, sourceId, 'migration');
-    expect(observed?.purpose).toBe('migration');
-    const replacements: NonNullable<Awaited<ReturnType<typeof beginSourceArchiveDrain>>>[] = [];
-    let replaced = false;
-    const replacingTarget = new Proxy(edgeTarget, {
-      get(realTarget, prop, receiver) {
-        if (prop === 'executeRaw') {
-          return async <T>(sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) => {
-            const rows = await realTarget.executeRaw<T>(sql, params, opts);
-            if (
-              !replaced
-              && params?.[0] === sourceId
-              && /SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token/i.test(sql)
-              && /embedding_drain_epoch/i.test(sql)
-            ) {
-              replaced = true;
-              expect(await cancelSourceArchiveDrain(realTarget, observed!)).toBe(true);
-              const replacement = await beginSourceArchiveDrain(realTarget, sourceId, 'migration');
-              if (replacement) replacements.push(replacement);
-            }
-            return rows;
-          };
-        }
-        return Reflect.get(realTarget, prop, receiver);
-      },
-    }) as unknown as BrainEngine;
-
-    await expect(copySourceRowsForMigration(edgeSource, replacingTarget, {
-      stageArchivedAsActive: true,
-    })).rejects.toThrow('ownership changed');
-    expect(replaced).toBe(true);
-    expect(replacements[0]?.purpose).toBe('migration');
-    expect((await edgeTarget.executeRaw<{ embedding_drain_token: string | null }>(
-      `SELECT embedding_drain_token FROM sources WHERE id = $1`,
-      [sourceId],
-    ))[0]?.embedding_drain_token).toBe(replacements[0]!.token);
-    expect(await cancelSourceArchiveDrain(edgeTarget, replacements[0]!)).toBe(true);
   }, 60_000);
 
   test('rejects an invalid archived default source', async () => {

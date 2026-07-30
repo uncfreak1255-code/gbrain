@@ -155,10 +155,12 @@ describe('ConnectionManager — describeMode + dual-pool routing', () => {
   });
 
   test('non-Supabase URL → single mode', () => {
-    const cm = new ConnectionManager({ url: 'postgresql://u:p@localhost:5432/db' });
+    const url = 'postgresql://u@localhost:5432/db';
+    const cm = new ConnectionManager({ url });
     expect(cm.isSupabase()).toBe(false);
     expect(cm.isDualPoolActive()).toBe(false);
     expect(cm.describeMode().mode).toBe('single (non-supabase)');
+    expect(cm.resolveSessionUrl()).toBe(url);
   });
 
   test('Supabase pooler URL → dual mode (without kill-switch)', () => {
@@ -169,6 +171,7 @@ describe('ConnectionManager — describeMode + dual-pool routing', () => {
     expect(cm.isDualPoolActive()).toBe(true);
     expect(cm.describeMode().mode).toBe('split');
     expect(cm.describeMode().direct_host).toContain('db.abc.supabase.co:5432');
+    expect(cm.resolveSessionUrl()).toContain('db.abc.supabase.co:5432');
   });
 
   test('kill-switch active → single mode (kill-switch)', () => {
@@ -180,6 +183,7 @@ describe('ConnectionManager — describeMode + dual-pool routing', () => {
     expect(cm.isKillSwitchActive()).toBe(true);
     expect(cm.isDualPoolActive()).toBe(false);
     expect(cm.describeMode().mode).toBe('single (kill-switch)');
+    expect(cm.resolveSessionUrl()).toBeNull();
   });
 
   test('explicit directUrl override wins', () => {
@@ -236,5 +240,68 @@ describe('ConnectionManager — parent inheritance (A2)', () => {
       if (original === undefined) delete process.env.GBRAIN_DISABLE_DIRECT_POOL;
       else process.env.GBRAIN_DISABLE_DIRECT_POOL = original;
     }
+  });
+});
+
+describe('ConnectionManager — session pool lifecycle', () => {
+  test('disconnect invalidates and closes an in-flight session initializer', async () => {
+    const cm = new ConnectionManager({ url: 'postgresql://u@localhost:5432/db' });
+    let resolveInit!: (pool: unknown) => void;
+    const initGate = new Promise<unknown>((resolve) => { resolveInit = resolve; });
+    let ended = 0;
+    const pool = {
+      end: async () => { ended += 1; },
+    };
+
+    const internals = cm as unknown as {
+      initSessionPool: () => Promise<unknown>;
+      _sessionPool: unknown | null;
+      _sessionInit: Promise<unknown> | null;
+    };
+    internals.initSessionPool = () => initGate;
+
+    const session = cm.session();
+    const disconnect = cm.disconnect();
+    resolveInit(pool);
+
+    await expect(session).rejects.toThrow('disconnected while initializing the session pool');
+    await disconnect;
+    expect(ended).toBe(1);
+    expect(internals._sessionPool).toBeNull();
+    expect(internals._sessionInit).toBeNull();
+  });
+
+  test('a new session request cannot race disconnect and publish another pool', async () => {
+    const cm = new ConnectionManager({ url: 'postgresql://u@localhost:5432/db' });
+    let resolveInit!: (pool: unknown) => void;
+    const initGate = new Promise<unknown>((resolve) => { resolveInit = resolve; });
+    let initCalls = 0;
+    let ended = 0;
+    const pool = {
+      end: async () => { ended += 1; },
+    };
+
+    const internals = cm as unknown as {
+      initSessionPool: () => Promise<unknown>;
+      _sessionPool: unknown | null;
+      _sessionInit: Promise<unknown> | null;
+    };
+    internals.initSessionPool = () => {
+      initCalls += 1;
+      return initGate;
+    };
+
+    const firstSession = cm.session();
+    const disconnect = cm.disconnect();
+    const racingSession = cm.session();
+
+    await expect(racingSession).rejects.toThrow('session pool is unavailable after disconnect has started');
+    expect(initCalls).toBe(1);
+    resolveInit(pool);
+    await expect(firstSession).rejects.toThrow('disconnected while initializing the session pool');
+    await disconnect;
+    expect(ended).toBe(1);
+    expect(internals._sessionPool).toBeNull();
+    expect(internals._sessionInit).toBeNull();
   });
 });

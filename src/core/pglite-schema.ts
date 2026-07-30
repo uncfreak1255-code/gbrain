@@ -1546,6 +1546,106 @@ BEGIN
 END;
 $fn$ LANGUAGE plpgsql;
 
+-- Migration drains must fence destructive target work as well as inserts and
+-- updates. Archived cleanup remains legal after the drain token is cleared.
+CREATE OR REPLACE FUNCTION enforce_source_lifecycle_delete_lock_fn()
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
+BEGIN
+  PERFORM pg_advisory_xact_lock_shared(
+    hashtextextended('gbrain:source-lifecycle', 0)
+  );
+  RETURN NULL;
+END;
+$fn$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_draining_source_delete_fn()
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
+DECLARE
+  source_ref TEXT;
+  source_draining BOOLEAN;
+BEGIN
+  source_ref := to_jsonb(OLD)->>TG_ARGV[0];
+  IF source_ref IS NULL THEN RETURN OLD; END IF;
+  PERFORM pg_advisory_xact_lock_shared(
+    hashtextextended('gbrain:source-lifecycle', 0)
+  );
+  SELECT embedding_drain_token IS NOT NULL
+    INTO source_draining
+    FROM public.sources
+   WHERE id = source_ref
+   FOR SHARE;
+  IF FOUND AND source_draining THEN
+    RAISE EXCEPTION
+      'Cannot delete from %: source % is draining', TG_TABLE_NAME, source_ref
+      USING ERRCODE = '23503';
+  END IF;
+  RETURN OLD;
+END;
+$fn$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_draining_source_row_delete_fn()
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
+BEGIN
+  IF OLD.embedding_drain_token IS NOT NULL THEN
+    RAISE EXCEPTION
+      'Cannot delete source % while it is draining', OLD.id
+      USING ERRCODE = '23503';
+  END IF;
+  RETURN OLD;
+END;
+$fn$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_draining_source_page_delete_fn()
+RETURNS trigger
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
+DECLARE
+  page_refs BIGINT[] := ARRAY[]::BIGINT[];
+  source_ref TEXT;
+  source_refs TEXT[] := ARRAY[]::TEXT[];
+BEGIN
+  IF TG_NARGS < 1 THEN
+    RAISE EXCEPTION 'Draining-source page delete guard requires at least one page column';
+  END IF;
+  SELECT COALESCE(
+           array_agg(DISTINCT (to_jsonb(OLD)->>page_column)::BIGINT
+                     ORDER BY (to_jsonb(OLD)->>page_column)::BIGINT),
+           ARRAY[]::BIGINT[]
+         )
+    INTO page_refs
+    FROM unnest(TG_ARGV) AS page_columns(page_column)
+   WHERE to_jsonb(OLD)->>page_column IS NOT NULL;
+  IF cardinality(page_refs) = 0 THEN RETURN NULL; END IF;
+
+  PERFORM pg_advisory_xact_lock_shared(
+    hashtextextended('gbrain:source-lifecycle', 0)
+  );
+  SELECT COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
+    INTO source_refs
+    FROM public.pages
+   WHERE id = ANY(page_refs);
+  FOR source_ref IN
+    SELECT id
+      FROM public.sources
+     WHERE id = ANY(source_refs)
+       AND embedding_drain_token IS NOT NULL
+     ORDER BY id
+     FOR SHARE
+  LOOP
+    RAISE EXCEPTION
+      'Cannot delete from %: page source % is draining', TG_TABLE_NAME, source_ref
+      USING ERRCODE = '23503';
+  END LOOP;
+  RETURN OLD;
+END;
+$fn$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION enforce_active_source_page_rehome_fn()
 RETURNS trigger
 SET search_path = pg_catalog, public, pg_temp
@@ -1619,6 +1719,15 @@ CREATE TRIGGER source_archive_transition_guard
   BEFORE UPDATE OF archived ON public.sources
   FOR EACH ROW EXECUTE FUNCTION enforce_source_archive_transition_fn();
 
+DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON public.sources;
+CREATE TRIGGER source_lifecycle_delete_lock_guard
+  BEFORE DELETE ON public.sources
+  FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn();
+DROP TRIGGER IF EXISTS source_draining_delete_guard ON public.sources;
+CREATE TRIGGER source_draining_delete_guard
+  BEFORE DELETE ON public.sources
+  FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_row_delete_fn();
+
 DO $install$
 DECLARE
   ref RECORD;
@@ -1643,6 +1752,24 @@ BEGIN
       'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I '
       || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
       ref.table_name, 'scalar', ref.column_name
+    );
+    EXECUTE format(
+      'DROP TRIGGER IF EXISTS source_draining_delete_guard ON %I',
+      ref.table_name
+    );
+    EXECUTE format(
+      'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
+      ref.table_name
+    );
+    EXECUTE format(
+      'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
+      || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
+      ref.table_name
+    );
+    EXECUTE format(
+      'CREATE TRIGGER source_draining_delete_guard BEFORE DELETE ON %I '
+      || 'FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_delete_fn(%L)',
+      ref.table_name, ref.column_name
     );
   END LOOP;
 
@@ -1745,6 +1872,19 @@ BEGIN
       ref.table_name
     );
     EXECUTE format(
+      'DROP TRIGGER IF EXISTS source_draining_page_ref_delete_guard ON %I',
+      ref.table_name
+    );
+    EXECUTE format(
+      'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
+      ref.table_name
+    );
+    EXECUTE format(
+      'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
+      || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
+      ref.table_name
+    );
+    EXECUTE format(
       'CREATE TRIGGER source_active_page_ref_insert_guard AFTER INSERT ON %I '
       || 'REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT '
       || 'EXECUTE FUNCTION enforce_active_source_page_reference_fn(%s)',
@@ -1755,6 +1895,13 @@ BEGIN
       'CREATE TRIGGER source_active_page_ref_update_guard AFTER UPDATE ON %I '
       || 'REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT '
       || 'EXECUTE FUNCTION enforce_active_source_page_reference_fn(%s)',
+      ref.table_name,
+      ref.trigger_arguments
+    );
+    EXECUTE format(
+      'CREATE TRIGGER source_draining_page_ref_delete_guard BEFORE DELETE ON %I '
+      || 'FOR EACH ROW '
+      || 'EXECUTE FUNCTION enforce_draining_source_page_delete_fn(%s)',
       ref.table_name,
       ref.trigger_arguments
     );

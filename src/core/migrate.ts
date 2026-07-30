@@ -7546,6 +7546,211 @@ export const MIGRATIONS: Migration[] = [
         FOR EACH ROW EXECUTE FUNCTION enforce_active_source_config_fn();
     `,
   },
+  {
+    version: 137,
+    name: 'draining_source_delete_guards',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_source_lifecycle_delete_lock_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        RETURN NULL;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_draining_source_delete_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_draining BOOLEAN;
+      BEGIN
+        source_ref := to_jsonb(OLD)->>TG_ARGV[0];
+        IF source_ref IS NULL THEN RETURN OLD; END IF;
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        SELECT embedding_drain_token IS NOT NULL
+          INTO source_draining
+          FROM public.sources
+         WHERE id = source_ref
+         FOR SHARE;
+        IF FOUND AND source_draining THEN
+          RAISE EXCEPTION
+            'Cannot delete from %: source % is draining', TG_TABLE_NAME, source_ref
+            USING ERRCODE = '23503';
+        END IF;
+        RETURN OLD;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_draining_source_row_delete_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        IF OLD.embedding_drain_token IS NOT NULL THEN
+          RAISE EXCEPTION
+            'Cannot delete source % while it is draining', OLD.id
+            USING ERRCODE = '23503';
+        END IF;
+        RETURN OLD;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_draining_source_page_delete_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        page_refs BIGINT[] := ARRAY[]::BIGINT[];
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+      BEGIN
+        IF TG_NARGS < 1 THEN
+          RAISE EXCEPTION 'Draining-source page delete guard requires at least one page column';
+        END IF;
+        SELECT COALESCE(
+                 array_agg(DISTINCT (to_jsonb(OLD)->>page_column)::BIGINT
+                           ORDER BY (to_jsonb(OLD)->>page_column)::BIGINT),
+                 ARRAY[]::BIGINT[]
+               )
+          INTO page_refs
+          FROM unnest(TG_ARGV) AS page_columns(page_column)
+         WHERE to_jsonb(OLD)->>page_column IS NOT NULL;
+        IF cardinality(page_refs) = 0 THEN RETURN NULL; END IF;
+
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        SELECT COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM public.pages
+         WHERE id = ANY(page_refs);
+        FOR source_ref IN
+          SELECT id
+            FROM public.sources
+           WHERE id = ANY(source_refs)
+             AND embedding_drain_token IS NOT NULL
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          RAISE EXCEPTION
+            'Cannot delete from %: page source % is draining', TG_TABLE_NAME, source_ref
+            USING ERRCODE = '23503';
+        END LOOP;
+        RETURN OLD;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON public.sources;
+      CREATE TRIGGER source_lifecycle_delete_lock_guard
+        BEFORE DELETE ON public.sources
+        FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn();
+      DROP TRIGGER IF EXISTS source_draining_delete_guard ON public.sources;
+      CREATE TRIGGER source_draining_delete_guard
+        BEFORE DELETE ON public.sources
+        FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_row_delete_fn();
+
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        FOR ref IN
+          SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema
+             AND t.table_name = c.table_name
+           WHERE c.table_schema = 'public'
+             AND t.table_type = 'BASE TABLE'
+             AND c.column_name = 'source_id'
+             AND c.table_name <> 'source_embedding_leases'
+           ORDER BY c.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_draining_delete_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
+            || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_draining_delete_guard BEFORE DELETE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_delete_fn(%L)',
+            ref.table_name, ref.column_name
+          );
+        END LOOP;
+
+        FOR ref IN
+          SELECT page_refs.table_name,
+                 string_agg(quote_literal(page_refs.column_name), ', '
+                            ORDER BY page_refs.column_name) AS trigger_arguments
+            FROM (
+              SELECT DISTINCT child_table.relname AS table_name,
+                              child_column.attname AS column_name
+                FROM pg_constraint constraint_
+                JOIN pg_class child_table ON child_table.oid = constraint_.conrelid
+                JOIN pg_namespace child_namespace ON child_namespace.oid = child_table.relnamespace
+                JOIN pg_class parent_table ON parent_table.oid = constraint_.confrelid
+                JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent_table.relnamespace
+                JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
+                  AS child_key(attnum, ordinal_position) ON true
+                JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
+                  AS parent_key(attnum, ordinal_position)
+                  ON parent_key.ordinal_position = child_key.ordinal_position
+                JOIN pg_attribute child_column
+                  ON child_column.attrelid = child_table.oid
+                 AND child_column.attnum = child_key.attnum
+                JOIN pg_attribute parent_column
+                  ON parent_column.attrelid = parent_table.oid
+                 AND parent_column.attnum = parent_key.attnum
+               WHERE constraint_.contype = 'f'
+                 AND child_namespace.nspname = 'public'
+                 AND parent_namespace.nspname = 'public'
+                 AND parent_table.relname = 'pages'
+                 AND parent_column.attname = 'id'
+            ) AS page_refs
+           GROUP BY page_refs.table_name
+           ORDER BY page_refs.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_draining_page_ref_delete_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
+            || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_draining_page_ref_delete_guard BEFORE DELETE ON %I '
+            || 'FOR EACH ROW '
+            || 'EXECUTE FUNCTION enforce_draining_source_page_delete_fn(%s)',
+            ref.table_name,
+            ref.trigger_arguments
+          );
+        END LOOP;
+      END;
+      $install$;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

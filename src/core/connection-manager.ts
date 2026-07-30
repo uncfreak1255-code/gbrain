@@ -1,10 +1,12 @@
 /**
  * Connection Manager — route Postgres queries by query type (v0.30.1, Fix 1).
  *
- * Three pools, one decision: read() goes to the pooler (port 6543, fast,
- * many connections); ddl() and bulk() go to a direct connection (port 5432,
- * 30min statement_timeout, capped at 3 conns) so DDL doesn't time out on
- * the Supabase pooler's 2-min statement_timeout.
+ * Three work routes plus one dedicated session-lock pool: read() goes to the
+ * pooler (port 6543, fast, many connections); ddl() and bulk() go to a direct
+ * connection (port 5432, 30min statement_timeout, capped at 3 conns) so DDL
+ * doesn't time out on the Supabase pooler's 2-min statement_timeout. session()
+ * owns one separate direct backend so long-lived advisory locks cannot consume
+ * a work-pool slot or leak through transaction pooling.
  *
  * The connection-manager is the URL-routing layer. It layers on top of
  * postgres.js's existing pool primitives + PostgresEngine.withReservedConnection.
@@ -195,6 +197,13 @@ export class ConnectionManager {
   private _readPoolOwnedExternally: boolean;
   private _directInit: Promise<Sql | null> | null = null;
   private _directPool: Sql | null = null;
+  /** Dedicated one-connection pool for session advisory locks. */
+  private _sessionInit: Promise<Sql> | null = null;
+  private _sessionPool: Sql | null = null;
+  /** Invalidates an in-flight session-pool initializer during disconnect. */
+  private _sessionGeneration = 0;
+  /** Disconnect is terminal for this manager's dedicated session pool. */
+  private _sessionClosed = false;
   private _killSwitch: boolean;
   private _directUrl: string | null;
   private _isSupabase: boolean;
@@ -227,6 +236,11 @@ export class ConnectionManager {
   isSupabase(): boolean { return this._isSupabase; }
   isKillSwitchActive(): boolean { return this._killSwitch; }
   resolveDirectUrl(): string | null { return this._directUrl; }
+  /** Exact endpoint safe for a dedicated session-lock connection. */
+  resolveSessionUrl(): string | null {
+    if (this._isSupabase && !this.isDualPoolActive()) return null;
+    return this.isDualPoolActive() ? this._directUrl : this.opts.url;
+  }
 
   /**
    * Internal: peek at the read pool without forcing init. Used by parent
@@ -304,6 +318,69 @@ export class ConnectionManager {
       return this.getReadPool();
     }
     return this.getDirectPool();
+  }
+
+  /**
+   * Return a dedicated one-connection pool for session-scoped advisory locks.
+   * Work performed while the lock is held continues through the normal pools,
+   * so even a configured pool size of one cannot self-deadlock. Supabase's
+   * transaction pooler is never accepted as the session endpoint.
+   */
+  async session(): Promise<Sql> {
+    if (this._sessionClosed) {
+      throw new Error('connection-manager: session pool is unavailable after disconnect has started');
+    }
+    const url = this.resolveSessionUrl();
+    if (!url) {
+      throw new Error(
+        'A direct Postgres connection is required for migrate-engine session locking; '
+        + 'configure GBRAIN_DIRECT_DATABASE_URL and enable the direct pool',
+      );
+    }
+    if (this._sessionPool) return this._sessionPool;
+    if (!this._sessionInit) {
+      const generation = this._sessionGeneration;
+      let sessionInit!: Promise<Sql>;
+      sessionInit = this.initSessionPool(url).then(async (pool) => {
+        if (this._sessionGeneration !== generation || this._sessionInit !== sessionInit) {
+          await endPoolBounded(pool);
+          throw new Error('connection-manager: disconnected while initializing the session pool');
+        }
+        this._sessionPool = pool;
+        return pool;
+      }).catch((error) => {
+        // An invalidated initializer must not clear a newer retry's cache.
+        if (this._sessionInit === sessionInit) this._sessionInit = null;
+        throw error;
+      });
+      this._sessionInit = sessionInit;
+    }
+    return this._sessionInit;
+  }
+
+  private async initSessionPool(url: string): Promise<Sql> {
+    const opts: Record<string, unknown> = {
+      max: 1,
+      idle_timeout: 20,
+      connect_timeout: 10,
+      types: { bigint: postgres.BigInt },
+    };
+    const prepare = resolvePrepare(url);
+    if (typeof prepare === 'boolean') opts.prepare = prepare;
+    const pool = postgres(url, opts);
+    try {
+      await pool`SELECT 1`;
+      logConnectionEvent({
+        pool: this.isDualPoolActive() ? 'ddl' : 'single',
+        op: 'init',
+        caller: 'ConnectionManager.session',
+        host: this.hostOnly(url),
+      });
+      return pool;
+    } catch (error) {
+      await endPoolBounded(pool);
+      throw error;
+    }
   }
 
   private async getDirectPool(): Promise<Sql> {
@@ -405,6 +482,19 @@ export class ConnectionManager {
     // instance/module pool is added downstream) and neither can hang teardown
     // past the CLI's 10s force-exit. endPoolBounded never throws.
     const ends: Promise<void>[] = [];
+    const sessionPool = this._sessionPool;
+    const pendingSessionInit = sessionPool ? null : this._sessionInit;
+    this._sessionClosed = true;
+    this._sessionGeneration += 1;
+    this._sessionPool = null;
+    this._sessionInit = null;
+    if (sessionPool) {
+      ends.push(endPoolBounded(sessionPool));
+    } else if (pendingSessionInit) {
+      // Wait for the invalidated initializer to close the pool it created, so
+      // disconnect never returns before a late backend has been reclaimed.
+      ends.push(pendingSessionInit.then(() => undefined, () => undefined));
+    }
     if (this._directPool) {
       ends.push(endPoolBounded(this._directPool));
       this._directPool = null;

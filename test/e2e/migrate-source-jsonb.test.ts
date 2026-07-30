@@ -15,6 +15,7 @@ import { beginSourceArchiveDrain } from '../../src/core/source-embedding-lease.t
 import {
   copySourceRowsForMigration,
   finalizeArchivedSourceRowsForMigration,
+  withMigrationSourceWriteFence,
 } from '../../src/commands/migrate-engine.ts';
 
 const skip = !hasDatabase();
@@ -65,7 +66,7 @@ describeE2E('Postgres migrate-engine source copy config shape', () => {
     expect(rows[0].k).toBe('v');
   }, 60_000);
 
-  test('archived PGLite sources stay writable while copying and finish archived in Postgres', async () => {
+  test('archived PGLite sources stay fenced while copying and finish archived in Postgres', async () => {
     const target = getEngine();
     const conn = getConn();
     const sourceId = 'archived-cross-engine';
@@ -93,12 +94,14 @@ describeE2E('Postgres migrate-engine source copy config shape', () => {
     );
 
     await copySourceRowsForMigration(source, target, { stageArchivedAsActive: true });
-    await target.putPage(slug, {
-      type: 'project',
-      title: 'Archived Cross Engine',
-      compiled_truth: 'Cross-engine migration preserves archived source data.',
-      timeline: '',
-    }, { sourceId });
+    await withMigrationSourceWriteFence(target, sourceId, async (tx) => {
+      await tx.putPage(slug, {
+        type: 'project',
+        title: 'Archived Cross Engine',
+        compiled_truth: 'Cross-engine migration preserves archived source data.',
+        timeline: '',
+      }, { sourceId });
+    });
     await finalizeArchivedSourceRowsForMigration(source, target);
 
     const rows = await conn.unsafe(`
@@ -119,17 +122,18 @@ describeE2E('Postgres migrate-engine source copy config shape', () => {
     expect(rows[0].pages).toBe(1);
 
     await copySourceRowsForMigration(source, target, { stageArchivedAsActive: true });
-    expect((await beginSourceArchiveDrain(target, sourceId, 'migration'))?.purpose)
-      .toBe('migration');
+    const observedDrain = await beginSourceArchiveDrain(target, sourceId, 'migration');
+    expect(observedDrain?.purpose).toBe('migration');
     await copySourceRowsForMigration(source, target, { stageArchivedAsActive: true });
     const recovered = await conn.unsafe(`
-      SELECT archived, embedding_drain_token
+      SELECT archived, embedding_drain_token, embedding_drain_epoch
         FROM sources
        WHERE id = $1
     `, [sourceId]);
     expect(recovered).toHaveLength(1);
     expect(recovered[0].archived).toBe(false);
-    expect(recovered[0].embedding_drain_token).toBeNull();
+    expect(recovered[0].embedding_drain_token).toBe(observedDrain!.token);
+    expect(Number(recovered[0].embedding_drain_epoch)).toBe(observedDrain!.epoch);
     await finalizeArchivedSourceRowsForMigration(source, target);
   }, 60_000);
 

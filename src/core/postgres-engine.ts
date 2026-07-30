@@ -895,8 +895,10 @@ export class PostgresEngine implements BrainEngine {
     }) as Promise<T>;
   }
 
-  async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
-    const pool = this.sql;
+  private async withReservedPool<T>(
+    pool: ReturnType<typeof postgres>,
+    fn: (conn: ReservedConnection) => Promise<T>,
+  ): Promise<T> {
     const reserved = await pool.reserve();
     try {
       const conn: ReservedConnection = {
@@ -920,6 +922,28 @@ export class PostgresEngine implements BrainEngine {
     } finally {
       reserved.release();
     }
+  }
+
+  async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
+    return this.withReservedPool(this.sql, fn);
+  }
+
+  /**
+   * Reserve one backend that is safe for session-scoped state. The connection
+   * manager owns a dedicated one-connection pool so a long-held lock cannot
+   * consume the only work/DDL slot. Supabase transaction-pooler topologies use
+   * the direct URL and fail closed when no direct route is available.
+   */
+  async withSessionReservedConnection<T>(
+    fn: (conn: ReservedConnection) => Promise<T>,
+  ): Promise<T> {
+    if (!this.connectionManager) {
+      throw new Error(
+        'Cannot reserve a migrate-engine session connection before Postgres is connected',
+      );
+    }
+    const pool = await this.connectionManager.session();
+    return this.withReservedPool(pool, fn);
   }
 
   // Pages CRUD
