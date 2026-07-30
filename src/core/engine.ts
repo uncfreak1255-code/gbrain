@@ -58,6 +58,23 @@ export interface SourceRow {
   config: Record<string, unknown>;
 }
 
+export interface PurgeDeletedPageCandidate {
+  slug: string;
+  source_id: string;
+  deleted_at: Date;
+}
+
+export interface PurgeDeletedPagesResult {
+  slugs: string[];
+  count: number;
+  /** Present only when `dryRun` is true. */
+  candidates?: PurgeDeletedPageCandidate[];
+  /** Present only when a dry-run candidate preview hit its read ceiling. */
+  truncated?: boolean;
+  /** Present only when a dry-run candidate preview has a read ceiling. */
+  candidate_limit?: number;
+}
+
 export interface TraverseGraphOpts {
   sourceId?: string;
   sourceIds?: string[];
@@ -662,6 +679,13 @@ export interface BrainEngine {
   initSchema(): Promise<void>;
   transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T>;
   /**
+   * Run `fn` inside a database savepoint on the current transaction-scoped
+   * engine. Callers must invoke this only from the engine passed to
+   * `transaction()`. Each implementation owns its driver's recovery
+   * semantics (notably postgres.js error bookkeeping).
+   */
+  savepoint<T>(name: string, fn: (engine: BrainEngine) => Promise<T>): Promise<T>;
+  /**
    * Run `fn` with a dedicated connection (Postgres: reserved backend;
    * PGLite: pass-through). See `ReservedConnection` for semantics and
    * usage constraints. Release is automatic.
@@ -805,9 +829,15 @@ export interface BrainEngine {
   /**
    * v0.26.5 — hard-delete pages whose `deleted_at` is older than the cutoff.
    * Called by the autopilot purge phase and by the `gbrain pages purge-deleted`
-   * CLI escape hatch. Cascades through existing FKs.
+   * CLI escape hatch. `dryRun` returns current aged candidates owned by
+   * non-draining sources without deleting. Live work is bounded per sweep;
+   * lifecycle-protected cascades may still be retained when execution rechecks
+   * database guards. Real purges cascade through existing FKs.
    */
-  purgeDeletedPages(olderThanHours: number): Promise<{ slugs: string[]; count: number }>;
+  purgeDeletedPages(
+    olderThanHours: number,
+    opts?: { dryRun?: boolean },
+  ): Promise<PurgeDeletedPagesResult>;
   /**
    * v0.26.5: by default `listPages` excludes soft-deleted rows. Set
    * `filters.includeDeleted: true` to surface them.

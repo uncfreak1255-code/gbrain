@@ -14,7 +14,7 @@ import type {
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
-  SourceRow,
+  SourceRow, PurgeDeletedPagesResult,
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
@@ -59,6 +59,7 @@ import {
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
 import { hasCJK, escapeLikePattern } from './cjk.ts';
+import { purgeDeletedPagesSafely } from './purge-deleted-pages.ts';
 
 type PGLiteDB = PGlite;
 
@@ -940,6 +941,32 @@ export class PGLiteEngine implements BrainEngine {
     });
   }
 
+  async savepoint<T>(name: string, fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    if (!this._inTransaction) {
+      throw new Error('BrainEngine.savepoint() requires a transaction-scoped engine');
+    }
+    if (!/^[a-z][a-z0-9_]*$/i.test(name)) {
+      throw new Error(`Invalid savepoint name: ${name}`);
+    }
+    await this.db.exec(`SAVEPOINT ${name}`);
+    try {
+      const result = await fn(this);
+      await this.db.exec(`RELEASE SAVEPOINT ${name}`);
+      return result;
+    } catch (error) {
+      try {
+        await this.db.exec(`ROLLBACK TO SAVEPOINT ${name}`);
+        await this.db.exec(`RELEASE SAVEPOINT ${name}`);
+      } catch (savepointError) {
+        throw new AggregateError(
+          [error, savepointError],
+          `Failed to recover ${name} after a savepoint error`,
+        );
+      }
+      throw error;
+    }
+  }
+
   // Pages CRUD
   async getPage(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeDeleted?: boolean }): Promise<Page | null> {
     // v0.26.5: hide soft-deleted by default; opt-in via opts.includeDeleted.
@@ -1133,19 +1160,11 @@ export class PGLiteEngine implements BrainEngine {
     return rows.length > 0;
   }
 
-  async purgeDeletedPages(olderThanHours: number): Promise<{ slugs: string[]; count: number }> {
-    // Clamp to non-negative integer; cascade through FKs (content_chunks,
-    // page_links, chunk_relations) on DELETE.
-    const hours = Math.max(0, Math.floor(olderThanHours));
-    const { rows } = await this.db.query(
-      `DELETE FROM pages
-       WHERE deleted_at IS NOT NULL
-         AND deleted_at < now() - ($1 || ' hours')::interval
-       RETURNING slug`,
-      [hours]
-    );
-    const slugs = (rows as { slug: string }[]).map((r) => r.slug);
-    return { slugs, count: slugs.length };
+  async purgeDeletedPages(
+    olderThanHours: number,
+    opts?: { dryRun?: boolean },
+  ): Promise<PurgeDeletedPagesResult> {
+    return purgeDeletedPagesSafely(this, olderThanHours, opts);
   }
 
   async refreshPageBody(

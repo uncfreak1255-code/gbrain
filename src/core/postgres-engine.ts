@@ -11,7 +11,7 @@ import type {
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
-  SourceRow,
+  SourceRow, PurgeDeletedPagesResult,
 } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
@@ -61,6 +61,7 @@ import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql, buildBestPerPagePoolCte } from './search/sql-ranking.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
+import { purgeDeletedPagesSafely } from './purge-deleted-pages.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -895,6 +896,29 @@ export class PostgresEngine implements BrainEngine {
     }) as Promise<T>;
   }
 
+  async savepoint<T>(name: string, fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    if (!this._inTransaction) {
+      throw new Error('BrainEngine.savepoint() requires a transaction-scoped engine');
+    }
+    if (!/^[a-z][a-z0-9_]*$/i.test(name)) {
+      throw new Error(`Invalid savepoint name: ${name}`);
+    }
+    const tx = this.sql as unknown as postgres.TransactionSql;
+    return tx.savepoint(name, async (savepointSql) => {
+      // postgres.js tracks the first rejected query inside each scope. Binding
+      // the clone to its native savepoint scope is required so a caught query
+      // error does not poison the enclosing transaction callback.
+      const savepointEngine = Object.create(this) as PostgresEngine;
+      Object.defineProperty(savepointEngine, 'sql', { get: () => savepointSql });
+      Object.defineProperty(savepointEngine, '_sql', {
+        value: savepointSql as unknown as ReturnType<typeof postgres>,
+        writable: false,
+      });
+      Object.defineProperty(savepointEngine, '_inTransaction', { value: true });
+      return fn(savepointEngine);
+    }) as Promise<T>;
+  }
+
   private async withReservedPool<T>(
     pool: ReturnType<typeof postgres>,
     fn: (conn: ReservedConnection) => Promise<T>,
@@ -1138,19 +1162,11 @@ export class PostgresEngine implements BrainEngine {
     return rows.length > 0;
   }
 
-  async purgeDeletedPages(olderThanHours: number): Promise<{ slugs: string[]; count: number }> {
-    const sql = this.sql;
-    // Clamp to non-negative integer; runaway purge protection. The DELETE
-    // cascades through content_chunks, page_links, chunk_relations via FKs.
-    const hours = Math.max(0, Math.floor(olderThanHours));
-    const rows = await sql`
-      DELETE FROM pages
-      WHERE deleted_at IS NOT NULL
-        AND deleted_at < now() - (${hours} || ' hours')::interval
-      RETURNING slug
-    `;
-    const slugs = rows.map((r) => r.slug as string);
-    return { slugs, count: slugs.length };
+  async purgeDeletedPages(
+    olderThanHours: number,
+    opts?: { dryRun?: boolean },
+  ): Promise<PurgeDeletedPagesResult> {
+    return purgeDeletedPagesSafely(this, olderThanHours, opts);
   }
 
   async refreshPageBody(
