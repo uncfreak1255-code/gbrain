@@ -297,6 +297,29 @@ describeE2E('migrate-engine source-fence concurrency', () => {
     )).toEqual([{ count: 0 }]);
   }, 30_000);
 
+  test('nullable page references do not suppress ordinary PostgreSQL deletes', async () => {
+    const sourceId = 'migration-nullable-page-delete';
+    await migration.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ($1, $1, jsonb_build_object())`,
+      [sourceId],
+    );
+    const inserted = await migration.executeRaw<{ id: number }>(
+      `INSERT INTO files (
+         source_id, page_id, filename, storage_path, content_hash
+       ) VALUES ($1, NULL, 'orphan.txt', 'nullable/orphan.txt', 'nullable-hash')
+       RETURNING id`,
+      [sourceId],
+    );
+
+    await ordinaryWorker.executeRaw('DELETE FROM files WHERE id = $1', [inserted[0]!.id]);
+
+    expect(await migration.executeRaw(
+      'SELECT COUNT(*)::int AS count FROM files WHERE id = $1',
+      [inserted[0]!.id],
+    )).toEqual([{ count: 0 }]);
+  }, 30_000);
+
   test('only one live migrate-engine command can own a target database', async () => {
     const firstEntered = deferred();
     const releaseFirst = deferred();

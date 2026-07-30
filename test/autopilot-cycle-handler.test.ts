@@ -33,7 +33,11 @@ beforeEach(async () => {
   // Same pattern as test/minions.test.ts.
   await engine.executeRaw('DELETE FROM minion_jobs').catch(() => {});
   await engine.executeRaw('DELETE FROM gbrain_cycle_locks').catch(() => {});
-  await engine.executeRaw(`DELETE FROM sources WHERE id <> 'default'`).catch(() => {});
+  // The interrupted-drain fixture intentionally leaves a source fenced. Clear
+  // that synthetic token before deleting fixtures; production source deletes
+  // now correctly reject rows that are still draining.
+  await engine.executeRaw(`UPDATE sources SET embedding_drain_token = NULL WHERE id <> 'default'`);
+  await engine.executeRaw(`DELETE FROM sources WHERE id <> 'default'`);
   brainDir = mkdtempSync(join(tmpdir(), 'gbrain-autopilot-handler-'));
   execFileSync('git', ['init', '--quiet', brainDir]);
   await engine.executeRaw(

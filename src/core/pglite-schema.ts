@@ -1621,7 +1621,7 @@ BEGIN
     INTO page_refs
     FROM unnest(TG_ARGV) AS page_columns(page_column)
    WHERE to_jsonb(OLD)->>page_column IS NOT NULL;
-  IF cardinality(page_refs) = 0 THEN RETURN NULL; END IF;
+  IF cardinality(page_refs) = 0 THEN RETURN OLD; END IF;
 
   PERFORM pg_advisory_xact_lock_shared(
     hashtextextended('gbrain:source-lifecycle', 0)

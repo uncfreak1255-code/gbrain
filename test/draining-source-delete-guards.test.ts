@@ -117,6 +117,29 @@ describe('draining-source delete guards', () => {
     )).toEqual([{ count: 0 }]);
   }, 30_000);
 
+  test('allows deleting active-source rows whose optional page reference is null', async () => {
+    const sourceId = 'nullable-page-delete';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ($1, $1, jsonb_build_object())`,
+      [sourceId],
+    );
+    const inserted = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO files (
+         source_id, page_id, filename, storage_path, content_hash
+       ) VALUES ($1, NULL, 'orphan.txt', 'nullable/orphan.txt', 'nullable-hash')
+       RETURNING id`,
+      [sourceId],
+    );
+
+    await engine.executeRaw(`DELETE FROM files WHERE id = $1`, [inserted[0]!.id]);
+
+    expect(await engine.executeRaw(
+      `SELECT count(*)::int AS count FROM files WHERE id = $1`,
+      [inserted[0]!.id],
+    )).toEqual([{ count: 0 }]);
+  }, 30_000);
+
   test('force-style deletion preserves pages owned by sources outside the exact fence set', async () => {
     const migratedSourceId = 'force-migrated-source';
     const targetOnlySourceId = 'force-target-only-source';
