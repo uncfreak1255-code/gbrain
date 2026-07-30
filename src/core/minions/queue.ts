@@ -139,24 +139,11 @@ export class MinionQueue {
     }
   }
 
-  /**
-   * Submit a new job.
-   *
-   * Wrapped in engine.transaction(): when parent_job_id is set, takes
-   * SELECT ... FOR UPDATE on the parent so concurrent submissions serialize
-   * on the cap check. Without this, two concurrent submissions could both
-   * see count = N-1 and both insert, blowing max_children.
-   *
-   * Child status is 'waiting' (or 'delayed') — claimable. Parent is flipped
-   * to 'waiting-children' atomically. Idempotency_key dedups via PG unique
-   * partial index; same key returns the existing row (no second insert).
-   */
-  async add(
+  private async validateSubmissionName(
     name: string,
-    data?: Record<string, unknown>,
-    opts?: Partial<MinionJobInput>,
+    data: Record<string, unknown> | undefined,
     trusted?: TrustedSubmitOpts,
-  ): Promise<MinionJob> {
+  ): Promise<string> {
     // Normalize first so the protected-name check and the insert use the same
     // canonical form. Without the trim-before-check, `queue.add(' shell ', ...)`
     // would evade the guard and insert a job literally named 'shell'.
@@ -176,7 +163,7 @@ export class MinionQueue {
     // the requested model literally cannot run a tool loop. The handler
     // (`subagent.ts`) does a defense-in-depth check at dispatch time too.
     if (jobName === 'subagent' && data && typeof data === 'object') {
-      const submittedModel = (data as { model?: unknown }).model;
+      const submittedModel = data.model;
       if (typeof submittedModel === 'string' && submittedModel.length > 0) {
         const { classifyCapabilities } = await import('../ai/capabilities.ts');
         const verdict = classifyCapabilities(submittedModel);
@@ -200,13 +187,55 @@ export class MinionQueue {
         // dispatch. 'ok' passes through silently.
       }
     }
+    return jobName;
+  }
+
+  /**
+   * Submit a new job.
+   *
+   * Wrapped in engine.transaction(): when parent_job_id is set, takes
+   * SELECT ... FOR UPDATE on the parent so concurrent submissions serialize
+   * on the cap check. Without this, two concurrent submissions could both
+   * see count = N-1 and both insert, blowing max_children.
+   *
+   * Child status is 'waiting' (or 'delayed') — claimable. Parent is flipped
+   * to 'waiting-children' atomically. Idempotency_key dedups via PG unique
+   * partial index; same key returns the existing row (no second insert).
+   */
+  async add(
+    name: string,
+    data?: Record<string, unknown>,
+    opts?: Partial<MinionJobInput>,
+    trusted?: TrustedSubmitOpts,
+  ): Promise<MinionJob> {
+    const jobName = await this.validateSubmissionName(name, data, trusted);
     await this.ensureSchema();
 
     const childStatus: MinionJobStatus = opts?.hold_until_children ? 'paused' : (opts?.delay ? 'delayed' : 'waiting');
     const delayUntil = opts?.delay ? new Date(Date.now() + opts.delay) : null;
     const maxSpawnDepth = opts?.max_spawn_depth ?? this.maxSpawnDepth;
 
-    return this.engine.transaction(async (tx) => {
+    return this.engine.transaction((tx) => this.addPrepared(
+      tx,
+      jobName,
+      data,
+      opts,
+      childStatus,
+      delayUntil,
+      maxSpawnDepth,
+    ));
+  }
+
+  /** Insert an already-validated submission into an existing transaction. */
+  private async addPrepared(
+    tx: BrainEngine,
+    jobName: string,
+    data: Record<string, unknown> | undefined,
+    opts: Partial<MinionJobInput> | undefined,
+    childStatus: MinionJobStatus,
+    delayUntil: Date | null,
+    maxSpawnDepth: number,
+  ): Promise<MinionJob> {
       // 1. Idempotency fast path — if a row already exists for this key, return it
       //    without doing any other work. The unique partial index guarantees
       //    no second row can be inserted with the same non-null key.
@@ -414,7 +443,6 @@ export class MinionQueue {
       }
 
       return child;
-    });
   }
 
   /** Get a job by ID. Returns null if not found. */
@@ -512,7 +540,7 @@ export class MinionQueue {
         .map((row) => Number(row.id)),
     );
     const cancellableStatuses = opts?.includeRetryableTerminal
-      ? "'waiting','active','delayed','waiting-children','paused','failed','dead'"
+      ? "'waiting','active','delayed','waiting-children','paused','completed','failed','dead'"
       : "'waiting','active','delayed','waiting-children','paused'";
 
     const rows = await tx.executeRaw<Record<string, unknown>>(
@@ -536,9 +564,9 @@ export class MinionQueue {
     const parentIds = new Set<number>();
     for (const r of rows) {
       const childId = Number(r.id);
-      // A failed/dead row already emitted its terminal effects. Purge may
-      // reclassify it as cancelled to make retry impossible, but must not emit
-      // a duplicate child_done or unblock its parent a second time.
+      // A completed/failed/dead row already emitted its terminal effects.
+      // Purge may reclassify it as cancelled to make replay/retry impossible,
+      // but must not emit a duplicate child_done or unblock its parent again.
       if (!newlyTerminalizedIds.has(childId)) continue;
       const parentJobId = r.parent_job_id == null ? null : Number(r.parent_job_id);
       const name = r.name as string;
@@ -761,7 +789,7 @@ export class MinionQueue {
       : [...new Set(sourceIds)];
     if (scopedSourceIds?.length === 0) return [];
     const eligibleStatuses = opts?.includeRetryableTerminal
-      ? "'waiting','active','delayed','waiting-children','paused','failed','dead'"
+      ? "'waiting','active','delayed','waiting-children','paused','completed','failed','dead'"
       : "'waiting','active','delayed','waiting-children','paused'";
     const rootLockClause = opts?.waitForLocks ? 'FOR UPDATE' : 'FOR UPDATE SKIP LOCKED';
     return this.engine.transaction(async (tx) => {
@@ -851,7 +879,7 @@ export class MinionQueue {
       `SELECT count(*)::int AS count
          FROM minion_jobs AS candidate
         WHERE candidate.status IN (
-          'waiting','active','delayed','waiting-children','paused','failed','dead'
+          'waiting','active','delayed','waiting-children','paused','completed','failed','dead'
         )
           AND EXISTS (
             SELECT 1 FROM public.sources AS source
@@ -1709,21 +1737,42 @@ export class MinionQueue {
 
   /** Replay a completed/failed/dead job with optional data overrides. Creates a new job. */
   async replayJob(id: number, dataOverrides?: Record<string, unknown>): Promise<MinionJob | null> {
-    const source = await this.getJob(id);
-    if (!source) return null;
-    if (!['completed', 'failed', 'dead'].includes(source.status)) return null;
+    await this.ensureSchema();
+    return this.engine.transaction(async (tx) => {
+      // Hold the original receipt row through the new INSERT. Source purge
+      // locks and reclassifies the same row before deleting the registry entry,
+      // so replay either inserts while the archived-source guard still exists
+      // (and is rejected) or observes the purge's cancelled tombstone.
+      const rows = await tx.executeRaw<Record<string, unknown>>(
+        'SELECT * FROM minion_jobs WHERE id = $1 FOR UPDATE',
+        [id],
+      );
+      if (rows.length === 0) return null;
+      const source = rowToMinionJob(rows[0]);
+      if (!['completed', 'failed', 'dead'].includes(source.status)) return null;
 
-    const data = dataOverrides
-      ? { ...source.data, ...dataOverrides }
-      : source.data;
+      const data = dataOverrides
+        ? { ...source.data, ...dataOverrides }
+        : source.data;
+      const jobName = await this.validateSubmissionName(source.name, data);
+      const opts: Partial<MinionJobInput> = {
+        queue: source.queue,
+        priority: source.priority,
+        max_attempts: source.max_attempts,
+        backoff_type: source.backoff_type,
+        backoff_delay: source.backoff_delay,
+        backoff_jitter: source.backoff_jitter,
+      };
 
-    return this.add(source.name, data, {
-      queue: source.queue,
-      priority: source.priority,
-      max_attempts: source.max_attempts,
-      backoff_type: source.backoff_type,
-      backoff_delay: source.backoff_delay,
-      backoff_jitter: source.backoff_jitter,
+      return this.addPrepared(
+        tx,
+        jobName,
+        data,
+        opts,
+        'waiting',
+        null,
+        this.maxSpawnDepth,
+      );
     });
   }
 

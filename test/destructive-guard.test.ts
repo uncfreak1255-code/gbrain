@@ -268,6 +268,7 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
       `INSERT INTO minion_jobs (name, status, data)
        VALUES
          ('purge-source-job', 'waiting', jsonb_build_object('sourceId', $1::text)),
+         ('purge-completed-job', 'completed', jsonb_build_object('sourceId', $1::text)),
          ('purge-failed-job', 'failed', jsonb_build_object('sourceId', $1::text)),
          ('purge-dead-job', 'dead', jsonb_build_object('sourceId', $1::text)),
          ('recoverable-source-job', 'waiting', jsonb_build_object('sourceId', $2::text))`,
@@ -289,10 +290,13 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     expect(remainingPages[0].n).toBe(0);
     const jobs = await engine.executeRaw<{ id: number | string; name: string; status: string }>(
       `SELECT id, name, status FROM minion_jobs
-        WHERE name IN ('purge-source-job', 'purge-failed-job', 'purge-dead-job')
+        WHERE name IN (
+          'purge-source-job', 'purge-completed-job', 'purge-failed-job', 'purge-dead-job'
+        )
         ORDER BY name`,
     );
     expect(jobs.map(({ name, status }) => ({ name, status }))).toEqual([
+      { name: 'purge-completed-job', status: 'cancelled' },
       { name: 'purge-dead-job', status: 'cancelled' },
       { name: 'purge-failed-job', status: 'cancelled' },
       { name: 'purge-source-job', status: 'cancelled' },
@@ -300,6 +304,7 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     const queue = new MinionQueue(engine);
     for (const job of jobs) {
       expect(await queue.retryJob(Number(job.id))).toBeNull();
+      expect(await queue.replayJob(Number(job.id))).toBeNull();
     }
     const recoverableJob = await engine.executeRaw<{ status: string }>(
       `SELECT status FROM minion_jobs WHERE name = 'recoverable-source-job'`,

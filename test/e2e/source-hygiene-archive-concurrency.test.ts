@@ -177,6 +177,7 @@ describeE2E('source hygiene archive/write concurrency', () => {
     const sourceId = 'purge-locked-job-e2e';
     const waitingName = 'purge-locked-waiting-e2e';
     const failedName = 'purge-locked-failed-e2e';
+    const completedName = 'purge-locked-completed-e2e';
     const lateChildName = 'purge-late-child-e2e';
     const cleaner = new PostgresEngine();
     const locker = new PostgresEngine();
@@ -190,8 +191,8 @@ describeE2E('source hygiene archive/write concurrency', () => {
 
     try {
       await cleaner.executeRaw(
-        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2, $3)`,
-        [waitingName, failedName, lateChildName],
+        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2, $3, $4)`,
+        [waitingName, failedName, completedName, lateChildName],
       );
       await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
       await cleaner.executeRaw(
@@ -202,16 +203,18 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await cleaner.executeRaw(
         `INSERT INTO public.minion_jobs (name, status, data)
          VALUES
-           ($1, 'waiting', jsonb_build_object('sourceId', $3::text)),
-           ($2, 'failed', jsonb_build_object('sourceId', $3::text))`,
-        [waitingName, failedName, sourceId],
+           ($1, 'waiting', jsonb_build_object('sourceId', $4::text)),
+           ($2, 'failed', jsonb_build_object('sourceId', $4::text)),
+           ($3, 'completed', jsonb_build_object('sourceId', $4::text))`,
+        [waitingName, failedName, completedName, sourceId],
       );
       expect(await softDeleteSource(cleaner, sourceId)).toMatchObject({ id: sourceId });
       const seededJobs = await cleaner.executeRaw<{ id: number | string; name: string }>(
-        `SELECT id, name FROM public.minion_jobs WHERE name IN ($1, $2)`,
-        [waitingName, failedName],
+        `SELECT id, name FROM public.minion_jobs WHERE name IN ($1, $2, $3)`,
+        [waitingName, failedName, completedName],
       );
       const failedId = Number(seededJobs.find((job) => job.name === failedName)!.id);
+      const completedId = Number(seededJobs.find((job) => job.name === completedName)!.id);
       const waitingId = Number(seededJobs.find((job) => job.name === waitingName)!.id);
 
       lockTx = locker.transaction(async (tx) => {
@@ -251,22 +254,136 @@ describeE2E('source hygiene archive/write concurrency', () => {
       )).toEqual([]);
       expect(await cleaner.executeRaw<{ name: string; status: string }>(
         `SELECT name, status FROM public.minion_jobs
-          WHERE name IN ($1, $2) ORDER BY name`,
-        [waitingName, failedName],
+          WHERE name IN ($1, $2, $3) ORDER BY name`,
+        [waitingName, failedName, completedName],
       )).toEqual([
+        { name: completedName, status: 'cancelled' },
         { name: failedName, status: 'cancelled' },
         { name: waitingName, status: 'cancelled' },
       ]);
       expect(await new MinionQueue(cleaner).retryJob(failedId)).toBeNull();
+      expect(await new MinionQueue(cleaner).replayJob(completedId)).toBeNull();
     } finally {
       releaseRow.resolve();
       await lockTx?.catch(() => {});
       await cleaner.executeRaw(
-        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2, $3)`,
-        [waitingName, failedName, lateChildName],
+        `DELETE FROM public.minion_jobs WHERE name IN ($1, $2, $3, $4)`,
+        [waitingName, failedName, completedName, lateChildName],
       ).catch(() => {});
       await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
       await Promise.all([cleaner.disconnect(), locker.disconnect(), childAdder.disconnect()]);
+    }
+  }, 30_000);
+
+  test('completed-job replay cannot race source purge and survive deletion', async () => {
+    const sourceId = 'purge-replay-race-e2e';
+    const repoPath = '/tmp/gbrain-purge-replay-race-e2e';
+    const jobName = 'sync';
+    const cleaner = new PostgresEngine();
+    const lifecycleBlocker = new PostgresEngine();
+    const replayer = new PostgresEngine();
+    await cleaner.connect({ database_url: process.env.DATABASE_URL! });
+    await lifecycleBlocker.connect({ database_url: process.env.DATABASE_URL! });
+    await replayer.connect({ database_url: process.env.DATABASE_URL! });
+    const advisoryLocked = deferred();
+    const releaseAdvisory = deferred();
+    let blockerTx: Promise<void> | null = null;
+
+    try {
+      await cleaner.executeRaw(
+        `DELETE FROM public.minion_jobs
+          WHERE name = $1 AND data->>'repoPath' = $2`,
+        [jobName, repoPath],
+      );
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await cleaner.executeRaw(
+        `INSERT INTO public.sources (id, name, local_path, config)
+         VALUES ($1, $1, $2, '{}'::jsonb)`,
+        [sourceId, repoPath],
+      );
+      const seeded = await cleaner.executeRaw<{ id: number | string }>(
+        `INSERT INTO public.minion_jobs (name, status, data)
+         VALUES ($1, 'completed', jsonb_build_object('repoPath', $2::text))
+         RETURNING id`,
+        [jobName, repoPath],
+      );
+      const completedId = Number(seeded[0]!.id);
+      expect(await softDeleteSource(cleaner, sourceId)).toMatchObject({ id: sourceId });
+
+      blockerTx = lifecycleBlocker.transaction(async (tx) => {
+        await tx.executeRaw(
+          `SELECT pg_advisory_xact_lock(
+             hashtextextended('gbrain:source-lifecycle', 0)
+           )`,
+        );
+        advisoryLocked.resolve();
+        await releaseAdvisory.promise;
+      });
+      await advisoryLocked.promise;
+
+      let replaySettled = false;
+      const replay = new MinionQueue(replayer).replayJob(completedId)
+        .then(
+          (job) => job,
+          (error: unknown) => error,
+        )
+        .finally(() => { replaySettled = true; });
+      let replayOwnsReceipt = false;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const available = await cleaner.executeRaw<{ id: number | string }>(
+          `SELECT id FROM public.minion_jobs
+            WHERE id = $1
+            FOR UPDATE SKIP LOCKED`,
+          [completedId],
+        );
+        if (available.length === 0) {
+          replayOwnsReceipt = true;
+          break;
+        }
+        await wait(10);
+      }
+      expect(replayOwnsReceipt).toBe(true);
+      expect(replaySettled).toBe(false);
+
+      let purgeSettled = false;
+      const purge = purgeArchivedSource(cleaner, sourceId)
+        .finally(() => { purgeSettled = true; });
+      await wait(100);
+      expect(purgeSettled).toBe(false);
+
+      releaseAdvisory.resolve();
+      await blockerTx;
+      const replayResult = await replay;
+      expect(replayResult).toBeInstanceOf(Error);
+      expect(String(replayResult)).toMatch(/archived|draining/i);
+      await expect(purge).resolves.toBe(true);
+
+      expect(await cleaner.executeRaw(
+        `SELECT id FROM public.sources WHERE id = $1`,
+        [sourceId],
+      )).toEqual([]);
+      expect(await cleaner.executeRaw<{ status: string }>(
+        `SELECT status FROM public.minion_jobs WHERE id = $1`,
+        [completedId],
+      )).toEqual([{ status: 'cancelled' }]);
+      expect(await cleaner.executeRaw<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM public.minion_jobs
+          WHERE name = $1
+            AND data->>'repoPath' = $2
+            AND status IN ('waiting', 'active', 'delayed', 'waiting-children', 'paused')`,
+        [jobName, repoPath],
+      )).toEqual([{ count: 0 }]);
+    } finally {
+      releaseAdvisory.resolve();
+      await blockerTx?.catch(() => {});
+      await cleaner.executeRaw(
+        `DELETE FROM public.minion_jobs
+          WHERE name = $1 AND data->>'repoPath' = $2`,
+        [jobName, repoPath],
+      ).catch(() => {});
+      await cleaner.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([cleaner.disconnect(), lifecycleBlocker.disconnect(), replayer.disconnect()]);
     }
   }, 30_000);
 

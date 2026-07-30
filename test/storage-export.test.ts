@@ -357,6 +357,48 @@ describe('source-scoped recovery export', () => {
     expect(stdout.join('\n')).not.toContain('Manifest:');
   });
 
+  test('rejects canonically equivalent page paths before writing recovery output', async () => {
+    const composed = 'notes/caf\u00e9';
+    const decomposed = 'notes/cafe\u0301';
+    await engine.putPage(
+      composed,
+      { type: 'note', title: 'Composed', compiled_truth: 'first body' },
+      { sourceId: 'default' },
+    );
+    await engine.putPage(
+      decomposed,
+      { type: 'note', title: 'Decomposed', compiled_truth: 'second body' },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toContain('filesystem-equivalent export output paths');
+    expect(existsSync(outDir)).toBe(false);
+    expect(stdout.join('\n')).not.toContain('Manifest:');
+  });
+
+  test('rejects canonically equivalent file/directory paths before writing recovery output', async () => {
+    await engine.putPage(
+      'notes/caf\u00e9',
+      { type: 'note', title: 'File', compiled_truth: 'first body' },
+      { sourceId: 'default' },
+    );
+    await engine.putPage(
+      'notes/cafe\u0301.md/child',
+      { type: 'note', title: 'Directory', compiled_truth: 'second body' },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toContain('export output path collision');
+    expect(existsSync(outDir)).toBe(false);
+    expect(stdout.join('\n')).not.toContain('Manifest:');
+  });
+
   test('rejects manifest file/directory collisions before writing recovery output', async () => {
     await engine.putPage(
       '.gbrain-export-manifest.json/x',

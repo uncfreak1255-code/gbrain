@@ -107,16 +107,32 @@ function assertNonCollidingScopedWriteSet(
   rawBySlug: Map<string, RawData[]>,
 ): void {
   const root = resolve(outDir);
-  const files = new Set<string>([
-    confinedOutputPath(outDir, '.gbrain-export-manifest.json'),
-  ]);
+  // Recovery exports must be portable across the common case-insensitive and
+  // Unicode-normalization-insensitive filesystems used by operators. Keep the
+  // original path for writes and receipts, but compare an NFC + lowercase key
+  // so canonically equivalent legacy slugs cannot overwrite one another.
+  const collisionKey = (file: string): string => relative(root, file)
+    .split(sep)
+    .map((segment) => segment.normalize('NFC').toLowerCase())
+    .join('/');
+  const files = new Map<string, string>();
+  const addFile = (file: string): void => {
+    const key = collisionKey(file);
+    const existing = files.get(key);
+    if (existing !== undefined) {
+      failExport(
+        `filesystem-equivalent export output paths: `
+        + `${JSON.stringify(relative(root, existing))} and ${JSON.stringify(relative(root, file))}`,
+      );
+    }
+    files.set(key, file);
+  };
+
+  addFile(confinedOutputPath(outDir, '.gbrain-export-manifest.json'));
 
   for (const page of pages) {
     const pagePath = confinedOutputPath(outDir, `${page.slug}.md`);
-    if (files.has(pagePath)) {
-      failExport(`duplicate export output path: ${JSON.stringify(relative(root, pagePath))}`);
-    }
-    files.add(pagePath);
+    addFile(pagePath);
 
     if ((rawBySlug.get(page.slug) ?? []).length > 0) {
       const slugParts = page.slug.split('/');
@@ -124,19 +140,17 @@ function assertNonCollidingScopedWriteSet(
         outDir,
         join(...slugParts.slice(0, -1), '.raw', `${slugParts[slugParts.length - 1]}.json`),
       );
-      if (files.has(rawPath)) {
-        failExport(`duplicate export output path: ${JSON.stringify(relative(root, rawPath))}`);
-      }
-      files.add(rawPath);
+      addFile(rawPath);
     }
   }
 
-  for (const file of files) {
+  for (const file of files.values()) {
     let parent = dirname(file);
     while (parent !== root) {
-      if (files.has(parent)) {
+      const collidingFile = files.get(collisionKey(parent));
+      if (collidingFile !== undefined) {
         failExport(
-          `export output path collision: ${JSON.stringify(relative(root, parent))} `
+          `export output path collision: ${JSON.stringify(relative(root, collidingFile))} `
           + 'would need to be both a file and a directory',
         );
       }

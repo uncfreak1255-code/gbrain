@@ -402,9 +402,9 @@ async function purgeArchivedSourceIds(
 
   // Purge is not ordinary best-effort queue maintenance. Wait for every
   // matching row lock, cancel running/waiting descendants, and reclassify
-  // failed/dead rows so retryJob cannot revive them after the registry row is
-  // gone. The normal cleanup path retains SKIP LOCKED and leaves failed/dead
-  // receipts intact.
+  // completed/failed/dead rows so replayJob/retryJob cannot revive them after
+  // the registry row is gone. The normal cleanup path retains SKIP LOCKED and
+  // leaves terminal receipts intact.
   await new MinionQueue(engine).cancelArchivedSourceJobs(uniqueSourceIds, {
     waitForLocks: true,
     includeRetryableTerminal: true,
