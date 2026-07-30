@@ -19,18 +19,45 @@ import type { BrainEngine } from '../src/core/engine.ts';
 
 // ── Stub engine ────────────────────────────────────────────
 
-function makeStub(registeredSources: string[], paths: Array<{ id: string; local_path: string }>, defaultKey: string | null): BrainEngine {
+function makeStub(
+  registeredSources: string[],
+  paths: Array<{
+    id: string;
+    local_path: string;
+    archived?: boolean;
+    drainToken?: string | null;
+  }>,
+  defaultKey: string | null,
+): BrainEngine {
+  const archivedIds = new Set(paths.filter((path) => path.archived).map((path) => path.id));
+  const drainTokens = new Map(paths.map((path) => [path.id, path.drainToken ?? null]));
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+      if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
+        const target = params?.[0] as string;
+        return (registeredSources.includes(target)
+          ? [{
+            id: target,
+            archived: archivedIds.has(target),
+            embedding_drain_token: drainTokens.get(target) ?? null,
+          } as unknown as T]
+          : []);
+      }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
         const target = params?.[0];
         return (registeredSources.includes(target as string)
           ? [{ id: target } as unknown as T]
           : []);
       }
-      if (sql.includes('SELECT id, local_path FROM sources')) {
-        return paths as unknown as T[];
+      if (sql.includes('SELECT id, local_path')) {
+        return paths.map((path) => ({
+          archived: false,
+          draining: path.drainToken != null,
+          drain_requires_hygiene_candidate: path.drainToken?.startsWith('hygiene-candidate:') ?? false,
+          drain_requires_migration_resume: path.drainToken?.startsWith('migration:') ?? false,
+          ...path,
+        })) as unknown as T[];
       }
       return [];
     },
@@ -61,6 +88,100 @@ describe('resolveSourceId priority 1 — explicit flag', () => {
     const engine = makeStub(['default'], [], null);
     await expect(resolveSourceId(engine, 'WRONG-case!')).rejects.toThrow(/Invalid --source/);
   });
+
+  test('can explicitly name an archived source for admin or restore work', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/retired', archived: true }],
+      null,
+    );
+    await expect(resolveSourceId(engine, 'retired')).resolves.toBe('retired');
+  });
+});
+
+describe('pre-v34 archived-column compatibility', () => {
+  test('falls back to the legacy registered-path query only for an undefined archived column', async () => {
+    let fallbackRead = false;
+    const engine = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string) => {
+        if (sql.includes('SELECT id, local_path, archived')) {
+          throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) {
+          fallbackRead = true;
+          return [{ id: 'legacy-source', local_path: '/legacy/repo' }];
+        }
+        return [];
+      },
+      getConfig: async () => null,
+    } as unknown as BrainEngine;
+
+    expect(await resolveSourceId(engine, null, '/legacy/repo/nested')).toBe('legacy-source');
+    expect(fallbackRead).toBe(true);
+  });
+
+  test('treats an existing automatic source as active when archived is undefined', async () => {
+    const engine = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
+          throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
+        }
+        if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
+          return params?.[0] === 'legacy-source' ? [{ id: 'legacy-source' }] : [];
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) return [];
+        return [];
+      },
+      getConfig: async (key: string) => key === 'sources.default' ? 'legacy-source' : null,
+    } as unknown as BrainEngine;
+
+    await expect(resolveSourceId(engine, null, '/tmp')).resolves.toBe('legacy-source');
+  });
+
+  test('does not swallow non-undefined-column errors from active-source checks', async () => {
+    const engine = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string) => {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
+          throw Object.assign(new Error('database unavailable'), { code: '57P01' });
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) return [];
+        return [];
+      },
+      getConfig: async (key: string) => key === 'sources.default' ? 'legacy-source' : null,
+    } as unknown as BrainEngine;
+
+    await expect(resolveSourceId(engine, null, '/tmp')).rejects.toThrow(/database unavailable/);
+  });
+
+  test('uses one source-state snapshot for automatic routing', async () => {
+    let stateReads = 0;
+    let existenceReads = 0;
+    const engine = {
+      kind: 'pglite' as const,
+      executeRaw: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
+          stateReads++;
+          return params?.[0] === 'restored-source'
+            ? [{ id: 'restored-source', archived: false, embedding_drain_token: null }]
+            : [];
+        }
+        if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
+          existenceReads++;
+          return [{ id: params?.[0] }];
+        }
+        if (sql.includes('SELECT id, local_path FROM sources')) return [];
+        return [];
+      },
+      getConfig: async (key: string) => key === 'sources.default' ? 'restored-source' : null,
+    } as unknown as BrainEngine;
+
+    await expect(resolveSourceId(engine, null, '/tmp')).resolves.toBe('restored-source');
+    expect(stateReads).toBe(1);
+    expect(existenceReads).toBe(0);
+  });
 });
 
 // ── Priority 2: env var ────────────────────────────────────
@@ -72,6 +193,20 @@ describe('resolveSourceId priority 2 — GBRAIN_SOURCE env', () => {
     try {
       const id = await resolveSourceId(engine, null, '/tmp/x');
       expect(id).toBe('env-wins');
+    } finally {
+      delete process.env.GBRAIN_SOURCE;
+    }
+  });
+
+  test('can intentionally name an archived source', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/retired', archived: true }],
+      null,
+    );
+    process.env.GBRAIN_SOURCE = 'retired';
+    try {
+      await expect(resolveSourceId(engine, null, '/tmp')).resolves.toBe('retired');
     } finally {
       delete process.env.GBRAIN_SOURCE;
     }
@@ -111,6 +246,53 @@ describe('resolveSourceId priority 3 — .gbrain-source dotfile walk-up', () => 
     const engine = makeStub(['default'], [], null);
     const id = await resolveSourceId(engine, null, tmpdirPath);
     expect(id).toBe('default');
+  });
+
+  test('refuses an archived dotfile rather than silently routing to default', async () => {
+    writeFileSync(join(tmpdirPath, '.gbrain-source'), 'retired\n');
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/retired', archived: true }],
+      null,
+    );
+    await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(/archived.*cannot be selected automatically/);
+  });
+
+  test('refuses an archived dotfile even when an active local path also matches', async () => {
+    writeFileSync(join(tmpdirPath, '.gbrain-source'), 'retired\n');
+    const engine = makeStub(
+      ['default', 'retired', 'active'],
+      [
+        { id: 'retired', local_path: '/retired', archived: true },
+        { id: 'active', local_path: tmpdirPath },
+      ],
+      null,
+    );
+    await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(
+      /archived.*cannot be selected automatically/,
+    );
+  });
+
+  test('routes a migration-owned dotfile drain back to engine migration', async () => {
+    writeFileSync(join(tmpdirPath, '.gbrain-source'), 'migration-stuck\n');
+    const engine = makeStub(
+      ['default', 'migration-stuck'],
+      [{
+        id: 'migration-stuck',
+        local_path: '/migration-stuck',
+        drainToken: 'migration:fixture',
+      }],
+      null,
+    );
+    await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(
+      /interrupted engine-migration drain.*Rerun the engine migration/,
+    );
+  });
+
+  test('keeps valid-but-unregistered dotfiles as loud errors', async () => {
+    writeFileSync(join(tmpdirPath, '.gbrain-source'), 'missing-source\n');
+    const engine = makeStub(['default'], [], null);
+    await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(/not found/);
   });
 });
 
@@ -152,6 +334,30 @@ describe('resolveSourceId priority 4 — registered local_path longest-prefix ma
     const id = await resolveSourceId(engine, null, '/some/other/dir');
     expect(id).toBe('default');
   });
+
+  test('an archived source sharing the active source path cannot win resolution', async () => {
+    const engine = makeStub(
+      ['default', 'archived-copy'],
+      [
+        { id: 'archived-copy', local_path: '/tmp/shared-brain', archived: true },
+        { id: 'default', local_path: '/tmp/shared-brain' },
+      ],
+      null,
+    );
+    const id = await resolveSourceId(engine, null, '/tmp/shared-brain/pages');
+    expect(id).toBe('default');
+  });
+
+  test('refuses an archived checkout path rather than silently routing to default', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/tmp/retired-brain', archived: true }],
+      null,
+    );
+    await expect(resolveSourceId(engine, null, '/tmp/retired-brain/pages')).rejects.toThrow(
+      /archived.*cannot be selected automatically/,
+    );
+  });
 });
 
 // ── Priority 5: brain-level default ────────────────────────
@@ -161,6 +367,22 @@ describe('resolveSourceId priority 5 — sources.default config key', () => {
     const engine = makeStub(['default', 'custom'], [], 'custom');
     const id = await resolveSourceId(engine, null, '/some/random/dir');
     expect(id).toBe('custom');
+  });
+
+  test('fails loudly when the configured brain default is archived', async () => {
+    const engine = makeStub(
+      ['default', 'retired'],
+      [{ id: 'retired', local_path: '/retired', archived: true }],
+      'retired',
+    );
+    await expect(resolveSourceId(engine, null, '/some/random/dir')).rejects.toThrow(
+      /archived.*sources\.default/,
+    );
+  });
+
+  test('keeps a valid-but-unregistered brain default as a loud error', async () => {
+    const engine = makeStub(['default'], [], 'missing-source');
+    await expect(resolveSourceId(engine, null, '/some/random/dir')).rejects.toThrow(/not found/);
   });
 });
 
@@ -185,6 +407,12 @@ describe('getDefaultSourcePath', () => {
     return {
       kind: 'pglite',
       executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
+          const target = params?.[0] as string;
+          return (registeredSources.includes(target)
+            ? [{ id: target, archived: false, embedding_drain_token: null } as unknown as T]
+            : []);
+        }
         if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
           const target = params?.[0];
           return (registeredSources.includes(target as string)
@@ -198,10 +426,16 @@ describe('getDefaultSourcePath', () => {
           }
           return [];
         }
-        if (sql.includes('SELECT id, local_path FROM sources')) {
+        if (sql.includes('SELECT id, local_path')) {
           return Object.entries(sourcePaths)
             .filter(([_, p]) => p !== null)
-            .map(([id, local_path]) => ({ id, local_path }) as unknown as T);
+            .map(([id, local_path]) => ({
+              id,
+              local_path,
+              archived: false,
+              draining: false,
+              drain_requires_hygiene_candidate: false,
+            }) as unknown as T);
         }
         return [];
       },
@@ -243,6 +477,9 @@ describe('getDefaultSourcePath', () => {
         }
         if (sql.includes('SELECT local_path FROM sources WHERE id = $1')) {
           return [{ local_path: null } as unknown as T];
+        }
+        if (sql.includes('SELECT id, local_path, archived')) {
+          throw Object.assign(new Error('column archived does not exist'), { code: '42703' });
         }
         if (sql.includes('SELECT id, local_path FROM sources')) {
           return [];

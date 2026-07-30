@@ -62,6 +62,7 @@ import { isUndefinedColumnError } from '../core/utils.ts';
 // drift from what search actually filters.
 import { resolveHardExcludes, DEFAULT_HARD_EXCLUDES } from '../core/search/source-boost.ts';
 import { escapeLikePattern, buildVisibilityClause } from '../core/search/sql-ranking.ts';
+import type { SourceHygienePacket } from '../core/source-hygiene.ts';
 
 export interface Check {
   name: string;
@@ -744,7 +745,7 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   try {
     const { findMisroutedPages } = await import('../core/multi-source-drift.ts');
     const sources = await engine.executeRaw<{ id: string; local_path: string | null }>(
-      `SELECT id, local_path FROM sources`,
+      `SELECT id, local_path FROM sources WHERE archived = false`,
     );
     const nonDefaultWithPath = sources.filter(s => s.id !== 'default' && s.local_path);
     if (sources.length > 1 && nonDefaultWithPath.length > 0) {
@@ -2508,7 +2509,7 @@ export async function checkFactsEmbeddingWidthConsistency(engine: BrainEngine): 
 export async function checkSourceRoutingHealth(engine: BrainEngine): Promise<Check> {
   try {
     const sources = await engine.executeRaw<{ id: string }>(
-      `SELECT id FROM sources WHERE id <> 'default'`,
+      `SELECT id FROM sources WHERE id <> 'default' AND archived = false`,
     );
     if (sources.length === 0) {
       return { name: 'source_routing_health', status: 'ok', message: 'Single-source brain (no federation to check)' };
@@ -3719,7 +3720,11 @@ export async function computeExtractHealthCheck(
 
 export async function checkSyncFreshness(
   engine: BrainEngine,
-  opts?: { nowMs?: number; localOnly?: boolean },
+  opts?: {
+    nowMs?: number;
+    localOnly?: boolean;
+    sourceHygiene?: SourceHygienePacket;
+  },
 ): Promise<Check> {
   try {
     // v0.41.27.0: SELECT widens to carry last_commit + chunker_version so
@@ -3738,7 +3743,10 @@ export async function checkSyncFreshness(
     }>(
       // v0.41.32.0: newest_content_at feeds the REMOTE (non-localOnly) lag so
       // doctorReportRemote never shells out to git on a DB-supplied local_path.
-      `SELECT id, name, local_path, last_sync_at, last_commit, chunker_version, newest_content_at FROM sources WHERE local_path IS NOT NULL`,
+      `SELECT id, name, local_path, last_sync_at, last_commit, chunker_version, newest_content_at
+         FROM sources
+        WHERE local_path IS NOT NULL
+          AND archived = false`,
     );
 
     if (sources.length === 0) {
@@ -3788,6 +3796,7 @@ export async function checkSyncFreshness(
     let stale_count = 0;
     let hasWarnings = false;
     let hasFailures = false;
+    let hasSourceLifecycleIssue = false;
 
     // BUG 4 (v0.42.x): a source with a LIVE, non-expired per-source sync lock is
     // actively syncing RIGHT NOW — it must not read as stale or never-synced.
@@ -3829,6 +3838,31 @@ export async function checkSyncFreshness(
       const display = source.name && source.name !== source.id
         ? `'${source.id}' (${source.name})`
         : `'${source.id}'`;
+
+      const sourceDecision = opts?.sourceHygiene?.sources.find(
+        (decision) => decision.source_id === source.id,
+      );
+      if (sourceDecision?.classification === 'archive_candidate') {
+        hasSourceLifecycleIssue = true;
+        issues.push(
+          `Source ${display} has no checkout and no dependent data; review a soft archive instead of syncing`,
+        );
+        hasWarnings = true;
+        stale_count++;
+        continue;
+      }
+      if (
+        sourceDecision?.classification === 'recovery_required' &&
+        sourceDecision.recovery_mode !== 'managed_clone_sync'
+      ) {
+        hasSourceLifecycleIssue = true;
+        issues.push(
+          `Source ${display} has no usable checkout and contains protected or unproven data; recover it before sync`,
+        );
+        hasFailures = true;
+        stale_count++;
+        continue;
+      }
 
       // BUG 4: actively syncing (live lock) → healthy, count as synced_recently
       // and skip the staleness checks. Keeps the 3-bucket invariant intact.
@@ -3932,7 +3966,9 @@ export async function checkSyncFreshness(
       return {
         name: 'sync_freshness',
         status: 'fail',
-        message: `${issues.join('; ')}. Run \`gbrain sync --source <id>\` for each stale source${inProgressNote}`,
+        message: hasSourceLifecycleIssue
+          ? `${issues.join('; ')}. Resolve source recovery/archive findings first; sync only a proven managed checkout${inProgressNote}`
+          : `${issues.join('; ')}. Run \`gbrain sync --source <id>\` for each stale source${inProgressNote}`,
         details,
       };
     }
@@ -3940,7 +3976,9 @@ export async function checkSyncFreshness(
       return {
         name: 'sync_freshness',
         status: 'warn',
-        message: `${issues.join('; ')}. Run \`gbrain sync --source <id>\` to refresh${inProgressNote}`,
+        message: hasSourceLifecycleIssue
+          ? `${issues.join('; ')}. Resolve source recovery/archive findings before syncing${inProgressNote}`
+          : `${issues.join('; ')}. Run \`gbrain sync --source <id>\` to refresh${inProgressNote}`,
         details,
       };
     }
@@ -3974,6 +4012,86 @@ export async function checkSyncFreshness(
       name: 'sync_freshness',
       status: 'warn',
       message: `Could not check sync freshness: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
+/**
+ * Trusted-local source checkout integrity. The shared inspector returns only
+ * bounded counts and source ids, never stored absolute paths or page bodies.
+ */
+export async function checkSourcePathHealth(
+  engine: BrainEngine,
+  opts: { packet?: SourceHygienePacket } = {},
+): Promise<Check> {
+  try {
+    const packet = opts.packet ?? await (async () => {
+      const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+      return inspectSourceHygiene(engine, { inspectFilesystem: true });
+    })();
+    const recovery = packet.sources.filter((source) => source.classification === 'recovery_required');
+    const archiveCandidates = packet.sources.filter((source) => source.classification === 'archive_candidate');
+    const details = {
+      schema_version: packet.schema_version,
+      filesystem_inspected: packet.filesystem_inspected,
+      recovery_required: recovery.map((source) => ({
+        source_id: source.source_id,
+        recovery_mode: source.recovery_mode,
+        dependent_row_count: source.dependent_row_count,
+        proposed_command_argv: source.proposed_command_argv,
+        veto_reasons: source.veto_reasons,
+      })),
+      archive_candidates: archiveCandidates.map((source) => ({
+        source_id: source.source_id,
+        proposed_command_argv: source.proposed_command_argv,
+      })),
+      fix_hint: recovery.length > 0
+        ? recovery.every((source) => source.recovery_mode === 'migration_resume')
+          ? 'Rerun the interrupted engine migration; do not use a plain source archive command.'
+          : recovery.every((source) => source.recovery_mode === 'archive_resume')
+          ? 'Rerun each listed archive command to finish its interrupted source drain.'
+          : 'Preserve the source data and restore its checkout before running sync or paid remediation.'
+        : archiveCandidates.length > 0
+          ? 'Adversarially verify each zero-content source, then soft-archive at most one candidate.'
+          : 'No source-path action required.',
+    };
+    if (recovery.length > 0) {
+      return {
+        name: 'source_path_health',
+        status: 'fail',
+        message: recovery.every((source) => source.recovery_mode === 'migration_resume')
+          ? `${recovery.length} source engine migration(s) were interrupted and need to be rerun: ${recovery.map((source) => source.source_id).join(', ')}`
+          : recovery.every((source) => source.recovery_mode === 'archive_resume')
+          ? `${recovery.length} source archive(s) were interrupted and need to be resumed: ${recovery.map((source) => source.source_id).join(', ')}`
+          : `${recovery.length} source(s) need checkout recovery before sync or paid work: ${recovery.map((source) => source.source_id).join(', ')}`,
+        details,
+        remediation_status: 'blocked',
+      };
+    }
+    if (archiveCandidates.length > 0) {
+      return {
+        name: 'source_path_health',
+        status: 'warn',
+        message: `${archiveCandidates.length} empty missing source(s) qualify for adversarial soft-archive review: ${archiveCandidates.map((source) => source.source_id).join(', ')}`,
+        details,
+        remediation_status: 'human_only',
+      };
+    }
+    return {
+      name: 'source_path_health',
+      status: 'ok',
+      message: 'All inspected active source checkouts are usable',
+      details,
+    };
+  } catch (error) {
+    return {
+      name: 'source_path_health',
+      status: 'warn',
+      message: `Could not prove source checkout health: ${error instanceof Error ? error.message : String(error)}`,
+      details: {
+        fix_hint: 'Resolve the inspection error before any source lifecycle or paid remediation action.',
+      },
+      remediation_status: 'blocked',
     };
   }
 }
@@ -5368,7 +5486,7 @@ export async function buildChecks(
   if (engine !== null) try {
     const { findMisroutedPages } = await import('../core/multi-source-drift.ts');
     const sources = await engine!.executeRaw<{ id: string; local_path: string | null }>(
-      `SELECT id, local_path FROM sources`,
+      `SELECT id, local_path FROM sources WHERE archived = false`,
     );
     const nonDefaultWithPath = sources.filter(s => s.id !== 'default' && s.local_path);
     if (sources.length > 1 && nonDefaultWithPath.length > 0) {
@@ -7561,6 +7679,15 @@ export async function buildChecks(
 
   // Sync freshness check (v0.32 — Check that sources are synced recently)
   if (engine !== null) {
+    let sourceHygienePacket: SourceHygienePacket | undefined;
+    try {
+      const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+      sourceHygienePacket = await inspectSourceHygiene(engine, { inspectFilesystem: true });
+    } catch {
+      // checkSourcePathHealth emits the bounded inspection failure below.
+    }
+    progress.heartbeat('source_path_health');
+    checks.push(await checkSourcePathHealth(engine, { packet: sourceHygienePacket }));
     progress.heartbeat('sync_freshness');
     // v0.41.27.0 D4: local CLI path is trusted to walk DB-supplied
     // local_path values via subprocess (we own the brain repo). Pass
@@ -7568,7 +7695,10 @@ export async function buildChecks(
     // at doctorReportRemote (around line 662) deliberately keeps the
     // default (false) — that's the trust-boundary preservation Codex
     // P0-1 flagged.
-    checks.push(await checkSyncFreshness(engine, { localOnly: true }));
+    checks.push(await checkSyncFreshness(engine, {
+      localOnly: true,
+      sourceHygiene: sourceHygienePacket,
+    }));
     // v0.41.19.0 (Issue 5): sync --all consolidation nudge.
     progress.heartbeat('sync_consolidation');
     checks.push(await checkSyncConsolidation(engine));
@@ -8103,7 +8233,11 @@ export async function runRemediationPlan(
   const jsonOutput = args.includes('--json');
 
   const extraRemediations = await loadDoctorExtraRemediations(engine);
-  const plan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
+  const plan = await computeRemediationPlan(engine, {
+    targetScore,
+    extraRemediations,
+    inspectLocalSourcePaths: true,
+  });
 
   if (jsonOutput) {
     console.log(JSON.stringify(plan, null, 2));
@@ -8180,7 +8314,11 @@ export async function runRemediate(
   // own plan internally — we accept the second computation cost for
   // a cleaner CLI/library separation.
   if (!skipConfirm && !dryRun && process.stdout.isTTY && !resumeMode) {
-    const plan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
+    const plan = await computeRemediationPlan(engine, {
+      targetScore,
+      extraRemediations,
+      inspectLocalSourcePaths: true,
+    });
     if (plan.target_unreachable) {
       console.error(
         `[remediate] target ${targetScore} unreachable; max autonomous = ${plan.max_reachable_score}/100. ` +
@@ -8217,6 +8355,7 @@ export async function runRemediate(
       resume: resumeMode,
       resumePlanHash,
       extraRemediations,
+      inspectLocalSourcePaths: true,
     },
     {
       onTargetUnreachable: (target, ceiling) => {

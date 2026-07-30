@@ -31,7 +31,11 @@ import {
   type CycleReport,
 } from '../core/cycle.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
-import { fetchSource } from '../core/sources-load.ts';
+import {
+  fetchSource,
+  isSourceActive,
+  sourceDrainResumeMessage,
+} from '../core/sources-load.ts';
 import { existsSync } from 'fs';
 import { resolve } from 'node:path';
 import { gbrainPath } from '../core/config.ts';
@@ -637,12 +641,25 @@ export async function runDream(
     // built-in listAllSources defaults to includeArchived=false AND
     // doesn't project the archived column, so it cannot be used here.
     const src = await fetchSource(engine, resolvedSourceId);
-    if (src?.archived === true) {
+    if (!src) {
       console.error(
-        `source ${resolvedSourceId} is archived; restore with ` +
-        `\`gbrain sources restore ${resolvedSourceId}\` before cycling`,
+        `Source "${resolvedSourceId}" disappeared before cycling; `
+        + 'run `gbrain sources list` and retry with an active source.',
       );
       process.exit(1);
+    }
+    if (!isSourceActive(src)) {
+      if (src.archived === true) {
+        console.error(
+          `source ${resolvedSourceId} is archived; restore with ` +
+          `\`gbrain sources restore ${resolvedSourceId}\` before cycling`,
+        );
+        process.exit(1);
+      }
+      if (src.embedding_drain_token != null) {
+        console.error(sourceDrainResumeMessage(resolvedSourceId, src.embedding_drain_token));
+        process.exit(1);
+      }
     }
   }
 

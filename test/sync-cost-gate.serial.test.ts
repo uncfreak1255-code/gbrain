@@ -26,6 +26,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 import { CHUNKER_VERSION } from '../src/core/chunkers/code.ts';
 import type { ChunkInput } from '../src/core/types.ts';
+import { beginSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
 
 /** Offline embed stub so inline-proceed paths (posture tokenmax) don't network. */
 function stubOfflineEmbed(): void {
@@ -105,6 +106,30 @@ async function runSyncCaptured(args: string[]): Promise<{ exitCode: number | und
 }
 
 describe('v0.41.31 — sync --all cost gate wiring', () => {
+  test('sync --all bypasses an inactive automatic route and excludes inactive sources', async () => {
+    await runSources(engine, ['add', 'vault', '--path', repoPath, '--no-federated']);
+    await engine.executeRaw(`UPDATE sources SET last_commit = $1 WHERE id = 'vault'`, [headSha]);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived)
+       VALUES ('archived-source', 'archived-source', '/fixture/missing-archived', '{}'::jsonb, true)`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('draining-source', 'draining-source', '/fixture/missing-draining', '{}'::jsonb)`,
+    );
+    await engine.setConfig('sources.default', 'draining-source');
+    expect(await beginSourceArchiveDrain(engine, 'draining-source')).not.toBeNull();
+
+    const { exitCode, stdout } = await runSyncCaptured([
+      '--all', '--json', '--no-pull', '--no-embed',
+    ]);
+
+    expect(exitCode).toBeUndefined();
+    expect(stdout).toContain('vault');
+    expect(stdout).not.toContain('archived-source');
+    expect(stdout).not.toContain('draining-source');
+  }, 60_000);
+
   test('R-1: deferred sync --all (non-TTY) emits deferred_notice and never exit 2', async () => {
     await runSources(engine, ['add', 'vault', '--path', repoPath, '--no-federated']);
     // Make the fan-out a clean no-op: last_commit == HEAD so performSync

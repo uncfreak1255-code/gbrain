@@ -26,6 +26,14 @@ export interface RemediationPlanOpts {
    * policy before previewing or executing them.
    */
   extraRemediations?: RemediationStep[];
+  /**
+   * Trusted local callers may opt in to inspecting stored source paths.
+   * Remote/MCP callers must leave this false so database-supplied paths are
+   * never walked on their behalf.
+   */
+  inspectLocalSourcePaths?: boolean;
+  /** Internal reuse seam so one run binds planning to one hygiene snapshot. */
+  sourceHygienePacket?: import('../source-hygiene.ts').SourceHygienePacket;
 }
 
 /**
@@ -59,6 +67,8 @@ export interface RemediationOpts {
    * plan entries they previewed.
    */
   extraRemediations?: RemediationStep[];
+  /** Trusted-local source-path inspection; false by default. */
+  inspectLocalSourcePaths?: boolean;
   /** Cap inner loop iterations (default: Infinity). */
   maxJobs?: number;
   /** USD cap for total plan cost. Pre-flight refuse + mid-run BudgetExhausted gate. */

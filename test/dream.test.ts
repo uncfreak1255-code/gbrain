@@ -685,6 +685,31 @@ describe('runDream — --source / --source-id (v0.41.13)', () => {
     errSpy.mockRestore();
   });
 
+  test('--source <draining> exits 1 with archive-resume guidance and no cycle writeback', async () => {
+    await seedSource('draining-thing');
+    await engine.executeRaw(
+      `UPDATE sources
+          SET embedding_drain_token = 'interrupted-drain'
+        WHERE id = 'draining-thing'`,
+    );
+    expect(await readLastFullCycleAt('draining-thing')).toBeNull();
+
+    const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await runDream(engine, ['--source', 'draining-thing']);
+    } catch (e: any) {
+      expect(e.message).toBe('EXIT');
+    }
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const errOut = errSpy.mock.calls.flat().join(' ');
+    expect(errOut).toMatch(/interrupted archive drain/);
+    expect(errOut).toMatch(/gbrain sources archive draining-thing/);
+    expect(await readLastFullCycleAt('draining-thing')).toBeNull();
+    exitSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
   // ─── Happy path: --source writes last_full_cycle_at (the bug fix) ───
 
   test('--source <existing> writes last_full_cycle_at on success (PR #1559 regression)', async () => {

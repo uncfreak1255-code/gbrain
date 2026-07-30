@@ -10,6 +10,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { mkdtempSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -32,8 +33,21 @@ beforeEach(async () => {
   // Same pattern as test/minions.test.ts.
   await engine.executeRaw('DELETE FROM minion_jobs').catch(() => {});
   await engine.executeRaw('DELETE FROM gbrain_cycle_locks').catch(() => {});
-  await engine.executeRaw(`DELETE FROM sources WHERE id <> 'default'`).catch(() => {});
+  // The interrupted-drain fixture intentionally leaves a source fenced. Clear
+  // that synthetic token before deleting fixtures; production source deletes
+  // now correctly reject rows that are still draining.
+  await engine.executeRaw(`UPDATE sources SET embedding_drain_token = NULL WHERE id <> 'default'`);
+  await engine.executeRaw(`DELETE FROM sources WHERE id <> 'default'`);
   brainDir = mkdtempSync(join(tmpdir(), 'gbrain-autopilot-handler-'));
+  execFileSync('git', ['init', '--quiet', brainDir]);
+  await engine.executeRaw(
+    `UPDATE sources
+        SET local_path = $1,
+            archived = false,
+            embedding_drain_token = NULL
+      WHERE id = 'default'`,
+    [brainDir],
+  );
 });
 
 async function seedSource(id: string, opts: { archived?: boolean } = {}): Promise<void> {
@@ -90,6 +104,24 @@ describe('autopilot-cycle handler source_id validation + archive recheck', () =>
     expect(result.report.reason).toBe('source_archived');
   });
 
+  test('source_id with an interrupted archive drain skips with resume guidance', async () => {
+    await seedSource('draining-src');
+    await engine.executeRaw(
+      `UPDATE sources
+          SET embedding_drain_token = 'interrupted-drain'
+        WHERE id = 'draining-src'`,
+    );
+
+    const result = await runHandlerOnce({
+      repoPath: brainDir,
+      source_id: 'draining-src',
+      phases: ['lint'],
+    });
+    expect(result.status).toBe('skipped');
+    expect(result.report.reason).toBe('source_draining');
+    expect(result.report.recovery).toContain('gbrain sources archive draining-src');
+  });
+
   test('malformed source_id (regex fail) throws (codex P1-B)', async () => {
     await expect(
       runHandlerOnce({ repoPath: brainDir, source_id: 'BAD ID', phases: ['lint'] }),
@@ -124,5 +156,27 @@ describe('autopilot-cycle handler source_id validation + archive recheck', () =>
       `SELECT config FROM sources WHERE id = 'db-only'`,
     );
     expect(rows[0]?.config?.last_full_cycle_at ?? null).toBeNull();
+  });
+
+  test('queued full cycle rechecks source recovery before running', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config, archived, created_at)
+       VALUES ('broken-neighbor', 'broken-neighbor', '/definitely/missing/gbrain-source', '{}'::jsonb, false, NOW())`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, title, type, compiled_truth, frontmatter)
+       VALUES ('people/recovery-proof', 'broken-neighbor', 'Recovery proof', 'person', '# proof', '{}'::jsonb)`,
+    );
+    await seedSource('healthy-target');
+
+    const result = await runHandlerOnce({
+      repoPath: brainDir,
+      source_id: 'healthy-target',
+      phases: ['lint'],
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.report.reason).toBe('source_hygiene_blocked');
+    expect(result.report.source_ids).toContain('broken-neighbor');
   });
 });

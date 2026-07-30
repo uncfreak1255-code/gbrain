@@ -7,7 +7,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
 import { MinionWorker } from '../core/minions/worker.ts';
 import { WORKER_EXIT_RSS_WATCHDOG } from '../core/minions/worker-exit-codes.ts';
-import type { MinionJob, MinionJobStatus } from '../core/minions/types.ts';
+import type { MinionJob, MinionJobContext, MinionJobStatus } from '../core/minions/types.ts';
 import type { PaceKeyOverrides } from '../core/pace-mode.ts';
 import { loadConfig, loadConfigWithEngine, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
@@ -1311,6 +1311,228 @@ HANDLER TYPES (built in)
  *
  * Per the v0.11.1 plan (Codex architecture #5 — tension 3).
  */
+export async function resolveSyncJobSourceId(
+  engine: BrainEngine,
+  data: Record<string, unknown>,
+): Promise<string | undefined> {
+  const camelSourceId = typeof data.sourceId === 'string' && data.sourceId.length > 0
+    ? data.sourceId
+    : undefined;
+  const snakeSourceId = typeof data.source_id === 'string' && data.source_id.length > 0
+    ? data.source_id
+    : undefined;
+  const explicitSourceId = camelSourceId ?? snakeSourceId;
+  if (explicitSourceId) return explicitSourceId;
+
+  const repoPath = typeof data.repoPath === 'string' ? data.repoPath : undefined;
+  if (!repoPath) return undefined;
+  try {
+    const rows = await engine.executeRaw<{ id: string }>(
+      `SELECT id
+         FROM public.sources
+        WHERE local_path = $1
+        ORDER BY CASE
+                   WHEN archived IS NOT TRUE AND embedding_drain_token IS NULL THEN 0
+                   ELSE 1
+                 END,
+                 CASE WHEN id = 'default' THEN 0 ELSE 1 END,
+                 id
+        LIMIT 1`,
+      [repoPath],
+    );
+    return rows[0]?.id;
+  } catch {
+    // Older brains can have sources.local_path without lifecycle columns.
+    // Preserve exact-source routing there too; only a genuinely unavailable
+    // sources table may fall back to the legacy global/default path.
+    try {
+      const rows = await engine.executeRaw<{ id: string }>(
+        `SELECT id
+           FROM public.sources
+          WHERE local_path = $1
+          ORDER BY CASE WHEN id = 'default' THEN 0 ELSE 1 END, id
+          LIMIT 1`,
+        [repoPath],
+      );
+      return rows[0]?.id;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Exhaustive built-in handler inventory whose execution can reach a paid or
+ * provider-backed operation. Conditional handlers still appear here even
+ * though their explicit no-provider modes bypass the gate (for example
+ * `sync` with its default `noEmbed:true`). Keep this list in lock-step with
+ * the registrations below; registerBuiltinHandlers asserts that every entry
+ * is wired through the execution-time gate.
+ */
+export const QUEUED_PROVIDER_HANDLER_INVENTORY = [
+  'sync',
+  'embed',
+  'extract-conversation-facts',
+  'enrich',
+  'import',
+  'contextual_reindex_per_chunk',
+  'autopilot-cycle',
+  'autopilot-global-maintenance',
+  'subagent',
+  'ingest_capture',
+  'reindex',
+  'synthesize',
+  'patterns',
+  'consolidate',
+  'extract_facts',
+  'extract-atoms-drain',
+  'embed-backfill',
+  'extract-takes-from-pages',
+  'embed-catch-up',
+  'skillopt',
+  'integrity-auto',
+  'integrity',
+] as const;
+
+/**
+ * Built-in handlers that have no direct provider egress in their documented
+ * execution paths. The test suite asserts that this list plus the provider
+ * inventory is an exact partition of registerBuiltinHandlers, forcing every
+ * newly registered handler to receive an explicit spend classification.
+ */
+export const QUEUED_NO_PROVIDER_HANDLER_INVENTORY = [
+  'lint',
+  'lint-fix',
+  'sync-retry-failed',
+  'extract',
+  'backlinks',
+  'shell',
+  'subagent_aggregator',
+  'repair-jsonb',
+  'orphans',
+  'purge',
+  'resolve_symbol_edges',
+  'recompute_emotional_weight',
+  'extract-ner',
+  'extract-timeline-from-meetings',
+  'unify-types',
+] as const;
+
+type QueuedProviderHandlerName = (typeof QUEUED_PROVIDER_HANDLER_INVENTORY)[number];
+
+export function integrityJobRequiresProviderGate(data: Record<string, unknown>): boolean {
+  return data.mode === 'auto';
+}
+
+interface ExecutionTimeSpendBlock {
+  status: 'skipped';
+  reason: 'source_hygiene_blocked';
+  source_id?: string;
+  classification: string;
+  block_reason: 'unknown_source' | 'target_not_healthy' | 'brain_recovery_required';
+  recovery_source_ids: string[];
+}
+
+/**
+ * One trusted-local, execution-time source-hygiene read for every queued
+ * provider path. `sourceId === undefined` means the handler is genuinely
+ * brain-wide; that form applies the brain-wide recovery veto without
+ * inventing a target source.
+ */
+async function executionTimeSpendBlock(
+  engine: BrainEngine,
+  sourceId: string | undefined,
+): Promise<ExecutionTimeSpendBlock | null> {
+  const { gateProtectedSourceWork, inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+  const packet = await inspectSourceHygiene(engine, { inspectFilesystem: true });
+  const recoverySourceIds = packet.sources
+    .filter((decision) => decision.classification === 'recovery_required')
+    .map((decision) => decision.source_id)
+    .sort();
+
+  if (sourceId === undefined) {
+    if (recoverySourceIds.length === 0) return null;
+    return {
+      status: 'skipped',
+      reason: 'source_hygiene_blocked',
+      classification: 'brain_wide',
+      block_reason: 'brain_recovery_required',
+      recovery_source_ids: recoverySourceIds,
+    };
+  }
+
+  const target = packet.sources.find((decision) => decision.source_id === sourceId);
+  const gate = gateProtectedSourceWork(packet, sourceId);
+  if (gate.allowed) return null;
+  return {
+    status: 'skipped',
+    reason: 'source_hygiene_blocked',
+    source_id: sourceId,
+    classification: target?.classification ?? 'unknown_source',
+    block_reason: gate.reason,
+    recovery_source_ids: recoverySourceIds,
+  };
+}
+
+async function resolveContextualReindexSourceId(
+  engine: BrainEngine,
+  data: Record<string, unknown>,
+): Promise<string> {
+  const pageSlug = data.page_slug;
+  if (typeof pageSlug !== 'string' || pageSlug.length === 0) {
+    throw new Error('contextual_reindex_per_chunk requires data.page_slug: string.');
+  }
+
+  const expectedSourceId = typeof data.expected_source_id === 'string'
+    ? data.expected_source_id
+    : undefined;
+  if (expectedSourceId) {
+    const expectedPage = await engine.getPage(pageSlug, { sourceId: expectedSourceId });
+    if (!expectedPage) {
+      throw new Error(
+        `Page not found for slug '${pageSlug}' in expected source '${expectedSourceId}'.`,
+      );
+    }
+    return expectedSourceId;
+  }
+
+  const sources = await engine.executeRaw<{ id: string }>(
+    `SELECT id FROM public.sources WHERE archived = false ORDER BY id`,
+  );
+  const matchingSourceIds: string[] = [];
+  for (const { id } of sources) {
+    const page = await engine.getPage(pageSlug, { sourceId: id });
+    if (page) matchingSourceIds.push(id);
+  }
+  if (matchingSourceIds.length === 0) {
+    throw new Error(`Page not found for slug '${pageSlug}'.`);
+  }
+  if (matchingSourceIds.length > 1) {
+    throw new Error(
+      `Ambiguous page slug '${pageSlug}' exists in sources `
+      + `${matchingSourceIds.map((id) => `'${id}'`).join(', ')}; `
+      + 'data.expected_source_id is required.',
+    );
+  }
+  return matchingSourceIds[0];
+}
+
+async function resolveImportJobSourceId(
+  engine: BrainEngine,
+  data: Record<string, unknown>,
+): Promise<string> {
+  if (typeof data.sourceId === 'string' && data.sourceId.length > 0) {
+    return data.sourceId;
+  }
+  if (process.env.GBRAIN_SOURCE) {
+    const { resolveSourceId } = await import('../core/source-resolver.ts');
+    return await resolveSourceId(engine, null);
+  }
+  const { resolveSourceWithTier } = await import('../core/source-resolver.ts');
+  const resolved = await resolveSourceWithTier(engine, null);
+  return resolved.tier === 'sole_non_default' ? resolved.source_id : 'default';
+}
+
 export async function registerBuiltinHandlers(
   worker: MinionWorker,
   engine: BrainEngine,
@@ -1322,7 +1544,43 @@ export async function registerBuiltinHandlers(
   // terminal with "shell handler registered…" lines. The real `jobs work` path
   // omits opts and prints as before.
   const quiet = opts?.quiet === true;
-  worker.register('sync', async (job) => {
+  const providerGateRegistrations = new Set<QueuedProviderHandlerName>();
+  const registerProviderHandler = (
+    name: QueuedProviderHandlerName,
+    handler: (job: MinionJobContext) => Promise<unknown>,
+    options: {
+      resolveSourceId?: (job: MinionJobContext) => string | undefined | Promise<string | undefined>;
+      shouldGate?: (job: MinionJobContext) => boolean | Promise<boolean>;
+      phase?: string;
+      prepareJob?: (
+        job: MinionJobContext,
+        sourceId: string | undefined,
+      ) => MinionJobContext | Promise<MinionJobContext>;
+    } = {},
+  ): void => {
+    if (providerGateRegistrations.has(name)) {
+      throw new Error(`Duplicate provider-handler gate registration: ${name}`);
+    }
+    providerGateRegistrations.add(name);
+    worker.register(name, async (job) => {
+      if (options.shouldGate && !(await options.shouldGate(job))) {
+        return await handler(job);
+      }
+      const sourceId = options.resolveSourceId
+        ? await options.resolveSourceId(job)
+        : undefined;
+      const block = await executionTimeSpendBlock(engine, sourceId);
+      if (block) {
+        return { ...(options.phase ? { phase: options.phase } : {}), ...block };
+      }
+      const preparedJob = options.prepareJob
+        ? await options.prepareJob(job, sourceId)
+        : job;
+      return await handler(preparedJob);
+    });
+  };
+
+  registerProviderHandler('sync', async (job) => {
     const { performSync } = await import('./sync.ts');
     const repoPath = typeof job.data.repoPath === 'string' ? job.data.repoPath : undefined;
     const noPull = !!job.data.noPull;
@@ -1335,20 +1593,7 @@ export async function registerBuiltinHandlers(
     // multi-source brain reads the global config.sync.last_commit anchor
     // instead of sources.last_commit, which on a regularly-GC'd repo can drop
     // out of git history and trigger 30-min full reimports every cycle.
-    let sourceId: string | undefined =
-      typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
-    if (!sourceId && repoPath) {
-      try {
-        const rows = await engine.executeRaw<{ id: string }>(
-          `SELECT id FROM sources WHERE local_path = $1 LIMIT 1`,
-          [repoPath],
-        );
-        sourceId = rows[0]?.id;
-      } catch {
-        // sources table may not exist on very old brains — fall through to
-        // global config.sync.* anchor in performSync.
-      }
-    }
+    const sourceId = await resolveSyncJobSourceId(engine, job.data);
     // v0.22.13 (PR #490 CODEX-4): route concurrency through the shared
     // autoConcurrency helper instead of hardcoded 4. PGLite engines stay
     // serial (forced 1); explicit job param wins; auto path defaults are
@@ -1423,9 +1668,12 @@ export async function registerBuiltinHandlers(
     }
 
     return { ...result, embed_job_id: embedJobId, embed_skip_reason: embedSkipReason };
+  }, {
+    shouldGate: (job) => job.data.noEmbed === false,
+    resolveSourceId: async (job) => (await resolveSyncJobSourceId(engine, job.data)) ?? 'default',
   });
 
-  worker.register('embed', async (job) => {
+  registerProviderHandler('embed', async (job) => {
     const { runEmbedCore } = await import('./embed.ts');
     // Primary Minion progress channel is job.updateProgress (DB-backed,
     // readable via `gbrain jobs get <id>`). Stderr from the worker daemon
@@ -1455,6 +1703,10 @@ export async function registerBuiltinHandlers(
       },
     });
     return { embedded: true };
+  }, {
+    resolveSourceId: (job) => typeof job.data.sourceId === 'string'
+      ? job.data.sourceId
+      : undefined,
   });
 
   worker.register('lint', async (job) => {
@@ -1472,7 +1724,7 @@ export async function registerBuiltinHandlers(
   // BudgetTracker inside its own process. BudgetExhausted is caught at
   // the core level and returned as `result.budget_exhausted: true` (NOT
   // a job failure) so the user can resume with a higher cap.
-  worker.register('extract-conversation-facts', async (job) => {
+  registerProviderHandler('extract-conversation-facts', async (job) => {
     const { runExtractConversationFactsCore } = await import('./extract-conversation-facts.ts');
     const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
     if (!sourceId) {
@@ -1504,6 +1756,14 @@ export async function registerBuiltinHandlers(
       workers: typeof job.data.workers === 'number' ? job.data.workers : undefined,
     });
     return result;
+  }, {
+    resolveSourceId: (job) => {
+      const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+      if (!sourceId) {
+        throw new Error('extract-conversation-facts Minion job requires data.sourceId');
+      }
+      return sourceId;
+    },
   });
 
   // v0.41.39 (#1700) — enrich. NOT in PROTECTED_JOB_NAMES: per-call cost is
@@ -1512,7 +1772,7 @@ export async function registerBuiltinHandlers(
   // at the core level and returned as result.budget_exhausted (NOT a failure).
   // Strict per-source: the CLI fans out one job per source when --source is
   // omitted, so a job ALWAYS carries data.sourceId.
-  worker.register('enrich', async (job) => {
+  registerProviderHandler('enrich', async (job) => {
     const { runEnrichCore } = await import('./enrich.ts');
     const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
     if (!sourceId) {
@@ -1537,6 +1797,14 @@ export async function registerBuiltinHandlers(
       force: !!job.data.force,
     });
     return result;
+  }, {
+    resolveSourceId: (job) => {
+      const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+      if (!sourceId) {
+        throw new Error('enrich Minion job requires data.sourceId (CLI fans out one job per source)');
+      }
+      return sourceId;
+    },
   });
 
   // v0.40.3.0 T8b: RemediationStep consumer handlers. Thin wrappers
@@ -1550,7 +1818,7 @@ export async function registerBuiltinHandlers(
     return await runLintCore({ target, fix: true, dryRun: false, engine });
   });
 
-  worker.register('integrity-auto', async () => {
+  registerProviderHandler('integrity-auto', async () => {
     const { runIntegrity } = await import('./integrity.ts');
     await runIntegrity(['auto']);
     return { ok: true };
@@ -1558,11 +1826,13 @@ export async function registerBuiltinHandlers(
 
   worker.register('sync-retry-failed', async () => {
     const { runSync } = await import('./sync.ts');
-    await runSync(engine, ['--retry-failed']);
+    // This remediation step is documented as zero-cost. Keep it explicitly
+    // provider-free; any embedding catch-up runs as its separately gated job.
+    await runSync(engine, ['--retry-failed', '--no-embed']);
     return { ok: true };
   });
 
-  worker.register('import', async (job) => {
+  registerProviderHandler('import', async (job) => {
     // import.ts Core extraction deferred to v0.12.0 (import has parallel
     // workers + checkpointing). Keep the CLI wrapper call but note the
     // worker-kill risk is bounded: import's only process.exit fires on
@@ -1571,8 +1841,12 @@ export async function registerBuiltinHandlers(
     const importArgs: string[] = [];
     if (job.data.dir) importArgs.push(String(job.data.dir));
     if (job.data.noEmbed) importArgs.push('--no-embed');
+    if (typeof job.data.sourceId === 'string') importArgs.push('--source-id', job.data.sourceId);
     await runImport(engine, importArgs);
     return { imported: true };
+  }, {
+    shouldGate: (job) => job.data.noEmbed !== true,
+    resolveSourceId: (job) => resolveImportJobSourceId(engine, job.data),
   });
 
   worker.register('extract', async (job) => {
@@ -1627,12 +1901,26 @@ export async function registerBuiltinHandlers(
     const { makeContextualReindexHandler } = await import(
       '../core/minions/handlers/contextual-reindex-per-chunk.ts'
     );
-    worker.register('contextual_reindex_per_chunk', makeContextualReindexHandler({ engine }));
+    registerProviderHandler(
+      'contextual_reindex_per_chunk',
+      makeContextualReindexHandler({ engine }),
+      {
+        // The source-qualified slug is the authority. Resolve it at claim
+        // time, then pin the delegated handler to that exact source before it
+        // can call Haiku. An unqualified duplicate slug fails closed.
+        resolveSourceId: (job) => resolveContextualReindexSourceId(engine, job.data),
+        prepareJob: (job, sourceId) => ({
+          ...job,
+          data: { ...job.data, expected_source_id: sourceId },
+        }),
+      },
+    );
   }
 
   // derivation); the handler returns { partial, status, report } so
   // `gbrain jobs get <id>` shows the full structured report. Does NOT
   // throw on partial: a flaky phase must not block every future cycle.
+  providerGateRegistrations.add('autopilot-cycle');
   worker.register('autopilot-cycle', async (job) => {
     const { runCycle } = await import('../core/cycle.ts');
     // v0.41.30 (T2): fall back to null (NOT cwd '.') when no repo is configured.
@@ -1673,28 +1961,41 @@ export async function registerBuiltinHandlers(
       // Archive recheck (codex r1 P1-5): cheap pre-cycle lookup. Returns
       // immediately if source is gone or archived; runCycle never even
       // acquires a lock.
-      const rows = await engine.executeRaw<{ archived: boolean | null; local_path: string | null }>(
-        `SELECT archived, local_path FROM sources WHERE id = $1`,
-        [rawSourceId],
-      );
-      if (rows.length === 0) {
+      const {
+        fetchSource,
+        isSourceActive,
+        sourceDrainResumeMessage,
+      } = await import('../core/sources-load.ts');
+      const source = await fetchSource(engine, rawSourceId);
+      if (!source) {
         return {
           partial: false,
           status: 'skipped',
           report: { reason: 'source_not_found', source_id: rawSourceId },
         };
       }
-      if (rows[0].archived === true) {
+      if (!isSourceActive(source)) {
+        if (source.archived === true) {
+          return {
+            partial: false,
+            status: 'skipped',
+            report: { reason: 'source_archived', source_id: rawSourceId },
+          };
+        }
         return {
           partial: false,
           status: 'skipped',
-          report: { reason: 'source_archived', source_id: rawSourceId },
+          report: {
+            reason: 'source_draining',
+            source_id: rawSourceId,
+            recovery: sourceDrainResumeMessage(rawSourceId, source.embedding_drain_token),
+          },
         };
       }
       const { existsSync } = await import('fs');
       sourceId = rawSourceId;
-      repoPath = rows[0].local_path && existsSync(rows[0].local_path)
-        ? rows[0].local_path
+      repoPath = source.local_path && existsSync(source.local_path)
+        ? source.local_path
         : null;
     }
 
@@ -1724,6 +2025,26 @@ export async function registerBuiltinHandlers(
       }
     }
 
+    // Claim-time defense in depth: a source can enter recovery after the
+    // daemon queued this job. Re-read current filesystem + DB evidence before
+    // allowing any full-cycle primitive to run paid or protected phases.
+    const hygieneSourceId = sourceId
+      ?? (await resolveSyncJobSourceId(
+        engine,
+        repoPath ? { repoPath } : {},
+      ));
+    const hygieneBlock = await executionTimeSpendBlock(engine, hygieneSourceId);
+    if (hygieneBlock) {
+      return {
+        partial: false,
+        status: 'skipped',
+        report: {
+          reason: 'source_hygiene_blocked',
+          source_ids: hygieneBlock.recovery_source_ids,
+        },
+      };
+    }
+
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull,
@@ -1749,6 +2070,7 @@ export async function registerBuiltinHandlers(
   // of N times concurrently across per-source cycles (the 4→10GB RSS blowout).
   // No source_id → uses the legacy global cycle lock; stamps autopilot.last_global_at
   // on success so the dispatch gate backs off.
+  providerGateRegistrations.add('autopilot-global-maintenance');
   worker.register('autopilot-global-maintenance', async (job) => {
     const { runCycle, GLOBAL_PHASES, LAST_GLOBAL_AT_KEY, ALL_PHASES } = await import('../core/cycle.ts');
     const repoPath: string | null = typeof job.data.repoPath === 'string'
@@ -1760,6 +2082,20 @@ export async function registerBuiltinHandlers(
       ? (job.data.phases as string[]).filter((p) => validPhases.has(p as never))
       : GLOBAL_PHASES;
     const phases = (requested.length > 0 ? requested : GLOBAL_PHASES) as typeof GLOBAL_PHASES;
+
+    // A previously queued global job must not outlive a newly discovered
+    // recovery requirement and start spend-capable brain-wide work.
+    const hygieneBlock = await executionTimeSpendBlock(engine, undefined);
+    if (hygieneBlock) {
+      return {
+        partial: false,
+        status: 'skipped',
+        report: {
+          reason: 'source_hygiene_blocked',
+          source_ids: hygieneBlock.recovery_source_ids,
+        },
+      };
+    }
 
     const report = await runCycle(engine, {
       brainDir: repoPath,
@@ -1811,7 +2147,11 @@ export async function registerBuiltinHandlers(
   // cost-ceremony env flag needed.
   const { makeSubagentHandler } = await import('../core/minions/handlers/subagent.ts');
   const { subagentAggregatorHandler } = await import('../core/minions/handlers/subagent-aggregator.ts');
-  worker.register('subagent', makeSubagentHandler({ engine }));
+  registerProviderHandler('subagent', makeSubagentHandler({ engine }), {
+    resolveSourceId: (job) => typeof job.data.source_id === 'string'
+      ? job.data.source_id
+      : 'default',
+  });
   worker.register('subagent_aggregator', subagentAggregatorHandler);
   process.stderr.write('[minion worker] subagent handlers enabled\n');
 
@@ -1824,7 +2164,10 @@ export async function registerBuiltinHandlers(
   // caller-provided slug).
   // ============================================================
   const { makeIngestCaptureHandler } = await import('../core/minions/handlers/ingest-capture.ts');
-  worker.register('ingest_capture', makeIngestCaptureHandler(engine));
+  registerProviderHandler('ingest_capture', makeIngestCaptureHandler(engine), {
+    shouldGate: (job) => job.data.noEmbed === false,
+    resolveSourceId: () => 'default',
+  });
 
   // ============================================================
   // v0.36+ brain-health-100 wave: 11 new handlers for autonomous
@@ -1833,12 +2176,15 @@ export async function registerBuiltinHandlers(
   // PROTECTED via PROTECTED_JOB_NAMES (D11): synthesize, patterns,
   // consolidate — they internally submit `subagent` jobs with
   // allowProtectedSubmit=true, so they CAN spend Anthropic credits.
-  // Open handlers (DB writes only): reindex, repair-jsonb, orphans,
-  // integrity, purge, extract_facts, resolve_symbol_edges,
-  // recompute_emotional_weight.
+  // Open handlers include some provider-capable work and are therefore still
+  // execution-time gated: reindex unless --no-embed/--dry-run, and
+  // extract_facts when its fact-embedding path is available. DB-only/free
+  // handlers remain ungated: repair-jsonb, orphans, purge,
+  // resolve_symbol_edges, recompute_emotional_weight. Integrity check mode is
+  // free; integrity auto mode is provider-capable and brain-wide gated.
   // ============================================================
 
-  worker.register('reindex', async (job) => {
+  registerProviderHandler('reindex', async (job) => {
     const { runReindex } = await import('./reindex.ts');
     const args: string[] = ['--markdown'];
     if (typeof job.data.limit === 'number') args.push('--limit', String(job.data.limit));
@@ -1847,6 +2193,8 @@ export async function registerBuiltinHandlers(
     if (typeof job.data.repoPath === 'string') args.push('--repo', job.data.repoPath);
     const result = await runReindex(engine, args);
     return { ...result, ran: 'reindex' };
+  }, {
+    shouldGate: (job) => !job.data.dryRun && !job.data.noEmbed,
   });
 
   worker.register('repair-jsonb', async (job) => {
@@ -1861,7 +2209,7 @@ export async function registerBuiltinHandlers(
     return { count: result.length, orphans: result };
   });
 
-  worker.register('integrity', async (job) => {
+  registerProviderHandler('integrity', async (job) => {
     const { runIntegrity } = await import('./integrity.ts');
     const args: string[] = [];
     args.push(job.data.mode === 'auto' ? 'auto' : 'check');
@@ -1869,6 +2217,8 @@ export async function registerBuiltinHandlers(
     if (job.data.dryRun) args.push('--dry-run');
     await runIntegrity(args);
     return { ran: 'integrity', mode: args[0] };
+  }, {
+    shouldGate: (job) => integrityJobRequiresProviderGate(job.data),
   });
 
   worker.register('purge', async (job) => {
@@ -1907,21 +2257,39 @@ export async function registerBuiltinHandlers(
     const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
       : ((await engine.getConfig('sync.repo_path')) ?? null);
+    const sourceId = (await resolveSyncJobSourceId(engine, job.data)) ?? 'default';
     const report = await runCycle(engine, {
       brainDir: repoPath,
       phases: [phase as any],
       signal: job.signal,
+      sourceId,
     });
     return { phase, status: report.status, report };
   };
 
-  // PROTECTED — internally spawn subagent children
-  worker.register('synthesize', makePhaseHandler('synthesize'));
-  worker.register('patterns', makePhaseHandler('patterns'));
-  worker.register('consolidate', makePhaseHandler('consolidate'));
+  const resolvePhaseSourceId = async (job: MinionJobContext): Promise<string> =>
+    (await resolveSyncJobSourceId(engine, job.data)) ?? 'default';
 
-  // Open — DB writes only, no LLM spend
-  worker.register('extract_facts', makePhaseHandler('extract_facts'));
+  // PROTECTED — internally spawn subagent children
+  registerProviderHandler('synthesize', makePhaseHandler('synthesize'), {
+    phase: 'synthesize',
+    resolveSourceId: resolvePhaseSourceId,
+  });
+  registerProviderHandler('patterns', makePhaseHandler('patterns'), {
+    phase: 'patterns',
+    resolveSourceId: resolvePhaseSourceId,
+  });
+  registerProviderHandler('consolidate', makePhaseHandler('consolidate'), {
+    phase: 'consolidate',
+    resolveSourceId: resolvePhaseSourceId,
+  });
+
+  // Open submission name, but the phase embeds extracted facts when a
+  // provider is configured, so it shares the same execution-time gate.
+  registerProviderHandler('extract_facts', makePhaseHandler('extract_facts'), {
+    phase: 'extract_facts',
+    resolveSourceId: resolvePhaseSourceId,
+  });
   worker.register('resolve_symbol_edges', makePhaseHandler('resolve_symbol_edges'));
   worker.register('recompute_emotional_weight', makePhaseHandler('recompute_emotional_weight'));
 
@@ -1931,7 +2299,7 @@ export async function registerBuiltinHandlers(
   // window / defer behavior. On LockUnavailableError (the routine cycle holds
   // the per-source lock) the job completes `{ deferred: true }` and retries
   // next tick instead of failing — cooperative interleave (CODEX accepted).
-  worker.register('extract-atoms-drain', async (job) => {
+  registerProviderHandler('extract-atoms-drain', async (job) => {
     const { runExtractAtomsDrainForSource } = await import('../core/cycle/extract-atoms-drain.ts');
     const { LockUnavailableError } = await import('../core/db-lock.ts');
     const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
@@ -1953,16 +2321,35 @@ export async function registerBuiltinHandlers(
       }
       throw e;
     }
+  }, {
+    phase: 'extract_atoms',
+    resolveSourceId: (job) => typeof job.data.sourceId === 'string'
+      ? job.data.sourceId
+      : 'default',
   });
 
   // v0.40 Federated Sync v2 — embed-backfill: per-source decoupled embed.
   // Cost-bounded via D6 ($10/job BudgetTracker) + D19 (source-level cooldown
   // + 24h rolling cap, gated at submit time). NOT in PROTECTED_JOB_NAMES —
   // embedding-only spend, no API-by-the-minute risk like subagent.
-  worker.register('embed-backfill', async (job) => {
-    const { makeEmbedBackfillHandler } = await import('../core/minions/handlers/embed-backfill.ts');
-    return await makeEmbedBackfillHandler(engine)(job);
-  });
+  registerProviderHandler(
+    'embed-backfill',
+    async (job) => {
+      const { makeEmbedBackfillHandler } = await import('../core/minions/handlers/embed-backfill.ts');
+      return await makeEmbedBackfillHandler(engine)(job);
+    },
+    {
+      resolveSourceId: (job) => {
+        const sourceId = typeof job.data.sourceId === 'string' && job.data.sourceId.length > 0
+          ? job.data.sourceId
+          : undefined;
+        if (!sourceId) {
+          throw new Error('embed-backfill: data.sourceId is required and must be a non-empty string');
+        }
+        return sourceId;
+      },
+    },
+  );
 
   // v0.41.18.0 (A10, T7): extract-ner handler for the gbrain onboard
   // remediation pipeline. Wraps extractNerLinks; emits typed_ner kind
@@ -1980,7 +2367,7 @@ export async function registerBuiltinHandlers(
   // (LLM-bearing). Two-gate consent enforced at the handler boundary:
   // refuses to run unless takes.bootstrap_enabled config is true, even
   // when allowProtectedSubmit was set at queue.add time.
-  worker.register('extract-takes-from-pages', async (job) => {
+  registerProviderHandler('extract-takes-from-pages', async (job) => {
     const { extractTakesFromPages } = await import('../core/extract-takes-from-pages.ts');
     const data = (job.data ?? {}) as { sourceId?: string; maxPages?: number };
     const bootstrapCfg = await engine.getConfig('takes.bootstrap_enabled');
@@ -1990,6 +2377,11 @@ export async function registerBuiltinHandlers(
       sourceIdFilter: data.sourceId,
       maxPages: data.maxPages,
     });
+  }, {
+    // Without a filter this operation scans every active source.
+    resolveSourceId: (job) => typeof job.data.sourceId === 'string'
+      ? job.data.sourceId
+      : undefined,
   });
 
   // v0.41.18.0 (A11, T8): extract-timeline-from-meetings handler. Wraps
@@ -2007,7 +2399,7 @@ export async function registerBuiltinHandlers(
   // remediation pipeline. Wraps runEmbedCore with stale + catchUp + the
   // priority/batchSize the recommendation supplies. NOT in
   // PROTECTED_JOB_NAMES (embedding spend only).
-  worker.register('embed-catch-up', async (job) => {
+  registerProviderHandler('embed-catch-up', async (job) => {
     const { runEmbedCore } = await import('./embed.ts');
     const data = (job.data ?? {}) as {
       sourceId?: string;
@@ -2021,6 +2413,11 @@ export async function registerBuiltinHandlers(
       priority: data.priority,
       sourceId: data.sourceId,
     });
+  }, {
+    // Without a filter this operation is intentionally brain-wide.
+    resolveSourceId: (job) => typeof job.data.sourceId === 'string'
+      ? job.data.sourceId
+      : undefined,
   });
 
   // v0.42 type-unification (T10): unify-types PROTECTED handler. Pack-upgrade
@@ -2058,7 +2455,7 @@ export async function registerBuiltinHandlers(
   // v0.42.0.0 SkillOpt Minion handler — for --background CLI invocations.
   // PROTECTED by name so MCP submission rejects (only trusted CLI can
   // submit). Threaded SkillOptOpts JSON in job.data.
-  worker.register('skillopt', async (job) => {
+  registerProviderHandler('skillopt', async (job) => {
     const { runSkillOpt } = await import('../core/skillopt/orchestrator.ts');
     const data = (job.data ?? {}) as Record<string, unknown>;
     const skillsDir = String(data.skills_dir ?? '');
@@ -2097,7 +2494,22 @@ export async function registerBuiltinHandlers(
       mutated_skill_file: result.mutatedSkillFile,
       proposed_path: result.proposedPath,
     };
+  }, {
+    shouldGate: (job) => !job.data.dry_run,
   });
+
+  const expectedProviderHandlers = [...QUEUED_PROVIDER_HANDLER_INVENTORY].sort();
+  const registeredProviderHandlers = [...providerGateRegistrations].sort();
+  if (
+    expectedProviderHandlers.length !== registeredProviderHandlers.length
+    || expectedProviderHandlers.some((name, index) => name !== registeredProviderHandlers[index])
+  ) {
+    throw new Error(
+      'Queued provider-handler inventory does not match execution-time gate registrations: '
+      + `expected=${expectedProviderHandlers.join(',')} `
+      + `registered=${registeredProviderHandlers.join(',')}`,
+    );
+  }
 
   process.stderr.write('[minion worker] brain-health-100 handlers registered (12 ops, 4 protected) + embed-backfill (v0.40) + embed-catch-up (v0.42) + unify-types (v0.42) + skillopt (v0.42.0.0, protected)\n');
 

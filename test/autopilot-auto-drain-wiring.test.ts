@@ -29,6 +29,12 @@ describe('autopilot auto-drain wiring', () => {
     expect(SRC).toContain('countExtractAtomsBacklog(engine, src.id)');
   });
 
+  test('rechecks trusted-local source hygiene before protected submission', () => {
+    expect(SRC).toContain('inspectSourceHygiene(engine');
+    expect(SRC).toContain('gateProtectedSourceWork(sourceHygiene, src.id)');
+    expect(SRC).toMatch(/if \(!sourceGate\.allowed\)[\s\S]{0,1600}queue\.add/);
+  });
+
   test('gates on pack NOT declaring extract_atoms (the silent-backlog condition)', () => {
     expect(SRC).toContain("packDeclaresPhase(engine, 'extract_atoms')");
   });

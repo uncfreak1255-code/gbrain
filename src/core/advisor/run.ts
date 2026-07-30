@@ -17,9 +17,11 @@ import { collectSeascapeWritebacks } from './collect-seascape-writebacks.ts';
 import { collectSetupSmells } from './collect-setup-smells.ts';
 import { collectUninstalledBrainPack } from './collect-uninstalled-brain-pack.ts';
 import { collectUninstalledBundled } from './collect-uninstalled-bundled.ts';
+import { collectSourceHygiene } from './collect-source-hygiene.ts';
 
 /** Deterministic v1 collector order (also the secondary sort key for ranking). */
 export const COLLECTORS: AdvisorCollector[] = [
+  collectSourceHygiene,
   collectVersion,
   collectMigration,
   collectSchemaPack,

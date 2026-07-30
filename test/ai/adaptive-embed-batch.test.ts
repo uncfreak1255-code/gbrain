@@ -39,6 +39,7 @@ import {
   __getShrinkStateForTests,
 } from '../../src/core/ai/gateway.ts';
 import { AIConfigError, AITransientError } from '../../src/core/ai/errors.ts';
+import { SourceEmbeddingLeaseLostError } from '../../src/core/source-embedding-lease.ts';
 
 // --------- Test helpers ---------
 
@@ -210,6 +211,65 @@ describe('embed() recursion via stubbed transport', () => {
     const callLengths = stub.mock.calls.map(([arg]) => (arg as { values: string[] }).values.length);
     expect(callLengths.sort((a, b) => a - b)).toEqual([25, 25, 50]);
     expect(result).toHaveLength(50);
+  });
+
+  test('reacquires the provider fence for the failed batch and every recursive half', async () => {
+    configureVoyage();
+
+    const fencedBatchSizes: number[] = [];
+    const transportSignals: Array<AbortSignal | undefined> = [];
+    const stub = mock(async ({ values, abortSignal }: {
+      values: string[];
+      abortSignal?: AbortSignal;
+    }) => {
+      transportSignals.push(abortSignal);
+      if (values.length === 8) throw VOYAGE_TOKEN_LIMIT_ERROR;
+      return fakeEmbeddings(values, 1024);
+    });
+    __setEmbedTransportForTests(stub as any);
+
+    const result = await embed(
+      Array.from({ length: 8 }, (_, i) => `fenced-${i}`),
+      {
+        withProviderSubmission: async (texts, submit) => {
+          fencedBatchSizes.push(texts.length);
+          return submit(new AbortController().signal);
+        },
+      },
+    );
+
+    expect(result).toHaveLength(8);
+    expect(fencedBatchSizes).toEqual([8, 4, 4]);
+    expect(transportSignals).toHaveLength(3);
+    expect(transportSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
+  });
+
+  test('lease loss after a failed request wins and prevents recursive provider retries', async () => {
+    configureVoyage();
+
+    let fenceCalls = 0;
+    const stub = mock(async () => { throw VOYAGE_TOKEN_LIMIT_ERROR; });
+    __setEmbedTransportForTests(stub as any);
+
+    await expect(embed(['left', 'right'], {
+      withProviderSubmission: async (_texts, submit) => {
+        fenceCalls++;
+        try {
+          return await submit(new AbortController().signal);
+        } catch (cause) {
+          // Models a drain winning between provider settlement and durable
+          // lease completion. The stale provider error must not trigger the
+          // gateway's token-limit recursion after ownership was lost.
+          throw new SourceEmbeddingLeaseLostError(
+            'provider output discarded after source drain',
+            { cause },
+          );
+        }
+      },
+    })).rejects.toBeInstanceOf(SourceEmbeddingLeaseLostError);
+
+    expect(fenceCalls).toBe(1);
+    expect(stub).toHaveBeenCalledTimes(1);
   });
 
   test('preserves input order across halving boundaries', async () => {

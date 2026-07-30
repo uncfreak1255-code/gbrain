@@ -114,6 +114,31 @@ describe('Voyage multimodal — text variant + inputType discipline', () => {
     expect(capturedBody.inputs[0].content[0].type).toBe('text');
     expect(capturedBody.inputs[1].content[0].type).toBe('image_base64');
   });
+
+  test('provider fence fires once per real <=32 Voyage request and composes its abort signal', async () => {
+    configureVoyage();
+    const fencedBatchSizes: number[] = [];
+    const requestSignals: Array<AbortSignal | null | undefined> = [];
+    fetchHandler = async (_url, init) => {
+      requestSignals.push(init.signal);
+      const body = JSON.parse(init.body as string);
+      return fakeResponse(body.inputs.length);
+    };
+    const result = await embedMultimodal(
+      Array.from({ length: 33 }, () => makeImg()),
+      {
+        withProviderSubmission: (inputs, submit) => {
+          fencedBatchSizes.push(inputs.length);
+          return submit(new AbortController().signal);
+        },
+      },
+    );
+
+    expect(result).toHaveLength(33);
+    expect(fencedBatchSizes).toEqual([32, 1]);
+    expect(requestSignals).toHaveLength(2);
+    expect(requestSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+  });
 });
 
 describe('embedQueryMultimodal — text query path', () => {
@@ -200,6 +225,25 @@ describe('embedMultimodalSafe — partial-failure surfacing', () => {
     expect(result.lastError).toBeDefined();
     // Binary-search retry: tries [0,1] then [0] then [1] = 3 calls
     expect(callCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test('safe split retries reacquire the provider fence for every smaller request', async () => {
+    configureVoyage();
+    const fencedAttemptSizes: number[] = [];
+    fetchHandler = async () => new Response('rate limited', { status: 429 });
+
+    const result = await embedMultimodalSafe(
+      [makeImg(), makeImg()],
+      {
+        withProviderSubmission: (inputs, submit) => {
+          fencedAttemptSizes.push(inputs.length);
+          return submit(new AbortController().signal);
+        },
+      },
+    );
+
+    expect(result.failedIndices).toEqual([0, 1]);
+    expect(fencedAttemptSizes).toEqual([2, 1, 1]);
   });
 
   test('mid-batch failure: binary-search retry recovers good inputs', async () => {

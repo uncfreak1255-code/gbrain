@@ -151,9 +151,12 @@ describe('haltBudgetSubtree', () => {
   test('flips waiting + delayed children to dead with reason', async () => {
     const owner = await queue.add('subagent', {}, {}, { allowProtectedSubmit: true });
     await setOwnerBudget(engine, owner.id, 1.0);
-    const c1 = await queue.add('subagent', {}, {}, { allowProtectedSubmit: true });
-    const c2 = await queue.add('subagent', {}, {}, { allowProtectedSubmit: true });
-    const c3 = await queue.add('subagent', {}, {}, { allowProtectedSubmit: true });
+    // Default on_child_fail is fail_parent. Administrative budget halt must
+    // still preserve the owner's independent state machine.
+    const childOpts = { parent_job_id: owner.id };
+    const c1 = await queue.add('subagent', {}, childOpts, { allowProtectedSubmit: true });
+    const c2 = await queue.add('subagent', {}, childOpts, { allowProtectedSubmit: true });
+    const c3 = await queue.add('subagent', {}, childOpts, { allowProtectedSubmit: true });
     for (const c of [c1, c2, c3]) {
       await inheritBudgetOwner(engine, c.id, owner.id);
     }
@@ -176,6 +179,47 @@ describe('haltBudgetSubtree', () => {
       expect(r[0]!.status).toBe('dead');
       expect(r[0]!.error_text).toContain('budget_exhausted');
     }
+    expect(await queue.getJob(owner.id)).toMatchObject({ status: 'waiting' });
+    const receipts = await engine.executeRaw<{ count: number }>(
+      `SELECT count(*)::int AS count
+         FROM minion_inbox
+        WHERE job_id = $1 AND payload->>'type' = 'child_done'
+          AND payload->>'outcome' = 'dead'`,
+      [owner.id],
+    );
+    expect(receipts[0]?.count).toBe(3);
+  });
+
+  test('dead-letters nested waiting-children parents instead of waking them', async () => {
+    const owner = await queue.add('subagent', {}, {}, { allowProtectedSubmit: true });
+    await setOwnerBudget(engine, owner.id, 1.0);
+    const parent = await queue.add(
+      'subagent', {}, { parent_job_id: owner.id }, { allowProtectedSubmit: true },
+    );
+    await inheritBudgetOwner(engine, parent.id, owner.id);
+    const child = await queue.add(
+      'subagent', {}, { parent_job_id: parent.id }, { allowProtectedSubmit: true },
+    );
+    await inheritBudgetOwner(engine, child.id, parent.id);
+
+    expect(await queue.getJob(owner.id)).toMatchObject({ status: 'waiting-children' });
+    expect(await queue.getJob(parent.id)).toMatchObject({ status: 'waiting-children' });
+    expect(await queue.getJob(child.id)).toMatchObject({ status: 'waiting' });
+
+    const halted = await haltBudgetSubtree(engine, owner.id, 'budget_exhausted');
+    expect(halted).toBe(2);
+    expect(await queue.getJob(owner.id)).toMatchObject({ status: 'waiting' });
+    expect(await queue.getJob(parent.id)).toMatchObject({ status: 'dead' });
+    expect(await queue.getJob(child.id)).toMatchObject({ status: 'dead' });
+
+    const ownerReceipts = await engine.executeRaw<{ count: number }>(
+      `SELECT count(*)::int AS count
+         FROM minion_inbox
+        WHERE job_id = $1 AND payload->>'type' = 'child_done'
+          AND payload->>'child_id' = $2 AND payload->>'outcome' = 'dead'`,
+      [owner.id, String(parent.id)],
+    );
+    expect(ownerReceipts[0]?.count).toBe(1);
   });
 
   test('does NOT touch active children (they finish their current turn cleanly)', async () => {

@@ -41,8 +41,10 @@ import {
   emptyPhantomPassResult,
   type PhantomPassResult,
 } from './phantom-redirect.ts';
-import { embed, isAvailable } from '../ai/gateway.ts';
+import { isAvailable } from '../ai/gateway.ts';
+import { embedBatch } from '../embedding.ts';
 import { isAborted } from '../abort-check.ts';
+import { withActiveSourceProviderLease } from '../source-embedding-lease.ts';
 
 export interface ExtractFactsOpts {
   /** Subset of slugs to reconcile. undefined = walk every page in the brain. */
@@ -222,19 +224,6 @@ export async function runExtractFacts(
 
     if (opts.dryRun) continue;
 
-    // Wipe-and-reinsert per page. The delete targets source_markdown_slug =
-    // slug only, so NULL-source_markdown_slug legacy rows survive (the
-    // partial-UNIQUE-index keyspace). #1928: `cli:`-origin facts (conversation
-    // facts from extract-conversation-facts) are NOT fence-owned — the page
-    // carries no `## Facts` fence to recreate them — so they MUST survive this
-    // reconcile. Exclude them from the wipe.
-    const deleted = await engine.deleteFactsForPage(slug, sourceId, {
-      excludeSourcePrefixes: ['cli:'],
-    });
-    result.factsDeleted += deleted.deleted;
-
-    if (parsed.facts.length === 0) continue;
-
     // v0.35.4 (D-ENG-1) — thread page.effective_date as the fallback
     // valid_from. Without this, fence rows without explicit `validFrom:`
     // land with `valid_from = now()` (import timestamp) and every
@@ -255,7 +244,16 @@ export async function runExtractFacts(
         const texts = extracted.map(e => e.fact);
         // #1972: forward the abort signal so a cancelled cycle's in-flight
         // batch embed (a network call) is itself abortable, not just the loop.
-        const embeddings = await embed(texts, { abortSignal: opts.signal });
+        const embeddings = await embedBatch(texts, {
+          abortSignal: opts.signal,
+          withProviderSubmission: (_batch, submit) =>
+            withActiveSourceProviderLease(
+              engine,
+              sourceId,
+              (leaseSignal) => submit(leaseSignal),
+              opts.signal,
+            ),
+        });
         // Defensive: embed should return one vector per input; if the
         // gateway returns a partial array (provider partial-batch retry
         // returning fewer than requested), only fill what we have.
@@ -271,8 +269,46 @@ export async function runExtractFacts(
       }
     }
 
-    const inserted = await engine.insertFacts(extracted, { source_id: sourceId }); // gbrain-allow-direct-insert: extract_facts cycle phase reconciles fence → DB
-    result.factsInserted += inserted.inserted;
+    // The fence is canonical, but its derived DB index must never pass through
+    // a committed empty state. Build/embed first, then lifecycle-lock and
+    // reconcile delete+insert in one transaction. If archive drain wins first,
+    // the active-source check rejects before DELETE; if it begins after DELETE,
+    // the shared lock makes it wait for this complete replacement to commit.
+    const reconciled = await engine.transaction(async (tx) => {
+      if (tx.kind === 'postgres') {
+        await tx.executeRaw(
+          `SELECT pg_advisory_xact_lock_shared(
+             hashtextextended('gbrain:source-lifecycle', 0)
+           )`,
+        );
+      }
+      const sources = await tx.executeRaw<{
+        archived: boolean;
+        embedding_drain_token: string | null;
+      }>(
+        `SELECT archived, embedding_drain_token
+           FROM sources
+          WHERE id = $1${tx.kind === 'postgres' ? ' FOR SHARE' : ''}`,
+        [sourceId],
+      );
+      const source = sources[0];
+      if (source && (source.archived || source.embedding_drain_token !== null)) {
+        throw new Error(
+          `Source "${sourceId}" is archived or draining; refusing fact reconciliation`,
+        );
+      }
+
+      // Wipe-and-reinsert per page. The delete targets
+      // source_markdown_slug = slug only, so NULL legacy rows survive.
+      // `cli:` conversation facts are not fence-owned and must survive.
+      const deleted = await tx.deleteFactsForPage(slug, sourceId, {
+        excludeSourcePrefixes: ['cli:'],
+      });
+      const inserted = await tx.insertFacts(extracted, { source_id: sourceId }); // gbrain-allow-direct-insert: extract_facts cycle phase reconciles fence → DB
+      return { deleted: deleted.deleted, inserted: inserted.inserted };
+    });
+    result.factsDeleted += reconciled.deleted;
+    result.factsInserted += reconciled.inserted;
   }
 
   // v0.42 Wave B3: receipt + rollup. extract_facts is deterministic

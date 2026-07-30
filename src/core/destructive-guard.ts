@@ -14,6 +14,14 @@
  */
 
 import type { BrainEngine } from './engine.ts';
+import {
+  beginSourceArchiveDrain,
+  cancelSourceArchiveDrain,
+  lockSourceDrainForFinalize,
+  waitForSourceEmbeddingLeases,
+  type SourceArchiveDrainPurpose,
+} from './source-embedding-lease.ts';
+import { MinionQueue } from './minions/queue.ts';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -181,35 +189,114 @@ export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
-  // Atomic: only flip rows that are currently active. Returns the metadata
-  // we need without a follow-up SELECT. RETURNING projects the columns the
-  // caller cares about; pageCount is a separate count.
+  return (await softDeleteSourceGuarded(engine, sourceId)).result;
+}
+
+export interface SoftDeleteGuardDecision {
+  allowed: boolean;
+  reason: string;
+}
+
+/**
+ * Two-phase archive with provider wait and any expensive guard outside the
+ * final transaction. A committed drain blocks new source work, so the final
+ * exclusive section needs only exact source/token validation plus the UPDATE.
+ */
+export async function softDeleteSourceGuarded(
+  engine: BrainEngine,
+  sourceId: string,
+  guard?: (engine: BrainEngine) => Promise<SoftDeleteGuardDecision>,
+  purpose: SourceArchiveDrainPurpose = 'manual',
+): Promise<{ result: SoftDeletedSource | null; reason: string }> {
+  if (sourceId === 'default') {
+    return { result: null, reason: 'protected_default' };
+  }
+  const drain = await beginSourceArchiveDrain(engine, sourceId, purpose);
+  if (!drain) return { result: null, reason: 'source_not_active' };
+  if (drain.purpose !== purpose) {
+    return {
+      result: null,
+      reason: drain.purpose === 'hygiene_candidate'
+        ? 'hygiene_candidate_resume_required'
+        : `${drain.purpose}_resume_required`,
+    };
+  }
+
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
-  const rows = await engine.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
-    `UPDATE sources
-     SET archived = true,
-         archived_at = now(),
-         archive_expires_at = ${expiresClause},
-         config = COALESCE(config, '{}'::jsonb) || '{"federated": false}'::jsonb
-     WHERE id = $1 AND archived = false
-     RETURNING id, name, archived_at, archive_expires_at`,
-    [sourceId],
-  );
-  if (rows.length === 0) return null;
-  const row = rows[0];
+  let final: {
+    row: { id: string; name: string; archived_at: string; archive_expires_at: string } | null;
+    reason: string;
+  };
+  try {
+    await waitForSourceEmbeddingLeases(engine, drain);
+    if (guard) {
+      const decision = await guard(engine);
+      if (!decision.allowed) {
+        await cancelSourceArchiveDrain(engine, drain);
+        return { result: null, reason: decision.reason };
+      }
+    }
+    final = await engine.transaction(async (tx) => {
+      await tx.executeRaw(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended('gbrain:source-lifecycle', 0)
+         )`,
+      );
+      const readiness = await lockSourceDrainForFinalize(tx, drain);
+      if (readiness.status === 'already_archived') {
+        return { row: null, reason: 'source_not_active' };
+      }
+      const rows = await tx.executeRaw<{
+        id: string;
+        name: string;
+        archived_at: string;
+        archive_expires_at: string;
+      }>(
+        `UPDATE public.sources
+            SET archived = true,
+                archived_at = now(),
+                archive_expires_at = ${expiresClause},
+                embedding_drain_token = NULL,
+                config = COALESCE(config, '{}'::jsonb) || '{"federated": false}'::jsonb
+          WHERE id = $1
+            AND archived IS NOT TRUE
+            AND embedding_drain_token = $2
+            AND embedding_drain_epoch = $3
+        RETURNING id, name, archived_at, archive_expires_at`,
+        [sourceId, drain.token, drain.epoch],
+      );
+      return {
+        row: rows[0] ?? null,
+        reason: rows.length === 1 ? 'archived' : 'archive_update_failed',
+      };
+    });
+  } catch (caught) {
+    // Fail safe: an uncertain provider token or DB failure keeps the source in
+    // drain state. A later archive invocation adopts the same token+epoch and
+    // resumes; we never reopen provider egress on uncertain state.
+    throw caught;
+  }
+  if (!final.row) {
+    await cancelSourceArchiveDrain(engine, drain);
+    return { result: null, reason: final.reason };
+  }
+  const row = final.row;
 
   const pageRows = await engine.executeRaw<{ n: number }>(
-    `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1`,
+    `SELECT COUNT(*)::int AS n FROM public.pages WHERE source_id = $1`,
     [sourceId],
   );
   const pageCount = pageRows[0]?.n ?? 0;
 
   return {
-    id: sourceId,
-    name: row.name,
-    deletedAt: new Date(row.archived_at),
-    expiresAt: new Date(row.archive_expires_at),
-    pageCount,
+    result: {
+      id: sourceId,
+      name: row.name,
+      deletedAt: new Date(row.archived_at),
+      expiresAt: new Date(row.archive_expires_at),
+      pageCount,
+    },
+    reason: 'archived',
   };
 }
 
@@ -285,14 +372,91 @@ export async function listArchivedSources(
 export async function purgeExpiredSources(
   engine: BrainEngine,
 ): Promise<string[]> {
-  const rows = await engine.executeRaw<{ id: string }>(
-    `DELETE FROM sources
-     WHERE archived = true
-       AND archive_expires_at IS NOT NULL
-       AND archive_expires_at <= now()
-     RETURNING id`,
+  // Terminalize archived-source work while the registry row still exists.
+  // After deletion, the queue's legacy-identifier compatibility predicate
+  // would otherwise make an orphaned job claimable again.
+  const expired = await engine.executeRaw<{ id: string }>(
+    `SELECT id FROM sources
+      WHERE archived = true
+        AND archive_expires_at IS NOT NULL
+        AND archive_expires_at <= now()
+      ORDER BY id`,
   );
-  return rows.map((r) => r.id);
+  const expiredIds = expired.map((row) => row.id);
+  if (expiredIds.length === 0) return [];
+  return purgeArchivedSourceIds(engine, expiredIds, true);
+}
+
+/** Permanently remove one archived source after terminalizing queued work. */
+export async function purgeArchivedSource(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<boolean> {
+  const state = await engine.executeRaw<{ archived: boolean }>(
+    `SELECT archived FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  if (state[0]?.archived !== true) return false;
+  return (await purgeArchivedSourceIds(engine, [sourceId], false)).length === 1;
+}
+
+async function purgeArchivedSourceIds(
+  engine: BrainEngine,
+  sourceIds: readonly string[],
+  requireExpired: boolean,
+): Promise<string[]> {
+  const uniqueSourceIds = [...new Set(sourceIds)];
+  if (uniqueSourceIds.length === 0) return [];
+
+  // Purge is not ordinary best-effort queue maintenance. Wait for every
+  // matching row lock, cancel running/waiting descendants, and reclassify
+  // completed/failed/dead rows so replayJob/retryJob cannot revive them after
+  // the registry row is gone. The normal cleanup path retains SKIP LOCKED and
+  // leaves terminal receipts intact.
+  await new MinionQueue(engine).cancelArchivedSourceJobs(uniqueSourceIds, {
+    waitForLocks: true,
+    includeRetryableTerminal: true,
+  });
+
+  return engine.transaction(async (tx) => {
+    await tx.executeRaw(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended('gbrain:source-lifecycle', 0)
+       )`,
+    );
+    const locked = await tx.executeRaw<{ id: string }>(
+      `SELECT id FROM public.sources
+        WHERE id = ANY($1::text[])
+          AND archived = true
+          ${requireExpired
+            ? 'AND archive_expires_at IS NOT NULL AND archive_expires_at <= now()'
+            : ''}
+        ORDER BY id
+        FOR UPDATE`,
+      [uniqueSourceIds],
+    );
+    const lockedIds = locked.map((row) => row.id);
+    if (lockedIds.length === 0) return [];
+
+    const remaining = await new MinionQueue(tx).countRevivableArchivedSourceJobs(lockedIds);
+    if (remaining > 0) {
+      throw new Error(
+        `Refusing to purge ${lockedIds.join(', ')}: ${remaining} source job(s) remain runnable or retryable`,
+      );
+    }
+
+    const rows = await tx.executeRaw<{ id: string }>(
+      `DELETE FROM public.sources
+        WHERE id = ANY($1::text[])
+          AND archived = true
+          ${requireExpired
+            ? 'AND archive_expires_at IS NOT NULL AND archive_expires_at <= now()'
+            : ''}
+      RETURNING id`,
+      [lockedIds],
+    );
+    return rows.map((row) => row.id);
+  });
 }
 
 // ── Display Helpers ─────────────────────────────────────────

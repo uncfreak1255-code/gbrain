@@ -79,6 +79,16 @@ export interface EmbedBatchOptions {
    * and amplify rate-limit pressure.
    */
   maxRetries?: number;
+  /**
+   * Optional lease around each real gateway provider submission. The gateway
+   * invokes it after recipe pre-splitting and again for recursive token-limit
+   * retries, while keeping any SDK-owned retries inside the same durable
+   * lease.
+   */
+  withProviderSubmission?: (
+    texts: string[],
+    submit: (leaseSignal?: AbortSignal) => Promise<Float32Array[]>,
+  ) => Promise<Float32Array[]>;
 }
 
 /**
@@ -98,15 +108,19 @@ export async function embedBatch(
   const gwOpts = {
     ...(options.abortSignal !== undefined && { abortSignal: options.abortSignal }),
     ...(options.maxRetries !== undefined && { maxRetries: options.maxRetries }),
+    ...(options.withProviderSubmission !== undefined && {
+      withProviderSubmission: options.withProviderSubmission,
+    }),
   };
+  const submit = (batch: string[]) => gatewayEmbed(batch, gwOpts);
   // Fast path: small batch, no progress callback — single gateway call.
   if (texts.length <= BATCH_SIZE && !options.onBatchComplete) {
-    return gatewayEmbed(texts, gwOpts);
+    return submit(texts);
   }
   const results: Float32Array[] = [];
   for (let i = 0; i < texts.length; i += BATCH_SIZE) {
     const slice = texts.slice(i, i + BATCH_SIZE);
-    const out = await gatewayEmbed(slice, gwOpts);
+    const out = await submit(slice);
     results.push(...out);
     options.onBatchComplete?.(results.length, texts.length);
   }

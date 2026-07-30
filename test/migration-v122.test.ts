@@ -26,7 +26,9 @@ describe('migration v122 — source-scoped file identity', () => {
     await engine.setConfig('version', '121');
 
     const result = await runMigrations(engine);
-    expect(result.applied).toBe(2);
+    expect(result.applied).toBe(
+      MIGRATIONS.filter((candidate) => candidate.version > 121).length,
+    );
 
     const constraints = await engine.executeRaw<{ conname: string }>(
       `SELECT conname FROM pg_constraint

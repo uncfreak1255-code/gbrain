@@ -148,6 +148,54 @@ describe('runExtractFacts — happy path', () => {
     expect(Number(rows.rows[0].n)).toBe(0);
   });
 
+  test('archive drain rejection rolls back the page delete and preserves old facts', async () => {
+    await putPage('people/alice', FACT_FENCE(
+      `| 1 | old fact | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
+    ));
+    await runExtractFacts(engine, { slugs: ['people/alice'] });
+    await putPage('people/alice', FACT_FENCE(
+      `| 1 | replacement fact | fact | 1.0 | world | medium | 2026-01-02 |  | s |  |`,
+    ));
+    await engine.executeRaw(
+      `UPDATE sources SET embedding_drain_token = 'active-drain' WHERE id = 'default'`,
+    );
+
+    await expect(
+      runExtractFacts(engine, { slugs: ['people/alice'] }),
+    ).rejects.toThrow(/archived or draining/);
+    await engine.executeRaw(
+      `UPDATE sources SET embedding_drain_token = NULL WHERE id = 'default'`,
+    );
+
+    const rows = await engine.executeRaw<{ fact: string }>(
+      `SELECT fact FROM facts WHERE source_id = 'default' AND source_markdown_slug = 'people/alice'`,
+    );
+    expect(rows).toEqual([{ fact: 'old fact' }]);
+  });
+
+  test('empty-fence delete is lifecycle-guarded and preserves old facts while draining', async () => {
+    await putPage('people/alice', FACT_FENCE(
+      `| 1 | old fact | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,
+    ));
+    await runExtractFacts(engine, { slugs: ['people/alice'] });
+    await putPage('people/alice', '# Empty fence replacement\n');
+    await engine.executeRaw(
+      `UPDATE sources SET embedding_drain_token = 'active-drain' WHERE id = 'default'`,
+    );
+
+    await expect(
+      runExtractFacts(engine, { slugs: ['people/alice'] }),
+    ).rejects.toThrow(/archived or draining/);
+    await engine.executeRaw(
+      `UPDATE sources SET embedding_drain_token = NULL WHERE id = 'default'`,
+    );
+
+    const rows = await engine.executeRaw<{ fact: string }>(
+      `SELECT fact FROM facts WHERE source_id = 'default' AND source_markdown_slug = 'people/alice'`,
+    );
+    expect(rows).toEqual([{ fact: 'old fact' }]);
+  });
+
   test('dry-run does not touch DB', async () => {
     await putPage('people/alice', FACT_FENCE(
       `| 1 | A | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`,

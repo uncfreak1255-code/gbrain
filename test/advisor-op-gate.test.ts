@@ -39,7 +39,9 @@ Seascape Hub strategy canon update.
       started_at: '2026-06-28T10:00:00Z',
     },
     created_at: new Date('2026-06-28T10:00:00Z'),
-    updated_at: new Date('2026-06-28T10:00:00Z'),
+    // Keep the fixture inside Advisor's 30-day candidate window regardless of
+    // the wall-clock date on the CI runner.
+    updated_at: new Date(Date.now() - 24 * 60 * 60 * 1000),
     source_id: 'default',
     ...overrides,
   };

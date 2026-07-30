@@ -81,6 +81,8 @@ export interface AutopilotDispatchDecisionInput {
   estTotal: number;
   minutesSinceLastFull: number;
   globalMaintenanceDue: boolean;
+  /** Brain-wide safety gate: no full or global cycle while any source needs recovery. */
+  sourceRecoveryBlocked?: boolean;
   fullCycleFloorMin?: number;
 }
 
@@ -91,15 +93,20 @@ export function decideAutopilotDispatch(input: AutopilotDispatchDecisionInput): 
 } {
   const floorMin = input.fullCycleFloorMin ?? 60;
   const planIsEmpty = input.planLength === 0;
+  const sourceRecoveryBlocked = input.sourceRecoveryBlocked === true;
   const shouldFullCycle =
-    (input.score >= 95 && planIsEmpty && input.minutesSinceLastFull >= floorMin) ||
-    input.planLength > 3 ||
-    input.estTotal >= 300 ||
-    input.score < 70;
+    !sourceRecoveryBlocked && (
+      (input.score >= 95 && planIsEmpty && input.minutesSinceLastFull >= floorMin) ||
+      input.planLength > 3 ||
+      input.estTotal >= 300 ||
+      input.score < 70
+    );
   return {
     shouldFullCycle,
-    shouldSleep: input.score >= 95 && planIsEmpty && input.minutesSinceLastFull < floorMin && !input.globalMaintenanceDue,
-    shouldDispatchGlobalMaintenance: input.globalMaintenanceDue,
+    shouldSleep: sourceRecoveryBlocked
+      ? planIsEmpty
+      : input.score >= 95 && planIsEmpty && input.minutesSinceLastFull < floorMin && !input.globalMaintenanceDue,
+    shouldDispatchGlobalMaintenance: !sourceRecoveryBlocked && input.globalMaintenanceDue,
   };
 }
 
@@ -909,12 +916,35 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                 if (submittedToday < maxJobsToday) {
                   const { loadAllSources } = await import('../core/sources-load.ts');
                   const { countExtractAtomsBacklog } = await import('../core/cycle/extract-atoms.ts');
+                  const { gateProtectedSourceWork, inspectSourceHygiene } = await import('../core/source-hygiene.ts');
                   const sources = await loadAllSources(engine);
+                  const drainCandidates: Array<{
+                    src: (typeof sources)[number];
+                    backlog: number;
+                  }> = [];
                   for (const src of sources) {
-                    if (submittedToday >= maxJobsToday) break; // brain-wide daily cap (fairness)
                     if (!src.local_path) continue;
                     const backlog = await countExtractAtomsBacklog(engine, src.id);
                     if (backlog === null || backlog <= threshold) continue;
+                    drainCandidates.push({ src, backlog });
+                  }
+                  const sourceHygiene = drainCandidates.length > 0
+                    ? await inspectSourceHygiene(engine, { inspectFilesystem: true })
+                    : null;
+                  for (const { src, backlog } of drainCandidates) {
+                    if (submittedToday >= maxJobsToday) break; // brain-wide daily cap (fairness)
+                    const sourceGate = sourceHygiene
+                      ? gateProtectedSourceWork(sourceHygiene, src.id)
+                      : { allowed: false as const, reason: 'unknown_source' as const };
+                    if (!sourceGate.allowed) {
+                      logError(
+                        'dispatch.auto-drain-source-hygiene',
+                        new Error(
+                          `source ${src.id} is blocked from protected atom work: ${sourceGate.reason}`,
+                        ),
+                      );
+                      continue;
+                    }
                     // Time-sloted key (CODEX #2): a static key would block the
                     // source FOREVER once the first job completes. A new UTC-day
                     // slot reopens it each day.
@@ -971,7 +1001,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         const health = await engine.getHealth();
         const score = health.brain_score;
         const { loadRecommendationContext } = await import('../core/remediation/context.ts');
-        const ctx = await loadRecommendationContext(engine, { repoPath });
+        const ctx = await loadRecommendationContext(engine, {
+          repoPath,
+          inspectLocalSourcePaths: true,
+        });
         // v0.41.18.0 (A5 + A19 + A22, T15): consult onboard recommendations
         // ALONGSIDE doctor's brain-score recommendations. Onboard's 4 new
         // checks (embed_staleness, link_coverage, timeline_coverage,
@@ -990,6 +1023,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         }
         const plan = computeRecommendations(health, ctx, extraRemediations).filter((r) => r.status === 'remediable');
         const estTotal = plan.reduce((s, r) => s + r.est_seconds, 0);
+        const sourceRecovery = (ctx.sourceHygiene?.sources ?? []).filter(
+          (source) => source.classification === 'recovery_required',
+        );
+        const sourceRecoveryBlocked = sourceRecovery.length > 0;
 
         const { dispatchPerSource, dispatchGlobalMaintenance, resolveEffectiveFanoutMax, isGlobalMaintenanceDue } = await import('./autopilot-fanout.ts');
         let globalMaintenanceDue = false;
@@ -1016,11 +1053,23 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           estTotal,
           minutesSinceLastFull,
           globalMaintenanceDue,
+          sourceRecoveryBlocked,
           fullCycleFloorMin: FULL_CYCLE_FLOOR_MIN,
         });
 
         if (shouldSleep) {
-          if (jsonMode) {
+          if (sourceRecoveryBlocked) {
+            const sourceIds = sourceRecovery.map((source) => source.source_id);
+            if (jsonMode) {
+              process.stderr.write(JSON.stringify({
+                event: 'source_hygiene_blocked',
+                source_ids: sourceIds,
+                blocked_modes: ['full_cycle', 'global_maintenance'],
+              }) + '\n');
+            } else {
+              console.log(`[dispatch] source recovery blocks full-cycle maintenance: ${sourceIds.join(', ')}`);
+            }
+          } else if (jsonMode) {
             process.stderr.write(JSON.stringify({ event: 'skip_healthy', score, plan_size: 0 }) + '\n');
           }
         } else if (shouldFullCycle) {
@@ -1121,31 +1170,48 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       // extract + embed, which didn't match the Minions-dispatch
       // path's phase set). Now both converge on the same primitive.
       try {
-        const { runCycle } = await import('../core/cycle.ts');
-        const report = await runCycle(engine, {
-          brainDir: repoPath,
-          // Autopilot daemon path: pulls by default (matches
-          // pre-v0.17 autopilot behavior). CLI dream defaults false
-          // for cron safety; that choice is scoped to dream only.
-          pull: true,
-          yieldBetweenPhases: async () => {
-            await new Promise(r => setImmediate(r));
-          },
-        });
-        // Only 'failed' (every attempted phase failed) trips the autopilot
-        // circuit breaker. 'partial' means at least one phase warned or
-        // failed while others ran — that's a soft signal, not a fatal
-        // condition. Treating 'partial' as failure here caused respawn
-        // storms under KeepAlive=true on brains where a single phase
-        // (typically `orphans`) emits a 'warn' every cycle in steady state.
-        if (report.status === 'failed') {
-          cycleOk = false;
-        }
-        if (jsonMode) {
-          process.stderr.write(JSON.stringify({ event: 'cycle-inline', status: report.status, duration_ms: report.duration_ms, totals: report.totals }) + '\n');
+        const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+        const sourceHygiene = await inspectSourceHygiene(engine, { inspectFilesystem: true });
+        const recoverySourceIds = sourceHygiene.sources
+          .filter((source) => source.classification === 'recovery_required')
+          .map((source) => source.source_id);
+        if (recoverySourceIds.length > 0) {
+          if (jsonMode) {
+            process.stderr.write(JSON.stringify({
+              event: 'source_hygiene_blocked',
+              source_ids: recoverySourceIds,
+              blocked_modes: ['inline_full_cycle'],
+            }) + '\n');
+          } else {
+            console.log(`[cycle-inline skipped] source recovery required: ${recoverySourceIds.join(', ')}`);
+          }
         } else {
-          const t = report.totals;
-          console.log(`[cycle-inline ${report.status}] lint=${t.lint_fixes} backlinks=${t.backlinks_added} synced=${t.pages_synced} extracted=${t.pages_extracted} embedded=${t.pages_embedded} orphans=${t.orphans_found}`);
+          const { runCycle } = await import('../core/cycle.ts');
+          const report = await runCycle(engine, {
+            brainDir: repoPath,
+            // Autopilot daemon path: pulls by default (matches
+            // pre-v0.17 autopilot behavior). CLI dream defaults false
+            // for cron safety; that choice is scoped to dream only.
+            pull: true,
+            yieldBetweenPhases: async () => {
+              await new Promise(r => setImmediate(r));
+            },
+          });
+          // Only 'failed' (every attempted phase failed) trips the autopilot
+          // circuit breaker. 'partial' means at least one phase warned or
+          // failed while others ran — that's a soft signal, not a fatal
+          // condition. Treating 'partial' as failure here caused respawn
+          // storms under KeepAlive=true on brains where a single phase
+          // (typically `orphans`) emits a 'warn' every cycle in steady state.
+          if (report.status === 'failed') {
+            cycleOk = false;
+          }
+          if (jsonMode) {
+            process.stderr.write(JSON.stringify({ event: 'cycle-inline', status: report.status, duration_ms: report.duration_ms, totals: report.totals }) + '\n');
+          } else {
+            const t = report.totals;
+            console.log(`[cycle-inline ${report.status}] lint=${t.lint_fixes} backlinks=${t.backlinks_added} synced=${t.pages_synced} extracted=${t.pages_extracted} embedded=${t.pages_embedded} orphans=${t.orphans_found}`);
+          }
         }
       } catch (e) { logError('cycle-inline', e); cycleOk = false; }
     }

@@ -15,6 +15,7 @@ import { mkdirSync, writeFileSync, rmSync, chmodSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { softDeleteSource } from '../src/core/destructive-guard.ts';
 import { operations, OperationError } from '../src/core/operations.ts';
 import type { OperationContext, AuthInfo, Operation } from '../src/core/operations.ts';
 import { hasScope } from '../src/core/scope.ts';
@@ -333,10 +334,7 @@ describe('sources_list — include_archived honored (was silently leaking)', () 
         id: 'archived-src',
         url: 'https://github.com/example/repo',
       });
-      await engine.executeRaw(
-        `UPDATE sources SET archived = true WHERE id = $1`,
-        ['archived-src'],
-      );
+      expect(await softDeleteSource(engine, 'archived-src')).not.toBeNull();
 
       const listOp = findOp('sources_list');
       const result = (await listOp.handler(ctxRemote(['read']), {})) as any;
@@ -352,10 +350,7 @@ describe('sources_list — include_archived honored (was silently leaking)', () 
         id: 'archived-included',
         url: 'https://github.com/example/repo',
       });
-      await engine.executeRaw(
-        `UPDATE sources SET archived = true WHERE id = $1`,
-        ['archived-included'],
-      );
+      expect(await softDeleteSource(engine, 'archived-included')).not.toBeNull();
 
       const listOp = findOp('sources_list');
       const result = (await listOp.handler(ctxRemote(['read']), {

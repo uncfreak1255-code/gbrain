@@ -175,7 +175,8 @@ export function buildDreamQualityReceipt(input: {
   source: 'summary' | 'slugs';
   now?: Date;
 }): DreamQualityReceipt {
-  const scores = input.pages.map((page) => scoreDreamPage(page, { now: input.now }));
+  const now = input.now ?? new Date();
+  const scores = input.pages.map((page) => scoreDreamPage(page, { now }));
   const passed = scores.filter((p) => p.passed).length;
   const avg = scores.length
     ? Math.round(scores.reduce((sum, p) => sum + p.score, 0) / scores.length)
@@ -195,7 +196,7 @@ export function buildDreamQualityReceipt(input: {
 
   const base: Omit<DreamQualityReceipt, 'receipt_sha8'> = {
     schema_version: 1,
-    ts: (input.now ?? new Date()).toISOString(),
+    ts: now.toISOString(),
     summary_slug: input.summarySlug ?? null,
     source: input.source,
     pages_scored: scores.length,

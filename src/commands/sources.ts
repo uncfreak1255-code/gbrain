@@ -33,9 +33,11 @@ import {
   assessDestructiveImpact,
   checkDestructiveConfirmation,
   softDeleteSource,
+  softDeleteSourceGuarded,
   restoreSource,
   listArchivedSources,
   purgeExpiredSources,
+  purgeArchivedSource,
   formatImpact,
   formatSoftDelete,
   SOFT_DELETE_TTL_HOURS,
@@ -54,9 +56,14 @@ import {
   loadAllSources,
   parseSourceConfig,
   isSourceFederated,
+  sourceDrainResumeMessage,
   type SourceRow as LoadedSourceRow,
 } from '../core/sources-load.ts';
 import { buildSourcePlanReport, type SourcePlanInput } from '../core/source-plan.ts';
+import {
+  recoverDefaultSourceArchiveDrain,
+  revokeStaleSourceEmbeddingLeases,
+} from '../core/source-embedding-lease.ts';
 
 // ── Validation ──────────────────────────────────────────────
 
@@ -532,13 +539,62 @@ async function runSetCrMode(engine: BrainEngine, args: string[]): Promise<void> 
 async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
   const id = args[0];
   if (!id) {
-    console.error('Usage: gbrain sources archive <id>');
+    console.error(
+      'Usage: gbrain sources archive <id> [--if-hygiene-candidate] '
+      + '[--revoke-stale-leases --confirm-destructive]',
+    );
     process.exit(2);
   }
 
+  const hygieneCandidate = args.includes('--if-hygiene-candidate');
+  const revokeStaleLeases = args.includes('--revoke-stale-leases');
+  const confirmDestructive = args.includes('--confirm-destructive');
+  if (hygieneCandidate && revokeStaleLeases) {
+    console.error('Error: --revoke-stale-leases cannot be combined with --if-hygiene-candidate.');
+    process.exit(2);
+  }
+  if (revokeStaleLeases && !confirmDestructive) {
+    console.error(
+      'Refusing stale lease revocation without --confirm-destructive. '
+      + 'Late provider output will be discarded after revocation.',
+    );
+    process.exit(5);
+  }
+
   if (id === 'default') {
-    console.error('Error: cannot archive the "default" source.');
-    process.exit(3);
+    const expectedPurpose = hygieneCandidate ? 'hygiene_candidate' : 'manual';
+    const recovery = await recoverDefaultSourceArchiveDrain(engine, expectedPurpose);
+    if (recovery.status === 'purpose_mismatch') {
+      const actualToken = recovery.purpose === 'hygiene_candidate'
+        ? 'hygiene-candidate:recovery'
+        : recovery.purpose === 'migration'
+          ? 'migration:recovery'
+          : 'manual:recovery';
+      console.error(sourceDrainResumeMessage(id, actualToken));
+      process.exit(4);
+    }
+    if (recovery.status === 'not_draining') {
+      console.error('Error: cannot archive the "default" source.');
+      process.exit(3);
+    }
+    console.log(
+      `Recovered protected default source from its interrupted ${recovery.purpose} archive drain; `
+      + `the source remains active and ${recovery.revokedLeases} fenced provider lease(s) were discarded.`,
+    );
+    return;
+  }
+
+  if (hygieneCandidate) {
+    const attempt = await archiveHygieneCandidate(engine, id);
+    if (!attempt.result) {
+      console.error(
+        `Refused to archive source "${id}": fresh source-hygiene evidence `
+        + `did not authorize it (${attempt.reason}).`,
+      );
+      process.exit(4);
+    }
+    console.log(formatSoftDelete(attempt.result));
+    return;
   }
 
   // Show impact preview
@@ -548,13 +604,78 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(4);
   }
 
-  const result = await softDeleteSource(engine, id);
-  if (!result) {
+  if (revokeStaleLeases) {
+    const recovery = await revokeStaleSourceEmbeddingLeases(engine, id, {
+      confirmDestructive,
+    });
+    console.log(
+      `Revoked ${recovery.revoked} stale embedding lease(s) for source "${id}"; `
+      + `${recovery.remaining} current lease(s) remain. Late provider output will be discarded.`,
+    );
+  }
+
+  const archiveAttempt = await softDeleteSourceGuarded(engine, id);
+  if (!archiveAttempt.result) {
+    if (archiveAttempt.reason === 'migration_resume_required') {
+      console.error(sourceDrainResumeMessage(id, 'migration:recovery'));
+      process.exit(4);
+    }
+    if (archiveAttempt.reason === 'hygiene_candidate_resume_required') {
+      console.error(sourceDrainResumeMessage(id, 'hygiene-candidate:recovery'));
+      process.exit(4);
+    }
     console.error(`Failed to archive source "${id}".`);
     process.exit(4);
   }
 
-  console.log(formatSoftDelete(result));
+  console.log(formatSoftDelete(archiveAttempt.result));
+}
+
+export async function archiveHygieneCandidate(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<{
+  result: Awaited<ReturnType<typeof softDeleteSource>>;
+  reason: string;
+}> {
+  const { inspectSourceHygiene } = await import('../core/source-hygiene.ts');
+  const inspectCandidate = async (
+    candidateEngine: BrainEngine,
+    expectedArchiveDrainSourceId?: string,
+  ) => {
+    const packet = await inspectSourceHygiene(candidateEngine, {
+      inspectFilesystem: true,
+      expectedArchiveDrainSourceId,
+    });
+    const decision = packet.sources.find((source) => source.source_id === sourceId);
+    const guardedResume = expectedArchiveDrainSourceId === undefined
+      && decision?.draining === true
+      && decision.drain_requires_hygiene_candidate === true;
+    if (
+      (decision?.classification === 'archive_candidate' && decision.safe_for_agent_review)
+      || guardedResume
+    ) {
+      return { allowed: true, reason: 'archive_candidate' };
+    }
+    return {
+      allowed: false,
+      reason: decision
+        ? [decision.classification, ...decision.veto_reasons].join(':')
+        : 'source_not_found',
+    };
+  };
+
+  // Avoid putting a healthy/non-candidate source into drain state. After the
+  // committed drain blocks new source work, reread the same full evidence
+  // outside the short final lifecycle transaction.
+  const preflight = await inspectCandidate(engine);
+  if (!preflight.allowed) return { result: null, reason: preflight.reason };
+  return softDeleteSourceGuarded(
+    engine,
+    sourceId,
+    (candidateEngine) => inspectCandidate(candidateEngine, sourceId),
+    'hygiene_candidate',
+  );
 }
 
 // ── Subcommand: restore ─────────────────────────────────────
@@ -624,7 +745,11 @@ async function runPurge(engine: BrainEngine, args: string[]): Promise<void> {
       process.exit(5);
     }
 
-    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
+    const deleted = await purgeArchivedSource(engine, id);
+    if (!deleted) {
+      console.error(`Source "${id}" is not archived; archive it before permanent purge.`);
+      process.exit(5);
+    }
     console.log(`Permanently deleted source "${id}" (${impact.pageCount} pages cascaded).`);
     return;
   }
@@ -1304,10 +1429,18 @@ async function runAudit(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const { fetchSource } = await import('../core/sources-load.ts');
+  const {
+    fetchSource,
+    isSourceActive,
+    sourceDrainResumeMessage,
+  } = await import('../core/sources-load.ts');
   const src = await fetchSource(engine, sourceId);
   if (!src) {
     console.error(`Source not found: ${sourceId} (run \`gbrain sources list\` to see registered sources)`);
+    process.exit(1);
+  }
+  if (!isSourceActive(src) && src.embedding_drain_token != null) {
+    console.error(sourceDrainResumeMessage(sourceId, src.embedding_drain_token));
     process.exit(1);
   }
   if (!src.local_path) {
@@ -1581,7 +1714,10 @@ Subcommands:
                                     Permanently delete a source and all its data.
                                     Shows impact preview. Requires --confirm-destructive
                                     when the source has data (pages/chunks/embeddings).
-  archive <id>                      Soft-delete: hide from search, preserve data for ${SOFT_DELETE_TTL_HOURS}h.
+  archive <id> [--if-hygiene-candidate]
+                                    Soft-delete: hide from search, preserve data for ${SOFT_DELETE_TTL_HOURS}h.
+                                    For a reviewed interrupted shared-DB drain:
+                                    --revoke-stale-leases --confirm-destructive
   restore <id> [--no-federate]      Un-archive a soft-deleted source.
   status [--json]                   v0.40.3.0 — read-only per-source dashboard:
                                     last sync, staleness, page count,

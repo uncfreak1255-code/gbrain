@@ -15,6 +15,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { resolveSourceId } from '../src/core/source-resolver.ts';
+import { softDeleteSource } from '../src/core/destructive-guard.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -70,6 +71,42 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
       const resolved = await resolveSourceId(engine, null, cwd);
       expect(resolved).toBe('default');
     });
+
+    test('soft-archived dotfile source is rejected instead of bypassed by a lower tier', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config, archived)
+         VALUES ('retired', 'retired', '{}'::jsonb, true)`,
+      );
+      writeFileSync(join(cwd, '.gbrain-source'), 'retired\n');
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /Source "retired" is archived.*\.gbrain-source/,
+      );
+    });
+
+    test('interrupted-drain dotfile source names the archive resume command', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config, embedding_drain_token)
+         VALUES ('stuck-drain', 'stuck-drain', '{}'::jsonb, 'resume-token')`,
+      );
+      writeFileSync(join(cwd, '.gbrain-source'), 'stuck-drain\n');
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /interrupted archive drain.*gbrain sources archive stuck-drain/,
+      );
+    });
+
+    test('hygiene-candidate dotfile drain names the guarded resume command', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config, embedding_drain_token)
+         VALUES (
+           'candidate-drain', 'candidate-drain', '{}'::jsonb,
+           'hygiene-candidate:resume-token'
+         )`,
+      );
+      writeFileSync(join(cwd, '.gbrain-source'), 'candidate-drain\n');
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /gbrain sources archive candidate-drain --if-hygiene-candidate/,
+      );
+    });
   });
 
   describe('tier 5 — brain_default config', () => {
@@ -95,6 +132,50 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
       const resolved = await resolveSourceId(engine, null, cwd);
       expect(resolved).toBe('default');
     });
+
+    test('soft-archived brain_default fails loudly instead of rerouting writes', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config)
+         VALUES ('retired', 'retired', '{}'::jsonb)`,
+      );
+      await engine.setConfig('sources.default', 'retired');
+      expect(await softDeleteSource(engine, 'retired')).not.toBeNull();
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /Source "retired" is archived.*sources\.default/,
+      );
+    });
+
+    test('hygiene-candidate brain_default names the guarded resume command', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config)
+         VALUES ('candidate-default', 'candidate-default', '{}'::jsonb)`,
+      );
+      await engine.setConfig('sources.default', 'candidate-default');
+      await engine.executeRaw(
+        `UPDATE sources
+            SET embedding_drain_token = 'hygiene-candidate:resume-token'
+          WHERE id = 'candidate-default'`,
+      );
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /gbrain sources archive candidate-default --if-hygiene-candidate/,
+      );
+    });
+  });
+
+  describe('tier 4 — registered local_path', () => {
+    test('hygiene-candidate local path names the guarded resume command', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config, embedding_drain_token)
+         VALUES (
+           'candidate-path', 'candidate-path', $1, '{}'::jsonb,
+           'hygiene-candidate:resume-token'
+         )`,
+        [cwd],
+      );
+      await expect(resolveSourceId(engine, null, cwd)).rejects.toThrow(
+        /gbrain sources archive candidate-path --if-hygiene-candidate/,
+      );
+    });
   });
 
   describe('tier 1 — explicit --source (throw-on-invalid contract)', () => {
@@ -113,6 +194,14 @@ describe('source-resolver silent-fallback tiers (codex P1-F)', () => {
 
     test('whitespace in explicit source THROWS', async () => {
       await expect(resolveSourceId(engine, 'has space', cwd)).rejects.toThrow(/Invalid --source/);
+    });
+
+    test('explicit source can still intentionally name a soft-archived source', async () => {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config, archived)
+         VALUES ('retired', 'retired', '{}'::jsonb, true)`,
+      );
+      await expect(resolveSourceId(engine, 'retired', cwd)).resolves.toBe('retired');
     });
   });
 

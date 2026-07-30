@@ -153,6 +153,10 @@ ${HOOK_BANNER}
 # Bypass: git commit --no-verify.
 set -euo pipefail
 
+if [ "\${GBRAIN_SKIP_DURABILITY_HOOK:-0}" = "1" ]; then
+  exit 0
+fi
+
 _branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
 if [ "$_branch" = "HEAD" ]; then
   echo "$(date -u +%FT%TZ) [push] detached HEAD; skip" >> "\${GBRAIN_HOME:-$HOME/.gbrain}/brain-push.log" 2>/dev/null || true
@@ -195,7 +199,7 @@ fi
 # remote after the local commit exists.
 git add -- "$@"
 if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
-git commit -m "$_msg"
+GBRAIN_SKIP_DURABILITY_HOOK=1 git commit -m "$_msg"
 
 if brain_push "$_branch"; then exit 0; fi
 echo "PUSH FAILED — commit is local-only, NEEDS ATTENTION (see ${'$'}{GBRAIN_HOME:-$HOME/.gbrain}/brain-push.log)" >&2
@@ -720,7 +724,11 @@ function commitScaffolding(repoPath: string, branch: string, redact: (s: string)
     }).toString().trim();
     if (!staged) return { status: 'ok', detail: 'scaffolding already committed' };
     execFileSync('git', ['-C', repoPath, 'commit', '-m', 'chore(gbrain): install brain durability scaffolding'], {
-      stdio: 'ignore', timeout: 30_000, env: { ...process.env, ...GIT_ENV },
+      stdio: 'ignore', timeout: 30_000,
+      // The next command pushes synchronously. Do not also launch the
+      // best-effort post-commit push, which can race the synchronous push and
+      // briefly take index.lock while hardenBrainRepo is returning.
+      env: { ...process.env, ...GIT_ENV, GBRAIN_SKIP_DURABILITY_HOOK: '1' },
     });
     execFileSync('git', ['-C', repoPath, ...durableSsrfFlags(), 'push', 'origin', `HEAD:${branch}`], {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, env: { ...process.env, ...GIT_ENV_AUTH },

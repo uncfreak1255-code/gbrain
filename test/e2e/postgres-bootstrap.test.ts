@@ -52,6 +52,10 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     const conn = (engine as any).sql;
     await conn.unsafe(`TRUNCATE pages, content_chunks, links, tags, raw_data, timeline_entries, page_versions, ingest_log RESTART IDENTITY CASCADE`);
 
+    // Mark the historical version before removing `sources`; v133 lifecycle
+    // triggers belong to the current fixture, not to a real v20 brain.
+    await engine.setConfig('version', '20');
+
     // Mutate to pre-v0.18 shape: drop source_id and the sources table.
     // The advisory lock is released between initSchema calls, so this
     // direct DDL won't deadlock.
@@ -60,9 +64,9 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
       ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
       DROP INDEX IF EXISTS idx_pages_source_id;
       ALTER TABLE pages DROP COLUMN IF EXISTS source_id CASCADE;
+      DROP TABLE IF EXISTS source_embedding_leases;
       DROP TABLE IF EXISTS sources CASCADE;
     `);
-    await engine.setConfig('version', '20');
 
     // The path under test: full PostgresEngine.initSchema() including the
     // bootstrap call, SCHEMA_SQL replay, and runMigrations chain.
@@ -82,6 +86,97 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     // Verify the default source row was seeded.
     const srcCheck = await conn`SELECT id FROM sources WHERE id = 'default'`;
     expect(srcCheck).toHaveLength(1);
+
+    const drainColumns = await conn`
+      SELECT column_name
+        FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name = 'sources'
+         AND column_name IN ('embedding_drain_token', 'embedding_drain_epoch')
+       ORDER BY column_name
+    `;
+    expect(drainColumns.map((row: { column_name: string }) => row.column_name)).toEqual([
+      'embedding_drain_epoch',
+      'embedding_drain_token',
+    ]);
+
+    const lifecycleTriggers = await conn`
+      SELECT c.relname AS table_name, t.tgname AS trigger_name
+        FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = current_schema()
+         AND NOT t.tgisinternal
+         AND (
+           (c.relname = 'config' AND t.tgname = 'source_active_config_guard')
+           OR
+           (c.relname = 'sources' AND t.tgname = 'source_archive_transition_guard')
+         )
+       ORDER BY c.relname, t.tgname
+    `;
+    expect(lifecycleTriggers).toEqual([
+      { table_name: 'config', trigger_name: 'source_active_config_guard' },
+      { table_name: 'sources', trigger_name: 'source_archive_transition_guard' },
+    ]);
+
+    const leaseFk = await conn`
+      SELECT 1
+        FROM pg_constraint constraint_
+        JOIN pg_class child ON child.oid = constraint_.conrelid
+        JOIN pg_class parent ON parent.oid = constraint_.confrelid
+       WHERE constraint_.contype = 'f'
+         AND child.relname = 'source_embedding_leases'
+         AND parent.relname = 'sources'
+    `;
+    expect(leaseFk).toHaveLength(1);
+  });
+
+  test('v33 archived config backfill survives current lifecycle schema replay', async () => {
+    await engine.initSchema();
+    const conn = (engine as any).sql;
+
+    await conn.unsafe(`
+      INSERT INTO sources (id, name, config)
+      VALUES (
+        'legacy-archived',
+        'legacy-archived',
+        '{"archived":true,"archived_at":"2026-01-01T00:00:00Z","archive_expires_at":"2026-01-04T00:00:00Z"}'::jsonb
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        archived = false,
+        archived_at = NULL,
+        archive_expires_at = NULL,
+        config = EXCLUDED.config;
+    `);
+    await engine.setConfig('version', '33');
+    await conn.unsafe(`
+      DROP TRIGGER IF EXISTS source_active_config_guard ON config;
+      DROP TRIGGER IF EXISTS source_archive_transition_guard ON sources;
+      DROP TABLE IF EXISTS source_embedding_leases;
+      ALTER TABLE sources DROP COLUMN IF EXISTS embedding_drain_token;
+      ALTER TABLE sources DROP COLUMN IF EXISTS embedding_drain_epoch;
+      ALTER TABLE sources DROP COLUMN IF EXISTS archived;
+      ALTER TABLE sources DROP COLUMN IF EXISTS archived_at;
+      ALTER TABLE sources DROP COLUMN IF EXISTS archive_expires_at;
+    `);
+
+    await engine.initSchema();
+
+    expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+    const rows = await conn`
+      SELECT archived,
+             archived_at IS NOT NULL AS has_archived_at,
+             archive_expires_at IS NOT NULL AS has_archive_expires_at,
+             config ?| ARRAY['archived', 'archived_at', 'archive_expires_at'] AS has_legacy_config
+        FROM sources
+       WHERE id = 'legacy-archived'
+    `;
+    expect(rows).toEqual([{
+      archived: true,
+      has_archived_at: true,
+      has_archive_expires_at: true,
+      has_legacy_config: false,
+    }]);
   });
 
   test('PostgresEngine.initSchema is idempotent on a brain already at LATEST', async () => {
@@ -122,6 +217,26 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     ]);
     for (const r of rows) {
       expect(JSON.stringify(r.proconfig ?? [])).toContain('search_path=');
+    }
+  });
+
+  test('source lifecycle guards pin public ahead of caller-controlled temporary tables', async () => {
+    await engine.initSchema();
+    const rows = await engine.executeRaw<{ proname: string; proconfig: string[] | null }>(
+      `SELECT p.proname, p.proconfig
+         FROM pg_proc p
+         JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.proname IN (
+            'enforce_active_source_reference_fn',
+            'enforce_active_source_job_status_fn',
+            'enforce_active_source_config_fn'
+          )
+        ORDER BY p.proname`,
+    );
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
     }
   });
 

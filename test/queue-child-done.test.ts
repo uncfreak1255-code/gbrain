@@ -134,6 +134,81 @@ describe('v0.15 child_done emission', () => {
     expect(parentNow?.status).toBe('failed');
   });
 
+  test('fail_parent recursively reports and resolves the full ancestor chain', async () => {
+    const grand = await queue.add('grand', {});
+    const parent = await queue.add('parent', {}, {
+      parent_job_id: grand.id,
+      on_child_fail: 'continue',
+    });
+    const child = await queue.add('child', {}, {
+      parent_job_id: parent.id,
+      on_child_fail: 'fail_parent',
+    });
+
+    await claimAndFail('child', 'failed', 'nested failure');
+
+    expect(await queue.getJob(child.id)).toMatchObject({ status: 'failed' });
+    expect(await queue.getJob(parent.id)).toMatchObject({ status: 'failed' });
+    expect(await queue.getJob(grand.id)).toMatchObject({ status: 'waiting' });
+    expect(await readChildDoneInbox(parent.id)).toMatchObject([
+      { child_id: child.id, outcome: 'failed' },
+    ]);
+    expect(await readChildDoneInbox(grand.id)).toMatchObject([
+      { child_id: parent.id, outcome: 'failed' },
+    ]);
+  });
+
+  test('direct failParent reports the failed parent to its own parent', async () => {
+    const grand = await queue.add('direct-grand', {});
+    const parent = await queue.add('direct-parent', {}, {
+      parent_job_id: grand.id,
+      on_child_fail: 'continue',
+    });
+    await queue.add('direct-child', {}, {
+      parent_job_id: parent.id,
+      on_child_fail: 'fail_parent',
+    });
+
+    expect(await queue.failParent(parent.id, 999, 'direct failure')).toMatchObject({
+      status: 'failed',
+    });
+    expect(await queue.getJob(grand.id)).toMatchObject({ status: 'waiting' });
+    expect(await readChildDoneInbox(grand.id)).toMatchObject([
+      { child_id: parent.id, outcome: 'failed' },
+    ]);
+  });
+
+  test('max-stalled fail_parent reports the child and propagated parent', async () => {
+    const grand = await queue.add('stall-grand', {});
+    const parent = await queue.add('stall-parent', {}, {
+      parent_job_id: grand.id,
+      on_child_fail: 'continue',
+    });
+    const child = await queue.add('stall-child', {}, {
+      parent_job_id: parent.id,
+      on_child_fail: 'fail_parent',
+      max_stalled: 1,
+    });
+    const token = nextToken();
+    const claimed = await queue.claim(token, 30_000, 'default', ['stall-child']);
+    expect(claimed?.id).toBe(child.id);
+    await engine.executeRaw(
+      `UPDATE minion_jobs SET lock_until = now() - interval '1 minute' WHERE id = $1`,
+      [child.id],
+    );
+
+    const result = await queue.handleStalled();
+    expect(result.dead.map((job) => job.id)).toEqual([child.id]);
+    expect(await queue.getJob(parent.id)).toMatchObject({ status: 'failed' });
+    expect(await queue.getJob(grand.id)).toMatchObject({ status: 'waiting' });
+    expect(await readChildDoneInbox(parent.id)).toMatchObject([
+      { child_id: child.id, outcome: 'dead' },
+    ]);
+    expect(await readChildDoneInbox(grand.id)).toMatchObject([
+      { child_id: parent.id, outcome: 'failed' },
+    ]);
+  });
+
   test('cancelJob on an individual child emits child_done(outcome=cancelled) to its aggregator parent', async () => {
     // This is the real codex scenario: the aggregator (parent) is alive in
     // waiting-children, and a sibling child gets cancelled. The aggregator

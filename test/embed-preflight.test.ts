@@ -6,7 +6,11 @@
  * process.env.
  */
 import { describe, test, expect, beforeEach, afterAll } from 'bun:test';
-import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import {
+  configureGateway,
+  resetGateway,
+  __unconfigureGatewayForTests,
+} from '../src/core/ai/gateway.ts';
 import {
   validateEmbeddingCreds,
   formatEmbeddingCredsError,
@@ -109,7 +113,7 @@ describe('validateEmbeddingCreds', () => {
   });
 
   test('throws no_gateway_config when gateway was not configured', () => {
-    // resetGateway() in beforeEach already cleared _config.
+    __unconfigureGatewayForTests();
     let caught: unknown;
     try { validateEmbeddingCreds(); } catch (e) { caught = e; }
     expect(caught).toBeInstanceOf(EmbeddingCredentialError);

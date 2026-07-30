@@ -63,6 +63,7 @@ import {
 import type { BrainEngine } from './engine.ts';
 import type { ChunkInput, CRMode, Page } from './types.ts';
 import type { SourceRow } from './sources-ops.ts';
+import { withActiveSourceProviderLease } from './source-embedding-lease.ts';
 
 /**
  * v3 = chunks embed with optional contextual retrieval wrapper. The
@@ -398,7 +399,16 @@ async function tryBuildPhase1(opts: {
     );
 
     try {
-      const embeddings = await embedBatch(wrappedTexts, { abortSignal: args.abortSignal });
+      const embeddings = await embedBatch(wrappedTexts, {
+        abortSignal: args.abortSignal,
+        withProviderSubmission: (_batch, submit) =>
+          withActiveSourceProviderLease(
+            args.engine,
+            args.sourceId,
+            (leaseSignal) => submit(leaseSignal),
+            args.abortSignal,
+          ),
+      });
       return {
         kind: 'success',
         embeddedChunks: chunks.map((c, i) => ({
@@ -437,16 +447,21 @@ async function tryBuildPhase1(opts: {
 
     let synopsisResult: GeneratePerChunkSynopsisResult;
     try {
-      synopsisResult = await generatePerChunkSynopsis({
-        documentText: sourceText,
-        chunkText: c.chunk_text,
-        pageTitle: page.title,
-        pageSlug: args.pageSlug,
-        sourceId: args.sourceId,
-        chunkIndex: c.chunk_index,
-        model: haikuModel,
-        abortSignal: args.abortSignal,
-      });
+      synopsisResult = await withActiveSourceProviderLease(
+        args.engine,
+        args.sourceId,
+        (leaseSignal) => generatePerChunkSynopsis({
+          documentText: sourceText,
+          chunkText: c.chunk_text,
+          pageTitle: page.title,
+          pageSlug: args.pageSlug,
+          sourceId: args.sourceId,
+          chunkIndex: c.chunk_index,
+          model: haikuModel,
+          abortSignal: leaseSignal,
+        }),
+        args.abortSignal,
+      );
     } finally {
       if (args.releaseSynopsisLease) {
         try {
@@ -495,7 +510,16 @@ async function tryBuildPhase1(opts: {
 
   // All chunks synthesized successfully. Single batch embed (D27 P2-2).
   try {
-    const embeddings = await embedBatch(wrappedTexts, { abortSignal: args.abortSignal });
+    const embeddings = await embedBatch(wrappedTexts, {
+      abortSignal: args.abortSignal,
+      withProviderSubmission: (_batch, submit) =>
+        withActiveSourceProviderLease(
+          args.engine,
+          args.sourceId,
+          (leaseSignal) => submit(leaseSignal),
+          args.abortSignal,
+        ),
+    });
     return {
       kind: 'success',
       embeddedChunks: chunks.map((c, i) => ({

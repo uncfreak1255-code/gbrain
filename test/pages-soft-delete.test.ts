@@ -16,6 +16,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { softDeleteSource } from '../src/core/destructive-guard.ts';
 
 delete process.env.GBRAIN_PGLITE_SNAPSHOT;
 
@@ -313,10 +314,7 @@ describe('search visibility (soft-deleted pages hidden from searchKeyword)', () 
     const before = await engine.searchKeyword('gbrainsemaphore');
     expect(before.length).toBe(1);
 
-    // Archive the source.
-    await engine.executeRaw(
-      `UPDATE sources SET archived = true, archived_at = now(), archive_expires_at = now() + INTERVAL '72 hours' WHERE id = 'archived-src'`,
-    );
+    expect(await softDeleteSource(engine, 'archived-src')).not.toBeNull();
     const after = await engine.searchKeyword('gbrainsemaphore');
     expect(after.length).toBe(0);
   });

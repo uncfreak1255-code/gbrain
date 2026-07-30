@@ -32,6 +32,7 @@ import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-optio
 import type { CliOptions } from './core/cli-options.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult } from './core/mcp-client.ts';
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
+import { isUndefinedTableError } from './core/utils.ts';
 import { VERSION } from './version.ts';
 
 // Build CLI name -> operation lookup
@@ -788,11 +789,18 @@ export function parseOpArgs(op: Operation, args: string[]): Record<string, unkno
   return params;
 }
 
-async function makeContext(engine: BrainEngine, params: Record<string, unknown>): Promise<OperationContext> {
+function isMissingSourcesTableError(error: unknown): boolean {
+  if (!isUndefinedTableError(error)) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b(?:public\.)?sources\b/i.test(message);
+}
+
+export async function makeContext(engine: BrainEngine, params: Record<string, unknown>): Promise<OperationContext> {
   // v0.31.8 (D11): resolve sourceId via the canonical 6-tier chain. Honors
   // --source / GBRAIN_SOURCE / .gbrain-source / path-match / brain default /
-  // 'default'. Wrapped in try/catch so a doctor / single-source brain that
-  // never set up sources still returns 'default' silently.
+  // 'default'. Only a genuinely absent sources table may take the pre-init
+  // compatibility fallback. Routing, lifecycle, auth, and connectivity errors
+  // must remain loud so a write can never be redirected to `default`.
   let sourceId: string | undefined;
   try {
     const { resolveSourceId } = await import('./core/source-resolver.ts');
@@ -800,10 +808,10 @@ async function makeContext(engine: BrainEngine, params: Record<string, unknown>)
     // CLI ops don't take --source). Falls through to env/dotfile/path-match.
     const explicit = (params.source as string | undefined) ?? null;
     sourceId = await resolveSourceId(engine, explicit);
-  } catch {
-    // Source resolution failed (e.g. sources table doesn't exist on a fresh
-    // pre-init brain). Leave sourceId unset; engine read methods fall through
-    // to the cross-source view (D16 back-compat path).
+  } catch (error) {
+    if (!isMissingSourcesTableError(error)) throw error;
+    // The sources table does not exist on a fresh pre-init brain. Leave
+    // sourceId unset; engine read methods retain the D16 back-compat path.
     sourceId = undefined;
   }
   return {
@@ -1631,6 +1639,19 @@ async function handleCliOnly(command: string, args: string[]) {
     }
   }
 
+  // Engine migration owns a host-global config/manifest/journal lock. Resolve
+  // and connect its source only after that lock is held so a waiter cannot use
+  // the pre-cutover engine selected before another migration completed.
+  if (command === 'migrate') {
+    const { runMigrateEngine } = await import('./commands/migrate-engine.ts');
+    await runMigrateEngine(
+      args,
+      () => connectEngine(),
+      async (engine) => { await finishCliTeardown({ engine }); },
+    );
+    return;
+  }
+
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
   try {
@@ -1679,12 +1700,7 @@ async function handleCliOnly(command: string, args: string[]) {
         await runConfig(engine, args);
         break;
       }
-      // doctor is handled before connectEngine() above
-      case 'migrate': {
-        const { runMigrateEngine } = await import('./commands/migrate-engine.ts');
-        await runMigrateEngine(engine, args);
-        break;
-      }
+      // doctor and migrate are handled before connectEngine() above
       case 'eval': {
         // v0.32 EXP-5: `eval takes-quality {run,trend,regress}` requires a
         // brain (samples takes from DB / reads runs table). `replay` was
@@ -2315,7 +2331,8 @@ IMPORT/EXPORT
   sync [--repo <path>] [flags]       Git-to-brain incremental sync
   sync --watch [--interval N]        Continuous sync (loops until stopped)
   sync --install-cron                Install persistent sync daemon
-  export [--dir ./out/]              Export to markdown
+  export --source S --dir ./out/     Export one source with a SHA-256 recovery receipt
+  export [--dir ./out/]              Legacy all-source export; same-slug pages can collide
   export --restore-only [--repo <p>] Restore missing supabase-only files
         [--type T] [--slug-prefix S] With optional filters
 

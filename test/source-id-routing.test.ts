@@ -13,6 +13,8 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { importFromContent } from '../src/core/import-file.ts';
+import { resolveSyncJobSourceId } from '../src/commands/jobs.ts';
+import { beginSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
 
 let engine: PGLiteEngine;
 
@@ -38,6 +40,37 @@ beforeEach(async () => {
 });
 
 describe('source-id routing (v0.36.x #891 + #978 regression)', () => {
+  test('sync job prefers a non-empty snake source id over conflicting path fallback', async () => {
+    await engine.executeRaw(
+      `UPDATE sources
+          SET local_path = CASE id
+            WHEN 'work' THEN '/fixture/work'
+            WHEN 'personal' THEN '/fixture/personal'
+          END
+        WHERE id IN ('work', 'personal')`,
+    );
+
+    expect(await resolveSyncJobSourceId(engine, {
+      sourceId: '',
+      source_id: 'work',
+      repoPath: '/fixture/personal',
+    })).toBe('work');
+  });
+
+  test('path-only sync keeps exact-source routing if that source starts draining', async () => {
+    await engine.executeRaw(
+      `UPDATE sources SET local_path = '/fixture/work' WHERE id = 'work'`,
+    );
+    expect((await beginSourceArchiveDrain(engine, 'work'))?.purpose).toBe('manual');
+
+    // A worker can claim the path-only job just before archive begins. The
+    // resolver must still return the owning source so performSync fails closed
+    // on that source instead of silently writing through the default route.
+    expect(await resolveSyncJobSourceId(engine, {
+      repoPath: '/fixture/work',
+    })).toBe('work');
+  });
+
   test('importFromContent({sourceId: "work"}) lands the page at source_id=work', async () => {
     await importFromContent(engine, 'people/alice', '---\ntype: person\ntitle: Alice\n---\n# Alice\n\nWorks at Acme.', {
       noEmbed: true,

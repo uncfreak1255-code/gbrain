@@ -145,7 +145,7 @@ describe('doctor command', () => {
     expect(source).toContain('async function loadDoctorExtraRemediations');
     expect(source).toContain('runAllOnboardChecks');
     expect(source).toContain("filterRunnableOnboardRemediations(extras, 'auto-with-prompt')");
-    expect(source).toContain('computeRemediationPlan(engine, { targetScore, extraRemediations })');
+    expect(source).toMatch(/computeRemediationPlan\(engine, \{[\s\S]{0,180}targetScore,[\s\S]{0,180}extraRemediations,[\s\S]{0,180}inspectLocalSourcePaths: true/);
     expect(source).toContain('extraRemediations,');
   });
 

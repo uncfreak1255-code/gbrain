@@ -492,6 +492,16 @@ describe('MinionQueue: Dependencies', () => {
     expect(resolved2!.status).toBe('waiting');
   });
 
+  test('rejects a new child when its parent is already terminal', async () => {
+    const parent = await queue.add('terminal-parent', {});
+    await queue.cancelJob(parent.id);
+
+    await expect(queue.add('late-child', {}, {
+      parent_job_id: parent.id,
+    })).rejects.toThrow(`cannot add child to terminal parent ${parent.id} (status=cancelled)`);
+    expect(await queue.getJobs({ name: 'late-child' })).toEqual([]);
+  });
+
   test('child fail → fail_parent', async () => {
     const parent = await queue.add('enrich', {});
     await queue.add('sync', {}, { parent_job_id: parent.id, on_child_fail: 'fail_parent' });
@@ -2537,8 +2547,16 @@ interface ProbeOverrides {
 }
 
 function makeProbeEngine(overrides: ProbeOverrides) {
-  return new Proxy(engine, {
+  const wrap = (target: PGLiteEngine): PGLiteEngine => new Proxy(target, {
     get(target, prop, receiver) {
+      // Preserve transaction scoping when production code adds a transactional
+      // preflight. Returning the outer proxy's executeRaw from a tx clone makes
+      // PGLite issue SQL on the base connection while its transaction owns the
+      // lock, which deadlocks the test harness instead of exercising the worker.
+      if (prop === 'transaction') {
+        return async <T>(fn: (tx: PGLiteEngine) => Promise<T>): Promise<T> =>
+          target.transaction((tx) => fn(wrap(tx as PGLiteEngine)));
+      }
       if (prop === 'executeRaw') {
         return async (sql: string, params?: unknown[]): Promise<unknown[]> => {
           if (overrides.selectOne && /^\s*SELECT\s+1\s*$/i.test(sql)) {
@@ -2558,6 +2576,7 @@ function makeProbeEngine(overrides: ProbeOverrides) {
       return Reflect.get(target, prop, receiver);
     },
   }) as unknown as PGLiteEngine;
+  return wrap(engine);
 }
 
 describe('MinionWorker: self-health-check behavior (v0.22.14)', () => {

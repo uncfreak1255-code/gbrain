@@ -22,6 +22,7 @@ import type { ChunkInput } from './types.ts';
 import { embedBatchWithBackoff } from '../commands/embed.ts';
 import { type DbPacer, createNoopPacer, observed } from './db-pacer.ts';
 import { AbortError } from './abort-check.ts';
+import { withActiveSourceProviderLease } from './source-embedding-lease.ts';
 
 /** Last visited (page_id, chunk_index) for keyset-resume across runs. */
 export interface StaleCursor {
@@ -114,8 +115,7 @@ export async function embedStaleForSource(
   const batchSize = opts.batchSize ?? 2000;
   const concurrency = opts.concurrency ?? 20;
   const signal = opts.signal;
-  const embedFn = opts.embedFn ?? ((texts, fnOpts) =>
-    embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }));
+  const injectedEmbedFn = opts.embedFn;
   // Defaulted no-op when pacing is off, so the observe()/pace() call sites
   // below are unconditional and cost ~nothing on the unpaced path.
   const pacer = opts.pacer ?? createNoopPacer();
@@ -189,10 +189,19 @@ export async function embedStaleForSource(
       const keySourceId = stale[0]?.source_id ?? sourceId;
       const slug = stale[0].slug;
       try {
-        const embeddings = await embedFn(
-          stale.map((c) => c.chunk_text),
-          { abortSignal: signal },
-        );
+        const texts = stale.map((c) => c.chunk_text);
+        const embeddings = injectedEmbedFn
+          ? await withActiveSourceProviderLease(
+              engine,
+              keySourceId,
+              (leaseSignal) => injectedEmbedFn(texts, { abortSignal: leaseSignal }),
+              signal,
+            )
+          : await embedBatchWithBackoff(texts, {
+              abortSignal: signal,
+              withProviderSubmission: (_texts, submit) =>
+                withActiveSourceProviderLease(engine, keySourceId, submit, signal),
+            });
         const existing = await observed(pacer, () =>
           engine.getChunks(slug, { sourceId: keySourceId }),
         );

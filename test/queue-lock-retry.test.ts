@@ -58,9 +58,15 @@ describe('MinionQueue lock-path recovery (issue #1678)', () => {
       let calls = 0;
       const engine = {
         kind: 'postgres',
+        // claim() first repairs archived-source poison rows transactionally.
+        // Keep that preflight empty so this test reaches the direct-pool claim
+        // whose retry contract it is exercising.
+        transaction: async (
+          fn: (tx: { executeRaw: (...args: unknown[]) => Promise<unknown[]> }) => Promise<unknown>,
+        ) => fn({ executeRaw: async () => [] }),
         // claim() routes through executeRawDirect (direct session pool) as of
         // the lock-hot-path fix; executeRaw is kept as a throwing guard to
-        // prove claim never falls back to it.
+        // prove the claim statement never falls back to it.
         executeRawDirect: async () => { calls++; throw connEndedError(); },
         executeRaw: async () => { throw new Error('claim must not use executeRaw'); },
         reconnect: async () => {},

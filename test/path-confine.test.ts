@@ -50,11 +50,17 @@ function fakeStats(opts: { uid: number; mode: number; symlink?: boolean }): Stat
   } as unknown as Stats;
 }
 
-/** Stub engine for resolveSourceId: registers `ids`, no local_paths, no default. */
+/** Stub engine for resolveSourceId: registers active `ids`, no local_paths. */
 function stubEngine(ids: string[]): BrainEngine {
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+      if (sql.includes('SELECT id, archived, embedding_drain_token')) {
+        const target = params?.[0];
+        return (ids.includes(target as string)
+          ? [{ id: target, archived: false, embedding_drain_token: null } as unknown as T]
+          : []);
+      }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
         const t = params?.[0];
         return (ids.includes(t as string) ? [{ id: t } as unknown as T] : []);

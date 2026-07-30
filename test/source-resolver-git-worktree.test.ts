@@ -53,8 +53,14 @@ function makeStub(localPath: string): BrainEngine {
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
         return params?.[0] === 'gbrain' ? [{ id: 'gbrain' } as T] : [];
       }
-      if (sql.includes('SELECT id, local_path FROM sources')) {
-        return [{ id: 'gbrain', local_path: localPath } as T];
+      if (sql.includes('SELECT id, local_path')) {
+        return [{
+          id: 'gbrain',
+          local_path: localPath,
+          archived: false,
+          draining: false,
+          drain_requires_hygiene_candidate: false,
+        } as T];
       }
       return [];
     },
@@ -70,10 +76,22 @@ function makeNestedStub(mainPath: string): BrainEngine {
         const ids = new Set(['gbrain', 'gbrain-plans']);
         return ids.has(params?.[0] as string) ? [{ id: params?.[0] } as T] : [];
       }
-      if (sql.includes('SELECT id, local_path FROM sources')) {
+      if (sql.includes('SELECT id, local_path')) {
         return [
-          { id: 'gbrain', local_path: mainPath },
-          { id: 'gbrain-plans', local_path: join(mainPath, 'plans') },
+          {
+            id: 'gbrain',
+            local_path: mainPath,
+            archived: false,
+            draining: false,
+            drain_requires_hygiene_candidate: false,
+          },
+          {
+            id: 'gbrain-plans',
+            local_path: join(mainPath, 'plans'),
+            archived: false,
+            draining: false,
+            drain_requires_hygiene_candidate: false,
+          },
         ] as T[];
       }
       return [];

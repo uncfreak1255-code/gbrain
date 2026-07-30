@@ -89,12 +89,16 @@ export async function runRemediation(
     clearRemediationCheckpoint,
   } = await import('../remediation-checkpoint.ts');
 
-  const ctx = await loadRecommendationContext(engine);
+  const ctx = await loadRecommendationContext(engine, {
+    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
+  });
 
   // Pre-flight ceiling check via the shared plan computation.
   const initialPlan = await computeRemediationPlan(engine, {
     targetScore,
     extraRemediations,
+    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
+    sourceHygienePacket: ctx.sourceHygiene,
   });
   if (initialPlan.target_unreachable) {
     hooks.onTargetUnreachable?.(targetScore, initialPlan.max_reachable_score);
@@ -252,7 +256,7 @@ export async function runRemediation(
     const totalSteps = recs.length;
     const attemptedIds = new Set<string>(completedFromCheckpoint);
     while (recs.length > 0 && stepCount < maxJobs) {
-      const step = recs[0];
+      let step = recs[0];
       if (!step) break;
       stepCount++;
 
@@ -279,6 +283,37 @@ export async function runRemediation(
       hooks.onStepStart?.(stepCount, totalSteps, step);
       attemptedIds.add(step.id);
       try {
+        // Re-read the canonical recommendation immediately before submission,
+        // including the first step. The initial plan and the post-step D7
+        // refresh are both snapshots; a local source checkout can become
+        // recovery_required while an operator is observing onStepStart. Do not
+        // enqueue paid/protected work that the fresh planner now suppresses.
+        if (opts.inspectLocalSourcePaths === true) {
+          const submissionHealth = await engine.getHealth();
+          const submissionCtx = await loadRecommendationContext(engine, {
+            inspectLocalSourcePaths: true,
+          });
+          const refreshedStep = computeRecommendations(
+            submissionHealth,
+            submissionCtx,
+            extraRemediations,
+          ).find((candidate) => candidate.status === 'remediable' && candidate.id === step.id);
+          if (!refreshedStep) {
+            const skippedResult: StepResult = {
+              step: stepCount,
+              id: step.id,
+              job_id: null,
+              status: 'skipped_recheck',
+            };
+            submitted.push(skippedResult);
+            abortedIds.add(step.id);
+            hooks.onStepEnd?.(skippedResult);
+            recs.shift();
+            continue;
+          }
+          step = refreshedStep;
+        }
+
         const isProtected = !!step.protected;
         await scopeTerminalRemediationIdempotencyKey(
           engine,
@@ -342,7 +377,9 @@ export async function runRemediation(
       // steps with bumped retry suffix (D1).
       if (recs.length === 0 || stepCount >= maxJobs) break;
       const freshHealth = await engine.getHealth();
-      const freshCtx = await loadRecommendationContext(engine);
+      const freshCtx = await loadRecommendationContext(engine, {
+        inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
+      });
       recs = computeRecommendations(freshHealth, freshCtx, extraRemediations)
         .filter((r) => r.status === 'remediable' && !attemptedIds.has(r.id));
     }

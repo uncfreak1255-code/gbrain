@@ -97,3 +97,12 @@ describe('WARN-6 — main `gbrain --help` lists capture/brainstorm/lsd', () => {
     expect(stdout).toContain('embed');
   });
 });
+
+describe('source-scoped export help', () => {
+  test('distinguishes the recovery receipt from collision-prone legacy export', () => {
+    const { stdout, status } = runCli(['--help']);
+    expect(status).toBe(0);
+    expect(stdout).toContain('Export one source with a SHA-256 recovery receipt');
+    expect(stdout).toContain('Legacy all-source export; same-slug pages can collide');
+  });
+});

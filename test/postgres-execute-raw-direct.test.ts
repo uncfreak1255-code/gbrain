@@ -22,12 +22,26 @@ import { PostgresEngine } from '../src/core/postgres-engine.ts';
  *   └─────────────────────────────┴──────────────┴───────────────┘
  */
 
-type FakeSql = { unsafe: (sql: string, params?: unknown[]) => Promise<unknown[]> };
+type FakeReservedSql = {
+  unsafe: (sql: string, params?: unknown[]) => Promise<unknown[]>;
+  release: () => void;
+};
+type FakeSql = {
+  unsafe: (sql: string, params?: unknown[]) => Promise<unknown[]>;
+  reserve: () => Promise<FakeReservedSql>;
+};
 
 /** A fake postgres.js handle whose unsafe() tags rows with its label. */
-function fakeSql(label: string): FakeSql {
+function fakeSql(label: string, calls: string[] = []): FakeSql {
   return {
     unsafe: async () => [{ via: label }],
+    reserve: async () => {
+      calls.push(`${label}:reserve`);
+      return {
+        unsafe: async () => [{ via: `${label}:reserved` }],
+        release: () => { calls.push(`${label}:release`); },
+      };
+    },
   };
 }
 
@@ -42,8 +56,10 @@ function fakeSql(label: string): FakeSql {
  */
 function makeEngine(opts: {
   dualPoolActive: boolean;
+  supabase?: boolean;
   readConn: FakeSql;
   directConn: FakeSql;
+  sessionConn?: FakeSql;
   // When set, models a tx clone: _sql is the tx conn (!== peekReadPool()).
   txConn?: FakeSql;
 }): PostgresEngine {
@@ -60,8 +76,15 @@ function makeEngine(opts: {
 
   e.connectionManager = {
     isDualPoolActive: () => opts.dualPoolActive,
+    isSupabase: () => opts.supabase === true,
     peekReadPool: () => opts.readConn,
     ddl: async () => opts.directConn,
+    session: async () => {
+      if (opts.supabase === true && !opts.dualPoolActive) {
+        throw new Error('A direct Postgres connection is required for migrate-engine session locking');
+      }
+      return opts.sessionConn ?? (opts.dualPoolActive ? opts.directConn : opts.readConn);
+    },
   };
 
   return engine;
@@ -107,5 +130,58 @@ describe('PostgresEngine.executeRawDirect — routing decision (PR #1816)', () =
     await expect(
       engine.executeRawDirect('UPDATE minion_jobs SET x=1', [], { signal: ac.signal }),
     ).rejects.toThrow(/abort/i);
+  });
+});
+
+describe('PostgresEngine.withSessionReservedConnection — routing decision', () => {
+  test('dual-pool Supabase target pins the direct session pool', async () => {
+    const calls: string[] = [];
+    const readConn = fakeSql('read', calls);
+    const directConn = fakeSql('direct', calls);
+    const sessionConn = fakeSql('session', calls);
+    const engine = makeEngine({
+      dualPoolActive: true,
+      supabase: true,
+      readConn,
+      directConn,
+      sessionConn,
+    });
+
+    const rows = await engine.withSessionReservedConnection(
+      (conn) => conn.executeRaw<{ via: string }>('SELECT 1'),
+    );
+    expect(rows).toEqual([{ via: 'session:reserved' }]);
+    expect(calls).toEqual(['session:reserve', 'session:release']);
+  });
+
+  test('Supabase transaction-pooler target without a direct route fails closed', async () => {
+    const calls: string[] = [];
+    const engine = makeEngine({
+      dualPoolActive: false,
+      supabase: true,
+      readConn: fakeSql('read', calls),
+      directConn: fakeSql('direct', calls),
+    });
+
+    await expect(engine.withSessionReservedConnection(async () => undefined))
+      .rejects.toThrow('A direct Postgres connection is required');
+    expect(calls).toEqual([]);
+  });
+
+  test('ordinary direct Postgres target pins a dedicated session backend', async () => {
+    const calls: string[] = [];
+    const sessionConn = fakeSql('session', calls);
+    const engine = makeEngine({
+      dualPoolActive: false,
+      readConn: fakeSql('read', calls),
+      directConn: fakeSql('direct', calls),
+      sessionConn,
+    });
+
+    const rows = await engine.withSessionReservedConnection(
+      (conn) => conn.executeRaw<{ via: string }>('SELECT 1'),
+    );
+    expect(rows).toEqual([{ via: 'session:reserved' }]);
+    expect(calls).toEqual(['session:reserve', 'session:release']);
   });
 });

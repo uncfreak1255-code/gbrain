@@ -68,6 +68,7 @@ import {
 } from '../core/console-prefix.ts';
 import { loadStorageConfig } from '../core/storage-config.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
+import { loadAllSources, parseSourceConfig } from '../core/sources-load.ts';
 // v0.41.32.0: stamp the durable newest-COMMIT timestamp at sync time so the
 // remote staleness path reads a column instead of shelling out to git.
 // lagFromContentMs is the remote/column comparator (buildSyncStatusReport
@@ -1099,10 +1100,25 @@ See also:
   }
 
   // Verify source exists before submitting
-  const { fetchSource } = await import('../core/sources-load.ts');
+  const {
+    fetchSource,
+    isSourceActive,
+    sourceDrainResumeMessage,
+  } = await import('../core/sources-load.ts');
   const source = await fetchSource(engine, sourceIdArg);
   if (!source) {
     console.error(`Source "${sourceIdArg}" not found. List with: gbrain sources list`);
+    process.exit(1);
+  }
+  if (!isSourceActive(source)) {
+    if (source.archived === true) {
+      console.error(
+        `Source "${sourceIdArg}" is archived; restore with `
+        + `\`gbrain sources restore ${sourceIdArg}\` before triggering sync.`,
+      );
+      process.exit(1);
+    }
+    console.error(sourceDrainResumeMessage(sourceIdArg, source.embedding_drain_token));
     process.exit(1);
   }
 
@@ -3742,13 +3758,16 @@ See also:
   // single-source brains to the right place automatically; the nudge
   // surfaces the auto-route to stderr so the user knows what happened
   // and can pass --source to override if needed.
-  const explicitSource = args.find((a, i) => args[i - 1] === '--source') || null;
-  const { resolveSourceWithTier, formatSoleNonDefaultNudge } = await import('../core/source-resolver.ts');
-  const resolved = await resolveSourceWithTier(engine, explicitSource);
-  const sourceId: string = resolved.source_id;
-  if (resolved.tier === 'sole_non_default') {
-    const nudge = formatSoleNonDefaultNudge(sourceId);
-    if (nudge) process.stderr.write(nudge + '\n');
+  let sourceId: string | null = null;
+  if (!syncAll) {
+    const explicitSource = args.find((a, i) => args[i - 1] === '--source') || null;
+    const { resolveSourceWithTier, formatSoleNonDefaultNudge } = await import('../core/source-resolver.ts');
+    const resolved = await resolveSourceWithTier(engine, explicitSource);
+    sourceId = resolved.source_id;
+    if (resolved.tier === 'sole_non_default') {
+      const nudge = formatSoleNonDefaultNudge(sourceId);
+      if (nudge) process.stderr.write(nudge + '\n');
+    }
   }
 
   // --skip-failed: acknowledge pre-existing unacked failures BEFORE the sync
@@ -3764,7 +3783,7 @@ See also:
   // (#1939), which is why the old D15 "no --skip-failed under parallel"
   // refusal is lifted below.
   if (skipFailed) {
-    const acked = syncAll ? acknowledgeFailures() : acknowledgeFailures(sourceId);
+    const acked = syncAll ? acknowledgeFailures() : acknowledgeFailures(sourceId!);
     if (acked.count > 0) console.log(`Acknowledged ${acked.count} pre-existing failure(s).`);
   }
 
@@ -3783,13 +3802,24 @@ See also:
     // own "do work?" gate (sync.ts:1057+1075) + doctor's sync_freshness.
     // Both columns predate v0.41 (writeSyncAnchor / writeChunkerVersion); no
     // schema migration needed.
-    const sources = await engine.executeRaw<{ id: string; name: string; local_path: string | null; config: Record<string, unknown>; last_commit: string | null; chunker_version: string | null }>(
-      `SELECT id, name, local_path, config, last_commit, chunker_version FROM sources WHERE local_path IS NOT NULL`,
-    );
-    if (!sources || sources.length === 0) {
+    const syncableSources = (await loadAllSources(engine))
+      .filter((source) => source.local_path !== null);
+    if (syncableSources.length === 0) {
       console.log('No sources with local_path configured. Use `gbrain sources add <id> --path <path>` first.');
       return;
     }
+    const chunkerRows = await engine.executeRaw<{ id: string; chunker_version: string | null }>(
+      `SELECT id, chunker_version FROM sources WHERE id = ANY($1::text[])`,
+      [syncableSources.map((source) => source.id)],
+    );
+    const chunkerBySource = new Map(
+      chunkerRows.map((row) => [row.id, row.chunker_version] as const),
+    );
+    const sources = syncableSources.map((source) => ({
+        ...source,
+        config: parseSourceConfig(source.config),
+        chunker_version: chunkerBySource.get(source.id) ?? null,
+      }));
 
     // v0.41.31 — mode-aware cost gate. Resolve federated_v2 ONCE here so both
     // the gate (below) and the fan-out (further down) share it.
@@ -4101,6 +4131,10 @@ See also:
 
     if (errCount > 0) process.exit(1);
     return;
+  }
+
+  if (sourceId === null) {
+    throw new Error('Internal error: single-source sync route was not resolved');
   }
 
   // v0.41.13.0 (T6) — single-source --timeout: same per-source AbortController

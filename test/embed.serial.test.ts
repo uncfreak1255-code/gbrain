@@ -15,22 +15,45 @@ let embedBatchBehavior: ((texts: string[], opts?: unknown) => Promise<Float32Arr
 
 mock.module('../src/core/embedding.ts', () => ({
   embedBatch: async (texts: string[], opts?: unknown) => {
-    activeEmbedCalls++;
-    totalEmbedCalls++;
     lastEmbedBatchOpts = opts;
-    if (activeEmbedCalls > maxConcurrentEmbedCalls) {
-      maxConcurrentEmbedCalls = activeEmbedCalls;
+    const typedOpts = opts as {
+      withProviderSubmission?: (
+        batch: string[],
+        submit: (leaseSignal?: AbortSignal) => Promise<Float32Array[]>,
+      ) => Promise<Float32Array[]>;
+    } | undefined;
+    const results: Float32Array[] = [];
+    // Mirror core/embedding.ts's <=100-text provider boundary so lifecycle
+    // race tests exercise every real submission rather than only the outer
+    // embedBatch call.
+    for (let i = 0; i < texts.length; i += 100) {
+      const batch = texts.slice(i, i + 100);
+      const submit = async (leaseSignal?: AbortSignal) => {
+        activeEmbedCalls++;
+        totalEmbedCalls++;
+        if (activeEmbedCalls > maxConcurrentEmbedCalls) {
+          maxConcurrentEmbedCalls = activeEmbedCalls;
+        }
+        try {
+          if (embedBatchBehavior) {
+            const providerOpts = leaseSignal
+              ? { ...(opts as Record<string, unknown>), abortSignal: leaseSignal }
+              : opts;
+            return await embedBatchBehavior(batch, providerOpts);
+          }
+          // Default: simulate API latency so concurrent workers actually overlap.
+          await new Promise(r => setTimeout(r, 30));
+          return batch.map(() => new Float32Array(1536));
+        } finally {
+          activeEmbedCalls--;
+        }
+      };
+      const out = typedOpts?.withProviderSubmission
+        ? await typedOpts.withProviderSubmission(batch, submit)
+        : await submit();
+      results.push(...out);
     }
-    try {
-      if (embedBatchBehavior) {
-        return await embedBatchBehavior(texts, opts);
-      }
-      // Default: simulate API latency so concurrent workers actually overlap.
-      await new Promise(r => setTimeout(r, 30));
-      return texts.map(() => new Float32Array(1536));
-    } finally {
-      activeEmbedCalls--;
-    }
+    return results;
   },
   // v0.41.31: embedAll/embedAllStale read the current embedding signature to
   // stamp provenance. The mock returns a stable value; the mock engine's
@@ -55,13 +78,47 @@ function mockEngine(overrides: Partial<Record<string, any>> = {}): BrainEngine {
   const calls: { method: string; args: any[] }[] = [];
   const track = (method: string) => (...args: any[]) => {
     calls.push({ method, args });
+    if (method === 'executeRaw') {
+      const sql = typeof args[0] === 'string' ? args[0] : '';
+      const params = Array.isArray(args[1]) ? args[1] : [];
+      // Durable lease plumbing is shared by every test. Race-specific
+      // overrides control only source snapshots; exact token rows otherwise
+      // behave like the real INSERT/heartbeat/DELETE lifecycle.
+      if (sql.includes('INSERT INTO public.source_embedding_leases')) return Promise.resolve([]);
+      if (sql.includes('UPDATE public.source_embedding_leases')) {
+        return Promise.resolve([{ lease_token: params[0] }]);
+      }
+      if (sql.includes('DELETE FROM public.source_embedding_leases')) {
+        return Promise.resolve([{ lease_token: params[0] }]);
+      }
+      if (sql.includes('pg_advisory_xact_lock')) return Promise.resolve([]);
+      if (overrides[method]) return overrides[method](...args);
+      if (sql.includes('SELECT id, archived') && sql.includes('FROM public.sources')) {
+        return Promise.resolve([{
+          id: params[0] ?? 'default',
+          archived: false,
+          embedding_drain_token: null,
+          embedding_drain_epoch: 0,
+        }]);
+      }
+      if (sql.includes('SELECT archived') && sql.includes('FROM public.sources')) {
+        return Promise.resolve([{
+          archived: false,
+          embedding_drain_token: null,
+          embedding_drain_epoch: 0,
+        }]);
+      }
+      return Promise.resolve([]);
+    }
     if (overrides[method]) return overrides[method](...args);
     return Promise.resolve(null);
   };
   const engine = new Proxy({} as any, {
     get(_, prop: string) {
       if (prop === '_calls') return calls;
-      if (overrides[prop]) return overrides[prop];
+      if (prop === 'transaction') {
+        return async (fn: (tx: BrainEngine) => Promise<unknown>) => fn(engine);
+      }
       return track(prop);
     },
   });
@@ -82,6 +139,128 @@ afterEach(() => {
 });
 
 describe('runEmbed --all (parallel)', () => {
+  test('does not call the embedding provider for archived-source pages', async () => {
+    const pages = [
+      { slug: 'active-page', source_id: 'default' },
+      { slug: 'archived-page', source_id: 'archived-source' },
+    ];
+    const requestedSlugs: string[] = [];
+    const engine = mockEngine({
+      listPages: async () => pages,
+      listAllSources: async () => [{
+        id: 'default',
+        name: 'default',
+        local_path: null,
+        last_sync_at: null,
+        config: {},
+      }],
+      getChunks: async (slug: string) => {
+        requestedSlugs.push(slug);
+        return [{
+          chunk_index: 0,
+          chunk_text: `text for ${slug}`,
+          chunk_source: 'compiled_truth',
+          embedded_at: null,
+          token_count: 4,
+        }];
+      },
+      upsertChunks: async () => {},
+    });
+
+    await runEmbed(engine, ['--all']);
+
+    expect(totalEmbedCalls).toBe(1);
+    expect(requestedSlugs).toEqual(['active-page']);
+  });
+
+  test('fails closed when a source is archived after --all selection but before provider submission', async () => {
+    let activeRechecks = 0;
+    let upserts = 0;
+    const engine = mockEngine({
+      listPages: async () => [{ slug: 'racing-page', source_id: 'default' }],
+      // Initial selection sees the source as active.
+      listAllSources: async () => [{
+        id: 'default',
+        name: 'default',
+        local_path: null,
+        last_sync_at: null,
+        config: {},
+      }],
+      getChunks: async () => [{
+        chunk_index: 0,
+        chunk_text: 'content selected while active',
+        chunk_source: 'compiled_truth',
+        embedded_at: null,
+        token_count: 5,
+      }],
+      // The source is archived before the last-moment recheck.
+      executeRaw: async (sql: string, params: unknown[]) => {
+        if (!sql.includes('FROM public.sources')) return [];
+        activeRechecks++;
+        expect(params).toEqual(['default']);
+        return [];
+      },
+      upsertChunks: async () => { upserts++; },
+    });
+
+    await runEmbed(engine, ['--all']);
+
+    expect(activeRechecks).toBe(1);
+    expect(totalEmbedCalls).toBe(0);
+    expect(upserts).toBe(0);
+  });
+
+  test('rechecks before every provider sub-batch when --all has more than 100 chunks', async () => {
+    let activeRechecks = 0;
+    let upserts = 0;
+    const chunks = Array.from({ length: 101 }, (_, chunk_index) => ({
+      chunk_index,
+      chunk_text: `bulk content ${chunk_index}`,
+      chunk_source: 'compiled_truth',
+      embedded_at: null,
+      token_count: 4,
+    }));
+    const engine = mockEngine({
+      listPages: async () => [{ slug: 'bulk-page', source_id: 'source-a' }],
+      listAllSources: async () => [{
+        id: 'source-a',
+        name: 'source-a',
+        local_path: null,
+        last_sync_at: null,
+        config: {},
+      }],
+      getChunks: async () => chunks,
+      executeRaw: async (sql: string, params: unknown[]) => {
+        if (!sql.includes('FROM public.sources')) return [];
+        if (sql.includes('SELECT archived')) {
+          return [{
+            archived: false,
+            embedding_drain_token: null,
+            embedding_drain_epoch: 0,
+          }];
+        }
+        activeRechecks++;
+        expect(params).toEqual(['source-a']);
+        // Archive commits after the first <=100-text provider submission.
+        return activeRechecks === 1
+          ? [{
+              id: 'source-a',
+              archived: false,
+              embedding_drain_token: null,
+              embedding_drain_epoch: 0,
+            }]
+          : [];
+      },
+      upsertChunks: async () => { upserts++; },
+    });
+
+    await runEmbed(engine, ['--all']);
+
+    expect(activeRechecks).toBe(2);
+    expect(totalEmbedCalls).toBe(1);
+    expect(upserts).toBe(0);
+  });
+
   test('runs embedBatch calls concurrently across pages', async () => {
     const NUM_PAGES = 20;
     const pages = Array.from({ length: NUM_PAGES }, (_, i) => ({ slug: `page-${i}` }));
@@ -225,6 +404,41 @@ describe('runEmbed --all (parallel)', () => {
     // Only the stale page triggers an embedBatch call.
     expect(totalEmbedCalls).toBe(1);
   });
+
+  test('fails closed when a source is archived after --stale selection but before provider submission', async () => {
+    let activeRechecks = 0;
+    let upserts = 0;
+    const stale = [{
+      slug: 'racing-stale-page',
+      chunk_index: 0,
+      chunk_text: 'stale content selected while active',
+      chunk_source: 'compiled_truth' as const,
+      model: null,
+      token_count: 6,
+      source_id: 'source-a',
+      page_id: 1,
+    }];
+    const engine = mockEngine({
+      countStaleChunks: async () => 1,
+      // The engine selection query observed the source as active.
+      listStaleChunks: async () => stale,
+      // It is archived before the provider-submit recheck.
+      executeRaw: async (sql: string, params: unknown[]) => {
+        if (!sql.includes('FROM public.sources')) return [];
+        activeRechecks++;
+        expect(params).toEqual(['source-a']);
+        return [];
+      },
+      getChunks: async () => stale,
+      upsertChunks: async () => { upserts++; },
+    });
+
+    await runEmbed(engine, ['--stale']);
+
+    expect(activeRechecks).toBe(1);
+    expect(totalEmbedCalls).toBe(0);
+    expect(upserts).toBe(0);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────
@@ -333,6 +547,113 @@ describe('runEmbedCore --dry-run never calls the embedding model', () => {
     expect(result.skipped).toBe(1);
     expect(result.total_chunks).toBe(3);
     expect(result.pages_processed).toBe(1);
+  });
+
+  test('direct --slugs path fences the exact source before provider egress', async () => {
+    let sourceChecks = 0;
+    let upserts = 0;
+    const engine = mockEngine({
+      getPage: async () => ({ slug: 'direct-page', compiled_truth: 'text', timeline: '' }),
+      getChunks: async () => [{
+        chunk_index: 0,
+        chunk_text: 'direct source content',
+        chunk_source: 'compiled_truth',
+        embedded_at: null,
+        token_count: 3,
+      }],
+      executeRaw: async (sql: string, params: unknown[]) => {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM public.sources')) {
+          sourceChecks++;
+          expect(params).toEqual(['direct-source']);
+          return [];
+        }
+        return [];
+      },
+      upsertChunks: async () => { upserts++; },
+    });
+
+    const result = await runEmbedCore(engine, {
+      slugs: ['direct-page'],
+      sourceId: 'direct-source',
+    });
+
+    expect(sourceChecks).toBe(1);
+    expect(totalEmbedCalls).toBe(0);
+    expect(upserts).toBe(0);
+    expect(result.embedded).toBe(0);
+  });
+
+  test('direct --slugs without --source uses the loaded page source for leases and writes', async () => {
+    const scopedReads: Array<{ slug: string; opts: unknown }> = [];
+    const scopedWrites: Array<{ slug: string; opts: unknown }> = [];
+    const signatureWrites: Array<{ slug: string; opts: unknown }> = [];
+    const sourceChecks: string[] = [];
+    const engine = mockEngine({
+      getPage: async (slug: string, opts: unknown) => {
+        expect(slug).toBe('non-default-page');
+        expect(opts).toBeUndefined();
+        return {
+          slug,
+          source_id: 'media-corpus',
+          compiled_truth: 'text',
+          timeline: '',
+        };
+      },
+      getChunks: async (slug: string, opts: unknown) => {
+        scopedReads.push({ slug, opts });
+        return [{
+          chunk_index: 0,
+          chunk_text: 'non-default source content',
+          chunk_source: 'compiled_truth',
+          embedded_at: null,
+          token_count: 4,
+        }];
+      },
+      executeRaw: async (sql: string, params: unknown[]) => {
+        if (sql.includes('SELECT id, archived') && sql.includes('FROM public.sources')) {
+          sourceChecks.push(String(params[0]));
+          return [{
+            id: params[0],
+            archived: false,
+            embedding_drain_token: null,
+            embedding_drain_epoch: 0,
+          }];
+        }
+        if (sql.includes('SELECT archived') && sql.includes('FROM public.sources')) {
+          sourceChecks.push(String(params[0]));
+          return [{
+            archived: false,
+            embedding_drain_token: null,
+            embedding_drain_epoch: 0,
+          }];
+        }
+        return [];
+      },
+      upsertChunks: async (slug: string, _chunks: unknown, opts: unknown) => {
+        scopedWrites.push({ slug, opts });
+      },
+      setPageEmbeddingSignature: async (slug: string, opts: unknown) => {
+        signatureWrites.push({ slug, opts });
+      },
+    });
+
+    const result = await runEmbedCore(engine, { slugs: ['non-default-page'] });
+
+    expect(sourceChecks).toEqual(['media-corpus', 'media-corpus']);
+    expect(scopedReads).toEqual([
+      { slug: 'non-default-page', opts: { sourceId: 'media-corpus' } },
+    ]);
+    expect(scopedWrites).toEqual([
+      { slug: 'non-default-page', opts: { sourceId: 'media-corpus' } },
+    ]);
+    expect(signatureWrites).toEqual([
+      {
+        slug: 'non-default-page',
+        opts: { sourceId: 'media-corpus', signature: 'test:model:1536' },
+      },
+    ]);
+    expect(totalEmbedCalls).toBe(1);
+    expect(result.embedded).toBe(1);
   });
 
   test('non-dry-run path reports accurate embedded count (regression guard)', async () => {
@@ -662,6 +983,31 @@ describe('embedBatchWithBackoff (D2/D4/D4a/D8)', () => {
     await embedBatchWithBackoff(['x']);
     expect(lastEmbedBatchOpts).toBeDefined();
     expect((lastEmbedBatchOpts as { maxRetries?: number }).maxRetries).toBe(0);
+  });
+
+  test('case 9: source archived during backoff blocks the next provider attempt', async () => {
+    const { embedBatchWithBackoff } = await import('../src/commands/embed.ts');
+    let sourceActive = true;
+    let activeChecks = 0;
+    embedBatchBehavior = async () => {
+      // The first provider attempt loses a rate-limit race; the source is then
+      // archived while the wrapper waits to retry.
+      sourceActive = false;
+      const error = new Error('Rate limit reached. Please try again in 1ms.');
+      (error as any).cause = { status: 429 };
+      throw error;
+    };
+
+    await expect(embedBatchWithBackoff(['x'], {
+      withProviderSubmission: async (_texts, submit) => {
+        activeChecks++;
+        if (!sourceActive) throw new Error('source archived');
+        return submit();
+      },
+    })).rejects.toThrow('source archived');
+
+    expect(activeChecks).toBe(2);
+    expect(totalEmbedCalls).toBe(1);
   });
 });
 

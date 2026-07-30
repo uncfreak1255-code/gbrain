@@ -2,6 +2,81 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.1.0] - 2026-07-29
+
+**GBrain can now rescue pages that exist only in its database before cleaning up a broken source.** When a source checkout disappears or points at the wrong place, Doctor, Advisor, and the remediation planner agree on the problem and stop unrelated paid work from running ahead of the repair. Empty duplicate sources can be archived safely, while sources that still contain unique pages are protected until those pages have a checked export.
+
+### How to use it
+
+```bash
+# Inspect the source problem without changing anything.
+gbrain doctor --json
+gbrain advisor --json
+
+# Export one source with a deterministic manifest before repair.
+gbrain export --source default --dir ./gbrain-default-recovery
+
+# Archive only when the source still satisfies the empty-candidate rules.
+gbrain sources archive <source-id> --if-hygiene-candidate
+
+# Recover an interrupted shared-Postgres drain only after reviewing the owner.
+gbrain sources archive <source-id> --revoke-stale-leases --confirm-destructive
+```
+
+### What the safety checks do
+
+| Situation | Result |
+|---|---|
+| The checkout is missing but the database has pages | Export and recovery come first; cleanup is blocked |
+| A duplicate source has no pages | It can be soft-archived with a restore command |
+| A source is archived while work is queued | New writes and continued jobs are refused at the database boundary |
+| The source problem is healthy again | Normal planning resumes without a stale source warning |
+
+### Things to watch
+
+Source-scoped exports write into a private mode-0700 sibling staging directory and use the operating system's atomic no-replace rename to publish only to an absent output directory, verify the page count, reject duplicate slugs, preserve raw data, and write a manifest with stable hashes. Existing directories, even empty ones, are rejected. A hard crash can leave a hidden `.NAME.gbrain-export-stage-*` directory; it remains private and is never treated as a published recovery snapshot. The legacy all-source export can overwrite pages when different sources share a slug; it is not a full relational database backup. Archival is deliberately reversible and does not delete source pages. Protected or paid remediation remains a separate operator decision; this release only prevents it from racing ahead of a source recovery.
+
+### To take advantage of v0.47.1.0
+
+`gbrain upgrade` should apply migrations 124 through 137 automatically. If Doctor reports a partial migration, run:
+
+```bash
+gbrain apply-migrations --yes
+gbrain doctor --json
+gbrain sources list --json
+```
+
+If the upgrade still looks incomplete, include `gbrain doctor --json` and `~/.gbrain/upgrade-errors.jsonl` when filing an issue.
+
+### Itemized changes
+
+### Added
+- **Source-scoped recovery exports.** `gbrain export --source <id>` writes the complete snapshot into private mode-0700 staging on the destination filesystem, then uses Darwin `RENAME_EXCL` or Linux `RENAME_NOREPLACE` to publish it only when the requested output directory is absent. Unsupported systems fail closed without a plain-rename fallback. It paginates inside a consistent database snapshot, validates counts and unique slugs, confines staging paths, and writes deterministic page hashes.
+- **A repeatable source-hygiene loop.** Repo-local maintenance guidance now separates investigation, adversarial review, and bounded repair, with a fresh readback after every action.
+- **Archived-source database guards.** Migrations 124 through 137 reject new, continued, or destructive writes against known archived or draining sources, including job progress, path-routed sync jobs, row re-homing, source-owned updates that do not change `source_id`, deletes, and child rows that refer to archived-source pages. Page-owned checks use statement-level transition tables and dynamically project only page-reference columns, so bulk writes validate each page once without serializing large vector values. Scalar bindings can still be cleared for cleanup, pure OAuth client revocation and post-archive cleanup remain available, and unresolved legacy source identifiers remain compatible.
+- **Durable per-source embedding leases.** Every source-owned text, code, image, contextual-retrieval, fact, and multimodal-reindex gateway submission now carries the exact owning source. Archive commits a purpose-marked drain, blocks new submissions and writes, waits for exact provider tokens without holding a database transaction, and exposes output only after the token completes against the same active source generation. Interrupted manual drains resume normally; candidate-only drains resume with `--if-hygiene-candidate` and repeat the full safety check.
+
+### Changed
+- **Doctor, Planner, Advisor, and queued workers share one source diagnosis.** Missing checkouts, database-only pages, empty duplicates, and healthy database-backed sources now produce consistent findings; spend-capable jobs recheck that diagnosis when execution starts so stale queue admission cannot race recovery.
+- **Dream-quality receipts use one explicit clock.** A caller-supplied receipt timestamp now also controls promotion staleness scoring, so delayed or replayed evaluations stay deterministic.
+- **Archived sources leave normal work queues.** Resolver and Doctor paths ignore soft-archived sources, archived configured defaults fail loudly instead of silently falling through, and source-owned embedding submissions use short database transactions only to acquire, heartbeat, and complete durable tokens. Provider latency never holds a transaction or pool connection. Concurrent submissions for one active source may overlap; archive drains only that source, aborts or discards in-flight output, and rejects later gateway sub-batches and gateway-owned retries before provider egress. Older schemas retain a narrow upgrade fallback.
+
+### Fixed
+- **Bulk soft-delete cleanup isolates lifecycle-protected cascades.** An interrupted source archive or migration no longer rolls back eligible tombstone cleanup for unrelated healthy pages: live sweeps prefilter current guarded cascade paths, cap each transaction at 1,000 candidates, and use driver-native savepoints with a 64-attempt fallback for guard races. `gbrain pages purge-deleted --dry-run` reports up to 10,000 current aged candidates owned by non-draining sources, marks truncated previews, and explains that execution is bounded.
+- **Queued integrity auto-runs and contextual reindexing fail closed before provider egress.** Both integrity auto entrypoints now honor the brain-wide recovery veto while free check mode remains available. Contextual reindex jobs load an explicitly expected source exactly, and legacy source-less jobs reject duplicate slugs instead of selecting an arbitrary source.
+- **Live upgrades keep legacy source identifiers writable and serialized.** Every intermediate archived-source guard migration distinguishes a missing legacy registry row from a known archived source while taking the shared lifecycle lock, preventing temporary write failures, row re-homing, or archive races as migrations 124 through 137 apply one at a time.
+- **Recovery exports fail before writing on file/directory collisions.** The complete page, raw-sidecar, and manifest path set is checked before the output directory is created, so malformed legacy slugs cannot leave a partial snapshot.
+- **Purged sources cannot revive orphaned jobs.** Nonterminal archived-source jobs are terminalized while the source registry row still exists, before either manual or TTL purge removes it.
+- **Pre-provider lease rejection records no spend.** Embedding budget receipts distinguish a rejected lease from a provider submission that actually started, while retaining pessimistic accounting after real egress.
+- **Shared Postgres drains have a bounded operator recovery.** Automatic lease reclamation remains fail-closed; `--revoke-stale-leases --confirm-destructive` removes only leases fenced by the current drain whose heartbeat is at least ten minutes stale.
+- **Archived OAuth clients can still be revoked.** A pure `deleted_at` transition is allowed after source archive, while any simultaneous client or source-binding mutation remains blocked.
+- **Interrupted candidate archives keep their stricter authority.** Drain purpose survives a process crash, so an empty-source candidate cannot be resumed through the broader manual archive path after its checkout or hygiene evidence changes.
+- **Archived duplicates no longer poison a healthy shared-path sync.** Path-only jobs route to a deterministic active owner, remain held while the last owner drains, and are cancelled only after every matching source is archived; both `sourceId` spellings override path fallback.
+- **Engine migration preserves source lifecycle without destructive recovery loops.** Every target source stays behind a durable migration fence from source-row staging through config cutover; ordinary workers cannot insert, update, or delete target data between committed copy steps. Only the exact migration transaction temporarily clears its token, and rollback restores both copied data and fence generation. A target-wide live-session lock prevents concurrent migration commands from sharing recoverable drains; it uses a dedicated direct connection on transaction-pooler topologies and fails closed if no direct route exists, without consuming a work-pool slot. A private host-global SQLite lock serializes the shared config, manifest, and journal across different targets, resolves the source connection only after ownership, and is released by the kernel after process death. The config cutover itself is an atomic private-file rename, while a mode-0600 atomic journal recovers death on either side of that switch; retry keeps durable reset authority through the complete fresh target copy, so source-deleted pages cannot survive. Archived sources then regain their exact archive state, while active-source fences are exact-cleared at cutover. Source-side drains, malformed resume receipts, target-only registrations, and unrelated target drains fail before page mutation; blocked provider leases leave pages untouched, and stale fenced leases require `--revoke-stale-leases --confirm-destructive`.
+
+### For contributors
+- Focused unit, export, migration, and real-PostgreSQL concurrency tests cover consistent recovery snapshots, raw-key preservation, post-drain archive rechecks with source-metadata compare-and-swap, intermediate migration compatibility, direct and path-routed queued-job races, 500-row non-null-vector guard updates, exact-source provider tokens, provider-versus-archive ordering, crash-resumable drains, page-owned references, terminalization, lock renewal, and all-update source guards. A structural inventory fails CI when a new document embedding path is not explicitly fenced or classified as query/smoke-only.
+
 ## [0.47.0.1] - 2026-07-27
 
 **Extraction dry runs and corpus briefing now report the work they would actually do, while disabled quality probes stay quiet.** Dry-run link and timeline extraction checks existing database rows before counting or printing actions, markdown corpus inputs carry their own titles and source URLs into review drafts, and stale nightly probe audit rows no longer make doctor noisy after the probe is disabled.

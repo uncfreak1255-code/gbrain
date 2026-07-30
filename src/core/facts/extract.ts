@@ -28,6 +28,7 @@ import { resolveModel } from '../model-config.ts';
 import { normalizeModelId } from '../model-id.ts';
 import type { BrainEngine, NewFact, FactKind } from '../engine.ts';
 import { normalizeMetricLabel } from './extract-from-fence.ts';
+import { withActiveSourceProviderLease } from '../source-embedding-lease.ts';
 
 /**
  * v0.31 (D15): kill-switch for fact extraction.
@@ -89,6 +90,8 @@ export interface ExtractInput {
   model?: string;
   /** BrainEngine for reading model config. When provided, reads facts.extraction_model. */
   engine?: BrainEngine;
+  /** Exact database source that owns this turn's document content. */
+  sourceId?: string;
   /** Abort signal for shutdown propagation. */
   abortSignal?: AbortSignal;
   /** Cap on number of facts returned per turn. Defaults to 10. */
@@ -218,7 +221,14 @@ export async function extractFactsFromTurn(input: ExtractInput): Promise<Extract
 
     let embedding: Float32Array | null = null;
     try {
-      embedding = await embedOne(factText);
+      embedding = input.engine && input.sourceId
+        ? await withActiveSourceProviderLease(
+            input.engine,
+            input.sourceId,
+            (leaseSignal) => embedOne(factText, { abortSignal: leaseSignal }),
+            input.abortSignal,
+          )
+        : await embedOne(factText);
     } catch (err) {
       if (isAbort(err)) throw err;
       // Gateway-down → NULL embedding; classifier still runs without

@@ -5,7 +5,8 @@ description: |
   Proactive "make the most of gbrain" coaching. Runs `gbrain advisor` on a
   cadence and pings the user with the top high-leverage actions for their brain:
   version drift, pending migrations, stalled jobs, low embed coverage, setup
-  smells, and uninstalled brain skills. Read-only; always asks before fixing.
+  smells, source checkout health, and uninstalled brain skills. Read-only;
+  distinguishes agent-reviewable housekeeping from owner decisions.
 triggers:
   - "what should I do to get more out of gbrain"
   - "is my brain set up right"
@@ -27,8 +28,9 @@ mutating: false
 This skill guarantees:
 - **Read-only.** `gbrain advisor` never mutates. It computes a ranked list of
   actions from existing brain state.
-- **Print, never execute.** You SHOW the user the findings and ASK before running
-  any fix. The user owns every decision.
+- **Print, never execute.** `gbrain advisor` itself never runs a fix. Findings
+  with `ask_user: false` are routine candidates for an agent's adversarial
+  review; findings with `ask_user: true` remain owner decisions.
 - **Bounded nagging.** On a cadence, surface only what changed or what's
   critical; don't repeat an ignored low-severity item every run.
 
@@ -57,8 +59,11 @@ payload is `{ version, generated_at, worst, findings: [...] }`. Each finding has
 1. Read the findings, highest severity first.
 2. Summarize the top 1-3 to the user in their own channel/voice. Lead with any
    `critical` item (e.g. pending migrations).
-3. For each, show the `fix.command_argv` and **ask** whether to run it.
-4. If they say yes and the finding has a `fix.dispatch_id`, you may run it
+3. For `ask_user: false`, do not bounce a technical method choice to the user.
+   Use the owning repo's investigator → adversarial reviewer → bounded executor
+   loop. Execute only when the current task authorizes mutation and every veto
+   is clear. For `ask_user: true`, show the command and ask.
+4. When an approved finding has a `fix.dispatch_id`, you may run it
    locally with an explicit confirm:
 
    ```bash
@@ -67,8 +72,9 @@ payload is `{ version, generated_at, worst, findings: [...] }`. Each finding has
 
    `--apply` is local-only, runs the fix as a structured argv (no shell), and
    confirms first. Findings without a `dispatch_id` are not auto-runnable — run
-   their `fix.command_argv` yourself after the user agrees.
-5. Never run a fix the user didn't approve.
+   their `fix.command_argv` only through the owning workflow and its proof gate.
+5. Credentials, spend, populated-source recovery, purge/remove, and ambiguous
+   evidence always remain owner decisions.
 
 ## Cron recipe (weekly checkup)
 
@@ -98,14 +104,18 @@ WARN      gbrain 0.44 is available (you're on 0.43).
 ```
 
 - One block per finding, highest severity first.
-- Always show the exact `fix` command and ASK before running it.
+- Always show the exact `fix` command. Say whether it is ready for agent review
+  or needs the owner.
 - If nothing is pressing, say so in one line ("brain looks healthy") — don't
   manufacture work.
 
 ## Anti-Patterns
 
-- **Running a fix without asking.** The advisor is read-only by contract. Never
-  run `--apply` (or any `fix` command) without the user's explicit yes.
+- **Treating every finding as a Sawyer question.** Honor `ask_user`. Routine,
+  reversible, no-spend candidates should be settled by evidence and an
+  adversarial reviewer when the current task already authorizes mutation.
+- **Skipping the mutation boundary.** The advisor is read-only. A separate
+  owning workflow must execute and verify every fix.
 - **Dumping the raw JSON at the user.** Translate findings into their voice; lead
   with what matters.
 - **Re-nagging ignored low-severity items every run.** Use the "new since last

@@ -21,6 +21,7 @@ import type { RemediationPlan, RemediationPlanOpts } from './types.ts';
  */
 export const SYNTHETIC_CHECK_NAMES = [
   'brain_score',
+  'source_path_health',
   'sync_freshness',
   'missing_embeddings',
   'dead_links',
@@ -46,7 +47,10 @@ export async function computeRemediationPlan(
   // Cheap path (D7) — don't run slow doctor checks for the plan surface.
   // The recommendation generator works from BrainHealth + context alone.
   const health = await engine.getHealth();
-  const ctx = await loadRecommendationContext(engine);
+  const ctx = await loadRecommendationContext(engine, {
+    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
+    sourceHygienePacket: opts.sourceHygienePacket,
+  });
   const recs = computeRecommendations(health, ctx, opts.extraRemediations ?? []);
   const syntheticChecks = SYNTHETIC_CHECK_NAMES.map((name) => ({
     name,
@@ -59,8 +63,17 @@ export async function computeRemediationPlan(
   const estTotalUsd = filteredRecs.reduce((sum, r) => sum + (r.est_usd_cost ?? 0), 0);
 
   const blocked = classifications
-    .filter((c) => c.status === 'blocked')
+    .filter((c) => c.status === 'blocked' && c.check !== 'source_path_health')
     .map((c) => ({ check: c.check, reason: c.reason ?? 'prerequisite missing' }));
+  for (const source of ctx.sourceHygiene?.sources ?? []) {
+    if (source.classification !== 'recovery_required') continue;
+    blocked.push({
+      check: `source_path_health:${source.source_id}`,
+      reason: source.recovery_mode === 'managed_clone_sync'
+        ? 'managed source checkout must be recovered before paid or protected work'
+        : 'source data must be preserved and its checkout recovered before sync or paid work',
+    });
+  }
 
   return {
     schema_version: 2,

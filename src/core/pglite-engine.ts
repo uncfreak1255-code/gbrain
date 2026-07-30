@@ -14,7 +14,7 @@ import type {
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
-  SourceRow,
+  SourceRow, PurgeDeletedPagesResult,
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
@@ -59,6 +59,7 @@ import {
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
 import { hasCJK, escapeLikePattern } from './cjk.ts';
+import { purgeDeletedPagesSafely } from './purge-deleted-pages.ts';
 
 type PGLiteDB = PGlite;
 
@@ -244,6 +245,8 @@ async function preservingProcessExitCode<T>(fn: () => Promise<T>): Promise<T> {
 export class PGLiteEngine implements BrainEngine {
   readonly kind = 'pglite' as const;
   private _db: PGLiteDB | null = null;
+  /** True only on the scoped clone passed to BrainEngine.transaction(). */
+  private _inTransaction = false;
   private _lock: LockHandle | null = null;
   // #2034: captured at connect() so reconnect() can restore the same data dir
   // after a drop, matching PostgresEngine's _savedConfig contract.
@@ -492,6 +495,10 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='sources' AND column_name='archive_expires_at') AS sources_archive_expires_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='sources' AND column_name='embedding_drain_token') AS sources_embedding_drain_token_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='sources' AND column_name='embedding_drain_epoch') AS sources_embedding_drain_epoch_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='last_retrieved_at') AS pages_last_retrieved_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='ingested_via') AS pages_ingested_via_exists,
@@ -545,6 +552,8 @@ export class PGLiteEngine implements BrainEngine {
       sources_archived_exists: boolean;
       sources_archived_at_exists: boolean;
       sources_archive_expires_at_exists: boolean;
+      sources_embedding_drain_token_exists: boolean;
+      sources_embedding_drain_epoch_exists: boolean;
       pages_last_retrieved_at_exists: boolean;
       pages_ingested_via_exists: boolean;
       pages_ingested_at_exists: boolean;
@@ -599,6 +608,12 @@ export class PGLiteEngine implements BrainEngine {
       && (!probe.sources_archived_exists
           || !probe.sources_archived_at_exists
           || !probe.sources_archive_expires_at_exists);
+    // v133: current schema replay installs source lifecycle
+    // functions before historical migrations run. Those functions compile
+    // against these columns, including while v34 backfills archived sources.
+    const needsSourcesDrain = probe.sources_exists
+      && (!probe.sources_embedding_drain_token_exists
+          || !probe.sources_embedding_drain_epoch_exists);
     // v0.37.0 (v79): pages_last_retrieved_at_idx in PGLITE_SCHEMA_SQL
     // references last_retrieved_at. Pre-v79 brains crash without the column.
     const needsPagesLastRetrievedAt = probe.pages_exists && !probe.pages_last_retrieved_at_exists;
@@ -640,7 +655,7 @@ export class PGLiteEngine implements BrainEngine {
         && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsPagesRecency && !needsIngestLogSourceId
         && !needsFilesBootstrap && !needsOauthClientsBootstrap
-        && !needsSourcesArchive && !needsPagesLastRetrievedAt
+        && !needsSourcesArchive && !needsSourcesDrain && !needsPagesLastRetrievedAt
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
@@ -651,10 +666,9 @@ export class PGLiteEngine implements BrainEngine {
     if (needsPagesBootstrap) {
       // Mirror schema-embedded.ts shape for `sources` so the subsequent
       // PGLITE_SCHEMA_SQL CREATE TABLE IF NOT EXISTS is a true no-op.
-      // Archive columns (v34) are folded in here so a pre-v18 brain doesn't
-      // need needsSourcesArchive to also fire — bootstrap creates a complete
-      // v34-shape sources in one go. needsSourcesArchive then only fires on
-      // the pre-v34 case (sources exists, archive cols don't).
+      // Archive columns (v34) and provider-drain columns (v133) are folded in
+      // here so schema replay can install the current lifecycle guards before
+      // the historical migration chain runs.
       await this.db.exec(`
         CREATE TABLE IF NOT EXISTS sources (
           id                 TEXT PRIMARY KEY,
@@ -666,6 +680,8 @@ export class PGLiteEngine implements BrainEngine {
           archived           BOOLEAN NOT NULL DEFAULT FALSE,
           archived_at        TIMESTAMPTZ,
           archive_expires_at TIMESTAMPTZ,
+          embedding_drain_token TEXT,
+          embedding_drain_epoch BIGINT NOT NULL DEFAULT 0,
           created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO sources (id, name, config)
@@ -824,6 +840,16 @@ export class PGLiteEngine implements BrainEngine {
       `);
     }
 
+    if (needsSourcesDrain) {
+      // v133 lifecycle functions are part of the current schema blob, so a
+      // retained pre-v133 sources table needs their row fields before replay.
+      // Migration v133 later recreates the lease table and final guards.
+      await this.db.exec(`
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS embedding_drain_token TEXT;
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS embedding_drain_epoch BIGINT NOT NULL DEFAULT 0;
+      `);
+    }
+
     if (needsPagesLastRetrievedAt) {
       // v79 (pages_last_retrieved_at): adds the stale-page signal column +
       // full B-tree index. PGLITE_SCHEMA_SQL's CREATE INDEX
@@ -910,8 +936,35 @@ export class PGLiteEngine implements BrainEngine {
     return this.db.transaction(async (tx) => {
       const txEngine = Object.create(this) as PGLiteEngine;
       Object.defineProperty(txEngine, 'db', { get: () => tx });
+      Object.defineProperty(txEngine, '_inTransaction', { value: true });
       return fn(txEngine);
     });
+  }
+
+  async savepoint<T>(name: string, fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    if (!this._inTransaction) {
+      throw new Error('BrainEngine.savepoint() requires a transaction-scoped engine');
+    }
+    if (!/^[a-z][a-z0-9_]*$/i.test(name)) {
+      throw new Error(`Invalid savepoint name: ${name}`);
+    }
+    await this.db.exec(`SAVEPOINT ${name}`);
+    try {
+      const result = await fn(this);
+      await this.db.exec(`RELEASE SAVEPOINT ${name}`);
+      return result;
+    } catch (error) {
+      try {
+        await this.db.exec(`ROLLBACK TO SAVEPOINT ${name}`);
+        await this.db.exec(`RELEASE SAVEPOINT ${name}`);
+      } catch (savepointError) {
+        throw new AggregateError(
+          [error, savepointError],
+          `Failed to recover ${name} after a savepoint error`,
+        );
+      }
+      throw error;
+    }
   }
 
   // Pages CRUD
@@ -1107,19 +1160,11 @@ export class PGLiteEngine implements BrainEngine {
     return rows.length > 0;
   }
 
-  async purgeDeletedPages(olderThanHours: number): Promise<{ slugs: string[]; count: number }> {
-    // Clamp to non-negative integer; cascade through FKs (content_chunks,
-    // page_links, chunk_relations) on DELETE.
-    const hours = Math.max(0, Math.floor(olderThanHours));
-    const { rows } = await this.db.query(
-      `DELETE FROM pages
-       WHERE deleted_at IS NOT NULL
-         AND deleted_at < now() - ($1 || ' hours')::interval
-       RETURNING slug`,
-      [hours]
-    );
-    const slugs = (rows as { slug: string }[]).map((r) => r.slug);
-    return { slugs, count: slugs.length };
+  async purgeDeletedPages(
+    olderThanHours: number,
+    opts?: { dryRun?: boolean },
+  ): Promise<PurgeDeletedPagesResult> {
+    return purgeDeletedPagesSafely(this, olderThanHours, opts);
   }
 
   async refreshPageBody(
@@ -1293,7 +1338,7 @@ export class PGLiteEngine implements BrainEngine {
     }>(
       `SELECT id, name, local_path, last_sync_at, config
          FROM sources
-        WHERE ($1::boolean OR archived IS NOT TRUE)
+        WHERE ($1::boolean OR (archived IS NOT TRUE AND embedding_drain_token IS NULL))
           AND ($2::boolean OR local_path IS NOT NULL)
         ORDER BY (id = 'default') DESC, id`,
       [includeArchived, !localPathOnly],
@@ -2212,6 +2257,8 @@ export class PGLiteEngine implements BrainEngine {
       conds.push(`cc.embedding IS NULL`);
     }
     conds.push(`NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
+    conds.push(`s.archived IS NOT TRUE`);
+    conds.push(`s.embedding_drain_token IS NULL`);
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
@@ -2228,6 +2275,7 @@ export class PGLiteEngine implements BrainEngine {
       `SELECT count(*)::int AS count
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params,
     );
@@ -2243,6 +2291,7 @@ export class PGLiteEngine implements BrainEngine {
       `SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params,
     );
@@ -2271,7 +2320,10 @@ export class PGLiteEngine implements BrainEngine {
       `UPDATE content_chunks cc
           SET embedding = NULL, embedded_at = NULL
          FROM pages p
+         JOIN sources s ON s.id = p.source_id
         WHERE cc.page_id = p.id
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND cc.embedding IS NOT NULL
           AND p.embedding_signature IS NOT NULL
           AND p.embedding_signature <> $1${srcClause}
@@ -2306,7 +2358,10 @@ export class PGLiteEngine implements BrainEngine {
                   p.updated_at
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
+             JOIN sources s ON s.id = p.source_id
             WHERE cc.embedding IS NULL
+              AND s.archived IS NOT TRUE
+              AND s.embedding_drain_token IS NULL
               AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
             LIMIT $1`,
@@ -2317,7 +2372,10 @@ export class PGLiteEngine implements BrainEngine {
                   p.updated_at
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
+             JOIN sources s ON s.id = p.source_id
             WHERE cc.embedding IS NULL
+              AND s.archived IS NOT TRUE
+              AND s.embedding_drain_token IS NULL
               AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
               AND (
                 p.updated_at < $1::timestamptz
@@ -2336,7 +2394,10 @@ export class PGLiteEngine implements BrainEngine {
                 p.updated_at
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
+           JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND p.source_id = $1
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
@@ -2348,7 +2409,10 @@ export class PGLiteEngine implements BrainEngine {
                 p.updated_at
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
+           JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND p.source_id = $1
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (
@@ -2373,7 +2437,10 @@ export class PGLiteEngine implements BrainEngine {
                 cc.model, cc.token_count, p.source_id, cc.page_id
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
+           JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (cc.page_id, cc.chunk_index) > ($1, $2)
           ORDER BY cc.page_id, cc.chunk_index
@@ -2387,7 +2454,10 @@ export class PGLiteEngine implements BrainEngine {
               cc.model, cc.token_count, p.source_id, cc.page_id
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND p.source_id = $1
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > ($2, $3)
@@ -3662,7 +3732,7 @@ export class PGLiteEngine implements BrainEngine {
     // VALUES) keep the embedding-vs-no-embedding branching readable; batch
     // sizes are small (5-30 rows per page in practice) so the loop overhead
     // is negligible vs the embedding compute cost.
-    const ids = await this.db.transaction(async (tx) => {
+    const insertRows = async (tx: Transaction) => {
       const out: number[] = [];
       for (const input of rows) {
         const validFrom = input.valid_from ?? new Date();
@@ -3726,7 +3796,12 @@ export class PGLiteEngine implements BrainEngine {
         out.push(ins.rows[0].id);
       }
       return out;
-    });
+    };
+    // A page reconciliation owns a wider delete+insert transaction. Reuse its
+    // scoped connection instead of attempting a nested PGLite transaction.
+    const ids = this._inTransaction
+      ? await insertRows(this.db as unknown as Transaction)
+      : await this.db.transaction(insertRows);
     return { inserted: ids.length, ids };
   }
 

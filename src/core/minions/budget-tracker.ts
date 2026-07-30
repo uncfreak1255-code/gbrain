@@ -27,8 +27,8 @@
  * so the child halts cleanly.
  *
  * Recursive halt (codex pass-2 #3): when owner balance hits 0, the worker
- * walks `WHERE budget_owner_job_id = X AND status IN ('waiting','delayed')`
- * to flip the entire subtree to `dead` with reason `budget_exhausted`.
+ * walks every non-running descendant of the owner and flips the entire
+ * subtree to `dead` with reason `budget_exhausted`.
  *
  * Audit (Eng D8 / codex pass-3 #7): every reserve/refund/lost/halted
  * event writes one row to `minion_budget_log` with denormalized model +
@@ -36,6 +36,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { MinionQueue } from './queue.ts';
 
 /** Status of a reservation attempt. */
 export type ReservationOutcome =
@@ -220,8 +221,9 @@ export async function refundBudget(
 
 /**
  * Recursive halt sweep — codex pass-2 #3. When the owner is exhausted,
- * walk `budget_owner_job_id = X` and flip every waiting/delayed
- * descendant to dead. Active jobs DO NOT get flipped here; their
+ * walk `budget_owner_job_id = X` and flip every non-running descendant
+ * to dead. This includes waiting-children parents so dead children cannot
+ * wake nested halted work back to waiting. Active jobs DO NOT get flipped; their
  * turn-boundary reserveBudget call will throw BudgetExhausted on the
  * next turn (or, if mid-tool-dispatch, they complete the current turn
  * cleanly and the next reservation fails).
@@ -238,17 +240,19 @@ export async function haltBudgetSubtree(
   // inherit via parent.budget_owner_job_id), which means the owner row
   // would match its own subtree filter. The owner has its own state
   // machine independent of budget halt; we just halt its DESCENDANTS.
-  const rows = await engine.executeRaw<{ id: number }>(
-    `UPDATE minion_jobs SET
-       status = 'dead',
-       error_text = $2,
-       finished_at = now(),
-       updated_at = now()
-     WHERE budget_owner_job_id = $1
-       AND id != $1
-       AND status IN ('waiting', 'delayed')
-     RETURNING id`,
-    [ownerJobId, `${reason}: parent ${ownerJobId} hit cap or was deleted`],
+  const candidates = await engine.executeRaw<{ id: number | string }>(
+    `SELECT id
+       FROM minion_jobs
+      WHERE budget_owner_job_id = $1
+        AND id != $1
+        AND status IN ('waiting', 'delayed', 'waiting-children', 'paused')
+      ORDER BY id`,
+    [ownerJobId],
+  );
+  const rows = await new MinionQueue(engine).deadLetterJobs(
+    candidates.map((row) => Number(row.id)),
+    `${reason}: parent ${ownerJobId} hit cap or was deleted`,
+    { parentPolicy: 'resolve' },
   );
   return rows.length;
 }

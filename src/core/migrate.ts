@@ -1591,6 +1591,14 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archive_expires_at TIMESTAMPTZ;
       `);
 
+      // Current schema replay happens before historical migrations and may
+      // install v133's committed-drain archive guard on a v33 brain. That
+      // future-only guard must not reject v34's canonical JSONB backfill.
+      // Migration v133 recreates the guard after the drain protocol exists.
+      await engine.runMigration(34, `
+        DROP TRIGGER IF EXISTS source_archive_transition_guard ON sources;
+      `);
+
       // 2. Backfill from JSONB shape used by pre-v0.26.5 cherry-picks of PR #595.
       //    Idempotent: subsequent re-runs find zero matching rows.
       await engine.runMigration(34, `
@@ -5492,6 +5500,254 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   {
+    version: 124,
+    name: 'active_source_reference_write_guard',
+    // Source archive safety is a database invariant, not a CLI convention.
+    // Every producer takes a shared lock on each referenced active source;
+    // `sources archive --if-hygiene-candidate` takes FOR UPDATE on that source.
+    // Therefore an already-running writer finishes before archive evidence is
+    // reread, while a writer that arrives during archive waits and then fails
+    // if the source committed as archived. The dynamic registry covers every
+    // exact source_id column plus the non-canonical array/JSON/config and
+    // per-source sync-lock shapes audited by src/core/source-hygiene.ts.
+    // Scalar UPDATEs may clear an archived reference for FK ON DELETE SET
+    // NULL cleanup; retaining or replacing it still checks both owners.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := array_append(source_refs, source_ref);
+            IF TG_OP = 'UPDATE' THEN
+              source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+              IF source_ref IS NOT NULL THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = NEW.value
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is archived', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          PERFORM id
+            FROM sources
+           WHERE local_path = NEW.value AND archived = false
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        FOR ref IN
+          SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema
+             AND t.table_name = c.table_name
+           WHERE c.table_schema = 'public'
+             AND t.table_type = 'BASE TABLE'
+             AND c.column_name = 'source_id'
+           ORDER BY c.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_active_ref_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+            ref.table_name, 'scalar', ref.column_name
+          );
+        END LOOP;
+
+        FOR ref IN
+          SELECT *
+            FROM (VALUES
+              ('oauth_clients', 'bound_source_id', 'scalar', 'source_active_bound_source_guard'),
+              ('oauth_clients', 'federated_read', 'array', 'source_active_federated_read_guard'),
+              ('eval_candidates', 'source_ids', 'array', 'source_active_source_ids_guard'),
+              ('minion_jobs', 'data', 'json_source_keys', 'source_active_job_data_guard'),
+              ('gbrain_cycle_locks', 'id', 'sync_lock_id', 'source_active_sync_lock_guard')
+            ) AS refs(table_name, column_name, kind, trigger_name)
+           WHERE EXISTS (
+             SELECT 1
+               FROM information_schema.columns c
+              WHERE c.table_schema = 'public'
+                AND c.table_name = refs.table_name
+                AND c.column_name = refs.column_name
+           )
+           ORDER BY table_name, column_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS %I ON %I',
+            ref.trigger_name, ref.table_name
+          );
+          IF ref.kind = 'sync_lock_id' THEN
+            EXECUTE format(
+              'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
+              || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+              ref.trigger_name, ref.table_name, ref.kind, ref.column_name
+            );
+          ELSE
+            EXECUTE format(
+              'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
+              || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+              ref.trigger_name, ref.table_name, ref.kind, ref.column_name
+            );
+          END IF;
+        END LOOP;
+
+        IF to_regclass('public.config') IS NOT NULL THEN
+          DROP TRIGGER IF EXISTS source_active_config_guard ON config;
+          CREATE TRIGGER source_active_config_guard
+            BEFORE INSERT OR UPDATE OF key, value ON config
+            FOR EACH ROW EXECUTE FUNCTION enforce_active_source_config_fn();
+        END IF;
+      END;
+      $install$;
+    `,
+  },
+  {
+    version: 125,
+    name: 'active_source_job_status_guard',
+    idempotent: true,
+    sql: `
+      DO $install$
+      BEGIN
+        IF to_regclass('public.minion_jobs') IS NOT NULL
+           AND to_regprocedure('enforce_active_source_reference_fn()') IS NOT NULL THEN
+          DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
+          CREATE TRIGGER source_active_job_data_guard
+            BEFORE INSERT OR UPDATE OF data, status ON minion_jobs
+            FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(
+              'json_source_keys', 'data'
+            );
+        END IF;
+      END;
+      $install$;
+    `,
+  },
+  {
     version: 123,
     name: 'pages_takes_extracted_content_hash',
     // A valid classifier result may contain zero claims. Without a page-level
@@ -5501,6 +5757,1998 @@ export const MIGRATIONS: Migration[] = [
     sql: `
       ALTER TABLE pages
         ADD COLUMN IF NOT EXISTS takes_extracted_content_hash TEXT;
+    `,
+  },
+  {
+    version: 126,
+    name: 'archived_source_job_terminalization_guard',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
+      CREATE TRIGGER source_active_job_data_guard
+        BEFORE INSERT OR UPDATE OF data, status ON minion_jobs
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+    `,
+  },
+  {
+    version: 127,
+    name: 'archived_source_job_continuation_guard',
+    idempotent: true,
+    sql: `
+      DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
+      CREATE TRIGGER source_active_job_data_guard
+        BEFORE INSERT OR UPDATE ON minion_jobs
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+    `,
+  },
+  {
+    version: 128,
+    name: 'archived_source_owned_row_guard',
+    idempotent: true,
+    sql: `
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        FOR ref IN
+          SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema
+             AND t.table_name = c.table_name
+           WHERE c.table_schema = 'public'
+             AND t.table_type = 'BASE TABLE'
+             AND c.column_name = 'source_id'
+           ORDER BY c.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_active_ref_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+            ref.table_name, 'scalar', ref.column_name
+          );
+        END LOOP;
+
+        FOR ref IN
+          SELECT *
+            FROM (VALUES
+              ('oauth_clients', 'bound_source_id', 'scalar', 'source_active_bound_source_guard'),
+              ('oauth_clients', 'federated_read', 'array', 'source_active_federated_read_guard'),
+              ('eval_candidates', 'source_ids', 'array', 'source_active_source_ids_guard')
+            ) AS refs(table_name, column_name, kind, trigger_name)
+           WHERE EXISTS (
+             SELECT 1
+               FROM information_schema.columns c
+              WHERE c.table_schema = 'public'
+                AND c.table_name = refs.table_name
+                AND c.column_name = refs.column_name
+           )
+           ORDER BY table_name, column_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS %I ON %I',
+            ref.trigger_name, ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
+            ref.trigger_name, ref.table_name, ref.kind, ref.column_name
+          );
+        END LOOP;
+      END;
+      $install$;
+    `,
+  },
+  {
+    version: 129,
+    name: 'archived_source_missing_reference_compatibility',
+    // Source identifiers can outlive their registry row in legacy brains and
+    // isolated fixtures. Preserve that compatibility while taking the shared
+    // lifecycle lock before any source lookup, then a row lock for every known
+    // source. Concurrent archive waits even when the source row does not exist,
+    // while known archived sources remain write-protected.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := array_append(source_refs, source_ref);
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref IS NOT NULL THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = NEW.value
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is archived', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          PERFORM id
+            FROM sources
+           WHERE local_path = NEW.value AND archived = false
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    version: 130,
+    name: 'source_lifecycle_advisory_lock',
+    // A source row cannot provide a lock before it exists. Every guarded
+    // writer therefore takes the shared form of one transaction-scoped
+    // lifecycle lock; archive takes the exclusive form before rereading its
+    // predicate. Shared locks remain concurrent, while the rare archive waits
+    // for every earlier writer and blocks every later writer until commit.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := array_append(source_refs, source_ref);
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref IS NOT NULL THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = NEW.value
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is archived', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          PERFORM id
+            FROM sources
+           WHERE local_path = NEW.value AND archived = false
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    version: 131,
+    name: 'archived_source_update_escape_guard',
+    // v130 originally inspected only NEW references. Replacing an archived
+    // row's source with an active source could therefore re-home the row and
+    // bypass the lifecycle boundary. Reinstall both guards under a new
+    // migration number so brains already stamped at v130 are repaired by the
+    // direct apply-migrations path as well as by schema replay.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref IS NOT NULL THEN
+            source_refs := array_append(source_refs, source_ref);
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref IS NOT NULL THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
+              IF source_ref <> '' THEN
+                source_refs := array_append(source_refs, source_ref);
+              END IF;
+            END IF;
+          END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write %.%: source % is archived',
+              TG_TABLE_NAME, TG_ARGV[1], source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    version: 132,
+    name: 'archived_source_indirect_reference_guard',
+    // Tables such as content_chunks and links inherit ownership through a
+    // pages(id) foreign key instead of carrying source_id directly. Protect
+    // every current page FK. NEW references are checked statement-wide; a
+    // narrow row trigger checks only non-null re-homes from OLD pages so
+    // ON DELETE SET NULL cleanup remains legal. Path-routed sync jobs
+    // receive the same lifecycle lock even when their payload omits sourceId.
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        repo_path TEXT;
+        repo_paths TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF NEW.name = 'sync'
+           AND NOT (
+             (jsonb_typeof(NEW.data->'sourceId') = 'string'
+               AND COALESCE(NEW.data->>'sourceId', '') <> '')
+             OR (jsonb_typeof(NEW.data->'source_id') = 'string'
+               AND COALESCE(NEW.data->>'source_id', '') <> '')
+           ) THEN
+          repo_path := NEW.data->>'repoPath';
+          IF repo_path IS NOT NULL AND repo_path <> '' THEN
+            repo_paths := array_append(repo_paths, repo_path);
+          END IF;
+        END IF;
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+          IF OLD.name = 'sync'
+             AND NOT (
+               (jsonb_typeof(OLD.data->'sourceId') = 'string'
+                 AND COALESCE(OLD.data->>'sourceId', '') <> '')
+               OR (jsonb_typeof(OLD.data->'source_id') = 'string'
+                 AND COALESCE(OLD.data->>'source_id', '') <> '')
+             ) THEN
+            repo_path := OLD.data->>'repoPath';
+            IF repo_path IS NOT NULL AND repo_path <> '' THEN
+              repo_paths := array_append(repo_paths, repo_path);
+            END IF;
+          END IF;
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO repo_paths
+          FROM unnest(repo_paths) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_before
+          FROM sources
+         WHERE local_path = ANY(repo_paths);
+
+        -- Resolve path-owned and direct references in the same ordered locking scan.
+        -- If an archive is in flight, EvalPlanQual rechecks the committed row after
+        -- the wait instead of letting a pre-lock path snapshot admit stale work.
+        FOR source_ref, source_archived IN
+          SELECT id, archived
+            FROM sources
+           WHERE id = ANY(source_refs)
+              OR local_path = ANY(repo_paths)
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          IF source_archived THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_after
+          FROM sources
+         WHERE local_path = ANY(repo_paths);
+        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
+          RAISE EXCEPTION 'Source path ownership changed while writing minion_jobs.data'
+            USING ERRCODE = '40001';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_page_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        page_refs BIGINT[] := ARRAY[]::BIGINT[];
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        archived_source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+        page_owners_before JSONB;
+        page_owners_after JSONB;
+        page_ref_query TEXT;
+      BEGIN
+        IF TG_NARGS < 1 THEN
+          RAISE EXCEPTION 'Active-source page guard requires at least one page column';
+        END IF;
+
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+          SELECT string_agg(
+                   format(
+                     'SELECT changed.%1$I::BIGINT AS page_ref FROM new_rows changed WHERE changed.%1$I IS NOT NULL',
+                     page_column
+                   ),
+                   ' UNION ALL '
+                   ORDER BY page_column
+                 )
+            INTO page_ref_query
+            FROM unnest(TG_ARGV) AS page_columns(page_column);
+        ELSE
+          RAISE EXCEPTION 'Active-source page guard does not support %', TG_OP;
+        END IF;
+
+        -- Project only the page-reference columns. Converting complete
+        -- transition rows to JSONB would detoast and serialize large payloads
+        -- such as content_chunks.embedding on every bulk upsert.
+        EXECUTE
+          'SELECT COALESCE(array_agg(DISTINCT page_ref ORDER BY page_ref), ARRAY[]::BIGINT[]) '
+          || 'FROM (' || page_ref_query || ') AS referenced_pages'
+          INTO page_refs;
+
+        IF cardinality(page_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB),
+               COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
+          INTO page_owners_before, source_refs
+          FROM pages
+         WHERE id = ANY(page_refs);
+
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived INTO source_archived
+            FROM sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND source_archived THEN
+            archived_source_refs := array_append(archived_source_refs, source_ref);
+          END IF;
+        END LOOP;
+
+        PERFORM id
+          FROM pages
+         WHERE id = ANY(page_refs)
+         ORDER BY id
+         FOR SHARE;
+
+        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB)
+          INTO page_owners_after
+          FROM pages
+         WHERE id = ANY(page_refs);
+
+        IF page_owners_after IS DISTINCT FROM page_owners_before THEN
+          RAISE EXCEPTION 'Page ownership changed while writing %', TG_TABLE_NAME
+            USING ERRCODE = '40001';
+        END IF;
+        IF cardinality(archived_source_refs) > 0 THEN
+          RAISE EXCEPTION
+            'Cannot write %: page source % is archived',
+            TG_TABLE_NAME, archived_source_refs[1]
+            USING ERRCODE = '23503';
+        END IF;
+        RETURN NULL;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_page_rehome_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        old_page_ref BIGINT;
+        old_source_ref TEXT;
+        old_source_archived BOOLEAN;
+      BEGIN
+        IF TG_NARGS <> 1 THEN
+          RAISE EXCEPTION 'Active-source page rehome guard requires one page column';
+        END IF;
+        old_page_ref := NULLIF(to_jsonb(OLD)->>TG_ARGV[0], '')::BIGINT;
+        IF old_page_ref IS NULL THEN RETURN NEW; END IF;
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        SELECT source.id, source.archived
+          INTO old_source_ref, old_source_archived
+          FROM public.pages page
+          JOIN public.sources source ON source.id = page.source_id
+         WHERE page.id = old_page_ref
+         FOR SHARE OF page, source;
+        IF FOUND AND old_source_archived THEN
+          RAISE EXCEPTION
+            'Cannot rehome %.%: page source % is archived',
+            TG_TABLE_NAME, TG_ARGV[0], old_source_ref
+            USING ERRCODE = '23503';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        FOR ref IN
+          SELECT page_refs.table_name,
+                 string_agg(quote_literal(page_refs.column_name), ', '
+                            ORDER BY page_refs.column_name) AS trigger_arguments
+            FROM (
+              SELECT DISTINCT child_table.relname AS table_name,
+                              child_column.attname AS column_name
+                FROM pg_constraint constraint_
+                JOIN pg_class child_table
+                  ON child_table.oid = constraint_.conrelid
+                JOIN pg_namespace child_namespace
+                  ON child_namespace.oid = child_table.relnamespace
+                JOIN pg_class parent_table
+                  ON parent_table.oid = constraint_.confrelid
+                JOIN pg_namespace parent_namespace
+                  ON parent_namespace.oid = parent_table.relnamespace
+                JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
+                  AS child_key(attnum, ordinal_position) ON true
+                JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
+                  AS parent_key(attnum, ordinal_position)
+                  ON parent_key.ordinal_position = child_key.ordinal_position
+                JOIN pg_attribute child_column
+                  ON child_column.attrelid = child_table.oid
+                 AND child_column.attnum = child_key.attnum
+                JOIN pg_attribute parent_column
+                  ON parent_column.attrelid = parent_table.oid
+                 AND parent_column.attnum = parent_key.attnum
+               WHERE constraint_.contype = 'f'
+                 AND child_namespace.nspname = 'public'
+                 AND parent_namespace.nspname = 'public'
+                 AND parent_table.relname = 'pages'
+                 AND parent_column.attname = 'id'
+            ) AS page_refs
+           GROUP BY page_refs.table_name
+           ORDER BY page_refs.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_active_page_ref_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_active_page_ref_insert_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_active_page_ref_update_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_active_page_ref_insert_guard AFTER INSERT ON %I '
+            || 'REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT '
+            || 'EXECUTE FUNCTION enforce_active_source_page_reference_fn(%s)',
+            ref.table_name,
+            ref.trigger_arguments
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_active_page_ref_update_guard AFTER UPDATE ON %I '
+            || 'REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT '
+            || 'EXECUTE FUNCTION enforce_active_source_page_reference_fn(%s)',
+            ref.table_name,
+            ref.trigger_arguments
+          );
+        END LOOP;
+
+        FOR ref IN
+          SELECT DISTINCT child_table.relname AS table_name,
+                          child_column.attname AS column_name
+            FROM pg_constraint constraint_
+            JOIN pg_class child_table ON child_table.oid = constraint_.conrelid
+            JOIN pg_namespace child_namespace ON child_namespace.oid = child_table.relnamespace
+            JOIN pg_class parent_table ON parent_table.oid = constraint_.confrelid
+            JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent_table.relnamespace
+            JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
+              AS child_key(attnum, ordinal_position) ON true
+            JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
+              AS parent_key(attnum, ordinal_position)
+              ON parent_key.ordinal_position = child_key.ordinal_position
+            JOIN pg_attribute child_column
+              ON child_column.attrelid = child_table.oid AND child_column.attnum = child_key.attnum
+            JOIN pg_attribute parent_column
+              ON parent_column.attrelid = parent_table.oid AND parent_column.attnum = parent_key.attnum
+           WHERE constraint_.contype = 'f'
+             AND child_namespace.nspname = 'public'
+             AND parent_namespace.nspname = 'public'
+             AND parent_table.relname = 'pages'
+             AND parent_column.attname = 'id'
+           ORDER BY child_table.relname, child_column.attname
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS %I ON %I',
+            'source_active_page_rehome_' || substr(md5(ref.table_name || ':' || ref.column_name), 1, 16),
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER %I BEFORE UPDATE OF %I ON %I '
+            || 'FOR EACH ROW WHEN (OLD.%I IS NOT NULL AND NEW.%I IS NOT NULL AND OLD.%I IS DISTINCT FROM NEW.%I) '
+            || 'EXECUTE FUNCTION enforce_active_source_page_rehome_fn(%L)',
+            'source_active_page_rehome_' || substr(md5(ref.table_name || ':' || ref.column_name), 1, 16),
+            ref.column_name, ref.table_name,
+            ref.column_name, ref.column_name, ref.column_name, ref.column_name,
+            ref.column_name
+          );
+        END LOOP;
+      END;
+      $install$;
+    `,
+  },
+  {
+    version: 133,
+    name: 'source_embedding_provider_drain_leases',
+    idempotent: true,
+    sql: `
+      ALTER TABLE public.sources
+        ADD COLUMN IF NOT EXISTS embedding_drain_token TEXT;
+      ALTER TABLE public.sources
+        ADD COLUMN IF NOT EXISTS embedding_drain_epoch BIGINT NOT NULL DEFAULT 0;
+
+      CREATE TABLE IF NOT EXISTS public.source_embedding_leases (
+        lease_token TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES public.sources(id) ON DELETE CASCADE,
+        source_epoch BIGINT NOT NULL,
+        owner_host TEXT NOT NULL CHECK (owner_host <> ''),
+        owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
+        owner_instance TEXT NOT NULL CHECK (owner_instance <> ''),
+        acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_embedding_leases_source_idx
+        ON public.source_embedding_leases (source_id, lease_token);
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        repo_paths TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        -- Security cleanup must remain possible after source archive. This is
+        -- deliberately narrower than a generic archived-row UPDATE escape:
+        -- only deleted_at may change, and only from NULL to non-NULL.
+        IF TG_TABLE_NAME = 'oauth_clients'
+           AND TG_OP = 'UPDATE'
+           AND (to_jsonb(OLD)->>'deleted_at') IS NULL
+           AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
+           AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
+          RETURN NEW;
+        END IF;
+
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_refs := ARRAY[to_jsonb(NEW)->>TG_ARGV[1]];
+          IF TG_OP = 'UPDATE' AND to_jsonb(NEW)->>TG_ARGV[1] IS NOT NULL THEN
+            source_refs := source_refs || ARRAY[to_jsonb(OLD)->>TG_ARGV[1]];
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_refs := ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_refs := source_refs || ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'job' THEN
+          IF TG_OP = 'UPDATE'
+             AND NEW.data IS NOT DISTINCT FROM OLD.data
+             AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+            RETURN NEW;
+          END IF;
+          source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+          IF NEW.name = 'sync'
+             AND NOT (
+               jsonb_typeof(NEW.data->'sourceId') = 'string'
+               AND COALESCE(NEW.data->>'sourceId', '') <> ''
+             ) THEN
+            repo_paths := ARRAY[NEW.data->>'repoPath'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+            IF OLD.name = 'sync'
+               AND NOT (
+                 jsonb_typeof(OLD.data->'sourceId') = 'string'
+                 AND COALESCE(OLD.data->>'sourceId', '') <> ''
+               ) THEN
+              repo_paths := repo_paths || ARRAY[OLD.data->>'repoPath'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'config' THEN
+          IF NEW.key = 'sources.default' THEN source_refs := ARRAY[NEW.value]; END IF;
+          IF NEW.key = 'sync.repo_path' THEN repo_paths := ARRAY[NEW.value]; END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown source-drain guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs FROM unnest(source_refs) values_(value)
+         WHERE value IS NOT NULL AND value <> '';
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO repo_paths FROM unnest(repo_paths) values_(value)
+         WHERE value IS NOT NULL AND value <> '';
+        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_before
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        FOR source_ref, source_archived, source_draining IN
+          SELECT id, archived, embedding_drain_token IS NOT NULL
+            FROM public.sources
+           WHERE id = ANY(source_refs) OR local_path = ANY(repo_paths)
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          IF source_archived OR source_draining THEN
+            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
+              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_after
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
+          RAISE EXCEPTION 'Source path ownership changed while writing %', TG_TABLE_NAME
+            USING ERRCODE = '40001';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_page_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        page_refs BIGINT[] := ARRAY[]::BIGINT[];
+        page_ref_query TEXT;
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        unavailable_source_refs TEXT[] := ARRAY[]::TEXT[];
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+        page_owners_before JSONB;
+        page_owners_after JSONB;
+      BEGIN
+        SELECT string_agg(
+                 format(
+                   'SELECT changed.%1$I::BIGINT AS page_ref FROM new_rows changed WHERE changed.%1$I IS NOT NULL',
+                   page_column
+                 ),
+                 ' UNION ALL ' ORDER BY page_column
+               )
+          INTO page_ref_query
+          FROM unnest(TG_ARGV) page_columns(page_column);
+        EXECUTE
+          'SELECT COALESCE(array_agg(DISTINCT page_ref ORDER BY page_ref), ARRAY[]::BIGINT[]) '
+          || 'FROM (' || page_ref_query || ') referenced_pages'
+          INTO page_refs;
+        IF cardinality(page_refs) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB),
+               COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
+          INTO page_owners_before, source_refs
+          FROM public.pages
+         WHERE id = ANY(page_refs);
+        FOREACH source_ref IN ARRAY source_refs LOOP
+          source_archived := NULL;
+          SELECT archived, embedding_drain_token IS NOT NULL
+            INTO source_archived, source_draining
+            FROM public.sources
+           WHERE id = source_ref
+           FOR SHARE;
+          IF FOUND AND (source_archived OR source_draining) THEN
+            unavailable_source_refs := array_append(unavailable_source_refs, source_ref);
+          END IF;
+        END LOOP;
+        PERFORM id
+          FROM public.pages
+         WHERE id = ANY(page_refs)
+         ORDER BY id
+         FOR SHARE;
+        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB)
+          INTO page_owners_after
+          FROM public.pages
+         WHERE id = ANY(page_refs);
+        IF page_owners_after IS DISTINCT FROM page_owners_before THEN
+          RAISE EXCEPTION 'Page ownership changed while writing %', TG_TABLE_NAME
+            USING ERRCODE = '40001';
+        END IF;
+        IF cardinality(unavailable_source_refs) > 0 THEN
+          RAISE EXCEPTION 'Cannot write %: page source % is archived or draining',
+            TG_TABLE_NAME, unavailable_source_refs[1] USING ERRCODE = '23503';
+        END IF;
+        RETURN NULL;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_page_rehome_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        old_page_ref BIGINT;
+        old_source_ref TEXT;
+        old_source_unavailable BOOLEAN;
+      BEGIN
+        old_page_ref := NULLIF(to_jsonb(OLD)->>TG_ARGV[0], '')::BIGINT;
+        IF old_page_ref IS NULL THEN RETURN NEW; END IF;
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        SELECT source.id,
+               source.archived OR source.embedding_drain_token IS NOT NULL
+          INTO old_source_ref, old_source_unavailable
+          FROM public.pages page
+          JOIN public.sources source ON source.id = page.source_id
+         WHERE page.id = old_page_ref
+         FOR SHARE OF page, source;
+        IF FOUND AND old_source_unavailable THEN
+          RAISE EXCEPTION 'Cannot rehome %.%: page source % is archived or draining',
+            TG_TABLE_NAME, TG_ARGV[0], old_source_ref USING ERRCODE = '23503';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_source_archive_transition_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        IF OLD.archived IS NOT TRUE AND NEW.archived IS TRUE THEN
+          IF OLD.embedding_drain_token IS NULL THEN
+            RAISE EXCEPTION
+              'Cannot archive source % without a committed embedding drain', OLD.id
+              USING ERRCODE = '55000';
+          END IF;
+          IF EXISTS (
+            SELECT 1
+              FROM public.source_embedding_leases
+             WHERE source_id = OLD.id
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot archive source % while embedding provider leases remain', OLD.id
+              USING ERRCODE = '55000';
+          END IF;
+          IF NEW.embedding_drain_token IS NOT NULL THEN
+            RAISE EXCEPTION
+              'Cannot archive source % without clearing its embedding drain', OLD.id
+              USING ERRCODE = '55000';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_archive_transition_guard ON public.sources;
+      CREATE TRIGGER source_archive_transition_guard
+        BEFORE UPDATE OF archived ON public.sources
+        FOR EACH ROW EXECUTE FUNCTION enforce_source_archive_transition_fn();
+
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        -- Lease rows are the lifecycle primitive itself. Their acquire,
+        -- heartbeat, completion, and dead-owner recovery paths perform exact
+        -- source/token checks and must remain operable while the source drains.
+        DROP TRIGGER IF EXISTS source_active_ref_guard ON public.source_embedding_leases;
+        FOR ref IN
+          SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+           WHERE c.table_schema = 'public'
+             AND t.table_type = 'BASE TABLE'
+             AND c.column_name = 'source_id'
+           ORDER BY c.table_name
+        LOOP
+          EXECUTE format('DROP TRIGGER IF EXISTS source_drain_ref_guard ON %I', ref.table_name);
+        END LOOP;
+        DROP TRIGGER IF EXISTS source_drain_bound_guard ON public.oauth_clients;
+        DROP TRIGGER IF EXISTS source_drain_federated_guard ON public.oauth_clients;
+        DROP TRIGGER IF EXISTS source_drain_eval_guard ON public.eval_candidates;
+        DROP TRIGGER IF EXISTS source_drain_job_guard ON public.minion_jobs;
+        DROP TRIGGER IF EXISTS source_drain_config_guard ON public.config;
+        DROP TRIGGER IF EXISTS source_drain_sync_lock_guard ON public.gbrain_cycle_locks;
+
+        -- Keep one lifecycle trigger per write surface. Direct and page
+        -- triggers already point at the CREATE OR REPLACE functions above.
+        -- The two specialized v124 triggers are redirected to the combined
+        -- function so upgraded brains do not pay an archived pass plus a
+        -- second drain pass.
+        DROP TRIGGER IF EXISTS source_active_job_data_guard ON public.minion_jobs;
+        CREATE TRIGGER source_active_job_data_guard
+          BEFORE INSERT OR UPDATE ON public.minion_jobs
+          FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn('job', 'data');
+        DROP TRIGGER IF EXISTS source_active_config_guard ON public.config;
+        CREATE TRIGGER source_active_config_guard
+          BEFORE INSERT OR UPDATE OF key, value ON public.config
+          FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn('config', 'value');
+
+        FOR ref IN
+          SELECT page_refs.table_name,
+                 string_agg(quote_literal(page_refs.column_name), ', ' ORDER BY page_refs.column_name)
+                   AS trigger_arguments
+            FROM (
+              SELECT DISTINCT child_table.relname table_name, child_column.attname column_name
+                FROM pg_constraint constraint_
+                JOIN pg_class child_table ON child_table.oid = constraint_.conrelid
+                JOIN pg_namespace child_namespace ON child_namespace.oid = child_table.relnamespace
+                JOIN pg_class parent_table ON parent_table.oid = constraint_.confrelid
+                JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent_table.relnamespace
+                JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY child_key(attnum, pos) ON true
+                JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY parent_key(attnum, pos)
+                  ON parent_key.pos = child_key.pos
+                JOIN pg_attribute child_column
+                  ON child_column.attrelid = child_table.oid AND child_column.attnum = child_key.attnum
+                JOIN pg_attribute parent_column
+                  ON parent_column.attrelid = parent_table.oid AND parent_column.attnum = parent_key.attnum
+               WHERE constraint_.contype = 'f'
+                 AND child_namespace.nspname = 'public'
+                 AND parent_namespace.nspname = 'public'
+                 AND parent_table.relname = 'pages'
+                 AND parent_column.attname = 'id'
+            ) page_refs
+           GROUP BY page_refs.table_name
+           ORDER BY page_refs.table_name
+        LOOP
+          EXECUTE format('DROP TRIGGER IF EXISTS source_drain_page_insert_guard ON %I', ref.table_name);
+          EXECUTE format('DROP TRIGGER IF EXISTS source_drain_page_update_guard ON %I', ref.table_name);
+        END LOOP;
+      END;
+      $install$;
+    `,
+  },
+  {
+    version: 134,
+    name: 'source_cycle_lock_archive_guard',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_lock_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        lock_ref TEXT;
+        lock_refs TEXT[] := ARRAY[to_jsonb(NEW)->>'id'];
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        legacy_cycle_lock BOOLEAN := false;
+        draining_source_ref TEXT;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE' THEN
+          lock_refs := lock_refs || ARRAY[to_jsonb(OLD)->>'id'];
+        END IF;
+
+        FOREACH lock_ref IN ARRAY lock_refs LOOP
+          IF lock_ref LIKE 'gbrain-sync:%' THEN
+            source_ref := substring(lock_ref FROM length('gbrain-sync:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          ELSIF lock_ref LIKE 'gbrain-cycle:%' THEN
+            source_ref := substring(lock_ref FROM length('gbrain-cycle:') + 1);
+            IF source_ref <> '' THEN
+              source_refs := array_append(source_refs, source_ref);
+            END IF;
+          ELSIF lock_ref = 'gbrain-cycle' THEN
+            legacy_cycle_lock := true;
+          END IF;
+        END LOOP;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 OR legacy_cycle_lock THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        IF legacy_cycle_lock THEN
+          SELECT id
+            INTO draining_source_ref
+            FROM public.sources
+           WHERE archived IS NOT TRUE
+             AND embedding_drain_token IS NOT NULL
+           ORDER BY id
+           LIMIT 1
+           FOR SHARE;
+          IF FOUND THEN
+            RAISE EXCEPTION 'Cannot acquire global cycle lock while source % is draining',
+              draining_source_ref USING ERRCODE = '23503';
+          END IF;
+        END IF;
+
+        FOR source_ref, source_archived, source_draining IN
+          SELECT id, archived, embedding_drain_token IS NOT NULL
+            FROM public.sources
+           WHERE id = ANY(source_refs)
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          IF source_archived OR source_draining THEN
+            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
+              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_active_sync_lock_guard ON public.gbrain_cycle_locks;
+      CREATE TRIGGER source_active_sync_lock_guard
+        BEFORE INSERT OR UPDATE ON public.gbrain_cycle_locks
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_lock_fn();
+    `,
+  },
+  {
+    version: 135,
+    name: 'archived_source_oauth_revocation_escape',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        repo_paths TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
+        raw_ref JSONB;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF TG_TABLE_NAME = 'oauth_clients'
+           AND TG_OP = 'UPDATE'
+           AND (to_jsonb(OLD)->>'deleted_at') IS NULL
+           AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
+           AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
+          RETURN NEW;
+        END IF;
+
+        IF TG_ARGV[0] = 'scalar' THEN
+          source_refs := ARRAY[to_jsonb(NEW)->>TG_ARGV[1]];
+          IF TG_OP = 'UPDATE' AND to_jsonb(NEW)->>TG_ARGV[1] IS NOT NULL THEN
+            source_refs := source_refs || ARRAY[to_jsonb(OLD)->>TG_ARGV[1]];
+          END IF;
+        ELSIF TG_ARGV[0] = 'array' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'array' THEN
+            source_refs := source_refs || ARRAY(
+              SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
+            );
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'array' THEN
+              source_refs := source_refs || ARRAY(
+                SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
+              );
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
+          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
+          IF jsonb_typeof(raw_ref) = 'object' THEN
+            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
+            IF jsonb_typeof(raw_ref) = 'object' THEN
+              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
+          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
+          IF source_ref LIKE 'gbrain-sync:%' THEN
+            source_refs := ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
+            IF source_ref LIKE 'gbrain-sync:%' THEN
+              source_refs := source_refs || ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'job' THEN
+          IF TG_OP = 'UPDATE'
+             AND NEW.data IS NOT DISTINCT FROM OLD.data
+             AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+            RETURN NEW;
+          END IF;
+          source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+          IF NEW.name = 'sync'
+             AND NOT (
+               jsonb_typeof(NEW.data->'sourceId') = 'string'
+               AND COALESCE(NEW.data->>'sourceId', '') <> ''
+             ) THEN
+            repo_paths := ARRAY[NEW.data->>'repoPath'];
+          END IF;
+          IF TG_OP = 'UPDATE' THEN
+            source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+            IF OLD.name = 'sync'
+               AND NOT (
+                 jsonb_typeof(OLD.data->'sourceId') = 'string'
+                 AND COALESCE(OLD.data->>'sourceId', '') <> ''
+               ) THEN
+              repo_paths := repo_paths || ARRAY[OLD.data->>'repoPath'];
+            END IF;
+          END IF;
+        ELSIF TG_ARGV[0] = 'config' THEN
+          IF NEW.key = 'sources.default' THEN source_refs := ARRAY[NEW.value]; END IF;
+          IF NEW.key = 'sync.repo_path' THEN repo_paths := ARRAY[NEW.value]; END IF;
+        ELSE
+          RAISE EXCEPTION 'Unknown source-drain guard kind: %', TG_ARGV[0];
+        END IF;
+
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs FROM unnest(source_refs) values_(value)
+         WHERE value IS NOT NULL AND value <> '';
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO repo_paths FROM unnest(repo_paths) values_(value)
+         WHERE value IS NOT NULL AND value <> '';
+        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_before
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        FOR source_ref, source_archived, source_draining IN
+          SELECT id, archived, embedding_drain_token IS NOT NULL
+            FROM public.sources
+           WHERE id = ANY(source_refs) OR local_path = ANY(repo_paths)
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          IF source_archived OR source_draining THEN
+            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
+              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_after
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
+          RAISE EXCEPTION 'Source path ownership changed while writing %', TG_TABLE_NAME
+            USING ERRCODE = '40001';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    version: 136,
+    name: 'active_path_source_job_resolution',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        repo_path TEXT;
+        repo_paths TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
+        matched_active BOOLEAN;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF NEW.name = 'sync'
+           AND NOT (
+             (jsonb_typeof(NEW.data->'sourceId') = 'string'
+               AND COALESCE(NEW.data->>'sourceId', '') <> '')
+             OR (jsonb_typeof(NEW.data->'source_id') = 'string'
+               AND COALESCE(NEW.data->>'source_id', '') <> '')
+           ) THEN
+          repo_path := NEW.data->>'repoPath';
+          IF repo_path IS NOT NULL AND repo_path <> '' THEN
+            repo_paths := array_append(repo_paths, repo_path);
+          END IF;
+        END IF;
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+          IF OLD.name = 'sync'
+             AND NOT (
+               (jsonb_typeof(OLD.data->'sourceId') = 'string'
+                 AND COALESCE(OLD.data->>'sourceId', '') <> '')
+               OR (jsonb_typeof(OLD.data->'source_id') = 'string'
+                 AND COALESCE(OLD.data->>'source_id', '') <> '')
+             ) THEN
+            repo_path := OLD.data->>'repoPath';
+            IF repo_path IS NOT NULL AND repo_path <> '' THEN
+              repo_paths := array_append(repo_paths, repo_path);
+            END IF;
+          END IF;
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO repo_paths
+          FROM unnest(repo_paths) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_before
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+
+        PERFORM id
+          FROM public.sources
+         WHERE id = ANY(source_refs)
+            OR local_path = ANY(repo_paths)
+         ORDER BY id
+         FOR SHARE;
+
+        FOR source_ref, source_archived, source_draining IN
+          SELECT id, archived, embedding_drain_token IS NOT NULL
+            FROM public.sources
+           WHERE id = ANY(source_refs)
+           ORDER BY id
+        LOOP
+          IF source_archived OR source_draining THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived or draining', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+
+        FOREACH repo_path IN ARRAY repo_paths LOOP
+          SELECT bool_or(archived IS NOT TRUE AND embedding_drain_token IS NULL), min(id)
+            INTO matched_active, source_ref
+            FROM public.sources
+           WHERE local_path = repo_path;
+          IF source_ref IS NOT NULL AND NOT COALESCE(matched_active, false) THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived or draining', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_after
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
+          RAISE EXCEPTION 'Source path ownership changed while writing minion_jobs.data'
+            USING ERRCODE = '40001';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        matched_active BOOLEAN := false;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          SELECT archived, embedding_drain_token IS NOT NULL
+            INTO source_archived, source_draining
+            FROM public.sources
+           WHERE id = NEW.value
+           FOR SHARE;
+          IF FOUND AND (source_archived OR source_draining) THEN
+            RAISE EXCEPTION
+              'Cannot set sources.default: source % is archived or draining', NEW.value
+              USING ERRCODE = '23503';
+          END IF;
+        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+          PERFORM id
+            FROM public.sources
+           WHERE local_path = NEW.value
+             AND archived = false
+             AND embedding_drain_token IS NULL
+           ORDER BY id
+           FOR SHARE;
+          matched_active := FOUND;
+          IF NOT matched_active AND EXISTS (
+            SELECT 1 FROM public.sources WHERE local_path = NEW.value
+          ) THEN
+            RAISE EXCEPTION
+              'Cannot set sync.repo_path: matching source is archived or draining'
+              USING ERRCODE = '23503';
+          END IF;
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_active_job_data_guard ON public.minion_jobs;
+      CREATE TRIGGER source_active_job_data_guard
+        BEFORE INSERT OR UPDATE ON public.minion_jobs
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+
+      DROP TRIGGER IF EXISTS source_active_config_guard ON public.config;
+      CREATE TRIGGER source_active_config_guard
+        BEFORE INSERT OR UPDATE OF key, value ON public.config
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_config_fn();
+    `,
+  },
+  {
+    version: 137,
+    name: 'draining_source_delete_guards',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_source_lifecycle_delete_lock_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        RETURN NULL;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_draining_source_delete_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_draining BOOLEAN;
+      BEGIN
+        source_ref := to_jsonb(OLD)->>TG_ARGV[0];
+        IF source_ref IS NULL THEN RETURN OLD; END IF;
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        SELECT embedding_drain_token IS NOT NULL
+          INTO source_draining
+          FROM public.sources
+         WHERE id = source_ref
+         FOR SHARE;
+        IF FOUND AND source_draining THEN
+          RAISE EXCEPTION
+            'Cannot delete from %: source % is draining', TG_TABLE_NAME, source_ref
+            USING ERRCODE = '23503';
+        END IF;
+        RETURN OLD;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_draining_source_row_delete_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      BEGIN
+        IF OLD.embedding_drain_token IS NOT NULL THEN
+          RAISE EXCEPTION
+            'Cannot delete source % while it is draining', OLD.id
+            USING ERRCODE = '23503';
+        END IF;
+        RETURN OLD;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION enforce_draining_source_page_delete_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        page_refs BIGINT[] := ARRAY[]::BIGINT[];
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+      BEGIN
+        IF TG_NARGS < 1 THEN
+          RAISE EXCEPTION 'Draining-source page delete guard requires at least one page column';
+        END IF;
+        SELECT COALESCE(
+                 array_agg(DISTINCT (to_jsonb(OLD)->>page_column)::BIGINT
+                           ORDER BY (to_jsonb(OLD)->>page_column)::BIGINT),
+                 ARRAY[]::BIGINT[]
+               )
+          INTO page_refs
+          FROM unnest(TG_ARGV) AS page_columns(page_column)
+         WHERE to_jsonb(OLD)->>page_column IS NOT NULL;
+        IF cardinality(page_refs) = 0 THEN RETURN OLD; END IF;
+
+        PERFORM pg_advisory_xact_lock_shared(
+          hashtextextended('gbrain:source-lifecycle', 0)
+        );
+        SELECT COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM public.pages
+         WHERE id = ANY(page_refs);
+        FOR source_ref IN
+          SELECT id
+            FROM public.sources
+           WHERE id = ANY(source_refs)
+             AND embedding_drain_token IS NOT NULL
+           ORDER BY id
+           FOR SHARE
+        LOOP
+          RAISE EXCEPTION
+            'Cannot delete from %: page source % is draining', TG_TABLE_NAME, source_ref
+            USING ERRCODE = '23503';
+        END LOOP;
+        RETURN OLD;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON public.sources;
+      CREATE TRIGGER source_lifecycle_delete_lock_guard
+        BEFORE DELETE ON public.sources
+        FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn();
+      DROP TRIGGER IF EXISTS source_draining_delete_guard ON public.sources;
+      CREATE TRIGGER source_draining_delete_guard
+        BEFORE DELETE ON public.sources
+        FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_row_delete_fn();
+
+      DO $install$
+      DECLARE
+        ref RECORD;
+      BEGIN
+        FOR ref IN
+          SELECT c.table_name, c.column_name
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema
+             AND t.table_name = c.table_name
+           WHERE c.table_schema = 'public'
+             AND t.table_type = 'BASE TABLE'
+             AND c.column_name = 'source_id'
+             AND c.table_name <> 'source_embedding_leases'
+           ORDER BY c.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_draining_delete_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
+            || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_draining_delete_guard BEFORE DELETE ON %I '
+            || 'FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_delete_fn(%L)',
+            ref.table_name, ref.column_name
+          );
+        END LOOP;
+
+        FOR ref IN
+          SELECT page_refs.table_name,
+                 string_agg(quote_literal(page_refs.column_name), ', '
+                            ORDER BY page_refs.column_name) AS trigger_arguments
+            FROM (
+              SELECT DISTINCT child_table.relname AS table_name,
+                              child_column.attname AS column_name
+                FROM pg_constraint constraint_
+                JOIN pg_class child_table ON child_table.oid = constraint_.conrelid
+                JOIN pg_namespace child_namespace ON child_namespace.oid = child_table.relnamespace
+                JOIN pg_class parent_table ON parent_table.oid = constraint_.confrelid
+                JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent_table.relnamespace
+                JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
+                  AS child_key(attnum, ordinal_position) ON true
+                JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
+                  AS parent_key(attnum, ordinal_position)
+                  ON parent_key.ordinal_position = child_key.ordinal_position
+                JOIN pg_attribute child_column
+                  ON child_column.attrelid = child_table.oid
+                 AND child_column.attnum = child_key.attnum
+                JOIN pg_attribute parent_column
+                  ON parent_column.attrelid = parent_table.oid
+                 AND parent_column.attnum = parent_key.attnum
+               WHERE constraint_.contype = 'f'
+                 AND child_namespace.nspname = 'public'
+                 AND parent_namespace.nspname = 'public'
+                 AND parent_table.relname = 'pages'
+                 AND parent_column.attname = 'id'
+            ) AS page_refs
+           GROUP BY page_refs.table_name
+           ORDER BY page_refs.table_name
+        LOOP
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_draining_page_ref_delete_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
+            || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
+            ref.table_name
+          );
+          EXECUTE format(
+            'CREATE TRIGGER source_draining_page_ref_delete_guard BEFORE DELETE ON %I '
+            || 'FOR EACH ROW '
+            || 'EXECUTE FUNCTION enforce_draining_source_page_delete_fn(%s)',
+            ref.table_name,
+            ref.trigger_arguments
+          );
+        END LOOP;
+      END;
+      $install$;
     `,
   },
 ];

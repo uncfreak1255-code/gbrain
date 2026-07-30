@@ -11,7 +11,7 @@ import type {
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
-  SourceRow,
+  SourceRow, PurgeDeletedPagesResult,
 } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
@@ -61,6 +61,7 @@ import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql, buildBestPerPagePoolCte } from './search/sql-ranking.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
+import { purgeDeletedPagesSafely } from './purge-deleted-pages.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -94,6 +95,8 @@ export function getPostgresSchema(
 export class PostgresEngine implements BrainEngine {
   readonly kind = 'postgres' as const;
   private _sql: ReturnType<typeof postgres> | null = null;
+  /** True only on the scoped clone passed to BrainEngine.transaction(). */
+  private _inTransaction = false;
   /** Saved config for reconnection. */
   private _savedConfig: (EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }) | null = null;
   /** Whether a reconnect is in progress (prevents concurrent reconnects). */
@@ -422,6 +425,8 @@ export class PostgresEngine implements BrainEngine {
       sources_archived_exists: boolean;
       sources_archived_at_exists: boolean;
       sources_archive_expires_at_exists: boolean;
+      sources_embedding_drain_token_exists: boolean;
+      sources_embedding_drain_epoch_exists: boolean;
     }[]>`
       SELECT
         EXISTS (SELECT 1 FROM information_schema.tables
@@ -480,6 +485,10 @@ export class PostgresEngine implements BrainEngine {
                 WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'archived_at') AS sources_archived_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'archive_expires_at') AS sources_archive_expires_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'embedding_drain_token') AS sources_embedding_drain_token_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'sources' AND column_name = 'embedding_drain_epoch') AS sources_embedding_drain_epoch_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'last_retrieved_at') AS pages_last_retrieved_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -551,6 +560,12 @@ export class PostgresEngine implements BrainEngine {
       && (!probe.sources_archived_exists
           || !probe.sources_archived_at_exists
           || !probe.sources_archive_expires_at_exists);
+    // v133: current schema replay installs source lifecycle
+    // functions before historical migrations run. Those functions compile
+    // against these columns, including while v34 backfills archived sources.
+    const needsSourcesDrain = probe.sources_exists
+      && (!probe.sources_embedding_drain_token_exists
+          || !probe.sources_embedding_drain_epoch_exists);
     // v0.37.0 (v79): pages_last_retrieved_at_idx in SCHEMA_SQL references
     // last_retrieved_at. Pre-v79 brains crash without the column; bootstrap
     // adds it before SCHEMA_SQL replay creates the index. v79 runs later
@@ -604,7 +619,7 @@ export class PostgresEngine implements BrainEngine {
         && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsChunksEmbeddingImage && !needsPagesRecency
         && !needsIngestLogSourceId && !needsFilesBootstrap
-        && !needsOauthClientsBootstrap && !needsSourcesArchive
+        && !needsOauthClientsBootstrap && !needsSourcesArchive && !needsSourcesDrain
         && !needsPagesLastRetrievedAt
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
@@ -616,10 +631,9 @@ export class PostgresEngine implements BrainEngine {
     if (needsPagesBootstrap) {
       // Mirror schema-embedded.ts's `sources` shape so the subsequent
       // SCHEMA_SQL CREATE TABLE IF NOT EXISTS is a true no-op.
-      // Archive columns (v34) are folded in here so a pre-v18 brain doesn't
-      // need needsSourcesArchive to also fire — bootstrap creates a complete
-      // v34-shape sources in one go. needsSourcesArchive then only fires on
-      // the pre-v34 case (sources exists, archive cols don't).
+      // Archive columns (v34) and provider-drain columns (v133) are folded in
+      // here so schema replay can install the current lifecycle guards before
+      // the historical migration chain runs.
       await conn.unsafe(`
         CREATE TABLE IF NOT EXISTS sources (
           id                 TEXT PRIMARY KEY,
@@ -631,6 +645,8 @@ export class PostgresEngine implements BrainEngine {
           archived           BOOLEAN NOT NULL DEFAULT FALSE,
           archived_at        TIMESTAMPTZ,
           archive_expires_at TIMESTAMPTZ,
+          embedding_drain_token TEXT,
+          embedding_drain_epoch BIGINT NOT NULL DEFAULT 0,
           created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         INSERT INTO sources (id, name, config)
@@ -789,6 +805,16 @@ export class PostgresEngine implements BrainEngine {
       `);
     }
 
+    if (needsSourcesDrain) {
+      // v133 lifecycle functions are part of the current schema blob, so a
+      // retained pre-v133 sources table needs their row fields before replay.
+      // Migration v133 later recreates the lease table and final guards.
+      await conn.unsafe(`
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS embedding_drain_token TEXT;
+        ALTER TABLE sources ADD COLUMN IF NOT EXISTS embedding_drain_epoch BIGINT NOT NULL DEFAULT 0;
+      `);
+    }
+
     if (needsPagesLastRetrievedAt) {
       // v79 (pages_last_retrieved_at): adds the real stale-page signal column
       // + full B-tree index. SCHEMA_SQL's CREATE INDEX
@@ -865,12 +891,38 @@ export class PostgresEngine implements BrainEngine {
       const txEngine = Object.create(this) as PostgresEngine;
       Object.defineProperty(txEngine, 'sql', { get: () => tx });
       Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
+      Object.defineProperty(txEngine, '_inTransaction', { value: true });
       return fn(txEngine);
     }) as Promise<T>;
   }
 
-  async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
-    const pool = this.sql;
+  async savepoint<T>(name: string, fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    if (!this._inTransaction) {
+      throw new Error('BrainEngine.savepoint() requires a transaction-scoped engine');
+    }
+    if (!/^[a-z][a-z0-9_]*$/i.test(name)) {
+      throw new Error(`Invalid savepoint name: ${name}`);
+    }
+    const tx = this.sql as unknown as postgres.TransactionSql;
+    return tx.savepoint(name, async (savepointSql) => {
+      // postgres.js tracks the first rejected query inside each scope. Binding
+      // the clone to its native savepoint scope is required so a caught query
+      // error does not poison the enclosing transaction callback.
+      const savepointEngine = Object.create(this) as PostgresEngine;
+      Object.defineProperty(savepointEngine, 'sql', { get: () => savepointSql });
+      Object.defineProperty(savepointEngine, '_sql', {
+        value: savepointSql as unknown as ReturnType<typeof postgres>,
+        writable: false,
+      });
+      Object.defineProperty(savepointEngine, '_inTransaction', { value: true });
+      return fn(savepointEngine);
+    }) as Promise<T>;
+  }
+
+  private async withReservedPool<T>(
+    pool: ReturnType<typeof postgres>,
+    fn: (conn: ReservedConnection) => Promise<T>,
+  ): Promise<T> {
     const reserved = await pool.reserve();
     try {
       const conn: ReservedConnection = {
@@ -894,6 +946,28 @@ export class PostgresEngine implements BrainEngine {
     } finally {
       reserved.release();
     }
+  }
+
+  async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
+    return this.withReservedPool(this.sql, fn);
+  }
+
+  /**
+   * Reserve one backend that is safe for session-scoped state. The connection
+   * manager owns a dedicated one-connection pool so a long-held lock cannot
+   * consume the only work/DDL slot. Supabase transaction-pooler topologies use
+   * the direct URL and fail closed when no direct route is available.
+   */
+  async withSessionReservedConnection<T>(
+    fn: (conn: ReservedConnection) => Promise<T>,
+  ): Promise<T> {
+    if (!this.connectionManager) {
+      throw new Error(
+        'Cannot reserve a migrate-engine session connection before Postgres is connected',
+      );
+    }
+    const pool = await this.connectionManager.session();
+    return this.withReservedPool(pool, fn);
   }
 
   // Pages CRUD
@@ -1088,19 +1162,11 @@ export class PostgresEngine implements BrainEngine {
     return rows.length > 0;
   }
 
-  async purgeDeletedPages(olderThanHours: number): Promise<{ slugs: string[]; count: number }> {
-    const sql = this.sql;
-    // Clamp to non-negative integer; runaway purge protection. The DELETE
-    // cascades through content_chunks, page_links, chunk_relations via FKs.
-    const hours = Math.max(0, Math.floor(olderThanHours));
-    const rows = await sql`
-      DELETE FROM pages
-      WHERE deleted_at IS NOT NULL
-        AND deleted_at < now() - (${hours} || ' hours')::interval
-      RETURNING slug
-    `;
-    const slugs = rows.map((r) => r.slug as string);
-    return { slugs, count: slugs.length };
+  async purgeDeletedPages(
+    olderThanHours: number,
+    opts?: { dryRun?: boolean },
+  ): Promise<PurgeDeletedPagesResult> {
+    return purgeDeletedPagesSafely(this, olderThanHours, opts);
   }
 
   async refreshPageBody(
@@ -1262,7 +1328,7 @@ export class PostgresEngine implements BrainEngine {
     const rows = await sql`
       SELECT id, name, local_path, last_sync_at, config
         FROM sources
-       WHERE (${includeArchived} OR archived IS NOT TRUE)
+       WHERE (${includeArchived} OR (archived IS NOT TRUE AND embedding_drain_token IS NULL))
          AND (${!localPathOnly} OR local_path IS NOT NULL)
        ORDER BY (id = 'default') DESC, id
     `;
@@ -2255,6 +2321,8 @@ export class PostgresEngine implements BrainEngine {
       conds.push(`cc.embedding IS NULL`);
     }
     conds.push(`NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
+    conds.push(`s.archived IS NOT TRUE`);
+    conds.push(`s.embedding_drain_token IS NULL`);
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
@@ -2271,6 +2339,7 @@ export class PostgresEngine implements BrainEngine {
       `SELECT count(*)::int AS count
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params as Parameters<typeof this.sql.unsafe>[1],
     );
@@ -2285,6 +2354,7 @@ export class PostgresEngine implements BrainEngine {
       `SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
+         JOIN sources s ON s.id = p.source_id
         WHERE ${where}`,
       params as Parameters<typeof this.sql.unsafe>[1],
     );
@@ -2313,7 +2383,10 @@ export class PostgresEngine implements BrainEngine {
       `UPDATE content_chunks cc
           SET embedding = NULL, embedded_at = NULL
          FROM pages p
+         JOIN sources s ON s.id = p.source_id
         WHERE cc.page_id = p.id
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND cc.embedding IS NOT NULL
           AND p.embedding_signature IS NOT NULL
           AND p.embedding_signature <> $1${srcClause}
@@ -2355,7 +2428,10 @@ export class PostgresEngine implements BrainEngine {
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
+          JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
           LIMIT ${limit}
@@ -2365,7 +2441,10 @@ export class PostgresEngine implements BrainEngine {
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
+          JOIN sources s ON s.id = p.source_id
           WHERE cc.embedding IS NULL
+            AND s.archived IS NOT TRUE
+            AND s.embedding_drain_token IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (
               p.updated_at < ${afterUpdated}::timestamptz
@@ -2383,7 +2462,10 @@ export class PostgresEngine implements BrainEngine {
                p.updated_at
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
+        JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND p.source_id = ${opts.sourceId}
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
@@ -2394,7 +2476,10 @@ export class PostgresEngine implements BrainEngine {
                p.updated_at
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
+        JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND p.source_id = ${opts.sourceId}
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (
@@ -2427,7 +2512,10 @@ export class PostgresEngine implements BrainEngine {
                cc.model, cc.token_count, p.source_id, cc.page_id
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
+        JOIN sources s ON s.id = p.source_id
         WHERE cc.embedding IS NULL
+          AND s.archived IS NOT TRUE
+          AND s.embedding_drain_token IS NULL
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
         ORDER BY cc.page_id, cc.chunk_index
@@ -2440,7 +2528,10 @@ export class PostgresEngine implements BrainEngine {
              cc.model, cc.token_count, p.source_id, cc.page_id
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
+      JOIN sources s ON s.id = p.source_id
       WHERE cc.embedding IS NULL
+        AND s.archived IS NOT TRUE
+        AND s.embedding_drain_token IS NULL
         AND p.source_id = ${opts.sourceId}
         AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
@@ -3764,7 +3855,7 @@ export class PostgresEngine implements BrainEngine {
     // readable; batch sizes are small (5-30 rows per page in practice).
     // No supersede flow in this path — fence reconciliation is the
     // canonical source-of-truth direction, not the consolidator path.
-    const ids = await sql.begin(async (tx) => {
+    const insertRows = async (tx: postgres.TransactionSql) => {
       const out: number[] = [];
       for (const input of rows) {
         const validFrom = input.valid_from ?? new Date();
@@ -3807,7 +3898,12 @@ export class PostgresEngine implements BrainEngine {
         out.push(Number(ins[0].id));
       }
       return out;
-    });
+    };
+    // A page reconciliation owns a wider delete+insert transaction. Reuse its
+    // scoped connection instead of opening an independent nested transaction.
+    const ids = this._inTransaction
+      ? await insertRows(sql as unknown as postgres.TransactionSql)
+      : await sql.begin(insertRows) as number[];
     return { inserted: ids.length, ids };
   }
 
