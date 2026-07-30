@@ -8,6 +8,8 @@ const DEFAULT_ARCHIVE_POLL_MS = 50;
 const DEFAULT_ARCHIVE_WAIT_MS = 10 * 60_000;
 const DEFAULT_DB_OPERATION_MS = 30_000;
 const DEFAULT_STALE_LEASE_MS = 10 * 60_000;
+const HYGIENE_CANDIDATE_DRAIN_PREFIX = 'hygiene-candidate:';
+const MANUAL_DRAIN_PREFIX = 'manual:';
 
 const PROCESS_OWNER_HOST = hostname();
 const PROCESS_OWNER_PID = process.pid;
@@ -22,9 +24,18 @@ export interface SourceArchiveDrain {
   sourceId: string;
   token: string;
   epoch: number;
+  purpose: SourceArchiveDrainPurpose;
   /** Hygiene-relevant source metadata captured when this archive attempt began. */
   localPath: string | null;
   configJson: string;
+}
+
+export type SourceArchiveDrainPurpose = 'manual' | 'hygiene_candidate';
+
+export function sourceArchiveDrainPurpose(token: string | null): SourceArchiveDrainPurpose {
+  return token?.startsWith(HYGIENE_CANDIDATE_DRAIN_PREFIX)
+    ? 'hygiene_candidate'
+    : 'manual';
 }
 
 export interface SourceDrainFinalizeState {
@@ -377,6 +388,7 @@ export async function withActiveSourceProviderLease<T>(
 export async function beginSourceArchiveDrain(
   engine: BrainEngine,
   sourceId: string,
+  purpose: SourceArchiveDrainPurpose = 'manual',
 ): Promise<SourceArchiveDrain | null> {
   return engine.transaction(async (tx) => {
     // Drain begins only after every earlier source writer that holds the shared
@@ -408,12 +420,15 @@ export async function beginSourceArchiveDrain(
         sourceId,
         token: source.embedding_drain_token,
         epoch: Number(source.embedding_drain_epoch),
+        purpose: sourceArchiveDrainPurpose(source.embedding_drain_token),
         localPath: source.local_path,
         configJson: source.config_json,
       };
     }
 
-    const token = randomUUID();
+    const token = `${purpose === 'hygiene_candidate'
+      ? HYGIENE_CANDIDATE_DRAIN_PREFIX
+      : MANUAL_DRAIN_PREFIX}${randomUUID()}`;
     const updated = await tx.executeRaw<{
       embedding_drain_token: string;
       embedding_drain_epoch: number | string;
@@ -433,6 +448,7 @@ export async function beginSourceArchiveDrain(
       sourceId,
       token: drain.embedding_drain_token,
       epoch: Number(drain.embedding_drain_epoch),
+      purpose,
       localPath: source.local_path,
       configJson: source.config_json,
     };

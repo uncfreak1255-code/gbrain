@@ -19,6 +19,7 @@ import {
   cancelSourceArchiveDrain,
   lockSourceDrainForFinalize,
   waitForSourceEmbeddingLeases,
+  type SourceArchiveDrainPurpose,
 } from './source-embedding-lease.ts';
 import { MinionQueue } from './minions/queue.ts';
 
@@ -205,9 +206,13 @@ export async function softDeleteSourceGuarded(
   engine: BrainEngine,
   sourceId: string,
   guard?: (engine: BrainEngine) => Promise<SoftDeleteGuardDecision>,
+  purpose: SourceArchiveDrainPurpose = 'manual',
 ): Promise<{ result: SoftDeletedSource | null; reason: string }> {
-  const drain = await beginSourceArchiveDrain(engine, sourceId);
+  const drain = await beginSourceArchiveDrain(engine, sourceId, purpose);
   if (!drain) return { result: null, reason: 'source_not_active' };
+  if (drain.purpose === 'hygiene_candidate' && purpose !== 'hygiene_candidate') {
+    return { result: null, reason: 'hygiene_candidate_resume_required' };
+  }
 
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
   let final: {

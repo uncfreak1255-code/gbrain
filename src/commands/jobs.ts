@@ -1311,6 +1311,40 @@ HANDLER TYPES (built in)
  *
  * Per the v0.11.1 plan (Codex architecture #5 — tension 3).
  */
+export async function resolveSyncJobSourceId(
+  engine: BrainEngine,
+  data: Record<string, unknown>,
+): Promise<string | undefined> {
+  const camelSourceId = typeof data.sourceId === 'string' && data.sourceId.length > 0
+    ? data.sourceId
+    : undefined;
+  const snakeSourceId = typeof data.source_id === 'string' && data.source_id.length > 0
+    ? data.source_id
+    : undefined;
+  const explicitSourceId = camelSourceId ?? snakeSourceId;
+  if (explicitSourceId) return explicitSourceId;
+
+  const repoPath = typeof data.repoPath === 'string' ? data.repoPath : undefined;
+  if (!repoPath) return undefined;
+  try {
+    const rows = await engine.executeRaw<{ id: string }>(
+      `SELECT id
+         FROM public.sources
+        WHERE local_path = $1
+          AND archived IS NOT TRUE
+          AND embedding_drain_token IS NULL
+        ORDER BY CASE WHEN id = 'default' THEN 0 ELSE 1 END, id
+        LIMIT 1`,
+      [repoPath],
+    );
+    return rows[0]?.id;
+  } catch {
+    // The sources table may not exist on very old brains. Preserve the legacy
+    // global config.sync.* anchor in performSync when lookup is unavailable.
+    return undefined;
+  }
+}
+
 export async function registerBuiltinHandlers(
   worker: MinionWorker,
   engine: BrainEngine,
@@ -1335,20 +1369,7 @@ export async function registerBuiltinHandlers(
     // multi-source brain reads the global config.sync.last_commit anchor
     // instead of sources.last_commit, which on a regularly-GC'd repo can drop
     // out of git history and trigger 30-min full reimports every cycle.
-    let sourceId: string | undefined =
-      typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
-    if (!sourceId && repoPath) {
-      try {
-        const rows = await engine.executeRaw<{ id: string }>(
-          `SELECT id FROM sources WHERE local_path = $1 LIMIT 1`,
-          [repoPath],
-        );
-        sourceId = rows[0]?.id;
-      } catch {
-        // sources table may not exist on very old brains — fall through to
-        // global config.sync.* anchor in performSync.
-      }
-    }
+    const sourceId = await resolveSyncJobSourceId(engine, job.data);
     // v0.22.13 (PR #490 CODEX-4): route concurrency through the shared
     // autoConcurrency helper instead of hardcoded 4. PGLite engines stay
     // serial (forced 1); explicit job param wins; auto path defaults are

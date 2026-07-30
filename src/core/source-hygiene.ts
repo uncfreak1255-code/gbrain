@@ -7,6 +7,7 @@
  */
 
 import type { BrainEngine } from './engine.ts';
+import { sourceArchiveDrainPurpose } from './source-embedding-lease.ts';
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,6 +45,8 @@ export interface SourceHygieneEvidence {
   archived: boolean;
   /** A committed archive drain exists and must be resumed or cancelled. */
   draining: boolean;
+  /** Persisted provenance keeps candidate-only resumes on the guarded path. */
+  drain_requires_hygiene_candidate?: boolean;
   has_local_path: boolean;
   shared_path_source_count: number;
   repo_state: SourceHygieneRepoState;
@@ -160,11 +163,15 @@ export function classifySourceHygieneEvidence(
     return decision(evidence, 'not_applicable', 'none', null, [], true);
   }
   if (evidence.draining) {
+    const resumeCommand = ['gbrain', 'sources', 'archive', evidence.source_id];
+    if (evidence.drain_requires_hygiene_candidate === true) {
+      resumeCommand.push('--if-hygiene-candidate');
+    }
     return decision(
       evidence,
       'recovery_required',
       'archive_resume',
-      ['gbrain', 'sources', 'archive', evidence.source_id],
+      resumeCommand,
       ['embedding_drain_pending'],
       true,
     );
@@ -342,6 +349,7 @@ export async function inspectSourceHygiene(
     ? await readNonterminalWorkCounts(
       engine,
       sources.filter((source) => degradedSourceIds.includes(source.id)),
+      opts.expectedArchiveDrainSourceId,
     )
     : { known: true, counts: new Map<string, number>() };
 
@@ -372,6 +380,8 @@ export async function inspectSourceHygiene(
       source_id: source.id,
       archived: source.archived === true,
       draining: source.embedding_drain_token != null,
+      drain_requires_hygiene_candidate:
+        sourceArchiveDrainPurpose(source.embedding_drain_token ?? null) === 'hygiene_candidate',
       has_local_path: hasLocalPath,
       shared_path_source_count: hasLocalPath
         ? (pathCounts.get(source.local_path!) ?? 1)
@@ -623,6 +633,7 @@ async function readDependentDataCounts(
 async function readNonterminalWorkCounts(
   engine: BrainEngine,
   candidateSources: Array<Pick<SourceRow, 'id' | 'local_path'>>,
+  expectedArchiveDrainSourceId?: string,
 ): Promise<{ known: boolean; counts: Map<string, number> }> {
   if (candidateSources.length === 0) return { known: true, counts: new Map() };
   try {
@@ -636,17 +647,37 @@ async function readNonterminalWorkCounts(
            OR (
              job.name = 'sync'
              AND NOT (
-               jsonb_typeof(job.data->'sourceId') = 'string'
-               AND COALESCE(job.data->>'sourceId', '') <> ''
+               (jsonb_typeof(job.data->'sourceId') = 'string'
+                 AND COALESCE(job.data->>'sourceId', '') <> '')
+               OR (jsonb_typeof(job.data->'source_id') = 'string'
+                 AND COALESCE(job.data->>'source_id', '') <> '')
              )
              AND candidate.local_path IS NOT NULL
              AND job.data->>'repoPath' = candidate.local_path
+             AND candidate.source_id = (
+               SELECT active_path_source.id
+                 FROM public.sources AS active_path_source
+                WHERE active_path_source.local_path = job.data->>'repoPath'
+                  AND active_path_source.archived IS NOT TRUE
+                  AND (
+                    active_path_source.embedding_drain_token IS NULL
+                    OR active_path_source.id = $3
+                  )
+                ORDER BY CASE
+                           WHEN active_path_source.embedding_drain_token IS NULL THEN 0
+                           ELSE 1
+                         END,
+                         CASE WHEN active_path_source.id = 'default' THEN 0 ELSE 1 END,
+                         active_path_source.id
+                LIMIT 1
+             )
            )
         WHERE job.status NOT IN ('completed', 'failed', 'dead', 'cancelled')
         GROUP BY candidate.source_id`,
       [
         candidateSources.map((source) => source.id),
         candidateSources.map((source) => source.local_path),
+        expectedArchiveDrainSourceId ?? null,
       ],
     );
     const counts = new Map<string, number>();

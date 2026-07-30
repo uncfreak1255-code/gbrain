@@ -512,6 +512,132 @@ describe('archive hygiene execution gate', () => {
     expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
   });
 
+  test('a crashed hygiene-candidate drain can resume only through a fresh candidate recheck', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gbrain-candidate-drain-'));
+    const repoPath = join(parent, 'candidate');
+    try {
+      await db.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+         VALUES ('candidate-drain', 'candidate-drain', $1, '{}'::jsonb)`,
+        [repoPath],
+      );
+      const before = await inspectSourceHygiene(db, { inspectFilesystem: true });
+      expect(before.sources.find((source) => source.source_id === 'candidate-drain')?.classification)
+        .toBe('archive_candidate');
+
+      const drain = await beginSourceArchiveDrain(db, 'candidate-drain', 'hygiene_candidate');
+      expect(drain?.purpose).toBe('hygiene_candidate');
+      const pending = await inspectSourceHygiene(db, { inspectFilesystem: true });
+      expect(pending.sources.find((source) => source.source_id === 'candidate-drain'))
+        .toMatchObject({
+          classification: 'recovery_required',
+          proposed_command_argv: [
+            'gbrain', 'sources', 'archive', 'candidate-drain', '--if-hygiene-candidate',
+          ],
+        });
+
+      expect(await softDeleteSource(db, 'candidate-drain')).toBeNull();
+      execFileSync('git', ['init', repoPath], { stdio: 'ignore' });
+      const resumed = await archiveHygieneCandidate(db, 'candidate-drain');
+      expect(resumed.result).toBeNull();
+      expect(resumed.reason).toContain('healthy');
+
+      const rows = await db.executeRaw<{
+        archived: boolean;
+        embedding_drain_token: string | null;
+      }>(
+        `SELECT archived, embedding_drain_token
+           FROM sources
+          WHERE id = 'candidate-drain'`,
+      );
+      expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test('a crashed hygiene-candidate drain archives after a fresh candidate recheck still passes', async () => {
+    const missingPath = join(tmpdir(), `gbrain-candidate-resume-${Date.now()}`);
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('candidate-resume', 'candidate-resume', $1, '{}'::jsonb)`,
+      [missingPath],
+    );
+    expect(await beginSourceArchiveDrain(db, 'candidate-resume', 'hygiene_candidate'))
+      .toMatchObject({ purpose: 'hygiene_candidate' });
+
+    const resumed = await archiveHygieneCandidate(db, 'candidate-resume');
+    expect(resumed.reason).toBe('archived');
+    expect(resumed.result).toMatchObject({ id: 'candidate-resume' });
+
+    const rows = await db.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+    }>(
+      `SELECT archived, embedding_drain_token
+         FROM sources
+        WHERE id = 'candidate-resume'`,
+    );
+    expect(rows).toEqual([{ archived: true, embedding_drain_token: null }]);
+  });
+
+  test('a crashed hygiene-candidate drain still counts path-only work owned before the drain', async () => {
+    const missingPath = join(tmpdir(), `gbrain-candidate-path-work-${Date.now()}`);
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES ('candidate-path-work', 'candidate-path-work', $1, '{}'::jsonb)`,
+      [missingPath],
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES ('sync', 'waiting', jsonb_build_object('repoPath', $1::text))`,
+      [missingPath],
+    );
+    expect(await beginSourceArchiveDrain(db, 'candidate-path-work', 'hygiene_candidate'))
+      .toMatchObject({ purpose: 'hygiene_candidate' });
+
+    const resumed = await archiveHygieneCandidate(db, 'candidate-path-work');
+    expect(resumed.result).toBeNull();
+    expect(resumed.reason).toContain('nonterminal_source_work');
+    const rows = await db.executeRaw<{
+      archived: boolean;
+      embedding_drain_token: string | null;
+    }>(
+      `SELECT archived, embedding_drain_token
+         FROM sources
+        WHERE id = 'candidate-path-work'`,
+    );
+    expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
+  });
+
+  test('a live shared-path owner inherits path-only work from a draining archive candidate', async () => {
+    const missingPath = join(tmpdir(), `gbrain-candidate-shared-path-${Date.now()}`);
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES
+         ('candidate-shared-a', 'candidate-shared-a', $1, '{}'::jsonb),
+         ('candidate-shared-b', 'candidate-shared-b', $1, '{}'::jsonb)`,
+      [missingPath],
+    );
+    await db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES ('sync', 'waiting', jsonb_build_object('repoPath', $1::text))`,
+      [missingPath],
+    );
+    expect(await beginSourceArchiveDrain(db, 'candidate-shared-a', 'hygiene_candidate'))
+      .toMatchObject({ purpose: 'hygiene_candidate' });
+
+    const resumed = await archiveHygieneCandidate(db, 'candidate-shared-a');
+    expect(resumed.reason).toBe('archived');
+    expect(resumed.result).toMatchObject({ id: 'candidate-shared-a' });
+    const jobRows = await db.executeRaw<{ status: string }>(
+      `SELECT status FROM minion_jobs
+        WHERE name = 'sync' AND data->>'repoPath' = $1`,
+      [missingPath],
+    );
+    expect(jobRows).toEqual([{ status: 'waiting' }]);
+  });
+
   test('rereads the complete predicate after the committed drain and before finalization', async () => {
     const missingPath = join(tmpdir(), `gbrain-archive-race-${Date.now()}`);
     await db.executeRaw(
@@ -637,7 +763,8 @@ describe('archive hygiene execution gate', () => {
          ('job-secondary-key', 'job-secondary-key', '/fixture/job-secondary-key', '{}'::jsonb),
          ('job-equal-keys', 'job-equal-keys', '/fixture/job-equal-keys', '{}'::jsonb),
          ('job-path-route', 'job-path-route', '/fixture/job-path-route', '{}'::jsonb),
-         ('job-path-ignored', 'job-path-ignored', '/fixture/job-path-ignored', '{}'::jsonb)`,
+         ('job-path-ignored', 'job-path-ignored', '/fixture/job-path-ignored', '{}'::jsonb),
+         ('job-snake-path-ignored', 'job-snake-path-ignored', '/fixture/job-snake-path-ignored', '{}'::jsonb)`,
     );
     await db.executeRaw(
       `INSERT INTO minion_jobs (name, status, data)
@@ -648,7 +775,9 @@ describe('archive hygiene execution gate', () => {
           '{"sourceId":"job-equal-keys","source_id":"job-equal-keys"}'::jsonb),
          ('sync', 'waiting', '{"repoPath":"/fixture/job-path-route"}'::jsonb),
          ('sync', 'waiting',
-          '{"sourceId":"default","repoPath":"/fixture/job-path-ignored"}'::jsonb)`,
+          '{"sourceId":"default","repoPath":"/fixture/job-path-ignored"}'::jsonb),
+         ('sync', 'waiting',
+          '{"source_id":"default","repoPath":"/fixture/job-snake-path-ignored"}'::jsonb)`,
     );
 
     const packet = await inspectSourceHygiene(db, {
@@ -667,11 +796,13 @@ describe('archive hygiene execution gate', () => {
         work_state_known: true,
       });
     }
-    expect(packet.sources.find((source) => source.source_id === 'job-path-ignored')).toMatchObject({
-      classification: 'archive_candidate',
-      nonterminal_work_count: 0,
-      work_state_known: true,
-    });
+    for (const sourceId of ['job-path-ignored', 'job-snake-path-ignored']) {
+      expect(packet.sources.find((source) => source.source_id === sourceId)).toMatchObject({
+        classification: 'archive_candidate',
+        nonterminal_work_count: 0,
+        work_state_known: true,
+      });
+    }
   });
 
   test('source guard migrations cover every direct and page-owned reference at the database boundary', async () => {
@@ -1269,7 +1400,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '130');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(5);
+    expect(result.applied).toBe(6);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -1317,7 +1448,7 @@ describe('archive hygiene execution gate', () => {
     `);
     await db.setConfig('version', '131');
     const result = await runMigrations(db);
-    expect(result.applied).toBe(4);
+    expect(result.applied).toBe(5);
     expect(result.current).toBe(LATEST_VERSION);
 
     const definitions = await db.executeRaw<{ definition: string }>(
@@ -1553,6 +1684,71 @@ describe('archive hygiene execution gate', () => {
     });
   });
 
+  test('path-only jobs follow an active shared-path owner and cancel only after every owner archives', async () => {
+    const sharedPath = '/fixture/shared-path-owner';
+    await db.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config)
+       VALUES
+         ('shared-path-a', 'shared-path-a', $1, '{}'::jsonb),
+         ('shared-path-b', 'shared-path-b', $1, '{}'::jsonb)`,
+      [sharedPath],
+    );
+    expect(await softDeleteSource(db, 'shared-path-a')).not.toBeNull();
+
+    const inserted = await db.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES ('sync', 'waiting', jsonb_build_object('repoPath', $1::text))
+       RETURNING id`,
+      [sharedPath],
+    );
+    await expect(db.executeRaw(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES (
+         'sync',
+         'waiting',
+         jsonb_build_object('source_id', 'shared-path-a', 'repoPath', $1::text)
+       )`,
+      [sharedPath],
+    )).rejects.toThrow(/shared-path-a is archived/);
+
+    await db.setConfig('version', String(LATEST_VERSION));
+    const queue = new MinionQueue(db);
+    expect(await queue.cancelArchivedSourceJobs(['shared-path-a'])).toEqual([]);
+
+    const drain = await beginSourceArchiveDrain(db, 'shared-path-b');
+    expect(drain).not.toBeNull();
+    expect(await queue.cancelArchivedSourceJobs(['shared-path-a'])).toEqual([]);
+    expect(await queue.claim('held-shared-path', 30_000, 'default', ['sync'])).toBeNull();
+
+    await cancelSourceArchiveDrain(db, drain!);
+    const claimed = await queue.claim('active-shared-path', 30_000, 'default', ['sync']);
+    expect(claimed?.id).toBe(inserted[0]?.id);
+    await db.executeRaw(
+      `UPDATE minion_jobs SET status = 'completed' WHERE id = $1`,
+      [inserted[0]!.id],
+    );
+
+    const doomed = await db.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data)
+       VALUES ('sync', 'waiting', jsonb_build_object('repoPath', $1::text))
+       RETURNING id`,
+      [sharedPath],
+    );
+    expect(await softDeleteSource(db, 'shared-path-b')).not.toBeNull();
+    const cancelled = await queue.cancelArchivedSourceJobs(['shared-path-b']);
+    expect(cancelled.map((job) => job.id)).toContain(doomed[0]!.id);
+    expect(await queue.getJob(doomed[0]!.id)).toMatchObject({ status: 'cancelled' });
+  });
+
+  test('migration v136 restores active-owner semantics for path-only source jobs', () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 136);
+    expect(migration?.name).toBe('active_path_source_job_resolution');
+    expect(migration?.idempotent).toBe(true);
+    expect(migration?.sql).toContain("NEW.data->'source_id'");
+    expect(migration?.sql).toContain('matched_active');
+    expect(migration?.sql).toContain('enforce_active_source_job_status_fn');
+  });
+
   test('claim race classifier accepts only the exact source lifecycle guard', () => {
     expect(isSourceLifecycleClaimRace(Object.assign(
       new Error('Cannot write minion_jobs: source race-source is archived or draining'),
@@ -1694,7 +1890,9 @@ function makeEngine(
       if (/\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE)\b/i.test(sql)) {
         throw new Error(`unexpected mutation: ${sql}`);
       }
-      if (sql.includes('FROM public.sources')) return sources;
+      if (sql.includes('FROM public.sources') && !sql.includes('FROM public.minion_jobs')) {
+        return sources;
+      }
       if (sql.includes('FROM public.config')) {
         const key = String(params?.[0]);
         if (key === 'sources.default' && opts.configuredDefault != null) {

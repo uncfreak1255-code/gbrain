@@ -13,6 +13,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { importFromContent } from '../src/core/import-file.ts';
+import { resolveSyncJobSourceId } from '../src/commands/jobs.ts';
 
 let engine: PGLiteEngine;
 
@@ -38,6 +39,23 @@ beforeEach(async () => {
 });
 
 describe('source-id routing (v0.36.x #891 + #978 regression)', () => {
+  test('sync job prefers a non-empty snake source id over conflicting path fallback', async () => {
+    await engine.executeRaw(
+      `UPDATE sources
+          SET local_path = CASE id
+            WHEN 'work' THEN '/fixture/work'
+            WHEN 'personal' THEN '/fixture/personal'
+          END
+        WHERE id IN ('work', 'personal')`,
+    );
+
+    expect(await resolveSyncJobSourceId(engine, {
+      sourceId: '',
+      source_id: 'work',
+      repoPath: '/fixture/personal',
+    })).toBe('work');
+  });
+
   test('importFromContent({sourceId: "work"}) lands the page at source_id=work', async () => {
     await importFromContent(engine, 'people/alice', '---\ntype: person\ntitle: Alice\n---\n# Alice\n\nWorks at Acme.', {
       noEmbed: true,

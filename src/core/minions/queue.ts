@@ -50,18 +50,30 @@ const TERMINAL_STATUSES = ['completed', 'failed', 'dead', 'cancelled'] as const;
 function sourceReferencePredicate(
   jobAlias: 'candidate',
   sourceAlias: 'source',
+  pathOwnerAvailability: 'active' | 'unarchived',
 ): string {
+  const pathOwnerPredicate = pathOwnerAvailability === 'active'
+    ? 'active_path_source.archived IS NOT TRUE AND active_path_source.embedding_drain_token IS NULL'
+    : 'active_path_source.archived IS NOT TRUE';
   return `(
     ${jobAlias}.data->>'sourceId' = ${sourceAlias}.id
     OR ${jobAlias}.data->>'source_id' = ${sourceAlias}.id
     OR (
       ${jobAlias}.name = 'sync'
       AND NOT (
-        jsonb_typeof(${jobAlias}.data->'sourceId') = 'string'
-        AND COALESCE(${jobAlias}.data->>'sourceId', '') <> ''
+        (jsonb_typeof(${jobAlias}.data->'sourceId') = 'string'
+          AND COALESCE(${jobAlias}.data->>'sourceId', '') <> '')
+        OR (jsonb_typeof(${jobAlias}.data->'source_id') = 'string'
+          AND COALESCE(${jobAlias}.data->>'source_id', '') <> '')
       )
       AND ${sourceAlias}.local_path IS NOT NULL
       AND ${jobAlias}.data->>'repoPath' = ${sourceAlias}.local_path
+      AND NOT EXISTS (
+        SELECT 1
+         FROM public.sources AS active_path_source
+         WHERE active_path_source.local_path = ${jobAlias}.data->>'repoPath'
+           AND ${pathOwnerPredicate}
+      )
     )
   )`;
 }
@@ -69,12 +81,13 @@ function sourceReferencePredicate(
 function sourceJobPredicate(
   jobAlias: 'candidate',
   sourceUnavailable: string,
+  pathOwnerAvailability: 'active' | 'unarchived',
 ): string {
   return `EXISTS (
     SELECT 1
       FROM public.sources AS source
      WHERE ${sourceUnavailable}
-       AND ${sourceReferencePredicate(jobAlias, 'source')}
+       AND ${sourceReferencePredicate(jobAlias, 'source', pathOwnerAvailability)}
   )`;
 }
 
@@ -82,11 +95,12 @@ function activeSourceJobPredicate(jobAlias: 'candidate'): string {
   return `NOT (${sourceJobPredicate(
     jobAlias,
     '(source.archived IS TRUE OR source.embedding_drain_token IS NOT NULL)',
+    'active',
   )})`;
 }
 
 function archivedSourceJobPredicate(jobAlias: 'candidate'): string {
-  return sourceJobPredicate(jobAlias, 'source.archived IS TRUE');
+  return sourceJobPredicate(jobAlias, 'source.archived IS TRUE', 'unarchived');
 }
 
 /** A source lifecycle guard may close the claim snapshot race. Treat only the
@@ -760,7 +774,7 @@ export class MinionQueue {
               SELECT 1 FROM public.sources AS source
                WHERE source.id = ANY($1::text[])
                  AND source.archived IS TRUE
-                 AND ${sourceReferencePredicate('candidate', 'source')}
+                 AND ${sourceReferencePredicate('candidate', 'source', 'unarchived')}
             ))
           ORDER BY candidate.id`,
         [scopedSourceIds],
@@ -798,7 +812,7 @@ export class MinionQueue {
             AND EXISTS (
               SELECT 1 FROM minion_jobs AS candidate
                WHERE candidate.id = ANY($1::bigint[])
-                 AND ${sourceReferencePredicate('candidate', 'source')}
+                 AND ${sourceReferencePredicate('candidate', 'source', 'unarchived')}
             )
           ORDER BY source.id
           FOR UPDATE OF source`,
@@ -815,7 +829,7 @@ export class MinionQueue {
               SELECT 1 FROM public.sources AS source
                WHERE source.id = ANY($2::text[])
                  AND source.archived IS TRUE
-                 AND ${sourceReferencePredicate('candidate', 'source')}
+                 AND ${sourceReferencePredicate('candidate', 'source', 'unarchived')}
             )
           ORDER BY candidate.id`,
         [rootIds, lockedSourceIds],
@@ -843,7 +857,7 @@ export class MinionQueue {
             SELECT 1 FROM public.sources AS source
              WHERE source.id = ANY($1::text[])
                AND source.archived IS TRUE
-               AND ${sourceReferencePredicate('candidate', 'source')}
+               AND ${sourceReferencePredicate('candidate', 'source', 'unarchived')}
           )`,
       [scopedSourceIds],
     );

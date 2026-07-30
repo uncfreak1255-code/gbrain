@@ -8,6 +8,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import postgres from 'postgres';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -18,6 +22,7 @@ import { MIGRATIONS } from '../../src/core/migrate.ts';
 import { withActiveEmbeddingSource } from '../../src/commands/embed.ts';
 import {
   beginSourceArchiveDrain,
+  cancelSourceArchiveDrain,
   revokeStaleSourceEmbeddingLeases,
   SourceEmbeddingLeaseLostError,
 } from '../../src/core/source-embedding-lease.ts';
@@ -637,22 +642,12 @@ describeE2E('source hygiene archive/write concurrency', () => {
     }
   }, 30_000);
 
-  test('cleanup ignores a newly archived path-overlap source it did not lock', async () => {
+  test('cleanup preserves a path-only job while an active path owner remains', async () => {
     const sourceA = 'cleanup-path-phantom-a-e2e';
     const sourceB = 'cleanup-path-phantom-b-e2e';
     const sharedPath = '/tmp/gbrain-cleanup-path-phantom-e2e';
     const cleaner = new PostgresEngine();
-    const lifecycleA = new PostgresEngine();
-    const lifecycleB = new PostgresEngine();
     await cleaner.connect({ database_url: process.env.DATABASE_URL! });
-    await lifecycleA.connect({ database_url: process.env.DATABASE_URL! });
-    await lifecycleB.connect({ database_url: process.env.DATABASE_URL! });
-    const restoreAUpdated = deferred();
-    const releaseRestoreA = deferred();
-    const restoreBUpdated = deferred();
-    const releaseRestoreB = deferred();
-    let restoreATx: Promise<void> | null = null;
-    let restoreBTx: Promise<void> | null = null;
     let jobId: number | null = null;
 
     try {
@@ -678,43 +673,7 @@ describeE2E('source hygiene archive/write concurrency', () => {
       jobId = Number(jobs[0].id);
       expect(await softDeleteSource(cleaner, sourceA)).toMatchObject({ id: sourceA });
 
-      restoreATx = lifecycleA.transaction(async (tx) => {
-        await tx.executeRaw(
-          `UPDATE public.sources SET archived = false, archived_at = NULL,
-             archive_expires_at = NULL WHERE id = $1 AND archived IS TRUE`,
-          [sourceA],
-        );
-        restoreAUpdated.resolve();
-        await releaseRestoreA.promise;
-      });
-      await restoreAUpdated.promise;
-
-      let cleanupSettled = false;
-      const cleanup = new MinionQueue(cleaner).cancelArchivedSourceJobs()
-        .finally(() => { cleanupSettled = true; });
-      await wait(100);
-      expect(cleanupSettled).toBe(false);
-
-      // The cleanup source-lock statement already has its snapshot and is
-      // waiting on A. Archive B after that snapshot, then hold B's restore
-      // uncommitted. B must not become an unlocked match in the later recheck.
-      expect(await softDeleteSource(lifecycleB, sourceB)).toMatchObject({ id: sourceB });
-      restoreBTx = lifecycleB.transaction(async (tx) => {
-        await tx.executeRaw(
-          `UPDATE public.sources SET archived = false, archived_at = NULL,
-             archive_expires_at = NULL WHERE id = $1 AND archived IS TRUE`,
-          [sourceB],
-        );
-        restoreBUpdated.resolve();
-        await releaseRestoreB.promise;
-      });
-      await restoreBUpdated.promise;
-
-      releaseRestoreA.resolve();
-      await restoreATx;
-      expect(await cleanup).toEqual([]);
-      releaseRestoreB.resolve();
-      await restoreBTx;
+      expect(await new MinionQueue(cleaner).cancelArchivedSourceJobs()).toEqual([]);
 
       const finalRows = await cleaner.executeRaw<{ id: string; archived: boolean }>(
         `SELECT id, archived FROM public.sources
@@ -722,7 +681,7 @@ describeE2E('source hygiene archive/write concurrency', () => {
         [sourceA, sourceB],
       );
       expect(finalRows).toEqual([
-        { id: sourceA, archived: false },
+        { id: sourceA, archived: true },
         { id: sourceB, archived: false },
       ]);
       const jobRows = await cleaner.executeRaw<{ status: string }>(
@@ -731,16 +690,11 @@ describeE2E('source hygiene archive/write concurrency', () => {
       );
       expect(jobRows).toEqual([{ status: 'waiting' }]);
     } finally {
-      releaseRestoreA.resolve();
-      releaseRestoreB.resolve();
-      await Promise.all([restoreATx?.catch(() => {}), restoreBTx?.catch(() => {})]);
       if (jobId !== null) {
         await cleaner.executeRaw(`DELETE FROM public.minion_jobs WHERE id = $1`, [jobId]).catch(() => {});
       }
       await cleaner.executeRaw(`DELETE FROM public.sources WHERE id IN ($1, $2)`, [sourceA, sourceB]).catch(() => {});
-      await Promise.all([
-        cleaner.disconnect(), lifecycleA.disconnect(), lifecycleB.disconnect(),
-      ]);
+      await cleaner.disconnect();
     }
   }, 30_000);
 
@@ -1084,6 +1038,8 @@ describeE2E('source hygiene archive/write concurrency', () => {
     const indirectGuard = MIGRATIONS.find((entry) => entry.version === 132);
     const providerDrainGuard = MIGRATIONS.find((entry) => entry.version === 133);
     const cycleLockGuard = MIGRATIONS.find((entry) => entry.version === 134);
+    const oauthGuard = MIGRATIONS.find((entry) => entry.version === 135);
+    const pathOwnerGuard = MIGRATIONS.find((entry) => entry.version === 136);
     expect(referenceGuard?.sql).toBeDefined();
     expect(jobGuard?.sql).toBeDefined();
     expect(continuationGuard?.sql).toBeDefined();
@@ -1093,6 +1049,8 @@ describeE2E('source hygiene archive/write concurrency', () => {
     expect(indirectGuard?.sql).toBeDefined();
     expect(providerDrainGuard?.sql).toBeDefined();
     expect(cycleLockGuard?.sql).toBeDefined();
+    expect(oauthGuard?.sql).toBeDefined();
+    expect(pathOwnerGuard?.sql).toBeDefined();
 
     const writer = new PostgresEngine();
     const archiver = new PostgresEngine();
@@ -1229,6 +1187,8 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await writer.runMigration(132, indirectGuard!.sql!);
       await writer.runMigration(133, providerDrainGuard!.sql!);
       await writer.runMigration(134, cycleLockGuard!.sql!);
+      await writer.runMigration(135, oauthGuard!.sql!);
+      await writer.runMigration(136, pathOwnerGuard!.sql!);
       await writer.executeRaw(
         `DELETE FROM minion_jobs
           WHERE name IN ('v126-missing-source-e2e', 'v126-lock-missing-source-e2e',
@@ -1293,6 +1253,71 @@ describeE2E('source hygiene archive/write concurrency', () => {
       );
       expect(rows[0]?.archived).toBe(false);
     } finally {
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await Promise.all([writer.disconnect(), archiver.disconnect()]);
+    }
+  }, 30_000);
+
+  test('path-only sync work commits before archive rereads and vetoes the drained owner', async () => {
+    const sourceId = 'archive-path-writer-first-e2e';
+    const sourcePath = `/tmp/gbrain-${sourceId}-missing`;
+    const writer = new PostgresEngine();
+    const archiver = new PostgresEngine();
+    const writerReady = deferred();
+    const releaseWriter = deferred();
+    let writerTx: Promise<void> | null = null;
+    await writer.connect({ database_url: process.env.DATABASE_URL! });
+    await archiver.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await writer.executeRaw(
+        `DELETE FROM minion_jobs WHERE name = 'sync' AND data->>'repoPath' = $1`,
+        [sourcePath],
+      );
+      await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]);
+      await writer.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+         VALUES ($1, $1, $2, '{}'::jsonb)`,
+        [sourceId, sourcePath],
+      );
+
+      writerTx = writer.transaction(async (tx) => {
+        await tx.executeRaw(
+          `INSERT INTO minion_jobs (name, status, data)
+           VALUES ('sync', 'waiting', jsonb_build_object('repoPath', $1::text))`,
+          [sourcePath],
+        );
+        writerReady.resolve();
+        await releaseWriter.promise;
+      });
+      await writerReady.promise;
+
+      let archiveSettled = false;
+      const archiveAttempt = archiveHygieneCandidate(archiver, sourceId)
+        .finally(() => { archiveSettled = true; });
+      await wait(100);
+      expect(archiveSettled).toBe(false);
+
+      releaseWriter.resolve();
+      await writerTx;
+      const result = await archiveAttempt;
+      expect(result.result).toBeNull();
+      expect(result.reason).toContain('nonterminal_source_work');
+      const rows = await writer.executeRaw<{
+        archived: boolean;
+        embedding_drain_token: string | null;
+      }>(
+        `SELECT archived, embedding_drain_token FROM sources WHERE id = $1`,
+        [sourceId],
+      );
+      expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
+    } finally {
+      releaseWriter.resolve();
+      await writerTx?.catch(() => {});
+      await writer.executeRaw(
+        `DELETE FROM minion_jobs WHERE name = 'sync' AND data->>'repoPath' = $1`,
+        [sourcePath],
+      ).catch(() => {});
       await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
       await Promise.all([writer.disconnect(), archiver.disconnect()]);
     }
@@ -1695,6 +1720,107 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await writer.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [lockId]).catch(() => {});
       await writer.executeRaw(`DELETE FROM sources WHERE id = $1`, [sourceId]).catch(() => {});
       await Promise.all([writer.disconnect(), archiver.disconnect()]);
+    }
+  }, 30_000);
+
+  test('candidate drain purpose survives restart and forces a fresh Postgres hygiene recheck', async () => {
+    const sourceId = 'archive-candidate-purpose-e2e';
+    const parent = mkdtempSync(join(tmpdir(), 'gbrain-candidate-purpose-e2e-'));
+    const repoPath = join(parent, 'candidate');
+    const engine = new PostgresEngine();
+    await engine.connect({ database_url: process.env.DATABASE_URL! });
+
+    try {
+      await engine.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]);
+      await engine.executeRaw(
+        `INSERT INTO public.sources (id, name, local_path, config)
+         VALUES ($1, $1, $2, '{}'::jsonb)`,
+        [sourceId, repoPath],
+      );
+      const drain = await beginSourceArchiveDrain(engine, sourceId, 'hygiene_candidate');
+      expect(drain?.purpose).toBe('hygiene_candidate');
+      expect(await softDeleteSource(engine, sourceId)).toBeNull();
+
+      execFileSync('git', ['init', repoPath], { stdio: 'ignore' });
+      const resumed = await archiveHygieneCandidate(engine, sourceId);
+      expect(resumed.result).toBeNull();
+      expect(resumed.reason).toContain('healthy');
+      const rows = await engine.executeRaw<{
+        archived: boolean;
+        embedding_drain_token: string | null;
+      }>(
+        `SELECT archived, embedding_drain_token
+           FROM public.sources
+          WHERE id = $1`,
+        [sourceId],
+      );
+      expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
+    } finally {
+      await engine.executeRaw(`DELETE FROM public.sources WHERE id = $1`, [sourceId]).catch(() => {});
+      await engine.disconnect().catch(() => {});
+      rmSync(parent, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('active shared-path owner keeps a legacy sync job claimable in Postgres', async () => {
+    const archivedId = 'shared-path-archived-e2e';
+    const activeId = 'shared-path-active-e2e';
+    const sharedPath = '/tmp/gbrain-shared-path-owner-e2e';
+    const engine = new PostgresEngine();
+    await engine.connect({ database_url: process.env.DATABASE_URL! });
+    const queue = new MinionQueue(engine);
+
+    try {
+      await engine.executeRaw(
+        `DELETE FROM public.minion_jobs
+          WHERE data->>'repoPath' = $1
+             OR data->>'source_id' IN ($2, $3)`,
+        [sharedPath, archivedId, activeId],
+      );
+      await engine.executeRaw(`DELETE FROM public.sources WHERE id IN ($1, $2)`, [archivedId, activeId]);
+      await engine.executeRaw(
+        `INSERT INTO public.sources (id, name, local_path, config)
+         VALUES ($1, $1, $3, '{}'::jsonb), ($2, $2, $3, '{}'::jsonb)`,
+        [archivedId, activeId, sharedPath],
+      );
+      expect(await softDeleteSource(engine, archivedId)).not.toBeNull();
+      const inserted = await engine.executeRaw<{ id: number }>(
+        `INSERT INTO public.minion_jobs (name, status, data)
+         VALUES ('sync', 'waiting', jsonb_build_object('repoPath', $1::text))
+         RETURNING id`,
+        [sharedPath],
+      );
+      await expect(engine.executeRaw(
+        `INSERT INTO public.minion_jobs (name, status, data)
+         VALUES (
+           'sync', 'waiting',
+           jsonb_build_object('source_id', $1::text, 'repoPath', $2::text)
+         )`,
+        [archivedId, sharedPath],
+      )).rejects.toThrow(/is archived/);
+      expect(await queue.cancelArchivedSourceJobs([archivedId])).toEqual([]);
+
+      const drain = await beginSourceArchiveDrain(engine, activeId);
+      expect(drain).not.toBeNull();
+      expect(await queue.cancelArchivedSourceJobs([archivedId])).toEqual([]);
+      expect(await queue.claim('shared-path-held-e2e', 30_000, 'default', ['sync'])).toBeNull();
+      await cancelSourceArchiveDrain(engine, drain!);
+
+      const claimed = await queue.claim('shared-path-active-e2e', 30_000, 'default', ['sync']);
+      expect(claimed?.id).toBe(inserted[0]?.id);
+      expect(claimed?.data).toEqual({ repoPath: sharedPath });
+    } finally {
+      await engine.executeRaw(
+        `DELETE FROM public.minion_jobs
+          WHERE data->>'repoPath' = $1
+             OR data->>'source_id' IN ($2, $3)`,
+        [sharedPath, archivedId, activeId],
+      ).catch(() => {});
+      await engine.executeRaw(
+        `DELETE FROM public.sources WHERE id IN ($1, $2)`,
+        [archivedId, activeId],
+      ).catch(() => {});
+      await engine.disconnect().catch(() => {});
     }
   }, 30_000);
 });

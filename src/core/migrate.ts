@@ -6466,8 +6466,10 @@ export const MIGRATIONS: Migration[] = [
         source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
         IF NEW.name = 'sync'
            AND NOT (
-             jsonb_typeof(NEW.data->'sourceId') = 'string'
-             AND COALESCE(NEW.data->>'sourceId', '') <> ''
+             (jsonb_typeof(NEW.data->'sourceId') = 'string'
+               AND COALESCE(NEW.data->>'sourceId', '') <> '')
+             OR (jsonb_typeof(NEW.data->'source_id') = 'string'
+               AND COALESCE(NEW.data->>'source_id', '') <> '')
            ) THEN
           repo_path := NEW.data->>'repoPath';
           IF repo_path IS NOT NULL AND repo_path <> '' THEN
@@ -6478,8 +6480,10 @@ export const MIGRATIONS: Migration[] = [
           source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
           IF OLD.name = 'sync'
              AND NOT (
-               jsonb_typeof(OLD.data->'sourceId') = 'string'
-               AND COALESCE(OLD.data->>'sourceId', '') <> ''
+               (jsonb_typeof(OLD.data->'sourceId') = 'string'
+                 AND COALESCE(OLD.data->>'sourceId', '') <> '')
+               OR (jsonb_typeof(OLD.data->'source_id') = 'string'
+                 AND COALESCE(OLD.data->>'source_id', '') <> '')
              ) THEN
             repo_path := OLD.data->>'repoPath';
             IF repo_path IS NOT NULL AND repo_path <> '' THEN
@@ -7364,6 +7368,130 @@ export const MIGRATIONS: Migration[] = [
         RETURN NEW;
       END;
       $fn$ LANGUAGE plpgsql;
+    `,
+  },
+  {
+    version: 136,
+    name: 'active_path_source_job_resolution',
+    idempotent: true,
+    sql: `
+      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
+      RETURNS trigger
+      SET search_path = pg_catalog, public, pg_temp
+      AS $fn$
+      DECLARE
+        source_ref TEXT;
+        source_refs TEXT[] := ARRAY[]::TEXT[];
+        repo_path TEXT;
+        repo_paths TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
+        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
+        matched_active BOOLEAN;
+        source_archived BOOLEAN;
+        source_draining BOOLEAN;
+      BEGIN
+        IF TG_OP = 'UPDATE'
+           AND NEW.data IS NOT DISTINCT FROM OLD.data
+           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
+          RETURN NEW;
+        END IF;
+
+        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
+        IF NEW.name = 'sync'
+           AND NOT (
+             (jsonb_typeof(NEW.data->'sourceId') = 'string'
+               AND COALESCE(NEW.data->>'sourceId', '') <> '')
+             OR (jsonb_typeof(NEW.data->'source_id') = 'string'
+               AND COALESCE(NEW.data->>'source_id', '') <> '')
+           ) THEN
+          repo_path := NEW.data->>'repoPath';
+          IF repo_path IS NOT NULL AND repo_path <> '' THEN
+            repo_paths := array_append(repo_paths, repo_path);
+          END IF;
+        END IF;
+        IF TG_OP = 'UPDATE' THEN
+          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
+          IF OLD.name = 'sync'
+             AND NOT (
+               (jsonb_typeof(OLD.data->'sourceId') = 'string'
+                 AND COALESCE(OLD.data->>'sourceId', '') <> '')
+               OR (jsonb_typeof(OLD.data->'source_id') = 'string'
+                 AND COALESCE(OLD.data->>'source_id', '') <> '')
+             ) THEN
+            repo_path := OLD.data->>'repoPath';
+            IF repo_path IS NOT NULL AND repo_path <> '' THEN
+              repo_paths := array_append(repo_paths, repo_path);
+            END IF;
+          END IF;
+        END IF;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO source_refs
+          FROM unnest(source_refs) AS values_(value)
+         WHERE value IS NOT NULL;
+        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
+          INTO repo_paths
+          FROM unnest(repo_paths) AS values_(value)
+         WHERE value IS NOT NULL;
+
+        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
+          PERFORM pg_advisory_xact_lock_shared(
+            hashtextextended('gbrain:source-lifecycle', 0)
+          );
+        END IF;
+
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_before
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+
+        PERFORM id
+          FROM public.sources
+         WHERE id = ANY(source_refs)
+            OR local_path = ANY(repo_paths)
+         ORDER BY id
+         FOR SHARE;
+
+        FOR source_ref, source_archived, source_draining IN
+          SELECT id, archived, embedding_drain_token IS NOT NULL
+            FROM public.sources
+           WHERE id = ANY(source_refs)
+           ORDER BY id
+        LOOP
+          IF source_archived OR source_draining THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived or draining', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+
+        FOREACH repo_path IN ARRAY repo_paths LOOP
+          SELECT bool_or(archived IS NOT TRUE AND embedding_drain_token IS NULL), min(id)
+            INTO matched_active, source_ref
+            FROM public.sources
+           WHERE local_path = repo_path;
+          IF source_ref IS NOT NULL AND NOT COALESCE(matched_active, false) THEN
+            RAISE EXCEPTION
+              'Cannot write minion_jobs.data: source % is archived or draining', source_ref
+              USING ERRCODE = '23503';
+          END IF;
+        END LOOP;
+
+        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
+          INTO path_source_refs_after
+          FROM public.sources
+         WHERE local_path = ANY(repo_paths);
+        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
+          RAISE EXCEPTION 'Source path ownership changed while writing minion_jobs.data'
+            USING ERRCODE = '40001';
+        END IF;
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS source_active_job_data_guard ON public.minion_jobs;
+      CREATE TRIGGER source_active_job_data_guard
+        BEFORE INSERT OR UPDATE ON public.minion_jobs
+        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
     `,
   },
 ];

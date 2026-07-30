@@ -618,7 +618,13 @@ export async function archiveHygieneCandidate(
       expectedArchiveDrainSourceId,
     });
     const decision = packet.sources.find((source) => source.source_id === sourceId);
-    if (decision?.classification === 'archive_candidate' && decision.safe_for_agent_review) {
+    const guardedResume = expectedArchiveDrainSourceId === undefined
+      && decision?.draining === true
+      && decision.drain_requires_hygiene_candidate === true;
+    if (
+      (decision?.classification === 'archive_candidate' && decision.safe_for_agent_review)
+      || guardedResume
+    ) {
       return { allowed: true, reason: 'archive_candidate' };
     }
     return {
@@ -638,6 +644,7 @@ export async function archiveHygieneCandidate(
     engine,
     sourceId,
     (candidateEngine) => inspectCandidate(candidateEngine, sourceId),
+    'hygiene_candidate',
   );
 }
 

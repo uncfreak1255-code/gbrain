@@ -273,6 +273,7 @@ describe('source embedding provider leases', () => {
       sourceId: 'shared-source',
       token: 'drain-token',
       epoch: 1,
+      purpose: 'manual',
       localPath: null,
       configJson: '{}',
     })).rejects.toThrow('require operator review');
