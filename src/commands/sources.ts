@@ -567,7 +567,9 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     if (recovery.status === 'purpose_mismatch') {
       const actualToken = recovery.purpose === 'hygiene_candidate'
         ? 'hygiene-candidate:recovery'
-        : 'manual:recovery';
+        : recovery.purpose === 'migration'
+          ? 'migration:recovery'
+          : 'manual:recovery';
       console.error(sourceDrainResumeMessage(id, actualToken));
       process.exit(4);
     }
@@ -612,13 +614,21 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     );
   }
 
-  const result = await softDeleteSource(engine, id);
-  if (!result) {
+  const archiveAttempt = await softDeleteSourceGuarded(engine, id);
+  if (!archiveAttempt.result) {
+    if (archiveAttempt.reason === 'migration_resume_required') {
+      console.error(sourceDrainResumeMessage(id, 'migration:recovery'));
+      process.exit(4);
+    }
+    if (archiveAttempt.reason === 'hygiene_candidate_resume_required') {
+      console.error(sourceDrainResumeMessage(id, 'hygiene-candidate:recovery'));
+      process.exit(4);
+    }
     console.error(`Failed to archive source "${id}".`);
     process.exit(4);
   }
 
-  console.log(formatSoftDelete(result));
+  console.log(formatSoftDelete(archiveAttempt.result));
 }
 
 export async function archiveHygieneCandidate(

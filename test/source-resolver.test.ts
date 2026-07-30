@@ -21,17 +21,27 @@ import type { BrainEngine } from '../src/core/engine.ts';
 
 function makeStub(
   registeredSources: string[],
-  paths: Array<{ id: string; local_path: string; archived?: boolean }>,
+  paths: Array<{
+    id: string;
+    local_path: string;
+    archived?: boolean;
+    drainToken?: string | null;
+  }>,
   defaultKey: string | null,
 ): BrainEngine {
   const archivedIds = new Set(paths.filter((path) => path.archived).map((path) => path.id));
+  const drainTokens = new Map(paths.map((path) => [path.id, path.drainToken ?? null]));
   return {
     kind: 'pglite',
     executeRaw: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
       if (sql.includes('SELECT id, archived') && sql.includes('FROM sources WHERE id = $1')) {
         const target = params?.[0] as string;
         return (registeredSources.includes(target)
-          ? [{ id: target, archived: archivedIds.has(target), embedding_drain_token: null } as unknown as T]
+          ? [{
+            id: target,
+            archived: archivedIds.has(target),
+            embedding_drain_token: drainTokens.get(target) ?? null,
+          } as unknown as T]
           : []);
       }
       if (sql.includes('SELECT id FROM sources WHERE id = $1')) {
@@ -43,8 +53,9 @@ function makeStub(
       if (sql.includes('SELECT id, local_path')) {
         return paths.map((path) => ({
           archived: false,
-          draining: false,
-          drain_requires_hygiene_candidate: false,
+          draining: path.drainToken != null,
+          drain_requires_hygiene_candidate: path.drainToken?.startsWith('hygiene-candidate:') ?? false,
+          drain_requires_migration_resume: path.drainToken?.startsWith('migration:') ?? false,
           ...path,
         })) as unknown as T[];
       }
@@ -259,6 +270,22 @@ describe('resolveSourceId priority 3 — .gbrain-source dotfile walk-up', () => 
     );
     await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(
       /archived.*cannot be selected automatically/,
+    );
+  });
+
+  test('routes a migration-owned dotfile drain back to engine migration', async () => {
+    writeFileSync(join(tmpdirPath, '.gbrain-source'), 'migration-stuck\n');
+    const engine = makeStub(
+      ['default', 'migration-stuck'],
+      [{
+        id: 'migration-stuck',
+        local_path: '/migration-stuck',
+        drainToken: 'migration:fixture',
+      }],
+      null,
+    );
+    await expect(resolveSourceId(engine, null, tmpdirPath)).rejects.toThrow(
+      /interrupted engine-migration drain.*Rerun the engine migration/,
     );
   });
 

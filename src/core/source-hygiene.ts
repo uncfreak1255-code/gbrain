@@ -36,6 +36,7 @@ export type SourceRecoveryMode =
   | 'none'
   | 'archive_review'
   | 'archive_resume'
+  | 'migration_resume'
   | 'managed_clone_sync'
   | 'manual';
 
@@ -47,6 +48,8 @@ export interface SourceHygieneEvidence {
   draining: boolean;
   /** Persisted provenance keeps candidate-only resumes on the guarded path. */
   drain_requires_hygiene_candidate?: boolean;
+  /** Internal migration drains resume only by rerunning their owner migration. */
+  drain_requires_migration_resume?: boolean;
   has_local_path: boolean;
   shared_path_source_count: number;
   repo_state: SourceHygieneRepoState;
@@ -163,6 +166,16 @@ export function classifySourceHygieneEvidence(
     return decision(evidence, 'not_applicable', 'none', null, [], true);
   }
   if (evidence.draining) {
+    if (evidence.drain_requires_migration_resume === true) {
+      return decision(
+        evidence,
+        'recovery_required',
+        'migration_resume',
+        null,
+        ['embedding_drain_pending', 'migration_resume_required'],
+        true,
+      );
+    }
     const resumeCommand = ['gbrain', 'sources', 'archive', evidence.source_id];
     if (evidence.drain_requires_hygiene_candidate === true) {
       resumeCommand.push('--if-hygiene-candidate');
@@ -382,6 +395,8 @@ export async function inspectSourceHygiene(
       draining: source.embedding_drain_token != null,
       drain_requires_hygiene_candidate:
         sourceArchiveDrainPurpose(source.embedding_drain_token ?? null) === 'hygiene_candidate',
+      drain_requires_migration_resume:
+        sourceArchiveDrainPurpose(source.embedding_drain_token ?? null) === 'migration',
       has_local_path: hasLocalPath,
       shared_path_source_count: hasLocalPath
         ? (pathCounts.get(source.local_path!) ?? 1)

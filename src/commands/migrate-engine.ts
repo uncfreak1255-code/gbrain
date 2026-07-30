@@ -4,7 +4,9 @@
  * Usage:
  *   gbrain migrate --to supabase [--url <connection_string>]
  *   gbrain migrate --to pglite [--path <db_path>]
- *   gbrain migrate --to <engine> --force  (overwrite non-empty target)
+ *   gbrain migrate --to <engine> --force  (overwrite target pages when source IDs are compatible)
+ *   gbrain migrate --to <engine> --revoke-stale-leases --confirm-destructive
+ *     (recover a target migration drain whose fenced provider owner is stale)
  */
 
 import { createEngine } from '../core/engine-factory.ts';
@@ -17,18 +19,31 @@ import { resolve } from 'path';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { executeRawJsonb } from '../core/sql-query.ts';
+import {
+  beginSourceArchiveDrain,
+  cancelSourceArchiveDrain,
+  lockSourceDrainForFinalize,
+  revokeStaleSourceEmbeddingLeases,
+  sourceArchiveDrainPurpose,
+  waitForSourceEmbeddingLeases,
+} from '../core/source-embedding-lease.ts';
 
 interface MigrateOpts {
   targetEngine: 'postgres' | 'pglite';
   targetUrl?: string;
   targetPath?: string;
   force: boolean;
+  revokeStaleLeases: boolean;
+  confirmDestructive: boolean;
 }
 
 function parseArgs(args: string[]): MigrateOpts {
   const toIdx = args.indexOf('--to');
   if (toIdx === -1 || !args[toIdx + 1]) {
-    throw new Error('Usage: gbrain migrate --to <supabase|pglite> [--url <url>] [--path <path>] [--force]');
+    throw new Error(
+      'Usage: gbrain migrate --to <supabase|pglite> [--url <url>] [--path <path>] '
+      + '[--force] [--revoke-stale-leases --confirm-destructive]',
+    );
   }
 
   const targetRaw = args[toIdx + 1];
@@ -40,11 +55,21 @@ function parseArgs(args: string[]): MigrateOpts {
   const urlIdx = args.indexOf('--url');
   const pathIdx = args.indexOf('--path');
 
+  const revokeStaleLeases = args.includes('--revoke-stale-leases');
+  const confirmDestructive = args.includes('--confirm-destructive');
+  if (revokeStaleLeases && !confirmDestructive) {
+    throw new Error(
+      'Refusing target migration lease revocation without --confirm-destructive',
+    );
+  }
+
   return {
     targetEngine,
     targetUrl: urlIdx !== -1 ? args[urlIdx + 1] : undefined,
     targetPath: pathIdx !== -1 ? args[pathIdx + 1] : undefined,
     force: args.includes('--force'),
+    revokeStaleLeases,
+    confirmDestructive,
   };
 }
 
@@ -88,6 +113,61 @@ interface SourceMigrationRow {
   trust_frontmatter_overrides: boolean;
   newest_content_at: Date | string | null;
   created_at: Date | string;
+  embedding_drain_token: string | null;
+  embedding_drain_epoch: number | string;
+}
+
+interface ArchivedSourceMigrationRow {
+  id: string;
+  archived_at: Date | string | null;
+  archive_expires_at: Date | string | null;
+}
+
+interface TargetSourceMigrationState extends ArchivedSourceMigrationRow {
+  archived: boolean;
+  embedding_drain_token: string | null;
+}
+
+interface TargetSourceDrainMigrationState extends TargetSourceMigrationState {
+  embedding_drain_epoch: number | string;
+}
+
+export interface SourceMigrationLifecycleState {
+  id: string;
+  archived: boolean;
+  embedding_drain_token: string | null;
+}
+
+export interface FinalSourceMigrationState extends SourceMigrationLifecycleState {
+  archived_at: Date | string | null;
+  archive_expires_at: Date | string | null;
+}
+
+interface RecoverySourceMigrationState extends FinalSourceMigrationState {
+  embedding_drain_epoch: number | string;
+}
+
+function migrationDrainFromTargetState(
+  row: Pick<TargetSourceDrainMigrationState, 'id' | 'embedding_drain_token' | 'embedding_drain_epoch'>,
+) {
+  if (
+    row.embedding_drain_token === null
+    || sourceArchiveDrainPurpose(row.embedding_drain_token) !== 'migration'
+  ) {
+    throw new Error(`Target source "${row.id}" does not have a migration-owned drain`);
+  }
+  const epoch = Number(row.embedding_drain_epoch);
+  if (!Number.isSafeInteger(epoch) || epoch < 0) {
+    throw new Error(`Target source "${row.id}" has an invalid embedding drain epoch`);
+  }
+  return {
+    sourceId: row.id,
+    token: row.embedding_drain_token,
+    epoch,
+    purpose: 'migration' as const,
+    localPath: null,
+    configJson: '{}',
+  };
 }
 
 function loadManifest(): MigrateManifest | null {
@@ -128,23 +208,106 @@ function normalizeSourceConfig(value: unknown): Record<string, unknown> {
 
 function asIsoTimestamp(value: Date | string | null): string | null {
   if (value === null) return null;
-  return value instanceof Date ? value.toISOString() : value;
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function assertSourceMigrationLifecycleSnapshot(
+  sourceStates: SourceMigrationLifecycleState[],
+): void {
+  const drainingSource = sourceStates.find((row) => row.embedding_drain_token !== null);
+  if (drainingSource) {
+    throw new Error(
+      `Cannot migrate while source "${drainingSource.id}" has an active archive drain; `
+      + 'finish or recover that drain, then rerun migration',
+    );
+  }
+  if (sourceStates.some((row) => row.id === 'default' && row.archived)) {
+    throw new Error('Cannot migrate an invalid archived "default" source');
+  }
+}
+
+export async function assertSourceLifecycleReadyForMigration(
+  sourceEngine: BrainEngine,
+): Promise<void> {
+  const sourceStates = await sourceEngine.executeRaw<SourceMigrationLifecycleState>(
+    `SELECT id, archived, embedding_drain_token
+      FROM sources
+      ORDER BY (id = 'default') DESC, id`,
+  );
+  assertSourceMigrationLifecycleSnapshot(sourceStates);
 }
 
 export async function copySourceRowsForMigration(
   sourceEngine: BrainEngine,
   targetEngine: BrainEngine,
+  opts: { stageArchivedAsActive?: boolean } = {},
 ): Promise<number> {
+  await assertSourceLifecycleReadyForMigration(sourceEngine);
   const sourceRows = await sourceEngine.executeRaw<SourceMigrationRow>(
     `SELECT id, name, local_path, last_commit, last_sync_at, config,
             chunker_version, archived, archived_at, archive_expires_at,
             contextual_retrieval_mode, trust_frontmatter_overrides,
-            newest_content_at, created_at
+            newest_content_at, created_at, embedding_drain_token,
+            embedding_drain_epoch
        FROM sources
       ORDER BY (id = 'default') DESC, id`,
   );
+  // Validate the exact rows that will be copied. This closes the interleaving
+  // where a drain commits after the early command-entry preflight but before
+  // this snapshot; no target read or write occurs before this check.
+  assertSourceMigrationLifecycleSnapshot(sourceRows);
+
+  // A committed drain is source truth, not transient transport state. Copying
+  // it as an ordinary active source would reopen writes and provider work on
+  // the target. Fail before touching any target row; the operator can finish
+  // or recover the source-side archive and rerun migration.
+  const archivedRows = opts.stageArchivedAsActive === true
+    ? sourceRows.filter((row) => row.archived)
+    : [];
+  const targetStates = new Map<string, TargetSourceDrainMigrationState>();
+  for (const row of archivedRows) {
+    const state = (await targetEngine.executeRaw<TargetSourceDrainMigrationState>(
+      `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token,
+              embedding_drain_epoch
+         FROM sources
+        WHERE id = $1`,
+      [row.id],
+    ))[0];
+    if (state) targetStates.set(row.id, state);
+  }
+
+  // A prior run can stop after committing its migration-only drain. Drain the
+  // exact observed generation, then CAS-clear it to re-stage active before the
+  // normal UPSERT. Never archive from the possibly stale source snapshot, and
+  // never adopt a replacement drain owned by another operation.
+  for (const row of archivedRows) {
+    const state = targetStates.get(row.id);
+    if (!state || state.archived || state.embedding_drain_token === null) continue;
+    if (sourceArchiveDrainPurpose(state.embedding_drain_token) !== 'migration') {
+      throw new Error(
+        `Cannot stage migration source "${row.id}" while the target has a non-migration archive drain`,
+      );
+    }
+  }
+  for (const row of archivedRows) {
+    const state = targetStates.get(row.id);
+    if (!state || state.archived || state.embedding_drain_token === null) continue;
+    const drain = migrationDrainFromTargetState(state);
+    await waitForSourceEmbeddingLeases(targetEngine, drain);
+    if (!await cancelSourceArchiveDrain(targetEngine, drain)) {
+      throw new Error(
+        `Target migration drain ownership changed for source "${row.id}" before re-staging`,
+      );
+    }
+  }
 
   for (const row of sourceRows) {
+    // Page/chunk/tag/timeline/raw/link writes now reject archived owners. A
+    // migration therefore stages archived source rows as active parents, then
+    // restores their exact archive metadata only after every dependent row is
+    // copied. The default preserves the standalone helper's exact-copy
+    // contract for callers that are not about to write dependents.
+    const stageArchived = opts.stageArchivedAsActive === true && row.archived;
     await executeRawJsonb(
       targetEngine,
       `INSERT INTO sources (
@@ -178,9 +341,9 @@ export async function copySourceRowsForMigration(
         row.last_commit,
         asIsoTimestamp(row.last_sync_at),
         row.chunker_version,
-        row.archived,
-        asIsoTimestamp(row.archived_at),
-        asIsoTimestamp(row.archive_expires_at),
+        stageArchived ? false : row.archived,
+        stageArchived ? null : asIsoTimestamp(row.archived_at),
+        stageArchived ? null : asIsoTimestamp(row.archive_expires_at),
         row.contextual_retrieval_mode,
         row.trust_frontmatter_overrides,
         asIsoTimestamp(row.newest_content_at),
@@ -191,6 +354,229 @@ export async function copySourceRowsForMigration(
   }
 
   return sourceRows.length;
+}
+
+async function finalizeArchivedMigrationRow(
+  targetEngine: BrainEngine,
+  row: ArchivedSourceMigrationRow,
+): Promise<void> {
+  const current = (await targetEngine.executeRaw<TargetSourceMigrationState>(
+    `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token
+       FROM sources
+      WHERE id = $1`,
+    [row.id],
+  ))[0];
+  if (!current) {
+    throw new Error(`Could not find staged migration source "${row.id}"`);
+  }
+  if (current.archived) {
+    const currentArchivedAt = asIsoTimestamp(current.archived_at);
+    const currentExpiresAt = asIsoTimestamp(current.archive_expires_at);
+    if (
+      current.embedding_drain_token !== null
+      || currentArchivedAt !== asIsoTimestamp(row.archived_at)
+      || currentExpiresAt !== asIsoTimestamp(row.archive_expires_at)
+    ) {
+      throw new Error(`Migration source "${row.id}" was archived by another operation`);
+    }
+    return;
+  }
+
+  const drain = await beginSourceArchiveDrain(targetEngine, row.id, 'migration');
+  if (!drain) {
+    throw new Error(`Could not begin archive finalization for migration source "${row.id}"`);
+  }
+  if (drain.purpose !== 'migration') {
+    throw new Error(
+      `Cannot finalize migration source "${row.id}" through a ${drain.purpose} archive drain`,
+    );
+  }
+  await waitForSourceEmbeddingLeases(targetEngine, drain);
+  await targetEngine.transaction(async (tx) => {
+    await tx.executeRaw(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended('gbrain:source-lifecycle', 0)
+       )`,
+    );
+    const readiness = await lockSourceDrainForFinalize(tx, drain);
+    if (readiness.status !== 'ready') {
+      throw new Error(`Migration source "${row.id}" was archived before finalization`);
+    }
+    const updated = await tx.executeRaw<{ id: string }>(
+      `UPDATE sources
+          SET archived = TRUE,
+              archived_at = $4::timestamptz,
+              archive_expires_at = $5::timestamptz,
+              embedding_drain_token = NULL
+        WHERE id = $1
+          AND archived IS NOT TRUE
+          AND embedding_drain_token = $2
+          AND embedding_drain_epoch = $3
+      RETURNING id`,
+      [
+        row.id,
+        drain.token,
+        drain.epoch,
+        asIsoTimestamp(row.archived_at),
+        asIsoTimestamp(row.archive_expires_at),
+      ],
+    );
+    if (updated.length !== 1 || updated[0]?.id !== row.id) {
+      throw new Error(`Could not restore archived migration source "${row.id}"`);
+    }
+  });
+}
+
+function assertNoArchivedDefaultForMigration(rows: ArchivedSourceMigrationRow[]): void {
+  if (rows.some((row) => row.id === 'default')) {
+    throw new Error('Cannot finalize an invalid archived "default" source migration');
+  }
+}
+
+async function finalizeArchivedMigrationRows(
+  targetEngine: BrainEngine,
+  archivedRows: ArchivedSourceMigrationRow[],
+): Promise<void> {
+  assertNoArchivedDefaultForMigration(archivedRows);
+  for (const row of archivedRows) {
+    await finalizeArchivedMigrationRow(targetEngine, row);
+  }
+}
+
+export function assertTargetSourceLifecycleParityForMigration(
+  sourceRows: FinalSourceMigrationState[],
+  targetRows: FinalSourceMigrationState[],
+): void {
+  assertTargetSourceIdsCompatibleForMigration(sourceRows, targetRows);
+  const targetById = new Map(targetRows.map((row) => [row.id, row]));
+  for (const source of sourceRows) {
+    const target = targetById.get(source.id);
+    if (!target) throw new Error(`Migration target is missing source "${source.id}"`);
+    if (target.embedding_drain_token !== null) {
+      throw new Error(`Migration target source "${source.id}" is still draining`);
+    }
+    if (target.archived !== source.archived) {
+      throw new Error(`Migration target source "${source.id}" has stale archive state`);
+    }
+    if (source.archived && (
+      asIsoTimestamp(target.archived_at) !== asIsoTimestamp(source.archived_at)
+      || asIsoTimestamp(target.archive_expires_at) !== asIsoTimestamp(source.archive_expires_at)
+    )) {
+      throw new Error(`Migration target source "${source.id}" has stale archive metadata`);
+    }
+  }
+}
+
+export function assertTargetSourceIdsCompatibleForMigration(
+  sourceRows: Array<{ id: string }>,
+  targetRows: Array<{ id: string }>,
+): void {
+  const sourceIds = new Set(sourceRows.map((row) => row.id));
+  const unexpectedTarget = targetRows.find((row) => !sourceIds.has(row.id));
+  if (unexpectedTarget) {
+    throw new Error(
+      `Migration target has unexpected source "${unexpectedTarget.id}"; `
+      + '--force overwrites pages but does not delete source registrations',
+    );
+  }
+}
+
+export function assertTargetSourceLifecycleCompatibleForMigration(
+  sourceRows: SourceMigrationLifecycleState[],
+  targetRows: SourceMigrationLifecycleState[],
+  opts: { allowMigrationDrain?: boolean } = {},
+): void {
+  // Repeat the source check at the exact pre-mutation snapshot. Target setup
+  // can take long enough for a drain to begin after command-entry preflight.
+  assertSourceMigrationLifecycleSnapshot(sourceRows);
+  assertTargetSourceIdsCompatibleForMigration(sourceRows, targetRows);
+  const sourceById = new Map(sourceRows.map((row) => [row.id, row]));
+  for (const target of targetRows) {
+    const source = sourceById.get(target.id)!;
+    if (target.embedding_drain_token !== null) {
+      const purpose = sourceArchiveDrainPurpose(target.embedding_drain_token);
+      const recoverableMigrationDrain = purpose === 'migration'
+        && source.archived
+        && !target.archived
+        && opts.allowMigrationDrain !== false;
+      if (!recoverableMigrationDrain) {
+        if (purpose === 'migration' && opts.allowMigrationDrain === false) {
+          throw new Error(
+            `Migration target source "${target.id}" has active migration recovery; `
+            + 'rerun migration without --force before overwriting target pages',
+          );
+        }
+        throw new Error(
+          `Migration target source "${target.id}" has an incompatible ${purpose} archive drain`,
+        );
+      }
+    }
+    if (target.archived && !source.archived) {
+      throw new Error(
+        `Migration target source "${target.id}" is archived but the source is active`,
+      );
+    }
+  }
+}
+
+async function recoverTargetMigrationDrainsBeforePageMutation(
+  sourceRows: FinalSourceMigrationState[],
+  targetRows: RecoverySourceMigrationState[],
+  targetEngine: BrainEngine,
+  opts: Pick<MigrateOpts, 'revokeStaleLeases' | 'confirmDestructive'>,
+): Promise<void> {
+  const sourceById = new Map(sourceRows.map((row) => [row.id, row]));
+  for (const target of targetRows) {
+    if (sourceArchiveDrainPurpose(target.embedding_drain_token) !== 'migration') continue;
+    const source = sourceById.get(target.id);
+    if (!source || !source.archived || target.archived) continue;
+    const drain = migrationDrainFromTargetState(target);
+    if (opts.revokeStaleLeases) {
+      const recovery = await revokeStaleSourceEmbeddingLeases(targetEngine, target.id, {
+        confirmDestructive: opts.confirmDestructive,
+        expectedDrain: { token: drain.token, epoch: drain.epoch },
+      });
+      console.log(
+        `Revoked ${recovery.revoked} stale target embedding lease(s) for source "${target.id}"; `
+        + `${recovery.remaining} current lease(s) remain.`,
+      );
+    }
+    try {
+      // Recovery re-stages the target source as active instead of finalizing
+      // archive metadata from the pre-wait source snapshot. The normal copy
+      // and final dual-locked parity step will apply the source's current
+      // lifecycle truth after any potentially long provider wait.
+      await waitForSourceEmbeddingLeases(targetEngine, drain);
+      if (!await cancelSourceArchiveDrain(targetEngine, drain)) {
+        throw new Error('target migration drain ownership changed during recovery');
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Could not recover target migration drain for source "${target.id}" before page mutation: `
+        + `${detail}. Target pages were not changed. After the provider owner finishes, rerun `
+        + 'the same migration command; if the owner is stale, add '
+        + '--revoke-stale-leases --confirm-destructive.',
+        { cause: error },
+      );
+    }
+  }
+}
+
+/** Restore final archive state after every migrated source-owned row lands. */
+export async function finalizeArchivedSourceRowsForMigration(
+  sourceEngine: BrainEngine,
+  targetEngine: BrainEngine,
+): Promise<number> {
+  const archivedRows = await sourceEngine.executeRaw<ArchivedSourceMigrationRow>(
+    `SELECT id, archived_at, archive_expires_at
+       FROM sources
+      WHERE archived IS TRUE
+      ORDER BY id`,
+  );
+  await finalizeArchivedMigrationRows(targetEngine, archivedRows);
+
+  return archivedRows.length;
 }
 
 export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]): Promise<void> {
@@ -206,6 +592,11 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     console.error(`Already using ${opts.targetEngine} engine. Nothing to migrate.`);
     process.exit(1);
   }
+
+  // Run against the source before connecting to, initializing, or possibly
+  // force-wiping the target. The helper repeats this check immediately before
+  // source-row copy as defense against a drain that begins later in setup.
+  await assertSourceLifecycleReadyForMigration(sourceEngine);
 
   // Build target config
   const targetConfig: EngineConfig = { engine: opts.targetEngine };
@@ -227,6 +618,54 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   await targetEngine.connect(targetConfig);
   await targetEngine.initSchema();
 
+  // `--force` deletes page-owned data, not arbitrary source registrations.
+  // Reject an incompatible target before deleting or copying anything. The
+  // final locked parity check repeats this fail-closed if target state changes
+  // while a long migration is running.
+  let [sourceLifecycle, targetLifecycle] = await Promise.all([
+    sourceEngine.executeRaw<FinalSourceMigrationState>(
+      `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token
+         FROM sources ORDER BY id`,
+    ),
+    targetEngine.executeRaw<RecoverySourceMigrationState>(
+      `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token,
+              embedding_drain_epoch
+         FROM sources ORDER BY id`,
+    ),
+  ]);
+  try {
+    assertTargetSourceLifecycleCompatibleForMigration(sourceLifecycle, targetLifecycle, {
+      allowMigrationDrain: true,
+    });
+    // Complete only migration-owned target drains before the non-empty-target
+    // decision. This recovery-only phase never touches pages. It closes the
+    // cross-machine case where durable DB drain state survives but the local
+    // resume manifest does not.
+    await recoverTargetMigrationDrainsBeforePageMutation(
+      sourceLifecycle,
+      targetLifecycle,
+      targetEngine,
+      opts,
+    );
+    [sourceLifecycle, targetLifecycle] = await Promise.all([
+      sourceEngine.executeRaw<FinalSourceMigrationState>(
+        `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token
+           FROM sources ORDER BY id`,
+      ),
+      targetEngine.executeRaw<RecoverySourceMigrationState>(
+        `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token,
+                embedding_drain_epoch
+           FROM sources ORDER BY id`,
+      ),
+    ]);
+    assertTargetSourceLifecycleCompatibleForMigration(sourceLifecycle, targetLifecycle, {
+      allowMigrationDrain: false,
+    });
+  } catch (error) {
+    await targetEngine.disconnect();
+    throw error;
+  }
+
   // Load the resume manifest before deciding whether a non-empty target is
   // safe. A matching v2 manifest proves that the existing rows belong to an
   // interrupted migration to this exact target, so that case resumes in place.
@@ -242,19 +681,19 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   const canResume = manifest !== null && manifestMatchesTarget(manifest, targetId);
   if (targetStats.page_count > 0 && !opts.force && !canResume) {
     console.error(`Target brain is not empty (${targetStats.page_count} pages).`);
-    console.error('Run with --force to overwrite, or migrate to an empty brain.');
+    console.error('Run with --force to overwrite target pages, or migrate to an empty brain.');
     await targetEngine.disconnect();
     process.exit(1);
   }
 
   if (targetStats.page_count > 0 && opts.force) {
-    console.log('--force: wiping target brain...');
+    console.log('--force: wiping target pages...');
     // v0.18.0+ multi-source: deletePage(slug) is now source-scoped (defaults
     // to 'default'), so per-page iteration would skip non-default-source
-    // rows. migrate-engine --force is a destructive wipe across the entire
-    // brain — all sources, all pages — so we issue a raw DELETE that matches
-    // the original semantic. Cascades through content_chunks / page_links /
-    // tags / timeline_entries / page_versions via existing FKs.
+    // rows. migrate-engine --force is a destructive wipe of all target pages
+    // across compatible sources, so we issue one raw DELETE. Cascades through
+    // content_chunks / page_links / tags / timeline_entries / page_versions
+    // via existing FKs; source registrations themselves are never deleted.
     await targetEngine.executeRaw('DELETE FROM pages');
     manifest = null;
     clearManifest();
@@ -267,7 +706,11 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   }
 
   console.log('Copying source rows...');
-  const sourceCount = await copySourceRowsForMigration(sourceEngine, targetEngine);
+  const sourceCount = await copySourceRowsForMigration(
+    sourceEngine,
+    targetEngine,
+    { stageArchivedAsActive: true },
+  );
   console.log(`Copied ${sourceCount} source rows.`);
 
   // Continue the matching manifest, or create a fresh one.
@@ -413,7 +856,50 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
       ? { database_url: targetConfig.database_url, database_path: undefined }
       : { database_path: targetConfig.database_path, database_url: undefined }),
   };
-  saveConfig(newConfig);
+
+  // Linearize the final lifecycle snapshot and config switch. The source lock
+  // blocks archive-begin and provider-acquire; row locks also fence restore,
+  // which predates the advisory protocol. After target archive finalization,
+  // the target lock and row locks preserve verified parity through saveConfig.
+  // Both engines differ by construction, so these transactions cannot share
+  // a connection or self-deadlock.
+  let archivedSourceCount = 0;
+  await sourceEngine.transaction(async (sourceTx) => {
+    await sourceTx.executeRaw(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended('gbrain:source-lifecycle', 0)
+       )`,
+    );
+    const sourceLifecycle = await sourceTx.executeRaw<FinalSourceMigrationState>(
+      `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token
+         FROM sources
+        ORDER BY (id = 'default') DESC, id
+        FOR UPDATE`,
+    );
+    assertSourceMigrationLifecycleSnapshot(sourceLifecycle);
+    const archivedRows = sourceLifecycle.filter((row) => row.archived);
+    await finalizeArchivedMigrationRows(targetEngine, archivedRows);
+    archivedSourceCount = archivedRows.length;
+
+    await targetEngine.transaction(async (targetTx) => {
+      await targetTx.executeRaw(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended('gbrain:source-lifecycle', 0)
+         )`,
+      );
+      const targetLifecycle = await targetTx.executeRaw<FinalSourceMigrationState>(
+        `SELECT id, archived, archived_at, archive_expires_at, embedding_drain_token
+           FROM sources
+          ORDER BY (id = 'default') DESC, id
+          FOR UPDATE`,
+      );
+      assertTargetSourceLifecycleParityForMigration(sourceLifecycle, targetLifecycle);
+      saveConfig(newConfig);
+    });
+  });
+  if (archivedSourceCount > 0) {
+    console.log(`Restored archive state for ${archivedSourceCount} source row(s).`);
+  }
 
   // Clean up
   clearManifest();

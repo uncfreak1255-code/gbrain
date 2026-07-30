@@ -79,6 +79,25 @@ describe('source-hygiene advisor collector', () => {
     });
   });
 
+  test('does not offer a source archive command for a migration-owned drain', () => {
+    const findings = sourceHygieneFindings(packet([
+      decision('migration-stuck', 'recovery_required', {
+        draining: true,
+        recovery_mode: 'migration_resume',
+        proposed_command_argv: null,
+        safe_for_agent_review: true,
+      }),
+    ]));
+
+    expect(findings[0]).toMatchObject({
+      id: 'source_recovery_required:migration-stuck',
+      ask_user: true,
+      fix: { command_argv: null },
+    });
+    expect(findings[0]?.title).toContain('engine migration');
+    expect(findings[0]?.detail).toContain('Rerun that migration');
+  });
+
   test('marks a proven empty source as agent-reviewable soft archive', () => {
     const findings = sourceHygieneFindings(packet([
       decision('empty-source', 'archive_candidate'),

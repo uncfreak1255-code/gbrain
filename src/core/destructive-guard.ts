@@ -213,8 +213,13 @@ export async function softDeleteSourceGuarded(
   }
   const drain = await beginSourceArchiveDrain(engine, sourceId, purpose);
   if (!drain) return { result: null, reason: 'source_not_active' };
-  if (drain.purpose === 'hygiene_candidate' && purpose !== 'hygiene_candidate') {
-    return { result: null, reason: 'hygiene_candidate_resume_required' };
+  if (drain.purpose !== purpose) {
+    return {
+      result: null,
+      reason: drain.purpose === 'hygiene_candidate'
+        ? 'hygiene_candidate_resume_required'
+        : `${drain.purpose}_resume_required`,
+    };
   }
 
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;

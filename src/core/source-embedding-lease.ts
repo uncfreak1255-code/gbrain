@@ -9,6 +9,7 @@ const DEFAULT_ARCHIVE_WAIT_MS = 10 * 60_000;
 const DEFAULT_DB_OPERATION_MS = 30_000;
 const DEFAULT_STALE_LEASE_MS = 10 * 60_000;
 const HYGIENE_CANDIDATE_DRAIN_PREFIX = 'hygiene-candidate:';
+const MIGRATION_DRAIN_PREFIX = 'migration:';
 const MANUAL_DRAIN_PREFIX = 'manual:';
 
 const PROCESS_OWNER_HOST = hostname();
@@ -30,12 +31,12 @@ export interface SourceArchiveDrain {
   configJson: string;
 }
 
-export type SourceArchiveDrainPurpose = 'manual' | 'hygiene_candidate';
+export type SourceArchiveDrainPurpose = 'manual' | 'hygiene_candidate' | 'migration';
 
 export function sourceArchiveDrainPurpose(token: string | null): SourceArchiveDrainPurpose {
-  return token?.startsWith(HYGIENE_CANDIDATE_DRAIN_PREFIX)
-    ? 'hygiene_candidate'
-    : 'manual';
+  if (token?.startsWith(HYGIENE_CANDIDATE_DRAIN_PREFIX)) return 'hygiene_candidate';
+  if (token?.startsWith(MIGRATION_DRAIN_PREFIX)) return 'migration';
+  return 'manual';
 }
 
 export interface SourceDrainFinalizeState {
@@ -432,9 +433,12 @@ export async function beginSourceArchiveDrain(
       };
     }
 
-    const token = `${purpose === 'hygiene_candidate'
+    const tokenPrefix = purpose === 'hygiene_candidate'
       ? HYGIENE_CANDIDATE_DRAIN_PREFIX
-      : MANUAL_DRAIN_PREFIX}${randomUUID()}`;
+      : purpose === 'migration'
+        ? MIGRATION_DRAIN_PREFIX
+        : MANUAL_DRAIN_PREFIX;
+    const token = `${tokenPrefix}${randomUUID()}`;
     const updated = await tx.executeRaw<{
       embedding_drain_token: string;
       embedding_drain_epoch: number | string;
@@ -561,7 +565,10 @@ export async function waitForSourceEmbeddingLeases(
 export async function revokeStaleSourceEmbeddingLeases(
   engine: BrainEngine,
   sourceId: string,
-  opts: { confirmDestructive: boolean },
+  opts: {
+    confirmDestructive: boolean;
+    expectedDrain?: { token: string; epoch: number };
+  },
 ): Promise<StaleSourceEmbeddingLeaseRecovery> {
   if (!opts.confirmDestructive) {
     throw new Error(
@@ -596,6 +603,14 @@ export async function revokeStaleSourceEmbeddingLeases(
     const epoch = Number(source.embedding_drain_epoch);
     if (!Number.isSafeInteger(epoch) || epoch < 0) {
       throw new Error(`Source "${sourceId}" has an invalid embedding drain epoch`);
+    }
+    if (opts.expectedDrain && (
+      source.embedding_drain_token !== opts.expectedDrain.token
+      || epoch !== opts.expectedDrain.epoch
+    )) {
+      throw new Error(
+        `Embedding drain ownership changed for source "${sourceId}" before stale lease revocation`,
+      );
     }
 
     const revoked = await tx.executeRaw<{ lease_token: string }>(
@@ -679,14 +694,16 @@ export async function lockSourceDrainForFinalize(
 export async function cancelSourceArchiveDrain(
   engine: BrainEngine,
   drain: SourceArchiveDrain,
-): Promise<void> {
-  await engine.executeRaw(
+): Promise<boolean> {
+  const cleared = await engine.executeRaw<{ id: string }>(
     `UPDATE public.sources
         SET embedding_drain_token = NULL
       WHERE id = $1
         AND archived IS NOT TRUE
         AND embedding_drain_token = $2
-        AND embedding_drain_epoch = $3`,
+        AND embedding_drain_epoch = $3
+    RETURNING id`,
     [drain.sourceId, drain.token, drain.epoch],
   );
+  return cleared.length === 1;
 }

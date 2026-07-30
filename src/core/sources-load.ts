@@ -126,7 +126,12 @@ async function querySourcesCompat(
 
 /** Recovery guidance shared by single-source active-work entry points. */
 export function sourceDrainResumeMessage(sourceId: string, drainToken?: string | null): string {
-  const candidateFlag = sourceArchiveDrainPurpose(drainToken ?? null) === 'hygiene_candidate'
+  const purpose = sourceArchiveDrainPurpose(drainToken ?? null);
+  if (purpose === 'migration') {
+    return `Source "${sourceId}" has an interrupted engine-migration drain; `
+      + 'rerun the engine migration before continuing.';
+  }
+  const candidateFlag = purpose === 'hygiene_candidate'
     ? ' --if-hygiene-candidate'
     : '';
   return `Source "${sourceId}" has an interrupted archive drain; resume with `

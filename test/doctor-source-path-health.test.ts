@@ -80,6 +80,27 @@ describe('Doctor source path health', () => {
     });
   });
 
+  test('reports migration drains without suggesting a plain archive command', async () => {
+    const hygiene = packet([
+      sourceDecision('migration-stuck', 'recovery_required', {
+        draining: true,
+        recovery_mode: 'migration_resume',
+        proposed_command_argv: null,
+        safe_for_agent_review: true,
+      }),
+    ]);
+    const check = await checkSourcePathHealth({} as never, { packet: hygiene });
+
+    expect(check.message).toContain('engine migration');
+    expect(check.details).toMatchObject({
+      fix_hint: expect.stringContaining('Rerun the interrupted engine migration'),
+      recovery_required: [{
+        source_id: 'migration-stuck',
+        proposed_command_argv: null,
+      }],
+    });
+  });
+
   test('empty missing source is a warning for adversarial soft-archive review', async () => {
     const hygiene = packet([
       sourceDecision('empty-source', 'archive_candidate', {

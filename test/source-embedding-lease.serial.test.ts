@@ -6,6 +6,7 @@ import { softDeleteSource } from '../src/core/destructive-guard.ts';
 import {
   __setSourceEmbeddingLeaseTimingsForTests,
   beginSourceArchiveDrain,
+  cancelSourceArchiveDrain,
   revokeStaleSourceEmbeddingLeases,
   SourceEmbeddingLeaseLostError,
   waitForSourceEmbeddingLeases,
@@ -318,6 +319,41 @@ describe('source embedding provider leases', () => {
       confirmDestructive: true,
     })).resolves.toEqual({ revoked: 1, remaining: 0 });
     await expect(softDeleteSource(db, 'operator-recovery')).resolves.not.toBeNull();
+  });
+
+  test('stale-lease revocation refuses a replacement drain generation', async () => {
+    await addSource('replacement-recovery');
+    const before = await db.executeRaw<{ embedding_drain_epoch: number | string }>(
+      `SELECT embedding_drain_epoch FROM sources WHERE id = 'replacement-recovery'`,
+    );
+    await db.executeRaw(
+      `INSERT INTO source_embedding_leases
+         (lease_token, source_id, source_epoch, owner_host, owner_pid, owner_instance,
+          acquired_at, heartbeat_at)
+       VALUES ('replacement-stale-token', 'replacement-recovery', $1,
+               'remote.invalid', 2147483647, 'replacement-instance',
+               now() - interval '20 minutes', now() - interval '20 minutes')`,
+      [Number(before[0]!.embedding_drain_epoch)],
+    );
+    const first = await beginSourceArchiveDrain(db, 'replacement-recovery', 'migration');
+    expect(first?.purpose).toBe('migration');
+    expect(await cancelSourceArchiveDrain(db, first!)).toBe(true);
+    const replacement = await beginSourceArchiveDrain(db, 'replacement-recovery', 'manual');
+    expect(replacement?.purpose).toBe('manual');
+
+    await expect(revokeStaleSourceEmbeddingLeases(db, 'replacement-recovery', {
+      confirmDestructive: true,
+      expectedDrain: { token: first!.token, epoch: first!.epoch },
+    })).rejects.toThrow('ownership changed');
+    expect(await db.executeRaw<{ lease_token: string }>(
+      `SELECT lease_token FROM source_embedding_leases
+        WHERE source_id = 'replacement-recovery'`,
+    )).toEqual([{ lease_token: 'replacement-stale-token' }]);
+
+    expect(await cancelSourceArchiveDrain(db, replacement!)).toBe(true);
+    await db.executeRaw(
+      `DELETE FROM source_embedding_leases WHERE source_id = 'replacement-recovery'`,
+    );
   });
 });
 

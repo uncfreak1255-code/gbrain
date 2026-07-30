@@ -235,6 +235,9 @@ describe('sourceDrainResumeMessage', () => {
     expect(sourceDrainResumeMessage('candidate-source', 'hygiene-candidate:token')).toContain(
       '`gbrain sources archive candidate-source --if-hygiene-candidate`',
     );
+    expect(sourceDrainResumeMessage('migration-source', 'migration:token')).toContain(
+      'rerun the engine migration',
+    );
   });
 });
 

@@ -67,6 +67,7 @@ interface RegisteredSourcePath {
   archived: boolean;
   draining: boolean;
   drain_requires_hygiene_candidate: boolean;
+  drain_requires_migration_resume: boolean;
 }
 
 async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourcePath[]> {
@@ -75,7 +76,9 @@ async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourc
       `SELECT id, local_path, archived,
               embedding_drain_token IS NOT NULL AS draining,
               embedding_drain_token LIKE 'hygiene-candidate:%'
-                AS drain_requires_hygiene_candidate
+                AS drain_requires_hygiene_candidate,
+              embedding_drain_token LIKE 'migration:%'
+                AS drain_requires_migration_resume
          FROM sources WHERE local_path IS NOT NULL`,
     );
   } catch (error) {
@@ -85,7 +88,10 @@ async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourc
     ) throw error;
     try {
       const rows = await engine.executeRaw<
-        Omit<RegisteredSourcePath, 'draining' | 'drain_requires_hygiene_candidate'>
+        Omit<
+          RegisteredSourcePath,
+          'draining' | 'drain_requires_hygiene_candidate' | 'drain_requires_migration_resume'
+        >
       >(
         `SELECT id, local_path, archived FROM sources WHERE local_path IS NOT NULL`,
       );
@@ -93,6 +99,7 @@ async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourc
         ...row,
         draining: false,
         drain_requires_hygiene_candidate: false,
+        drain_requires_migration_resume: false,
       }));
     } catch (legacyError) {
       if (!isUndefinedColumnError(legacyError, 'archived')) throw legacyError;
@@ -100,6 +107,7 @@ async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourc
         Omit<
           RegisteredSourcePath,
           'archived' | 'draining' | 'drain_requires_hygiene_candidate'
+          | 'drain_requires_migration_resume'
         >
       >(
         `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
@@ -109,6 +117,7 @@ async function loadRegisteredPaths(engine: BrainEngine): Promise<RegisteredSourc
         archived: false,
         draining: false,
         drain_requires_hygiene_candidate: false,
+        drain_requires_migration_resume: false,
       }));
     }
   }
@@ -124,7 +133,8 @@ type AutomaticSourceState =
   | 'active'
   | 'archived'
   | 'draining'
-  | 'hygiene_candidate_draining';
+  | 'hygiene_candidate_draining'
+  | 'migration_draining';
 
 interface GitWorktreeInfo {
   commonDir: string;
@@ -271,7 +281,9 @@ export async function resolveSourceId(
     const source = registered.find((row) => row.id === archivedBest.id);
     const state: AutomaticSourceState = source?.archived
       ? 'archived'
-      : source?.drain_requires_hygiene_candidate
+      : source?.drain_requires_migration_resume
+        ? 'migration_draining'
+        : source?.drain_requires_hygiene_candidate
         ? 'hygiene_candidate_draining'
         : 'draining';
     throw inactiveAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`, state);
@@ -405,6 +417,9 @@ async function sourceStateOrThrowIfMissing(engine: BrainEngine, id: string): Pro
     if (rows[0].embedding_drain_token?.startsWith('hygiene-candidate:')) {
       return 'hygiene_candidate_draining';
     }
+    if (rows[0].embedding_drain_token?.startsWith('migration:')) {
+      return 'migration_draining';
+    }
     if (rows[0].embedding_drain_token !== null) return 'draining';
     return 'active';
   } catch (error) {
@@ -443,6 +458,13 @@ function inactiveAutomaticRouteError(
   signal: string,
   state: Exclude<AutomaticSourceState, 'active'>,
 ): Error {
+  if (state === 'migration_draining') {
+    return new Error(
+      `Source "${id}" has an interrupted engine-migration drain and cannot be selected automatically from ${signal}. ` +
+      'Rerun the engine migration before running normal commands. ' +
+      `Use --source ${id} only for an intentional migration or admin operation.`,
+    );
+  }
   if (state === 'draining' || state === 'hygiene_candidate_draining') {
     const candidateFlag = state === 'hygiene_candidate_draining'
       ? ' --if-hygiene-candidate'
@@ -569,7 +591,9 @@ export async function resolveSourceWithTier(
     const source = registered.find((row) => row.id === archivedBest.id);
     const state: AutomaticSourceState = source?.archived
       ? 'archived'
-      : source?.drain_requires_hygiene_candidate
+      : source?.drain_requires_migration_resume
+        ? 'migration_draining'
+        : source?.drain_requires_hygiene_candidate
         ? 'hygiene_candidate_draining'
         : 'draining';
     throw inactiveAutomaticRouteError(archivedBest.id, `local path ${archivedBest.detail}`, state);

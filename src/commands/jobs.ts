@@ -1331,17 +1331,33 @@ export async function resolveSyncJobSourceId(
       `SELECT id
          FROM public.sources
         WHERE local_path = $1
-          AND archived IS NOT TRUE
-          AND embedding_drain_token IS NULL
-        ORDER BY CASE WHEN id = 'default' THEN 0 ELSE 1 END, id
+        ORDER BY CASE
+                   WHEN archived IS NOT TRUE AND embedding_drain_token IS NULL THEN 0
+                   ELSE 1
+                 END,
+                 CASE WHEN id = 'default' THEN 0 ELSE 1 END,
+                 id
         LIMIT 1`,
       [repoPath],
     );
     return rows[0]?.id;
   } catch {
-    // The sources table may not exist on very old brains. Preserve the legacy
-    // global config.sync.* anchor in performSync when lookup is unavailable.
-    return undefined;
+    // Older brains can have sources.local_path without lifecycle columns.
+    // Preserve exact-source routing there too; only a genuinely unavailable
+    // sources table may fall back to the legacy global/default path.
+    try {
+      const rows = await engine.executeRaw<{ id: string }>(
+        `SELECT id
+           FROM public.sources
+          WHERE local_path = $1
+          ORDER BY CASE WHEN id = 'default' THEN 0 ELSE 1 END, id
+          LIMIT 1`,
+        [repoPath],
+      );
+      return rows[0]?.id;
+    } catch {
+      return undefined;
+    }
   }
 }
 

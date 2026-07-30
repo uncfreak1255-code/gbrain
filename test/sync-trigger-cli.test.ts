@@ -14,6 +14,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runSyncTrigger } from '../src/commands/sync.ts';
 import { runSources } from '../src/commands/sources.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
+import { beginSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
 
 let engine: PGLiteEngine;
 
@@ -68,6 +69,31 @@ async function capture(args: string[]): Promise<{
     console.error = origErr;
   }
   return { stdout, stderr, exitCode };
+}
+
+async function captureSources(args: string[]): Promise<{
+  stderr: string;
+  exitCode: number | null;
+}> {
+  const origExit = process.exit;
+  const origErr = console.error;
+  let stderr = '';
+  let exitCode: number | null = null;
+  const exitError = new Error('__sources_exit__');
+  process.exit = ((code?: number) => {
+    exitCode = code ?? 0;
+    throw exitError;
+  }) as never;
+  console.error = (...a: unknown[]) => { stderr += a.map(String).join(' ') + '\n'; };
+  try {
+    await runSources(engine, args);
+  } catch (e) {
+    if (e !== exitError) throw e;
+  } finally {
+    process.exit = origExit;
+    console.error = origErr;
+  }
+  return { stderr, exitCode };
 }
 
 describe('runSyncTrigger', () => {
@@ -151,6 +177,27 @@ describe('runSyncTrigger', () => {
       `SELECT archived, embedding_drain_token FROM sources WHERE id = 'default'`,
     );
     expect(rows).toEqual([{ archived: false, embedding_drain_token: null }]);
+  });
+
+  test('plain non-default archive refuses a migration drain with migration guidance', async () => {
+    const sourceId = 'migration-stuck';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ($1, 'Migration Stuck', '{}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET archived = FALSE, embedding_drain_token = NULL`,
+      [sourceId],
+    );
+    const drain = await beginSourceArchiveDrain(engine, sourceId, 'migration');
+    expect(drain?.purpose).toBe('migration');
+
+    const result = await captureSources(['archive', sourceId]);
+    expect(result.exitCode).toBe(4);
+    expect(result.stderr).toContain('interrupted engine-migration drain');
+    expect(result.stderr).toContain('rerun the engine migration');
+    expect((await engine.executeRaw<{ embedding_drain_token: string | null }>(
+      `SELECT embedding_drain_token FROM sources WHERE id = $1`,
+      [sourceId],
+    ))[0]?.embedding_drain_token).toBe(drain!.token);
   });
 
   test('valid trigger submits sync job + prints job_id=N to stdout', async () => {

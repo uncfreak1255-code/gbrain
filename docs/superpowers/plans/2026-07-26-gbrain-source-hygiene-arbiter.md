@@ -134,7 +134,7 @@ Expected: FAIL before integration.
 - [ ] Gate autopilot's independent protected atom-drain submitter on the same source-hygiene result so it cannot spend around the planner.
 - [ ] Re-read source health in the atom-drain job handler immediately before spend, closing the queue-time/execution-time race.
 - [ ] Replace the generic `sync_freshness` “run sync” hint for a missing directory with the source-hygiene recovery/archive direction.
-- [ ] Add the Advisor collector and mark deterministic archive candidates as agent-reviewable rather than Sawyer-choice items.
+- [ ] Add the Advisor collector and mark deterministic archive candidates as agent-reviewable rather than operator-choice items.
 - [ ] Keep credentials, paid work, customer impact, and ambiguous populated-source recovery as escalation boundaries.
 
 Run: `bun test test/source-hygiene.test.ts test/doctor.test.ts test/doctor-behavioral.test.ts test/doctor-categories.test.ts test/doctor-cause-rank.test.ts test/remediation-context.test.ts test/brain-score-recommendations.test.ts test/advisor-source-hygiene.test.ts test/advisor-op-gate.test.ts test/autopilot-auto-drain-wiring.test.ts test/extract-atoms-drain-handler.test.ts test/e2e/onboard-full-flow.test.ts`
@@ -170,16 +170,16 @@ Expected: PASS with regenerated documentation indexes tracked deliberately.
 **Runtime only; never commit private exports to the GBrain code repository or push them remotely. A private local recovery-repository commit is required. Current-turn authorization is the user's explicit “Do 1-5”; stop if live evidence no longer matches the approved zero-content/populated-source classification:**
 - [ ] Freshly verify source counts, shared path, remote/config metadata, active jobs/locks, archive status, and target absence.
 - [ ] Run the new source-scoped export for `default` into a new private directory on the same filesystem.
-- [ ] Verify exactly 443 unique slugs, 443 Markdown files/hashes, zero missing files, and the manifest checksum; report nullable source hashes honestly.
+- [ ] Verify the expected unique-slug count matches the Markdown file/hash count, with zero missing files, and verify the manifest checksum; report nullable source hashes honestly.
 - [ ] Initialize and commit the private recovery repository before archiving anything.
-- [ ] Capture the full source row/config and an exact restore command for `brain-sync-remote-thbelj`, then soft-archive it; verify archived and active readbacks.
+- [ ] Capture the full source row/config and an exact restore command for `example-empty-source`, then soft-archive it; verify archived and active readbacks.
 - [ ] Record that archive becomes destructive when its 72-hour purge window expires. Keep the duplicate archived and stop on any later recovery failure; restore before expiry only if the archive classification or archive action itself proves incorrect.
-- [ ] Recheck target absence, then atomically rename the committed recovery repository to `/Users/sawbeck/.gstack-brain-worktree`; never overwrite an existing directory.
+- [ ] Recheck target absence, then atomically rename the committed recovery repository to `/Users/alice-example/.gbrain-recovery-worktree`; never overwrite an existing directory.
 - [ ] Run `gbrain sync --source default --no-embed --no-extract` with a supported hard deadline and no concurrent source work.
-- [ ] Export `default` again into a separate private directory and compare canonical per-slug Markdown/raw hashes; verify page count remains 443.
+- [ ] Export `default` again into a separate private directory and compare canonical per-slug Markdown/raw hashes; verify the page count remains unchanged.
 - [ ] Run fresh `sources status`, Doctor, remediation-plan, and Advisor readbacks.
 
-Expected: the empty source is reversibly archived; all 443 pages remain retrievable and Git-backed; source-path failures clear; no paid job runs.
+Expected: the empty source is reversibly archived; every expected page remains retrievable and Git-backed; source-path failures clear; no paid job runs.
 
 ### Task 9: Adversarial review and verification
 

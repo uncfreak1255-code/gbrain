@@ -152,6 +152,23 @@ describe('classifySourceHygieneEvidence', () => {
       safe_for_agent_review: true,
     });
   });
+
+  test('routes an interrupted migration drain back to migration, never plain archive', () => {
+    const draining = classifySourceHygieneEvidence(evidence({
+      source_id: 'migration-stuck',
+      draining: true,
+      drain_requires_migration_resume: true,
+      repo_state: 'healthy',
+    }));
+
+    expect(draining).toMatchObject({
+      classification: 'recovery_required',
+      recovery_mode: 'migration_resume',
+      proposed_command_argv: null,
+      veto_reasons: ['embedding_drain_pending', 'migration_resume_required'],
+      safe_for_agent_review: true,
+    });
+  });
 });
 
 describe('gateProtectedSourceWork', () => {
