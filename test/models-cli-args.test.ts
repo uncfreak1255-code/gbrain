@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { runModels } from '../src/commands/models.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 function makeEngineStub(configMap: Record<string, string> = {}) {
   return {
@@ -71,15 +72,10 @@ describe('runModels CLI arg normalization', () => {
   });
 
   test('text output reports env as the winning tier source', async () => {
-    const originalEnv = process.env.GBRAIN_MODEL;
-    try {
-      process.env.GBRAIN_MODEL = 'haiku';
+    await withEnv({ GBRAIN_MODEL: 'haiku' }, async () => {
       const out = await captureStdout(() => runModels(makeEngineStub(), []));
       expect(out).toContain(`tier.utility    anthropic:claude-haiku-4-5-20251001`);
       expect(out).toContain('[env:GBRAIN_MODEL]');
-    } finally {
-      if (originalEnv === undefined) delete process.env.GBRAIN_MODEL;
-      else process.env.GBRAIN_MODEL = originalEnv;
-    }
+    });
   });
 });

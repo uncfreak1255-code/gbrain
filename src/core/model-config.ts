@@ -48,6 +48,13 @@ export interface ResolveModelOpts {
 }
 
 export interface ResolvedModelInfo {
+  /**
+   * Alias-resolved winner before the subagent runtime capability guard. Use
+   * this for diagnostics so a rejected configured model is not hidden by the
+   * runtime fallback.
+   */
+  selected: string;
+  /** Runtime model after any applicable subagent capability fallback. */
   resolved: string;
   /**
    * Resolution winner. Config keys are returned as their literal key
@@ -147,8 +154,10 @@ export async function resolveModelWithSource(
 
   // 1. CLI flag wins
   if (opts.cliFlag && opts.cliFlag.trim()) {
+    const selected = await resolveAlias(engine, opts.cliFlag.trim());
     return {
-      resolved: await resolveAlias(engine, opts.cliFlag.trim()),
+      selected,
+      resolved: selected,
       source: 'cli',
     };
   }
@@ -165,8 +174,10 @@ export async function resolveModelWithSource(
             emitDeprecationWarning(opts.deprecatedConfigKey, opts.configKey, /*ignored=*/ true);
           }
         }
+        const selected = await resolveAlias(engine, v.trim());
         return {
-          resolved: await resolveAlias(engine, v.trim()),
+          selected,
+          resolved: selected,
           source: opts.configKey,
         };
       }
@@ -177,8 +188,10 @@ export async function resolveModelWithSource(
       const v = await engine.getConfig(opts.deprecatedConfigKey);
       if (v && v.trim()) {
         emitDeprecationWarning(opts.deprecatedConfigKey, opts.configKey ?? '<no replacement>', /*ignored=*/ false);
+        const selected = await resolveAlias(engine, v.trim());
         return {
-          resolved: await resolveAlias(engine, v.trim()),
+          selected,
+          resolved: selected,
           source: opts.deprecatedConfigKey,
         };
       }
@@ -187,9 +200,10 @@ export async function resolveModelWithSource(
     // 4. Global default
     const def = await engine.getConfig('models.default');
     if (def && def.trim()) {
-      const resolved = await resolveAlias(engine, def.trim());
+      const selected = await resolveAlias(engine, def.trim());
       return {
-        resolved: enforceSubagentCapable(resolved, opts.tier, 'models.default'),
+        selected,
+        resolved: enforceSubagentCapable(selected, opts.tier, 'models.default'),
         source: 'models.default',
       };
     }
@@ -198,9 +212,10 @@ export async function resolveModelWithSource(
     if (opts.tier) {
       const tierVal = await engine.getConfig(`models.tier.${opts.tier}`);
       if (tierVal && tierVal.trim()) {
-        const resolved = await resolveAlias(engine, tierVal.trim());
+        const selected = await resolveAlias(engine, tierVal.trim());
         return {
-          resolved: enforceSubagentCapable(resolved, opts.tier, `models.tier.${opts.tier}`),
+          selected,
+          resolved: enforceSubagentCapable(selected, opts.tier, `models.tier.${opts.tier}`),
           source: `models.tier.${opts.tier}`,
         };
       }
@@ -210,9 +225,10 @@ export async function resolveModelWithSource(
   // 6. Env var
   const env = process.env[envVar];
   if (env && env.trim()) {
-    const resolved = await resolveAlias(engine, env.trim());
+    const selected = await resolveAlias(engine, env.trim());
     return {
-      resolved: enforceSubagentCapable(resolved, opts.tier, `env:${envVar}`),
+      selected,
+      resolved: enforceSubagentCapable(selected, opts.tier, `env:${envVar}`),
       source: `env:${envVar}`,
     };
   }
@@ -220,15 +236,19 @@ export async function resolveModelWithSource(
   // 7. Tier default (v0.31.12 — when no override beats us, the tier's
   //    canonical model wins over caller-supplied fallback)
   if (opts.tier && TIER_DEFAULTS[opts.tier]) {
+    const selected = await resolveAlias(engine, TIER_DEFAULTS[opts.tier]);
     return {
-      resolved: await resolveAlias(engine, TIER_DEFAULTS[opts.tier]),
+      selected,
+      resolved: selected,
       source: 'default',
     };
   }
 
   // 8. Hardcoded fallback (caller-supplied)
+  const selected = await resolveAlias(engine, opts.fallback);
   return {
-    resolved: await resolveAlias(engine, opts.fallback),
+    selected,
+    resolved: selected,
     source: 'default',
   };
 }

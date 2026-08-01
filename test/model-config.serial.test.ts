@@ -216,11 +216,12 @@ describe('resolveModel — v0.31.12 tier system', () => {
     // resolver falls back to TIER_DEFAULTS.subagent rather than burn money on
     // an unverified model.
     stub.set('models.tier.subagent', 'madeup-provider:weird-model');
-    const m = await resolveModel(stub as never, {
+    const info = await resolveModelWithSource(stub as never, {
       tier: 'subagent',
       fallback: 'sonnet',
     });
-    expect(m).toBe(TIER_DEFAULTS.subagent);
+    expect(info.selected).toBe('madeup-provider:weird-model');
+    expect(info.resolved).toBe(TIER_DEFAULTS.subagent);
     expect(stderrCapture).toContain('tier.subagent');
   });
 
