@@ -31,7 +31,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import {
   DEFAULT_ALIASES,
   TIER_DEFAULTS,
-  resolveModel,
+  resolveModelWithSource,
   type ModelTier,
 } from '../core/model-config.ts';
 
@@ -69,14 +69,11 @@ interface ModelsReport {
   aliases: { defaults: Record<string, string>; user: Record<string, string> };
 }
 
-async function probeSource(engine: BrainEngine, configKey: string, envVar: string): Promise<string | null> {
-  // For per-task probes, return the source the resolver USED (config / env /
-  // tier default / hardcoded). The resolver itself is the source of truth;
-  // we re-walk a subset of its precedence here to attribute the value.
-  const configVal = await engine.getConfig(configKey);
-  if (configVal && configVal.trim()) return `config: ${configKey}`;
-  if (process.env[envVar] && process.env[envVar]!.trim()) return `env: ${envVar}`;
-  return null;
+function formatResolutionSource(source: string): string {
+  if (source === 'default') return 'default';
+  if (source === 'cli') return 'cli';
+  if (source.startsWith('env:')) return source;
+  return `config: ${source}`;
 }
 
 async function buildReport(engine: BrainEngine): Promise<ModelsReport> {
@@ -84,26 +81,28 @@ async function buildReport(engine: BrainEngine): Promise<ModelsReport> {
 
   const tiers = {} as Record<ModelTier, ModelEntry>;
   for (const t of TIERS) {
-    const tierOverride = await engine.getConfig(`models.tier.${t}`);
-    // What models.default beats tier — re-walk the chain to attribute properly.
-    let source: string;
-    if (globalDefault && globalDefault.trim()) {
-      source = 'config: models.default';
-    } else if (tierOverride && tierOverride.trim()) {
-      source = `config: models.tier.${t}`;
-    } else {
-      source = 'default';
-    }
-    const resolved = await resolveModel(engine, { tier: t, fallback: TIER_DEFAULTS[t] });
-    tiers[t] = { tier: t, resolved, source };
+    const info = await resolveModelWithSource(engine, { tier: t, fallback: TIER_DEFAULTS[t] });
+    tiers[t] = {
+      tier: t,
+      resolved: info.resolved,
+      source: formatResolutionSource(info.source),
+    };
   }
 
   const per_task: ModelsReport['per_task'] = [];
   for (const { key, tier, description } of PER_TASK_KEYS) {
-    const resolved = await resolveModel(engine, { configKey: key, tier, fallback: TIER_DEFAULTS[tier] });
-    const explicit = await probeSource(engine, key, 'GBRAIN_MODEL');
-    const source = explicit ?? `tier.${tier}`;
-    per_task.push({ key, tier, resolved, source, description });
+    const info = await resolveModelWithSource(engine, {
+      configKey: key,
+      tier,
+      fallback: TIER_DEFAULTS[tier],
+    });
+    per_task.push({
+      key,
+      tier,
+      resolved: info.resolved,
+      source: info.source === 'default' ? `tier.${tier}` : formatResolutionSource(info.source),
+      description,
+    });
   }
 
   // User-defined aliases (engine.getConfig is the source; we don't enumerate

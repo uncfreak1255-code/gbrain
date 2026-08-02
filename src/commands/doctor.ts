@@ -3006,10 +3006,11 @@ async function checkEmbeddingEnvOverride(engine: BrainEngine): Promise<Check> {
 export async function checkSubagentCapability(engine: BrainEngine): Promise<Check> {
   try {
     const { classifyCapabilities } = await import('../core/ai/capabilities.ts');
-    const { isAnthropicProvider, resolveAlias, TIER_DEFAULTS } = await import('../core/model-config.ts');
-    const modelsSubagent = await engine.getConfig('models.subagent');
-    const tierSubagent = await engine.getConfig('models.tier.subagent');
-    const modelsDefault = await engine.getConfig('models.default');
+    const {
+      isAnthropicProvider,
+      resolveModelWithSource,
+      TIER_DEFAULTS,
+    } = await import('../core/model-config.ts');
     const gatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
     const gatewayLoopEnabled = typeof gatewayLoopRaw === 'string'
       && ['true', '1'].includes(gatewayLoopRaw.trim().toLowerCase());
@@ -3018,16 +3019,17 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       : `\`gbrain config set ${source} anthropic:claude-sonnet-4-6\``;
 
     // Helper: explain a verdict in user-facing terms.
-    const explain = (resolved: string, source: string): Check | null => {
-      const verdict = classifyCapabilities(resolved);
+    const explain = (configuredModel: string, source: string): Check | null => {
+      const verdict = classifyCapabilities(configuredModel);
       if (verdict === 'unusable:no_tools') {
         return {
           name: 'subagent_capability',
           status: 'warn',
           message:
-            `${source} is "${resolved}" but that provider/model lacks native tool calling. ` +
+            `${source} is "${configuredModel}" but that provider/model lacks native tool calling. ` +
             `The subagent loop cannot run on this model — runtime will fall back to claude-sonnet-4-6. ` +
             `Fix: \`gbrain config set ${source} <provider>:<model-with-tools>\` (e.g. anthropic:claude-sonnet-4-6 or openai:gpt-5.2).`,
+          details: { source, configured_model: configuredModel },
         };
       }
       if (verdict === 'unknown') {
@@ -3035,18 +3037,19 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
           name: 'subagent_capability',
           status: 'warn',
           message:
-            `${source} is "${resolved}" which references an unknown provider. ` +
+            `${source} is "${configuredModel}" which references an unknown provider. ` +
             `Use a recipe-declared provider. ` +
             `Fix: \`gbrain config set ${source} anthropic:claude-sonnet-4-6\` or pick another known provider.`,
+          details: { source, configured_model: configuredModel },
         };
       }
       if (verdict === 'degraded:no_caching') {
-        if (!gatewayLoopEnabled && !isAnthropicProvider(resolved)) {
+        if (!gatewayLoopEnabled && !isAnthropicProvider(configuredModel)) {
           return {
             name: 'subagent_capability',
             status: 'warn',
             message:
-              `${source} is "${resolved}" and agent.use_gateway_loop is not enabled. ` +
+              `${source} is "${configuredModel}" and agent.use_gateway_loop is not enabled. ` +
               `This model has tool calling, but the legacy subagent path only runs Anthropic models; ` +
               `jobs will fail at dispatch. ` +
               `Enable: \`gbrain config set agent.use_gateway_loop true\` or switch back with ${switchBackFix(source)}.`,
@@ -3057,7 +3060,7 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
           status: 'warn',
           action_tier: 'yellow',
           message:
-            `${source} is "${resolved}" — provider does not support prompt caching. ` +
+            `${source} is "${configuredModel}" — provider does not support prompt caching. ` +
             `The subagent loop runs hot (cost scales linearly with conversation length). ` +
             `Anthropic may still win on cache-heavy loops, but cheaper tool-capable models can be better for broad agent fan-out. ` +
             `Compare live spend with \`gbrain budget reconcile --provider all --days 7 --json\` before changing the default.`,
@@ -3066,24 +3069,13 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       return null;
     };
 
-    const candidates: Array<{ source: string; raw: string | null | undefined }> = [
-      { source: 'models.subagent', raw: modelsSubagent },
-      { source: 'models.default', raw: modelsDefault },
-      { source: 'models.tier.subagent', raw: tierSubagent },
-      { source: 'env:GBRAIN_MODEL', raw: process.env.GBRAIN_MODEL },
-      { source: 'models.tier.subagent', raw: TIER_DEFAULTS.subagent },
-    ];
-    let resolvedSource = 'models.tier.subagent';
-    let resolvedModel = TIER_DEFAULTS.subagent;
-    for (const candidate of candidates) {
-      if (!candidate.raw?.trim()) continue;
-      const resolved = await resolveAlias(engine, candidate.raw.trim());
-      resolvedSource = candidate.source;
-      resolvedModel = resolved;
-      const issue = explain(resolved, candidate.source);
-      if (issue) return issue;
-      break;
-    }
+    const { selected: configuredModel, source: resolvedSource } = await resolveModelWithSource(engine, {
+      configKey: 'models.subagent',
+      tier: 'subagent',
+      fallback: TIER_DEFAULTS.subagent,
+    });
+    const issue = explain(configuredModel, resolvedSource);
+    if (issue) return issue;
     // v0.37 (T10 / D7) + v0.38 (D7 capability rename): warn when the configured
     // chat_model is non-Anthropic AND ANTHROPIC_API_KEY isn't set. With
     // agent.use_gateway_loop=false (the v0.38 default), subagent jobs still
@@ -3111,7 +3103,7 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
     return {
       name: 'subagent_capability',
       status: 'ok',
-      message: `Subagent model resolves via ${resolvedSource} to "${resolvedModel}" with full tool-loop capability`,
+      message: `Subagent model resolves via ${resolvedSource} to "${configuredModel}" with full tool-loop capability`,
     };
   } catch (e) {
     return {

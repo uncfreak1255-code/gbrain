@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { withEnv } from './helpers/with-env.ts';
 
 describe('doctor command', () => {
   test('doctor module exports runDoctor', async () => {
@@ -249,6 +250,33 @@ describe('doctor command', () => {
     expect(check.message).toContain('models.subagent');
     expect(check.message).toContain('anthropic:claude-sonnet-4-6');
   });
+
+  for (const source of [
+    { key: 'models.default', label: 'models.default' },
+    { key: 'models.tier.subagent', label: 'models.tier.subagent' },
+    { key: 'env', label: 'env:GBRAIN_MODEL' },
+  ]) {
+    test(`subagent capability reports unsupported ${source.label} before runtime fallback`, async () => {
+      const { checkSubagentCapability } = await import('../src/commands/doctor.ts');
+      const unsupported = 'madeup-provider:unsupported-subagent';
+      await withEnv({ GBRAIN_MODEL: source.key === 'env' ? unsupported : undefined }, async () => {
+        const engine = {
+          async getConfig(key: string) {
+            if (key === 'models.subagent') return null;
+            if (key === 'models.default') return source.key === 'models.default' ? unsupported : null;
+            if (key === 'models.tier.subagent') return source.key === 'models.tier.subagent' ? unsupported : null;
+            if (key === 'agent.use_gateway_loop') return 'true';
+            return null;
+          },
+        };
+
+        const check = await checkSubagentCapability(engine as never);
+        expect(check.status).toBe('warn');
+        expect(check.message).toContain(`${source.label} is "${unsupported}"`);
+        expect(check.details).toEqual({ source: source.label, configured_model: unsupported });
+      });
+    });
+  }
 
   test('jsonb_integrity check covers the four JSONB sites fixed in v0.12.1', async () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
