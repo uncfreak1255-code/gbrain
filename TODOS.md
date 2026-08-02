@@ -1,5 +1,42 @@
 # TODOS
 
+## Source export/import slug stability (filed v0.47.1.0)
+
+### Slug round-trip bug in source recovery export/reimport
+
+**What:** The `default` source's recovery export/reimport path does not
+guarantee slug stability across a round-trip. A 2026-08-01 recovery reimport
+(rebuilding the checkout at `.gstack-brain-worktree` after it had gone missing
+from disk entirely) produced 23 path-derived slug mismatches, creating 23
+duplicate active pages alongside the original 494. The duplicates were
+soft-deleted as a one-time cleanup (recoverable 72h from deletion, then
+permanent); the slug-derivation bug that produced them was not touched.
+
+**Why:** Any future export/reimport of this or another source will hit the
+same bug and reproduce the same class of duplicates. The fix belongs in the
+slug-derivation path itself, not in cleanup-after-the-fact — a corrective
+recovery run needs the guarantee, not another manual reconciliation.
+
+**Context:** Root cause traced live during recovery from a checkout going
+missing on disk. `.gstack-brain-worktree` was a standalone, no-origin private
+git repo (never meant to appear in `git worktree list` or be re-clonable),
+deliberately created 2026-07-27 from a DB export. `source_path_health` — new
+in PR #89 / v0.47.1.0 — was the first check that ever verified the path
+existed, and caught it missing entirely. Recovery used a fresh export from the
+live DB (494 pages / 972 chunks) rather than the stale 443-page snapshot,
+verified manifest, atomic restore at the expected path. Reconciliation of the
+23 duplicates: private pre-delete backup at commit `85a0ded`; restored
+checkout clean at `6948803`. Note for future verification: `sources list`'s
+`page_count` is a raw `COUNT(*) FROM pages WHERE source_id = $1` with no
+`deleted_at` filter, so it will NOT drop after a soft-delete — check
+`source_path_health`/`sync_failures` in `gbrain doctor`, not raw page counts.
+
+**Effort:** M — audit what makes path-derived slugs diverge from source
+across an export/reimport round-trip, then add a regression test that
+reproduces a round-trip and asserts zero slug drift.
+**Priority:** P2
+**Depends on:** none
+
 ## Seascape GBrain Profile follow-ups (filed 2026-06-22)
 
 ### Seascape source-health readback
