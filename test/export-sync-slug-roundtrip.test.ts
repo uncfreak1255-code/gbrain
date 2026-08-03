@@ -331,6 +331,30 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
+  test('rejects a third frontmatter slug even in a verified recovery checkout', async () => {
+    const legacySlug = await seedLegacyPage();
+    const relativePath = `${legacySlug}.md`;
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    writeFileSync(
+      join(recoveryRepo, relativePath),
+      '---\nslug: people/unrelated\n---\n# Recovery fixture with a spoofed slug\n',
+    );
+    writeRecoveryManifest(recoveryRepo, [legacySlug]);
+
+    const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
+    const recoverySlug = loadVerifiedRecoverySlugOverrides(recoveryRepo, 'default').get(relativePath)!;
+    const { importFromFile } = await import('../src/core/import-file.ts');
+    const result = await importFromFile(engine, join(recoveryRepo, relativePath), relativePath, {
+      noEmbed: true,
+      sourceId: 'default',
+      recoverySlug,
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.error).toContain('does not match the verified recovery slug');
+    expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
   test('ignores an incompatible recovery manifest for another source', async () => {
     writeFileSync(
       join(tmp, '.gbrain-export-manifest.json'),
