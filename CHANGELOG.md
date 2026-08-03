@@ -7,12 +7,12 @@ All notable changes to GBrain will be documented in this file.
 **Recovery snapshots now retain a page's established GBrain identity without relaxing import safety.** A source-scoped export can be restored or synced back into the same source even when a legacy database slug differs from its current filesystem path.
 
 ### Fixed
-- **Verified recovery imports preserve legacy stored slugs.** GBrain accepts a legacy slug only when the current source-scoped recovery manifest proves the exact page content, source, and snapshot hash. Normal imports and any unverified or cross-source manifest keep rejecting mismatched frontmatter slugs.
-- **Recovery sync recognizes the same verified identity after `git pull`.** Full imports, incremental adds, and renames reload the current receipt and preserve the existing page instead of creating a duplicate.
-- **Recovery receipts remain tamper-resistant.** Changed content, malformed hashes, symlink escapes, altered source IDs, and a third arbitrary frontmatter slug are rejected before page mutation.
+- **Verified recovery imports preserve legacy stored slugs.** GBrain accepts a legacy slug only when the complete receipt is bound to the same active source count and canonical content of its existing `(source_id, slug)` row. A receipt cannot self-authorize edited bytes or a new legacy identity; normal imports and unverified/cross-source manifests keep rejecting mismatched frontmatter slugs. A valid first recovery sync may normalize a legacy bookkeeping hash without invalidating the unchanged static snapshot.
+- **Recovery sync reloads and revalidates the current receipt after `git pull`.** An amended receipt that tries to add, rename, omit, or otherwise reassign recovery identity fails before any source mutation.
+- **Recovery receipts remain tamper-resistant.** Changed content, malformed hashes, dangling or escaping symlinks, altered source IDs, partial source snapshots, and a third arbitrary frontmatter slug are rejected before page mutation. The importer rechecks the exact receipt bytes at use time.
 
 ### For contributors
-- The focused recovery round-trip suite now exercises complete import, incremental add, rename, a real post-pull sync path, Windows-style paths, malformed and changed receipts, and attempted slug spoofing.
+- The focused recovery round-trip suite now exercises the static round trip, source-count completeness, forged self-consistent receipts, post-pull amendments, file TOCTOU, dangling manifests, Windows-style paths, malformed receipts, and attempted slug spoofing.
 
 ## [0.47.1.0] - 2026-07-29
 

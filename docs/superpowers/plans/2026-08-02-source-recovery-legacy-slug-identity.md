@@ -1,6 +1,6 @@
 # Source-Recovery Legacy Slug Identity Plan
 
-**Status:** implemented; awaiting final closeout
+**Status:** implemented and security-hardened; awaiting final closeout
 **Date:** 2026-08-02
 **Issue:** #3772
 
@@ -17,6 +17,12 @@ otherwise normalize into a second page.
   untrusted files.
 - Only a complete source-scoped export manifest for the same source may enable
   recovery identity handling.
+- Bind every claimed identity to an existing active `(source_id, slug)` row and
+  its stored content identity; a receipt is evidence from an untrusted
+  checkout, not authority by itself.
+- Require the manifest's complete page count to match the trusted active source
+  count. A recovery snapshot is immutable: edits, additions, renames, or
+  omissions cannot self-authorize a new legacy identity.
 - The manifest may preserve only the identity literally represented by its own
   `slug + '.md'` path; it must never authorize an arbitrary path to claim a
   different page.
@@ -50,8 +56,12 @@ Run: `bun test test/export-sync-slug-roundtrip.test.ts`
 
 - Read only the root `.gbrain-export-manifest.json` for a source checkout.
 - Accept the current complete source-export schema only when its `source_id`,
-  counts, per-page slug, deterministic relative path, and Markdown digest are
-  valid.
+  trusted active source count, deterministic relative path, and Markdown
+  digest are valid. Treat its per-page stored DB hash as a snapshot receipt,
+  not identity authority, because a valid first recovery sync can normalize a
+  historical hash without changing the trusted page content.
+- Bind importer-shaped page content to the active target row, with a canonical
+  render fallback for historical rows that predate importer hashes.
 - Build a read-only `relativePath -> storedSlug` map only for verified files.
 - Treat an invalid same-source recovery manifest or digest mismatch as a
   fail-closed recovery error before an identity override is issued, never as
@@ -66,25 +76,29 @@ Run the new focused parser/verification test file.
 
 - Load the verifier once after sync resolves the source checkout.
 - Pass the map into both incremental sync and full import; first recovery sync
-  must not bypass the fix.
+  must not bypass the fix, and import must recheck the exact verified bytes
+  before it writes.
 - Let `importFromFile` use a recovery slug only when it received the
   verifier's runtime source/path-bound capability. With no recovery identity,
   retain the existing path-authoritative behavior byte-for-byte.
 - In recovery mode, accept an absent slug field or one equal to the stored
-  recovery slug; reject any other explicit frontmatter slug.
+  recovery slug; reject any other explicit frontmatter slug. Do not treat a
+  checkout-edited receipt as authority for a new identity.
 
 ### 4. Verify the boundary, not just the happy path
 
 - Run the new round-trip regression.
 - Run the adjacent import and source-export suites.
 - Run `bun run ci:local:diff` when Docker is available.
-- Review the diff specifically for a path that lets `notes/random.md` claim an
-  unrelated existing slug. If found, keep the anti-spoof rejection and revise
-  the recovery proof rather than widening trust.
+- Review the diff specifically for a forged/self-consistent receipt, a partial
+  receipt, a post-verification file swap, or a path that lets `notes/random.md`
+  claim an unrelated existing slug. If found, keep the anti-spoof rejection and
+  revise the recovery proof rather than widening trust.
 
 ## Completion Gate
 
 The change is ready for review only when the source-scoped recovery fixture
-retains one exact active slug set, the ordinary spoof fixture remains rejected,
-and the focused plus diff-aware CI checks pass. This plan does not authorize a
-release, push, or production recovery export.
+retains one exact active slug set; forged, partial, post-pull, and TOCTOU
+receipts leave trusted rows unchanged; the ordinary spoof fixture remains
+rejected; and the focused plus diff-aware CI checks pass. This plan does not
+authorize a release, push, or production recovery export.
