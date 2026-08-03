@@ -64,6 +64,10 @@ interface IssuedRecoverySlugOverride {
 
 const verifiedRecoverySlugOverrides = new WeakSet<object>();
 const verifiedRecoverySlugOverrideValues = new WeakMap<object, IssuedRecoverySlugOverride>();
+// A same-source receipt seals the import surface. Keep that fact separate from
+// the page capabilities: an empty ordinary map means "no receipt", while an
+// empty sealed map means "a verified empty recovery snapshot".
+const sealedRecoveryOverrideMaps = new WeakSet<object>();
 
 function createVerifiedRecoverySlugOverride(
   value: IssuedRecoverySlugOverride,
@@ -86,6 +90,25 @@ function issuedOverride(value: unknown): IssuedRecoverySlugOverride | undefined 
     return undefined;
   }
   return verifiedRecoverySlugOverrideValues.get(value);
+}
+
+/**
+ * Resolve a path's recovery capability. Ordinary checkouts still return
+ * `undefined` for paths with no override; a checked same-source recovery
+ * snapshot instead fails closed. Call this immediately before every import
+ * use as well as during preflight, so a file added after inventory verification
+ * cannot fall back to ordinary path-derived identity.
+ */
+export function getVerifiedRecoverySlugOverrideForPath(
+  overrides: ReadonlyMap<string, VerifiedRecoverySlugOverride>,
+  repoPath: string,
+  relativePath: string,
+): VerifiedRecoverySlugOverride | undefined {
+  const override = overrides.get(relativePath);
+  if (override === undefined && sealedRecoveryOverrideMaps.has(overrides)) {
+    failManifest(repoPath, `unexpected recovery file ${relativePath}`);
+  }
+  return override;
 }
 
 /** A recovery capability no longer matches the trusted source at write time. */
@@ -539,6 +562,7 @@ export async function loadVerifiedRecoverySlugOverrides(
   }
 
   assertRecoveryHasNoUnlistedVisibleFiles(repoPath, new Set(overrides.keys()));
+  sealedRecoveryOverrideMaps.add(overrides);
 
   return overrides;
 }

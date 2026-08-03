@@ -4,7 +4,10 @@ import { join, relative } from 'path';
 import { cpus, totalmem } from 'os';
 import type { BrainEngine } from '../core/engine.ts';
 import { importFile, importImageFile, isImageFilePath } from '../core/import-file.ts';
-import { loadVerifiedRecoverySlugOverrides } from '../core/source-recovery-manifest.ts';
+import {
+  getVerifiedRecoverySlugOverrideForPath,
+  loadVerifiedRecoverySlugOverrides,
+} from '../core/source-recovery-manifest.ts';
 import { loadConfig, gbrainPath } from '../core/config.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
@@ -197,6 +200,17 @@ export async function runImport(
   const _walkT0 = Date.now();
   console.error(`[gbrain phase] import.collect_files start dir=${dir} strategy=${strategy}`);
   const allFiles = collectSyncableFiles(dir, { strategy });
+  // The sealed recovery map is checked once against the file list so no
+  // ordinary import can begin if a file appeared after receipt verification.
+  // `processFile` repeats the check just before use for the narrow
+  // collect-to-import window.
+  for (const filePath of allFiles) {
+    getVerifiedRecoverySlugOverrideForPath(
+      recoverySlugOverrides,
+      dir,
+      normalizeImportRelativePath(relative(dir, filePath)),
+    );
+  }
   console.error(
     `[gbrain phase] import.collect_files done ${Date.now() - _walkT0}ms files=${allFiles.length}`,
   );
@@ -248,6 +262,11 @@ export async function runImport(
 
   async function processFile(eng: BrainEngine, filePath: string) {
     const relativePath = normalizeImportRelativePath(relative(dir, filePath));
+    const recoverySlug = getVerifiedRecoverySlugOverrideForPath(
+      recoverySlugOverrides,
+      dir,
+      relativePath,
+    );
     // v0.31.2 (D5): per-file slow-path log. Fires only when a single
     // file takes >5s. The user's hang surfaces as one file taking
     // forever — without this, the agent can't see which file.
@@ -263,7 +282,7 @@ export async function runImport(
           noEmbed,
           sourceId,
           activePack: importActivePack,
-          recoverySlug: recoverySlugOverrides.get(relativePath),
+          recoverySlug,
         });
       const _fileMs = Date.now() - _fileT0;
       if (_fileMs > 5000) {

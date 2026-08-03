@@ -228,6 +228,29 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
+  test('keeps the recovery checkout sealed after capabilities are issued', async () => {
+    const legacySlug = await seedLegacyPage();
+    const unlistedPath = 'notes/legacy-slug.md';
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+
+    const {
+      getVerifiedRecoverySlugOverrideForPath,
+      loadVerifiedRecoverySlugOverrides,
+    } = await import('../src/core/source-recovery-manifest.ts');
+    const overrides = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
+    writeFileSync(
+      join(recoveryRepo, unlistedPath),
+      '---\ntype: note\ntitle: Late unlisted recovery file\n---\n\nMust not be imported.\n',
+    );
+
+    expect(() => getVerifiedRecoverySlugOverrideForPath(
+      overrides,
+      recoveryRepo,
+      unlistedPath,
+    )).toThrow(`unexpected recovery file ${unlistedPath}`);
+    expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
   test('rejects an edited receipt that tries to grant a new legacy identity during rename', async () => {
     const legacySlug = await seedLegacyPage();
     const renamedSlug = 'notes/renamed legacy slug';

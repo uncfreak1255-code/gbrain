@@ -4,7 +4,10 @@ import { join, relative } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
-import { loadVerifiedRecoverySlugOverrides } from '../core/source-recovery-manifest.ts';
+import {
+  getVerifiedRecoverySlugOverrideForPath,
+  loadVerifiedRecoverySlugOverrides,
+} from '../core/source-recovery-manifest.ts';
 import { collectSyncableFiles } from './import.ts';
 import { createInterface } from 'readline';
 import {
@@ -1897,6 +1900,18 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     renamed: manifest.renamed.filter(r => isSyncable(r.to, syncOpts)),
   };
 
+  // A recovery receipt is a sealed snapshot, not a normal repo manifest.
+  // Verify every input path before the delete/rename/import phases mutate any
+  // source rows, and repeat the lookup at use sites below to close the narrow
+  // window between this diff and each file import.
+  for (const path of [
+    ...filtered.added,
+    ...filtered.modified,
+    ...filtered.renamed.map(rename => rename.to),
+  ]) {
+    getVerifiedRecoverySlugOverrideForPath(recoverySlugOverrides, repoPath, path);
+  }
+
   // Delete pages that became un-syncable (modified but filtered out).
   // v0.20.0 Cathedral II SP-5: resolveSlugForPath picks the right slug shape
   // (markdown vs code) based on the chunker's classifier, so a Rust file that
@@ -2348,7 +2363,11 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       // Keep updateSlug and the subsequent importFile on the same authority,
       // otherwise a rename could leave a path-derived duplicate beside the
       // recovered slug.
-      const recoverySlug = recoverySlugOverrides.get(to);
+      const recoverySlug = getVerifiedRecoverySlugOverrideForPath(
+        recoverySlugOverrides,
+        repoPath,
+        to,
+      );
       const newSlug = recoverySlug?.slug ?? resolveSlugForPath(to);
       try {
         await engine.updateSlug(oldSlug, newSlug, renameOpts);
@@ -2566,7 +2585,11 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
             noEmbed,
             sourceId: opts.sourceId,
             activePack: syncActivePack,
-            recoverySlug: recoverySlugOverrides.get(path),
+            recoverySlug: getVerifiedRecoverySlugOverrideForPath(
+              recoverySlugOverrides,
+              syncRepoPath,
+              path,
+            ),
           }));
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
