@@ -208,7 +208,7 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('preserves code-page identity during a source-scoped recovery sync', async () => {
+  test('rejects source-scoped recovery sync when the receipt contains a code page', async () => {
     const { importCodeFile } = await import('../src/core/import-file.ts');
     const sourcePath = 'src/example.ts';
     const source = 'export const answer = 42;\n';
@@ -228,22 +228,25 @@ describe('source-scoped recovery export slug identity', () => {
     commitRecoveryCheckout(recoveryRepo);
 
     const { performSync } = await import('../src/commands/sync.ts');
-    await performSync(engine, {
+    await expect(performSync(engine, {
       repoPath: recoveryRepo,
       sourceId: 'default',
       strategy: 'code',
       noPull: true,
       noEmbed: true,
       noExtract: true,
-    });
+    })).rejects.toThrow(/source-scoped recovery export supports only markdown pages.*src-example-ts.*code page/i);
 
-    const restored = await engine.getPage(codeSlug, { sourceId: 'default' });
-    expect(restored?.type).toBe('code');
-    expect(restored?.compiled_truth).toBe(source);
-    const restoredRows = await engine.executeRaw<{ source_path: string | null }>(
-      `SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2`,
+    const restoredRows = await engine.executeRaw<{
+      compiled_truth: string | null;
+      page_kind: string | null;
+      source_path: string | null;
+    }>(
+      `SELECT compiled_truth, page_kind, source_path FROM pages WHERE source_id = $1 AND slug = $2`,
       ['default', codeSlug],
     );
+    expect(restoredRows[0]?.compiled_truth).toBe(source);
+    expect(restoredRows[0]?.page_kind).toBe('code');
     expect(restoredRows[0]?.source_path).toBe(sourcePath);
     expect(await activeSlugs()).toEqual([codeSlug]);
   });
