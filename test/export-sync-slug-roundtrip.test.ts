@@ -10,7 +10,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,7 +36,11 @@ function commitAll(repoPath: string, message: string): void {
   execFileSync('git', ['commit', '-m', message], { cwd: repoPath, stdio: 'pipe' });
 }
 
-function writeRecoveryManifest(repoPath: string, slugs: string[]): void {
+function writeRecoveryManifest(
+  repoPath: string,
+  slugs: string[],
+  dbContentHash: string | null,
+): void {
   writeFileSync(
     join(repoPath, '.gbrain-export-manifest.json'),
     JSON.stringify({
@@ -47,6 +51,7 @@ function writeRecoveryManifest(repoPath: string, slugs: string[]): void {
       raw_sidecar_count: 0,
       pages: slugs.map(slug => ({
         slug,
+        db_content_hash: dbContentHash,
         markdown_sha256: createHash('sha256')
           .update(readFileSync(join(repoPath, `${slug}.md`)))
           .digest('hex'),
@@ -185,9 +190,22 @@ describe('source-scoped recovery export slug identity', () => {
     });
 
     expect(await activeSlugs()).toEqual([legacySlug]);
+
+    // A source recovery is a static trusted snapshot, not a one-use escape
+    // hatch. Once it has restored the legacy identity, the unchanged checkout
+    // must remain syncable without reissuing or weakening the receipt.
+    await performSync(engine, {
+      repoPath: recoveryRepo,
+      sourceId: 'default',
+      noPull: true,
+      noEmbed: true,
+      noExtract: true,
+    });
+
+    expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('keeps recovery identity through an incremental rename', async () => {
+  test('rejects an edited receipt that tries to grant a new legacy identity during rename', async () => {
     const legacySlug = await seedLegacyPage();
     const renamedSlug = 'notes/renamed legacy slug';
     await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
@@ -206,21 +224,22 @@ describe('source-scoped recovery export slug identity', () => {
       cwd: recoveryRepo,
       stdio: 'pipe',
     });
-    writeRecoveryManifest(recoveryRepo, [renamedSlug]);
+    const trustedBeforeRename = await engine.getPage(legacySlug, { sourceId: 'default' });
+    writeRecoveryManifest(recoveryRepo, [renamedSlug], trustedBeforeRename!.content_hash ?? null);
     commitAll(recoveryRepo, 'rename legacy recovery page');
 
-    await performSync(engine, {
+    await expect(performSync(engine, {
       repoPath: recoveryRepo,
       sourceId: 'default',
       noPull: true,
       noEmbed: true,
       noExtract: true,
-    });
+    })).rejects.toThrow(`no active trusted source page exists for ${renamedSlug}`);
 
-    expect(await activeSlugs()).toEqual([renamedSlug]);
+    expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('reloads a recovery receipt after pull before incremental import', async () => {
+  test('rejects a receipt amended after pull before incremental import', async () => {
     const legacySlug = await seedLegacyPage();
     const pulledSlug = 'notes/pulled legacy slug';
     const remoteRepo = join(tmp, 'remote.git');
@@ -234,6 +253,9 @@ describe('source-scoped recovery export slug identity', () => {
 
     const { daemon, port } = await startGitDaemon(tmp);
     try {
+      // The production pull path bans the local-file transport. Exercise its
+      // permitted git:// loopback transport so this test proves that a pulled
+      // receipt is revalidated, rather than relying on a test-only bypass.
       execFileSync('git', ['remote', 'set-url', 'origin', `git://127.0.0.1:${port}/remote.git`], {
         cwd: recoveryRepo,
         stdio: 'pipe',
@@ -253,18 +275,23 @@ describe('source-scoped recovery export slug identity', () => {
         join(updaterRepo, `${pulledSlug}.md`),
         readFileSync(join(updaterRepo, `${legacySlug}.md`)),
       );
-      writeRecoveryManifest(updaterRepo, [legacySlug, pulledSlug]);
+      const trustedBeforePull = await engine.getPage(legacySlug, { sourceId: 'default' });
+      writeRecoveryManifest(
+        updaterRepo,
+        [legacySlug, pulledSlug],
+        trustedBeforePull!.content_hash ?? null,
+      );
       commitAll(updaterRepo, 'add pulled legacy recovery page');
       execFileSync('git', ['push', 'origin', 'HEAD'], { cwd: updaterRepo, stdio: 'pipe' });
 
-      await performSync(engine, {
+      await expect(performSync(engine, {
         repoPath: recoveryRepo,
         sourceId: 'default',
         noEmbed: true,
         noExtract: true,
-      });
+      })).rejects.toThrow('source page count 2 does not match the trusted active source count 1');
 
-      expect(await activeSlugs()).toEqual([legacySlug, pulledSlug]);
+      expect(await activeSlugs()).toEqual([legacySlug]);
     } finally {
       await stopGitDaemon(daemon);
     }
@@ -310,13 +337,98 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([]);
   });
 
+  test('rejects a forged self-consistent receipt before it can overwrite a trusted legacy row', async () => {
+    const legacySlug = await seedLegacyPage();
+    const relativePath = `${legacySlug}.md`;
+    const attackerContent = '# Attacker-controlled recovery bytes\n';
+    const trustedBefore = await engine.getPage(legacySlug, { sourceId: 'default' });
+    expect(trustedBefore).not.toBeNull();
+
+    mkdirSync(join(recoveryRepo, 'notes'), { recursive: true });
+    writeFileSync(join(recoveryRepo, relativePath), attackerContent);
+    writeFileSync(
+      join(recoveryRepo, '.gbrain-export-manifest.json'),
+      JSON.stringify({
+        schema_version: 1,
+        source_id: 'default',
+        source_page_count: 1,
+        page_count: 1,
+        raw_sidecar_count: 0,
+        pages: [{
+          slug: legacySlug,
+          // A forged receipt can copy the target row's public hash while
+          // self-certifying different bytes. The verifier must bind both
+          // values to the trusted source row before it issues an override.
+          db_content_hash: trustedBefore!.content_hash ?? null,
+          markdown_sha256: createHash('sha256').update(attackerContent).digest('hex'),
+          raw_sidecar_sha256: null,
+          raw_record_count: 0,
+        }],
+      }),
+    );
+
+    const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
+    await expect(loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default'))
+      .rejects.toThrow(`Markdown content does not match the trusted source page for ${relativePath}`);
+    expect((await engine.getPage(legacySlug, { sourceId: 'default' }))?.compiled_truth)
+      .toBe('Generic fixture body.');
+  });
+
+  test('rejects a self-consistent partial receipt before full sync can reconcile away source pages', async () => {
+    const legacySlug = await seedLegacyPage();
+    await engine.putPage(
+      'notes/other',
+      {
+        type: 'note',
+        title: 'Other recovery fixture',
+        compiled_truth: 'Independent trusted page.',
+        timeline: '',
+        frontmatter: {},
+        source_path: 'notes/other.md',
+      },
+      { sourceId: 'default' },
+    );
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    const trustedLegacy = await engine.getPage(legacySlug, { sourceId: 'default' });
+    writeRecoveryManifest(recoveryRepo, [legacySlug], trustedLegacy!.content_hash ?? null);
+
+    const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
+    await expect(loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default'))
+      .rejects.toThrow('source page count 1 does not match the trusted active source count 2');
+    expect(await activeSlugs()).toEqual([legacySlug, 'notes/other']);
+  });
+
+  test('rechecks the exact receipt bytes before import to close the file TOCTOU window', async () => {
+    const legacySlug = await seedLegacyPage();
+    const relativePath = `${legacySlug}.md`;
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+
+    const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
+    const recoverySlug = (await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default'))
+      .get(relativePath)!;
+    writeFileSync(join(recoveryRepo, relativePath), '# Changed after capability issuance\n');
+
+    const { importFromFile } = await import('../src/core/import-file.ts');
+    const result = await importFromFile(engine, join(recoveryRepo, relativePath), relativePath, {
+      noEmbed: true,
+      sourceId: 'default',
+      recoverySlug,
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.error).toContain('Unverified recovery slug override');
+    expect((await engine.getPage(legacySlug, { sourceId: 'default' }))?.compiled_truth)
+      .toBe('Generic fixture body.');
+  });
+
   test('cannot retarget an issued recovery override to a different slug', async () => {
     const legacySlug = await seedLegacyPage();
     await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
 
     const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
     const relativePath = `${legacySlug}.md`;
-    const recoverySlug = loadVerifiedRecoverySlugOverrides(recoveryRepo, 'default').get(relativePath)!;
+    const recoverySlug = (await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default'))
+      .get(relativePath)!;
 
     expect(Reflect.set(recoverySlug, 'slug', 'people/target')).toBe(false);
 
@@ -331,7 +443,7 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('rejects a third frontmatter slug even in a verified recovery checkout', async () => {
+  test('rejects a self-consistent receipt whose content no longer matches the trusted page', async () => {
     const legacySlug = await seedLegacyPage();
     const relativePath = `${legacySlug}.md`;
     await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
@@ -339,19 +451,12 @@ describe('source-scoped recovery export slug identity', () => {
       join(recoveryRepo, relativePath),
       '---\nslug: people/unrelated\n---\n# Recovery fixture with a spoofed slug\n',
     );
-    writeRecoveryManifest(recoveryRepo, [legacySlug]);
+    const trustedBefore = await engine.getPage(legacySlug, { sourceId: 'default' });
+    writeRecoveryManifest(recoveryRepo, [legacySlug], trustedBefore!.content_hash ?? null);
 
     const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
-    const recoverySlug = loadVerifiedRecoverySlugOverrides(recoveryRepo, 'default').get(relativePath)!;
-    const { importFromFile } = await import('../src/core/import-file.ts');
-    const result = await importFromFile(engine, join(recoveryRepo, relativePath), relativePath, {
-      noEmbed: true,
-      sourceId: 'default',
-      recoverySlug,
-    });
-
-    expect(result.status).toBe('skipped');
-    expect(result.error).toContain('does not match the verified recovery slug');
+    await expect(loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default'))
+      .rejects.toThrow(`Markdown content does not match the trusted source page for ${relativePath}`);
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
@@ -362,7 +467,7 @@ describe('source-scoped recovery export slug identity', () => {
     );
 
     const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
-    expect(loadVerifiedRecoverySlugOverrides(tmp, 'default')).toEqual(new Map());
+    expect(await loadVerifiedRecoverySlugOverrides(engine, tmp, 'default')).toEqual(new Map());
   });
 
   test('fails closed when a manifest names the requested source but has an unsupported schema', async () => {
@@ -372,14 +477,26 @@ describe('source-scoped recovery export slug identity', () => {
     );
 
     const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
-    expect(() => loadVerifiedRecoverySlugOverrides(tmp, 'default')).toThrow('unsupported schema_version');
+    await expect(loadVerifiedRecoverySlugOverrides(engine, tmp, 'default')).rejects.toThrow('unsupported schema_version');
   });
 
   test('fails closed when a present recovery manifest cannot be parsed', async () => {
     writeFileSync(join(tmp, '.gbrain-export-manifest.json'), '{not valid JSON');
 
     const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
-    expect(() => loadVerifiedRecoverySlugOverrides(tmp, 'default')).toThrow('could not parse .gbrain-export-manifest.json');
+    await expect(loadVerifiedRecoverySlugOverrides(engine, tmp, 'default'))
+      .rejects.toThrow('could not parse .gbrain-export-manifest.json');
+  });
+
+  test('fails closed for a dangling recovery manifest symlink', async () => {
+    symlinkSync(
+      join(tmp, 'missing-recovery-receipt.json'),
+      join(tmp, '.gbrain-export-manifest.json'),
+    );
+
+    const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
+    await expect(loadVerifiedRecoverySlugOverrides(engine, tmp, 'default'))
+      .rejects.toThrow('.gbrain-export-manifest.json must be a regular file');
   });
 
   test('normalizes Windows-style file paths before recovery override lookup', async () => {
@@ -388,7 +505,7 @@ describe('source-scoped recovery export slug identity', () => {
 
     const { normalizeImportRelativePath } = await import('../src/commands/import.ts');
     const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
-    const manifestPaths = loadVerifiedRecoverySlugOverrides(recoveryRepo, 'default');
+    const manifestPaths = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
     const windowsPath = `${legacySlug}.md`.replace(/\//g, '\\');
     const normalizedPath = normalizeImportRelativePath(windowsPath);
 

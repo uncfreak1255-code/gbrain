@@ -1706,7 +1706,8 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // incremental imports below must use receipts and file hashes from the exact
   // revision being diffed, not the pre-pull checkout. Full sync reloads the
   // same verifier in runImport.
-  const recoverySlugOverrides = loadVerifiedRecoverySlugOverrides(
+  const recoverySlugOverrides = await loadVerifiedRecoverySlugOverrides(
+    engine,
     repoPath,
     opts.sourceId ?? DEFAULT_SOURCE_ID,
   );

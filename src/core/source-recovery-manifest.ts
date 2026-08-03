@@ -3,24 +3,31 @@
  *
  * A recovery export writes each page at `<stored-slug>.md`. Legacy stored
  * slugs can contain characters that the current path slugifier normalizes, so
- * importing that checkout by path alone can fabricate a second page. This
- * module accepts an override only from a complete, source-matching export
- * manifest whose page bytes still match the exported SHA-256 receipt.
+ * importing that checkout by path alone can fabricate a second page.
  *
- * The manifest never authorizes a path to claim an unrelated slug: each entry
- * may map only the literal `<entry.slug>.md` path back to that same slug.
- * Files without a verified entry keep importFromFile's normal path-authority
- * and frontmatter anti-spoof behavior.
+ * The checkout is untrusted. A manifest's own SHA-256 values establish only
+ * integrity between the receipt and files beside it; they cannot authorize a
+ * file to address an existing page. This module therefore issues a recovery
+ * override only when the receipt is bound to the current trusted source row:
+ * its `(source_id, slug)` and importer-equivalent page content must agree.
+ * The exported DB hash is a snapshot receipt, not authority: a first valid
+ * recovery import can normalize a historical row to the current importer
+ * hash. Rows whose current hash is not importer-shaped fall back to an exact
+ * canonical render from the trusted row.
  */
 
 import { createHash } from 'crypto';
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'fs';
+import { lstatSync, readFileSync, realpathSync } from 'fs';
 import { isAbsolute, join, relative, resolve, sep } from 'path';
+import type { BrainEngine } from './engine.ts';
+import { hashParsedMarkdownForImport } from './import-content-hash.ts';
+import { parseMarkdown, serializePageToMarkdown } from './markdown.ts';
 
 const MANIFEST_FILENAME = '.gbrain-export-manifest.json';
 
 interface ExportManifestPage {
   slug: string;
+  db_content_hash: string | null;
   markdown_sha256: string;
 }
 
@@ -34,9 +41,10 @@ interface ExportManifest {
 }
 
 /**
- * Opaque capability issued only while this module verifies a manifest page.
- * The WeakSet gives importFromFile a runtime distinction between a checked
- * recovery mapping and a caller-supplied lookalike object.
+ * Opaque capability issued only while this module verifies both a recovery
+ * receipt and its matching trusted source row. The WeakSet gives
+ * importFromFile a runtime distinction between a checked recovery mapping and
+ * a caller-supplied lookalike object.
  */
 export interface VerifiedRecoverySlugOverride {
   readonly relativePath: string;
@@ -44,47 +52,79 @@ export interface VerifiedRecoverySlugOverride {
   readonly sourceId: string;
 }
 
-const verifiedRecoverySlugOverrides = new WeakSet<object>();
-const verifiedRecoverySlugOverrideValues = new WeakMap<object, {
+interface IssuedRecoverySlugOverride {
   relativePath: string;
   slug: string;
   sourceId: string;
-}>();
+  dbContentHash: string | null;
+  markdownSha256: string;
+  /** Present only for source rows that predate import content hashes. */
+  canonicalMarkdownSha256?: string;
+}
+
+const verifiedRecoverySlugOverrides = new WeakSet<object>();
+const verifiedRecoverySlugOverrideValues = new WeakMap<object, IssuedRecoverySlugOverride>();
 
 function createVerifiedRecoverySlugOverride(
-  relativePath: string,
-  slug: string,
-  sourceId: string,
+  value: IssuedRecoverySlugOverride,
 ): VerifiedRecoverySlugOverride {
-  const override: VerifiedRecoverySlugOverride = { relativePath, slug, sourceId };
+  const override: VerifiedRecoverySlugOverride = {
+    relativePath: value.relativePath,
+    slug: value.slug,
+    sourceId: value.sourceId,
+  };
   // The public shape is convenient for callers, but it is not the authority:
-  // retain the issued tuple privately and freeze the object so a holder cannot
-  // retarget a valid path capability to a different stored slug.
-  verifiedRecoverySlugOverrideValues.set(override, { relativePath, slug, sourceId });
+  // retain the receipt + source-row binding privately and freeze the object so
+  // a holder cannot retarget a valid capability to another stored slug.
+  verifiedRecoverySlugOverrideValues.set(override, value);
   verifiedRecoverySlugOverrides.add(override);
   return Object.freeze(override);
 }
 
+function issuedOverride(value: unknown): IssuedRecoverySlugOverride | undefined {
+  if (typeof value !== 'object' || value === null || !verifiedRecoverySlugOverrides.has(value)) {
+    return undefined;
+  }
+  return verifiedRecoverySlugOverrideValues.get(value);
+}
+
 /**
- * Recovery identity is valid only for the exact manifest-listed path that
- * received the capability. Callers cannot manufacture this proof from a
- * structurally similar object.
+ * Recheck a capability immediately before parsing/writing a file. This closes
+ * the file TOCTOU window between manifest loading and import, and verifies the
+ * source row still has the identity that issued the capability.
  */
-export function isVerifiedRecoverySlugOverride(
+export async function isVerifiedRecoverySlugOverride(
+  engine: BrainEngine,
   value: unknown,
   relativePath: string,
   sourceId: string,
-): value is VerifiedRecoverySlugOverride {
-  const issued = typeof value === 'object' && value !== null
-    ? verifiedRecoverySlugOverrideValues.get(value)
-    : undefined;
-  return (
-    typeof value === 'object'
-    && value !== null
-    && verifiedRecoverySlugOverrides.has(value)
-    && issued?.relativePath === relativePath
-    && issued.sourceId === sourceId
-  );
+  content: Buffer,
+): Promise<boolean> {
+  const issued = issuedOverride(value);
+  if (
+    issued === undefined
+    || issued.relativePath !== relativePath
+    || issued.sourceId !== sourceId
+    || sha256(content) !== issued.markdownSha256
+  ) {
+    return false;
+  }
+
+  const current = await engine.getPage(issued.slug, { sourceId });
+  if (!current || (current.content_hash ?? null) !== issued.dbContentHash) {
+    return false;
+  }
+
+  // Historical rows can legitimately have no import content hash. In that
+  // case, re-render the trusted row at use time rather than treating a null
+  // value as an authority wildcard.
+  if (issued.canonicalMarkdownSha256 !== undefined) {
+    const tags = await engine.getTags(issued.slug, { sourceId });
+    const canonical = Buffer.from(serializePageToMarkdown(current, tags), 'utf8');
+    if (sha256(canonical) !== issued.canonicalMarkdownSha256) return false;
+  }
+
+  return true;
 }
 
 function sha256(content: Buffer): string {
@@ -100,6 +140,11 @@ function failManifest(repoPath: string, detail: string): never {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && (error as { code?: unknown }).code === code;
 }
 
 function requireNonNegativeInteger(
@@ -146,10 +191,19 @@ function parseManifest(repoPath: string, parsed: unknown): ExportManifest {
     if (typeof value.slug !== 'string' || value.slug.length === 0) {
       failManifest(repoPath, `pages[${index}].slug must be a non-empty string`);
     }
+    if (value.db_content_hash !== null && (
+      typeof value.db_content_hash !== 'string' || !/^[a-f0-9]{64}$/i.test(value.db_content_hash)
+    )) {
+      failManifest(repoPath, `pages[${index}].db_content_hash must be a SHA-256 digest or null`);
+    }
     if (typeof value.markdown_sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(value.markdown_sha256)) {
       failManifest(repoPath, `pages[${index}].markdown_sha256 must be a SHA-256 digest`);
     }
-    return { slug: value.slug, markdown_sha256: value.markdown_sha256.toLowerCase() };
+    return {
+      slug: value.slug,
+      db_content_hash: value.db_content_hash === null ? null : value.db_content_hash.toLowerCase(),
+      markdown_sha256: value.markdown_sha256.toLowerCase(),
+    };
   });
 
   return {
@@ -203,26 +257,97 @@ function assertRegularPathWithoutSymlinkParents(
   }
 }
 
+async function verifyPageAgainstTrustedSource(
+  engine: BrainEngine,
+  page: ExportManifestPage,
+  sourceId: string,
+  relativePath: string,
+  content: Buffer,
+  repoPath: string,
+): Promise<{ dbContentHash: string | null; canonicalMarkdownSha256?: string }> {
+  const sourcePage = await engine.getPage(page.slug, { sourceId });
+  if (!sourcePage) {
+    failManifest(repoPath, `no active trusted source page exists for ${page.slug}`);
+  }
+
+  const dbContentHash = sourcePage.content_hash ?? null;
+
+  // Most source rows originated through importFromContent, so this one pure
+  // parse/hash check is the fast, exact authority binding used by the importer
+  // itself. It is intentionally not a manifest-only check. Do not require
+  // page.db_content_hash to equal dbContentHash here: a legitimate first
+  // recovery sync can normalize a historical/programmatic hash to this
+  // importer-shaped value while leaving the static export receipt unchanged.
+  if (dbContentHash !== null) {
+    const parsed = parseMarkdown(content.toString('utf8'), relativePath);
+    if (hashParsedMarkdownForImport(parsed) === dbContentHash) {
+      return { dbContentHash };
+    }
+  }
+
+  // Some historical/programmatic rows have no importer hash (or a legacy
+  // engine-computed shape). Compare their recovery file byte-for-byte with a
+  // fresh canonical render of the trusted DB page rather than widening trust.
+  const tags = await engine.getTags(page.slug, { sourceId });
+  const canonical = Buffer.from(serializePageToMarkdown(sourcePage, tags), 'utf8');
+  if (!canonical.equals(content)) {
+    failManifest(repoPath, `Markdown content does not match the trusted source page for ${relativePath}`);
+  }
+  return {
+    dbContentHash,
+    canonicalMarkdownSha256: sha256(canonical),
+  };
+}
+
+async function assertManifestMatchesTrustedSourceCount(
+  engine: BrainEngine,
+  manifest: ExportManifest,
+  sourceId: string,
+  repoPath: string,
+): Promise<void> {
+  const rows = await engine.executeRaw<{ n: number | string }>(
+    `SELECT COUNT(*)::int AS n
+       FROM pages
+      WHERE source_id = $1 AND deleted_at IS NULL`,
+    [sourceId],
+  );
+  const actualCount = Number(rows[0]?.n ?? Number.NaN);
+  if (!Number.isSafeInteger(actualCount) || actualCount < 0) {
+    failManifest(repoPath, `could not read the active source page count for ${sourceId}`);
+  }
+  if (actualCount !== manifest.source_page_count) {
+    failManifest(
+      repoPath,
+      `source page count ${manifest.source_page_count} does not match the trusted active source count ${actualCount}`,
+    );
+  }
+}
+
 /**
  * Return verified `repo-relative path -> stored slug` overrides for a recovery
  * checkout. An absent manifest, or a parseable manifest that explicitly names
  * another source, is an ordinary checkout and gets no override. Any malformed
- * manifest, or one that names the requested source but is incomplete, changed,
- * or unsafe, fails closed before sync imports a single page.
+ * manifest, altered receipt, untrusted page identity, or changed source row
+ * fails closed before sync imports a single page.
  */
-export function loadVerifiedRecoverySlugOverrides(
+export async function loadVerifiedRecoverySlugOverrides(
+  engine: BrainEngine,
   repoPath: string,
   sourceId: string,
-): ReadonlyMap<string, VerifiedRecoverySlugOverride> {
+): Promise<ReadonlyMap<string, VerifiedRecoverySlugOverride>> {
   const manifestPath = join(repoPath, MANIFEST_FILENAME);
-  if (!existsSync(manifestPath)) return new Map();
-
   let manifestStat: ReturnType<typeof lstatSync>;
   try {
     manifestStat = lstatSync(manifestPath);
-  } catch {
-    return new Map();
+  } catch (error) {
+    if (isErrno(error, 'ENOENT')) return new Map();
+    failManifest(
+      repoPath,
+      `could not inspect ${MANIFEST_FILENAME} (${error instanceof Error ? error.message : String(error)})`,
+    );
   }
+  // Do not use existsSync() here: it follows symlinks and would downgrade a
+  // dangling manifest symlink to an "absent" receipt.
   if (!manifestStat.isFile() || manifestStat.isSymbolicLink()) {
     failManifest(repoPath, `${MANIFEST_FILENAME} must be a regular file`);
   }
@@ -238,6 +363,7 @@ export function loadVerifiedRecoverySlugOverrides(
   }
   if (manifestJson.source_id !== sourceId) return new Map();
   const manifest = parseManifest(repoPath, manifestJson);
+  await assertManifestMatchesTrustedSourceCount(engine, manifest, sourceId, repoPath);
 
   const rootResolved = resolve(repoPath);
   const rootReal = realpathSync(repoPath);
@@ -256,12 +382,29 @@ export function loadVerifiedRecoverySlugOverrides(
     assertRegularPathWithoutSymlinkParents(repoPath, relativePath);
     const fileReal = realpathSync(filePath);
     assertInside(rootReal, fileReal, repoPath, `recovery page ${relativePath}`);
-    if (sha256(readFileSync(filePath)) !== page.markdown_sha256) {
+    const content = readFileSync(filePath);
+    if (sha256(content) !== page.markdown_sha256) {
       failManifest(repoPath, `SHA-256 mismatch for ${relativePath}`);
     }
+
+    const binding = await verifyPageAgainstTrustedSource(
+      engine,
+      page,
+      sourceId,
+      relativePath,
+      content,
+      repoPath,
+    );
     overrides.set(
       relativePath,
-      createVerifiedRecoverySlugOverride(relativePath, page.slug, sourceId),
+      createVerifiedRecoverySlugOverride({
+        relativePath,
+        slug: page.slug,
+        sourceId,
+        dbContentHash: binding.dbContentHash,
+        markdownSha256: page.markdown_sha256,
+        canonicalMarkdownSha256: binding.canonicalMarkdownSha256,
+      }),
     );
   }
 

@@ -183,7 +183,8 @@ export async function runImport(
   // A source-scoped recovery export is the only supported exception to normal
   // path-derived slug authority. This map is empty for ordinary checkouts and
   // verifies every claimed recovery page before any import begins.
-  const recoverySlugOverrides = loadVerifiedRecoverySlugOverrides(
+  const recoverySlugOverrides = await loadVerifiedRecoverySlugOverrides(
+    engine,
     dir,
     sourceId ?? 'default',
   );

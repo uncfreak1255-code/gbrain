@@ -44,6 +44,7 @@ import {
   isVerifiedRecoverySlugOverride,
   type VerifiedRecoverySlugOverride,
 } from './source-recovery-manifest.ts';
+import { hashParsedMarkdownForImport } from './import-content-hash.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -541,28 +542,10 @@ export async function importFromContent(
   // is real, unbounded embedding spend). Same bug class as the captured_at /
   // ingested_at fix above; the gate re-derives the markers deterministically
   // on the next import, so dropping them from the hash is safe.
-  const HASH_EPHEMERAL_FRONTMATTER_KEYS = [
-    'captured_at',
-    'ingested_at',
-    QUARANTINE_KEY,
-    CONTENT_FLAG_KEY,
-    EMBED_SKIP_KEY,
-  ];
-  const stableFrontmatter: Record<string, unknown> = { ...parsed.frontmatter };
-  for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) {
-    delete stableFrontmatter[k];
-  }
-  // Hash includes all meaningful fields for idempotency.
-  const hash = createHash('sha256')
-    .update(JSON.stringify({
-      title: parsed.title,
-      type: parsed.type,
-      compiled_truth: parsed.compiled_truth,
-      timeline: parsed.timeline,
-      frontmatter: stableFrontmatter,
-      tags: parsed.tags.sort(),
-    }))
-    .digest('hex');
+  // Hash includes all meaningful fields for idempotency. Kept in a shared
+  // helper so source-recovery verification binds its capability to the exact
+  // same content identity this importer will honor.
+  const hash = hashParsedMarkdownForImport(parsed);
 
   const parsedPage: ParsedPage = {
     type: parsed.type,
@@ -961,7 +944,10 @@ export async function importFromFile(
     return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)` };
   }
 
-  let content = readFileSync(filePath, 'utf-8');
+  // Read the exact bytes once. A recovery capability is bound to this digest,
+  // so reopening the path later would reintroduce a file TOCTOU window.
+  const contentBytes = readFileSync(filePath);
+  let content = contentBytes.toString('utf8');
 
   // Route code files through the code import path
   if (isCodeFilePath(relativePath)) {
@@ -999,12 +985,18 @@ export async function importFromFile(
   let usedFrontmatterFallback = false;
 
   if (opts.recoverySlug !== undefined) {
-    if (!isVerifiedRecoverySlugOverride(opts.recoverySlug, relativePath, opts.sourceId ?? 'default')) {
+    if (!await isVerifiedRecoverySlugOverride(
+      engine,
+      opts.recoverySlug,
+      relativePath,
+      opts.sourceId ?? 'default',
+      contentBytes,
+    )) {
       return {
         slug: expectedSlug,
         status: 'skipped',
         chunks: 0,
-        error: `Unverified recovery slug override for ${relativePath}.`,
+        error: `Unverified recovery slug override for ${relativePath}: receipt or trusted source page changed.`,
       };
     }
     const recoverySlug = opts.recoverySlug.slug;
