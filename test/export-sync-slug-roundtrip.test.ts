@@ -18,6 +18,7 @@ import { runExport } from '../src/commands/export.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { slugifyPath } from '../src/core/sync.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 let tmp: string;
@@ -239,6 +240,50 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
+  test('keeps a rename with an import error in the sync failure gate', async () => {
+    const repoPath = join(tmp, 'rename-failure');
+    mkdirSync(join(repoPath, 'notes'), { recursive: true });
+    writeFileSync(
+      join(repoPath, 'notes', 'good.md'),
+      '---\ntype: note\ntitle: Good\n---\n\nInitial body.\n',
+    );
+    commitRecoveryCheckout(repoPath);
+
+    const { performSync } = await import('../src/commands/sync.ts');
+    const initial = await performSync(engine, {
+      repoPath,
+      sourceId: 'default',
+      noPull: true,
+      noEmbed: true,
+      noExtract: true,
+    });
+    expect(initial.status).toBe('first_sync');
+    const anchoredBeforeRename = await engine.getConfig('sync.last_commit');
+
+    execFileSync('git', ['mv', 'notes/good.md', 'notes/bad.md'], {
+      cwd: repoPath,
+      stdio: 'pipe',
+    });
+    writeFileSync(
+      join(repoPath, 'notes', 'bad.md'),
+      '---\ntype: note\ntitle: Bad\nslug: someone/else\n---\n\nInitial body.\n',
+    );
+    commitAll(repoPath, 'rename to a frontmatter-mismatched path');
+
+    await withEnv({ GBRAIN_HOME: tmp }, async () => {
+      const result = await performSync(engine, {
+        repoPath,
+        sourceId: 'default',
+        noPull: true,
+        noEmbed: true,
+        noExtract: true,
+      });
+
+      expect(result.status).toBe('blocked_by_failures');
+      expect(await engine.getConfig('sync.last_commit')).toBe(anchoredBeforeRename);
+    });
+  });
+
   test('rejects a receipt amended after pull before incremental import', async () => {
     const legacySlug = await seedLegacyPage();
     const pulledSlug = 'notes/pulled legacy slug';
@@ -419,6 +464,54 @@ describe('source-scoped recovery export slug identity', () => {
     expect(result.error).toContain('Unverified recovery slug override');
     expect((await engine.getPage(legacySlug, { sourceId: 'default' }))?.compiled_truth)
       .toBe('Generic fixture body.');
+  });
+
+  test('does not overwrite a source page changed after recovery preflight', async () => {
+    const legacySlug = await seedLegacyPage();
+    const relativePath = `${legacySlug}.md`;
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+
+    const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
+    const recoverySlug = (await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default'))
+      .get(relativePath)!;
+    const { importFromFile } = await import('../src/core/import-file.ts');
+
+    const originalGetPage = engine.getPage.bind(engine);
+    let targetReads = 0;
+    const mutableEngine = engine as PGLiteEngine & { getPage: typeof engine.getPage };
+    mutableEngine.getPage = async (slug, opts) => {
+      const page = await originalGetPage(slug, opts);
+      if (slug === legacySlug && opts?.sourceId === 'default' && ++targetReads === 2) {
+        // Deterministically simulate a concurrent manual/MCP update after
+        // importFromFile's preflight read but before importFromContent writes.
+        await engine.executeRaw(
+          `UPDATE pages
+              SET compiled_truth = $1, content_hash = $2
+            WHERE source_id = $3 AND slug = $4`,
+          ['Concurrent source update.', 'f'.repeat(64), 'default', legacySlug],
+        );
+      }
+      return page;
+    };
+
+    let result;
+    try {
+      result = await importFromFile(engine, join(recoveryRepo, relativePath), relativePath, {
+        noEmbed: true,
+        sourceId: 'default',
+        recoverySlug,
+      });
+    } finally {
+      // PGLite transaction engines inherit from the parent engine. Restore
+      // the prototype method rather than leaving a parent-bound own method,
+      // which would make tx.getPage re-enter the parent connection.
+      Reflect.deleteProperty(mutableEngine, 'getPage');
+    }
+
+    expect(result.status).toBe('skipped');
+    expect(result.error).toContain('trusted source page changed before write');
+    expect((await engine.getPage(legacySlug, { sourceId: 'default' }))?.compiled_truth)
+      .toBe('Concurrent source update.');
   });
 
   test('cannot retarget an issued recovery override to a different slug', async () => {

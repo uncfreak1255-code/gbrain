@@ -38,6 +38,11 @@ export interface ImportCheckpoint {
 
 const OLD_FORMAT_LOG = 'Older checkpoint format detected — re-walking (cheap via content_hash)';
 
+/** Checkpoints use POSIX repo-relative paths regardless of the host OS. */
+function normalizeCheckpointPath(path: string): string {
+  return path.replace(/\\/g, '/');
+}
+
 /**
  * Load a checkpoint and verify it's compatible with the current run.
  *
@@ -78,7 +83,8 @@ export function loadCheckpoint(path: string, currentDir: string): ImportCheckpoi
 
   return {
     dir: obj.dir,
-    completedPaths: obj.completedPaths,
+    // Accept checkpoints written on Windows before path normalization landed.
+    completedPaths: obj.completedPaths.map(normalizeCheckpointPath),
     timestamp: obj.timestamp,
   };
 }
@@ -99,7 +105,7 @@ export function saveCheckpoint(path: string, cp: ImportCheckpoint): void {
     // and tests deterministic.
     const payload: ImportCheckpoint = {
       dir: cp.dir,
-      completedPaths: [...cp.completedPaths].sort(),
+      completedPaths: [...new Set(cp.completedPaths.map(normalizeCheckpointPath))].sort(),
       timestamp: cp.timestamp,
     };
     writeFileSync(tmp, JSON.stringify(payload));
@@ -124,9 +130,14 @@ export function resumeFilter(
   completed: Set<string>,
 ): string[] {
   if (completed.size === 0) return allFiles;
+  // The current importer writes POSIX paths, but a resuming process can walk
+  // native Windows separators and old checkpoints may contain them too.
+  const normalizedCompleted = new Set(
+    [...completed].map(normalizeCheckpointPath),
+  );
   return allFiles.filter((p) => {
-    const rel = isAbsolute(p) ? relative(dir, p) : p;
-    return !completed.has(rel);
+    const rel = normalizeCheckpointPath(isAbsolute(p) ? relative(dir, p) : p);
+    return !normalizedCompleted.has(rel);
   });
 }
 

@@ -2364,7 +2364,16 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           activePack: syncActivePack,
           recoverySlug,
         });
-        if (result.status === 'imported') chunksCreated += result.chunks;
+        if (result.status === 'imported') {
+          chunksCreated += result.chunks;
+        } else if (result.status === 'skipped' && result.error) {
+          // A rejected renamed file must use the same failure ledger as an
+          // add/modify. Advancing the destination checkpoint here would let
+          // the sync bookmark skip the failed import permanently.
+          failedFiles.push({ path: to, error: result.error });
+          progress.tick(1, newSlug);
+          continue;
+        }
       }
       pagesAffected.push(newSlug);
       await markCompleted(to);

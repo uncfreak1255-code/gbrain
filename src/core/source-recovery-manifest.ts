@@ -88,6 +88,14 @@ function issuedOverride(value: unknown): IssuedRecoverySlugOverride | undefined 
   return verifiedRecoverySlugOverrideValues.get(value);
 }
 
+/** A recovery capability no longer matches the trusted source at write time. */
+export class RecoverySlugOverrideInvalidError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RecoverySlugOverrideInvalidError';
+  }
+}
+
 /**
  * Recheck a capability immediately before parsing/writing a file. This closes
  * the file TOCTOU window between manifest loading and import, and verifies the
@@ -125,6 +133,63 @@ export async function isVerifiedRecoverySlugOverride(
   }
 
   return true;
+}
+
+/**
+ * Bind a verified recovery capability to the final page write. The preflight
+ * check above protects the file bytes, but cannot hold a database lock while
+ * parsing and (potentially) embedding. Recheck the trusted row inside the
+ * import transaction so an intervening manual/MCP change wins rather than
+ * being silently overwritten by the historical recovery snapshot.
+ */
+export async function assertVerifiedRecoverySlugOverrideForWrite(
+  tx: BrainEngine,
+  value: unknown,
+  sourceId: string,
+  slug: string,
+): Promise<void> {
+  const issued = issuedOverride(value);
+  if (issued === undefined || issued.sourceId !== sourceId || issued.slug !== slug) {
+    throw new RecoverySlugOverrideInvalidError(
+      `Unverified recovery slug override for ${issued?.relativePath ?? slug}: receipt or trusted source page changed.`,
+    );
+  }
+
+  // Lock the active source row before comparing its identity. The lock stays
+  // held through putPage in the caller's transaction, making check-and-write
+  // atomic across Postgres and PGLite.
+  const rows = await tx.executeRaw<{ content_hash: string | null }>(
+    `SELECT content_hash
+       FROM pages
+      WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL
+      FOR UPDATE`,
+    [sourceId, slug],
+  );
+  const current = rows[0];
+  if (!current || (current.content_hash ?? null) !== issued.dbContentHash) {
+    throw new RecoverySlugOverrideInvalidError(
+      `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
+    );
+  }
+
+  // Legacy rows can have no importer content hash. Preserve the same
+  // canonical-render binding used at preflight, now while the page row is
+  // locked through the final write.
+  if (issued.canonicalMarkdownSha256 !== undefined) {
+    const page = await tx.getPage(slug, { sourceId });
+    if (!page) {
+      throw new RecoverySlugOverrideInvalidError(
+        `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
+      );
+    }
+    const tags = await tx.getTags(slug, { sourceId });
+    const canonical = Buffer.from(serializePageToMarkdown(page, tags), 'utf8');
+    if (sha256(canonical) !== issued.canonicalMarkdownSha256) {
+      throw new RecoverySlugOverrideInvalidError(
+        `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
+      );
+    }
+  }
 }
 
 function sha256(content: Buffer): string {

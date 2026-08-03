@@ -41,7 +41,9 @@ import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
 import { withActiveSourceProviderLease } from './source-embedding-lease.ts';
 import {
+  assertVerifiedRecoverySlugOverrideForWrite,
   isVerifiedRecoverySlugOverride,
+  RecoverySlugOverrideInvalidError,
   type VerifiedRecoverySlugOverride,
 } from './source-recovery-manifest.ts';
 import { hashParsedMarkdownForImport } from './import-content-hash.ts';
@@ -299,6 +301,12 @@ export async function importFromContent(
      * leave it unset → markers preserved (the gate + CLI own them).
      */
     remote?: boolean;
+    /**
+     * A recovery-only capability already checked against file bytes by
+     * importFromFile. The final row check happens inside this function's
+     * write transaction so a concurrent source update cannot be overwritten.
+     */
+    recoverySlug?: VerifiedRecoverySlugOverride;
   } = {},
 ): Promise<ImportResult> {
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
@@ -735,6 +743,14 @@ export async function importFromContent(
   // for single-source callers.
   const txOpts = sourceId ? { sourceId } : undefined;
   await engine.transaction(async (tx) => {
+    if (opts.recoverySlug !== undefined) {
+      await assertVerifiedRecoverySlugOverrideForWrite(
+        tx,
+        opts.recoverySlug,
+        sourceId ?? 'default',
+        slug,
+      );
+    }
     if (existing) await tx.createVersion(slug, txOpts);
 
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
@@ -1065,11 +1081,26 @@ export async function importFromFile(
   // precedence in computeEffectiveDate. e.g. `daily/2024-03-15.md` →
   // filename `2024-03-15`.
   const fileBasename = basename(relativePath, '.md');
-  return importFromContent(engine, resolvedSlug, content, {
-    ...opts,
-    filename: fileBasename,
-    sourcePath: relativePath,
-  });
+  try {
+    return await importFromContent(engine, resolvedSlug, content, {
+      ...opts,
+      filename: fileBasename,
+      sourcePath: relativePath,
+    });
+  } catch (error) {
+    // A write-time recovery recheck is a recoverable per-file failure: return
+    // the usual skipped-with-error shape so sync records it in its failure
+    // ledger instead of advancing its bookmark.
+    if (error instanceof RecoverySlugOverrideInvalidError) {
+      return {
+        slug: expectedSlug,
+        status: 'skipped',
+        chunks: 0,
+        error: error.message,
+      };
+    }
+    throw error;
+  }
 }
 
 /**
