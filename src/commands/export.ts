@@ -474,6 +474,28 @@ async function loadCompleteScopedPages(
       failExport(`source "${sourceId}" stopped being active before its recovery snapshot.`);
     }
 
+    // A source-scoped export is a recovery checkout, not a generic archive.
+    // Its current format replays Markdown through importFromFile and cannot
+    // preserve the source path, chunker, or importer semantics of code/image
+    // pages. Refuse before staging any bytes rather than publishing a receipt
+    // that a later recovery would have to reject (or, worse, mis-import).
+    const unsupported = await snapshot.executeRaw<{ slug: string; page_kind: string }>(
+      `SELECT slug, page_kind
+         FROM pages
+        WHERE source_id = $1 AND deleted_at IS NULL AND page_kind <> 'markdown'
+        ORDER BY slug
+        LIMIT 1`,
+      [sourceId],
+    );
+    if (unsupported.length > 0) {
+      const page = unsupported[0]!;
+      failExport(
+        `source-scoped recovery export supports only markdown pages; `
+        + `${JSON.stringify(page.slug)} is a ${page.page_kind} page. `
+        + 'Use the original source checkout for code or image recovery.',
+      );
+    }
+
     const sourcePageCountBefore = await countScopedPages(snapshot, sourceId);
     const pages: import('../core/types.ts').Page[] = [];
 

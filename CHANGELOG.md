@@ -21,13 +21,13 @@ gbrain sync --source <id> --repo ./gbrain-source-recovery
 
 | Recovery input | Result |
 |---|---|
-| Complete same-source export, unchanged pages | Legacy slug retained; no path duplicate. |
+| Complete same-source export of Markdown pages, unchanged | Legacy slug retained; no path duplicate. |
 | Normal, cross-source, partial, or edited receipt | Override denied; normal mismatch/error remains. |
 | Post-pull receipt edit or file swap | Fails before source mutation. |
 
 ### Things to watch
 
-Receipts are evidence, not authority. Existing output directories, malformed manifests, unsafe paths or symlinks, changed hashes, and source-count drift fail closed. A first valid recovery sync may normalize a historical database content hash without changing the static receipt. A recovery export is not a full database backup; archival remains separate and reversible.
+Receipts are evidence, not authority. Existing output directories, malformed manifests, unsafe paths or symlinks, changed hashes, and source-count drift fail closed. Source-scoped recovery currently supports Markdown pages only: code and image pages retain importer-specific path and chunking semantics, so export and restore reject them rather than risk mis-importing them. A first valid recovery sync may normalize a historical database content hash without changing the static receipt. A recovery export is not a full database backup; archival remains separate and reversible.
 
 ## To take advantage of v0.47.2.0
 
