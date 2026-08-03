@@ -27,6 +27,7 @@ import {
 } from '../src/core/source-health.ts';
 import { isSourceUnchangedSinceSync } from '../src/core/git-head.ts';
 import { loadAllSources } from '../src/core/sources-load.ts';
+import { probeEmbeddingDim } from './fixtures/retrieval-quality/relational/corpus.ts';
 
 const HOUR = 3600_000;
 
@@ -239,8 +240,9 @@ describe('computeAllSourceMetrics', () => {
   test('aggregates pages + chunks + embedding coverage per source', async () => {
     await engine.putPage('a', { type: 'note', title: 'a', compiled_truth: 'a' });
     await engine.putPage('b', { type: 'note', title: 'b', compiled_truth: 'b' });
+    const embeddingDim = await probeEmbeddingDim(engine);
     await engine.upsertChunks('a', [
-      { chunk_index: 0, chunk_text: 'one', chunk_source: 'compiled_truth', token_count: 1, embedding: new Float32Array(1536) },
+      { chunk_index: 0, chunk_text: 'one', chunk_source: 'compiled_truth', token_count: 1, embedding: new Float32Array(embeddingDim) },
       { chunk_index: 1, chunk_text: 'two', chunk_source: 'compiled_truth', token_count: 1, embedding: undefined },
     ]);
     await engine.upsertChunks('b', [

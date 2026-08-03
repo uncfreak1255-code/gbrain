@@ -33,6 +33,8 @@ function commitRecoveryCheckout(repoPath: string): void {
 }
 
 function commitAll(repoPath: string, message: string): void {
+  execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: repoPath, stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.name', 'GBrain Test'], { cwd: repoPath, stdio: 'pipe' });
   execFileSync('git', ['add', '-A'], { cwd: repoPath, stdio: 'pipe' });
   execFileSync('git', ['commit', '-m', message], { cwd: repoPath, stdio: 'pipe' });
 }
@@ -204,6 +206,46 @@ describe('source-scoped recovery export slug identity', () => {
     });
 
     expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
+  test('preserves code-page identity during a source-scoped recovery sync', async () => {
+    const { importCodeFile } = await import('../src/core/import-file.ts');
+    const sourcePath = 'src/example.ts';
+    const source = 'export const answer = 42;\n';
+    await importCodeFile(engine, sourcePath, source, { noEmbed: true });
+
+    const codeSlug = 'src-example-ts';
+    await engine.executeRaw(
+      `UPDATE pages
+          SET source_path = $1,
+              content_hash = NULL
+        WHERE source_id = $2 AND slug = $3`,
+      [sourcePath, 'default', codeSlug],
+    );
+
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    expect(readFileSync(join(recoveryRepo, `${codeSlug}.md`), 'utf8')).toBe(source);
+    commitRecoveryCheckout(recoveryRepo);
+
+    const { performSync } = await import('../src/commands/sync.ts');
+    await performSync(engine, {
+      repoPath: recoveryRepo,
+      sourceId: 'default',
+      strategy: 'code',
+      noPull: true,
+      noEmbed: true,
+      noExtract: true,
+    });
+
+    const restored = await engine.getPage(codeSlug, { sourceId: 'default' });
+    expect(restored?.type).toBe('code');
+    expect(restored?.compiled_truth).toBe(source);
+    const restoredRows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2`,
+      ['default', codeSlug],
+    );
+    expect(restoredRows[0]?.source_path).toBe(sourcePath);
+    expect(await activeSlugs()).toEqual([codeSlug]);
   });
 
   test('fails closed when a recovery checkout adds an unlisted Markdown page', async () => {

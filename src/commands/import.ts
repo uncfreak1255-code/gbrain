@@ -8,6 +8,7 @@ import {
   getVerifiedRecoverySlugOverrideForPath,
   loadVerifiedRecoverySlugOverrides,
 } from '../core/source-recovery-manifest.ts';
+import type { VerifiedRecoverySlugOverride } from '../core/source-recovery-manifest.ts';
 import { loadConfig, gbrainPath } from '../core/config.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
@@ -199,7 +200,7 @@ export async function runImport(
   const strategy: SyncStrategy = opts.strategy ?? 'markdown';
   const _walkT0 = Date.now();
   console.error(`[gbrain phase] import.collect_files start dir=${dir} strategy=${strategy}`);
-  const allFiles = collectSyncableFiles(dir, { strategy });
+  const allFiles = collectSyncableFiles(dir, { strategy, recoveryOverrides: recoverySlugOverrides });
   // The sealed recovery map is checked once against the file list so no
   // ordinary import can begin if a file appeared after receipt verification.
   // `processFile` repeats the check just before use for the narrow
@@ -530,6 +531,7 @@ function resolveMaxWalkDepth(): number {
 interface CollectOpts {
   strategy?: SyncStrategy;
   exclude?: string[];
+  recoveryOverrides?: ReadonlyMap<string, VerifiedRecoverySlugOverride>;
 }
 
 /**
@@ -544,7 +546,13 @@ function isCollectibleForWalker(
   strategy: SyncStrategy,
   multimodalOn: boolean,
   exclude?: string[],
+  recoveryOverrides?: ReadonlyMap<string, VerifiedRecoverySlugOverride>,
 ): boolean {
+  const recoveryOverride = recoveryOverrides?.get(normalizeImportRelativePath(path));
+  if (recoveryOverride?.pageKind === 'code') {
+    return (strategy === 'code' || strategy === 'auto')
+      && !(exclude && exclude.length > 0 && matchesSyncGlobs(path, exclude));
+  }
   // Keep the historical markdown+multimodal image carve-out, but route
   // markdown/code paths through the shared syncability gate so full sync
   // can't drift from incremental sync on metafiles like index.md.
@@ -572,6 +580,7 @@ function gitListSyncableFiles(
   strategy: SyncStrategy,
   multimodalOn: boolean,
   exclude?: string[],
+  recoveryOverrides?: ReadonlyMap<string, VerifiedRecoverySlugOverride>,
 ): string[] | null {
   let stdout: string;
   try {
@@ -586,7 +595,7 @@ function gitListSyncableFiles(
   const files: string[] = [];
   for (const rel of stdout.split('\0')) {
     if (!rel) continue;
-    if (!isCollectibleForWalker(rel, strategy, multimodalOn, exclude)) continue;
+    if (!isCollectibleForWalker(rel, strategy, multimodalOn, exclude, recoveryOverrides)) continue;
     const full = join(dir, rel);
     let st;
     try {
@@ -631,7 +640,7 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
   // vendored data/fixtures). `--cached --others --exclude-standard` = tracked
   // PLUS untracked-not-ignored, so uncommitted source is still indexed. Non-git
   // dirs (or git unavailable) fall through to the FS walk below.
-  const gitFiles = gitListSyncableFiles(dir, strategy, multimodalOn, exclude);
+  const gitFiles = gitListSyncableFiles(dir, strategy, multimodalOn, exclude, opts.recoveryOverrides);
   if (gitFiles) return gitFiles;
 
   const maxDepth = resolveMaxWalkDepth();
@@ -680,7 +689,7 @@ export function collectSyncableFiles(dir: string, opts: CollectOpts = {}): strin
         walk(full, depth + 1);
       } else if (stat.isFile()) {
         const relPath = relative(dir, full).replace(/\\/g, '/');
-        if (!isCollectibleForWalker(relPath, strategy, multimodalOn, exclude)) continue;
+        if (!isCollectibleForWalker(relPath, strategy, multimodalOn, exclude, opts.recoveryOverrides)) continue;
         files.push(full);
       }
     }

@@ -29,6 +29,8 @@ interface ExportManifestPage {
   slug: string;
   db_content_hash: string | null;
   markdown_sha256: string;
+  page_kind?: 'markdown' | 'code';
+  source_path?: string;
 }
 
 interface ExportManifest {
@@ -50,6 +52,8 @@ export interface VerifiedRecoverySlugOverride {
   readonly relativePath: string;
   readonly slug: string;
   readonly sourceId: string;
+  readonly pageKind: 'markdown' | 'code';
+  readonly sourcePath?: string;
 }
 
 interface IssuedRecoverySlugOverride {
@@ -58,6 +62,8 @@ interface IssuedRecoverySlugOverride {
   sourceId: string;
   dbContentHash: string | null;
   markdownSha256: string;
+  pageKind: 'markdown' | 'code';
+  sourcePath?: string;
   /** Present only for source rows that predate import content hashes. */
   canonicalMarkdownSha256?: string;
 }
@@ -76,6 +82,8 @@ function createVerifiedRecoverySlugOverride(
     relativePath: value.relativePath,
     slug: value.slug,
     sourceId: value.sourceId,
+    pageKind: value.pageKind,
+    ...(value.sourcePath === undefined ? {} : { sourcePath: value.sourcePath }),
   };
   // The public shape is convenient for callers, but it is not the authority:
   // retain the receipt + source-row binding privately and freeze the object so
@@ -146,6 +154,18 @@ export async function isVerifiedRecoverySlugOverride(
     return false;
   }
 
+  if (issued.pageKind === 'code') {
+    if (
+      current.type !== 'code'
+      || issued.sourcePath === undefined
+      || codeSourcePathForPage(current) !== issued.sourcePath
+      || !Buffer.from(current.compiled_truth, 'utf8').equals(content)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   // Historical rows can legitimately have no import content hash. In that
   // case, re-render the trusted row at use time rather than treating a null
   // value as an authority wildcard.
@@ -170,11 +190,18 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
   value: unknown,
   sourceId: string,
   slug: string,
+  expectedPageKind?: 'markdown' | 'code',
+  content?: Buffer,
 ): Promise<void> {
   const issued = issuedOverride(value);
   if (issued === undefined || issued.sourceId !== sourceId || issued.slug !== slug) {
     throw new RecoverySlugOverrideInvalidError(
       `Unverified recovery slug override for ${issued?.relativePath ?? slug}: receipt or trusted source page changed.`,
+    );
+  }
+  if (expectedPageKind !== undefined && issued.pageKind !== expectedPageKind) {
+    throw new RecoverySlugOverrideInvalidError(
+      `Unverified recovery slug override for ${issued.relativePath}: importer kind changed before write.`,
     );
   }
 
@@ -193,6 +220,27 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
     throw new RecoverySlugOverrideInvalidError(
       `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
     );
+  }
+
+  if (issued.pageKind === 'code') {
+    if (content === undefined) {
+      throw new RecoverySlugOverrideInvalidError(
+        `Unverified recovery slug override for ${issued.relativePath}: code bytes were not bound before write.`,
+      );
+    }
+    const page = await tx.getPage(slug, { sourceId });
+    if (
+      !page
+      || page.type !== 'code'
+      || issued.sourcePath === undefined
+      || codeSourcePathForPage(page) !== issued.sourcePath
+      || !Buffer.from(page.compiled_truth, 'utf8').equals(content)
+    ) {
+      throw new RecoverySlugOverrideInvalidError(
+        `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
+      );
+    }
+    return;
   }
 
   // Legacy rows can have no importer content hash. Preserve the same
@@ -228,6 +276,22 @@ function failManifest(repoPath: string, detail: string): never {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSafeRecoverySourcePath(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (value.includes('\\') || value.includes('\0') || isAbsolute(value)) return false;
+  return !value.split('/').some(part => part.length === 0 || part === '.' || part === '..');
+}
+
+function codeSourcePathForPage(
+  page: { slug: string; frontmatter: Record<string, unknown> },
+): string | undefined {
+  const frontmatterFile = page.frontmatter.file;
+  const sourcePath = typeof frontmatterFile === 'string' && frontmatterFile.length > 0
+    ? frontmatterFile
+    : page.slug;
+  return isSafeRecoverySourcePath(sourcePath) ? sourcePath : undefined;
 }
 
 function isErrno(error: unknown, code: string): boolean {
@@ -287,10 +351,19 @@ function parseManifest(repoPath: string, parsed: unknown): ExportManifest {
     if (typeof value.markdown_sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(value.markdown_sha256)) {
       failManifest(repoPath, `pages[${index}].markdown_sha256 must be a SHA-256 digest`);
     }
+    const pageKind = value.page_kind === undefined ? 'markdown' : value.page_kind;
+    if (pageKind !== 'markdown' && pageKind !== 'code') {
+      failManifest(repoPath, `pages[${index}].page_kind must be markdown or code`);
+    }
+    if (pageKind === 'code' && !isSafeRecoverySourcePath(value.source_path)) {
+      failManifest(repoPath, `pages[${index}].source_path must be a safe relative path for code pages`);
+    }
     return {
       slug: value.slug,
       db_content_hash: value.db_content_hash === null ? null : value.db_content_hash.toLowerCase(),
       markdown_sha256: value.markdown_sha256.toLowerCase(),
+      page_kind: pageKind,
+      ...(pageKind === 'code' ? { source_path: value.source_path as string } : {}),
     };
   });
 
@@ -417,13 +490,35 @@ async function verifyPageAgainstTrustedSource(
   relativePath: string,
   content: Buffer,
   repoPath: string,
-): Promise<{ dbContentHash: string | null; canonicalMarkdownSha256?: string }> {
+): Promise<{
+  dbContentHash: string | null;
+  pageKind: 'markdown' | 'code';
+  sourcePath?: string;
+  canonicalMarkdownSha256?: string;
+}> {
   const sourcePage = await engine.getPage(page.slug, { sourceId });
   if (!sourcePage) {
     failManifest(repoPath, `no active trusted source page exists for ${page.slug}`);
   }
 
   const dbContentHash = sourcePage.content_hash ?? null;
+
+  if (page.page_kind === 'code') {
+    const sourcePath = codeSourcePathForPage(sourcePage);
+    if (sourcePage.type !== 'code') {
+      failManifest(repoPath, `code recovery page ${relativePath} is not bound to a trusted code page`);
+    }
+    if (sourcePath === undefined || page.source_path !== sourcePath) {
+      failManifest(repoPath, `code source path does not match the trusted source page for ${relativePath}`);
+    }
+    if (!Buffer.from(sourcePage.compiled_truth, 'utf8').equals(content)) {
+      failManifest(repoPath, `Code content does not match the trusted source page for ${relativePath}`);
+    }
+    return { dbContentHash, pageKind: 'code', sourcePath };
+  }
+  if (sourcePage.type === 'code') {
+    failManifest(repoPath, `code recovery page ${relativePath} must declare page_kind code`);
+  }
 
   // Most source rows originated through importFromContent, so this one pure
   // parse/hash check is the fast, exact authority binding used by the importer
@@ -434,7 +529,7 @@ async function verifyPageAgainstTrustedSource(
   if (dbContentHash !== null) {
     const parsed = parseMarkdown(content.toString('utf8'), relativePath);
     if (hashParsedMarkdownForImport(parsed) === dbContentHash) {
-      return { dbContentHash };
+      return { dbContentHash, pageKind: 'markdown' };
     }
   }
 
@@ -448,6 +543,7 @@ async function verifyPageAgainstTrustedSource(
   }
   return {
     dbContentHash,
+    pageKind: 'markdown',
     canonicalMarkdownSha256: sha256(canonical),
   };
 }
@@ -556,6 +652,8 @@ export async function loadVerifiedRecoverySlugOverrides(
         sourceId,
         dbContentHash: binding.dbContentHash,
         markdownSha256: page.markdown_sha256,
+        pageKind: binding.pageKind,
+        sourcePath: binding.sourcePath,
         canonicalMarkdownSha256: binding.canonicalMarkdownSha256,
       }),
     );

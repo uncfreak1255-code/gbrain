@@ -27,6 +27,8 @@ interface ExportManifestPage {
   markdown_sha256: string;
   raw_sidecar_sha256: string | null;
   raw_record_count: number;
+  page_kind: 'markdown' | 'code';
+  source_path?: string;
 }
 
 interface ExportManifest {
@@ -95,6 +97,28 @@ function assertSafeExportSlug(slug: string): void {
   ) {
     failExport(`unsafe page slug cannot be exported: ${JSON.stringify(slug)}`);
   }
+}
+
+function assertSafeExportSourcePath(sourcePath: string): void {
+  const segments = sourcePath.split('/');
+  if (
+    sourcePath.length === 0
+    || sourcePath.includes('\\')
+    || sourcePath.includes('\0')
+    || isAbsolute(sourcePath)
+    || segments.some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    failExport(`unsafe code source path cannot be exported: ${JSON.stringify(sourcePath)}`);
+  }
+}
+
+function codeExportSourcePath(page: { slug: string; frontmatter: Record<string, unknown> }): string {
+  const frontmatterFile = page.frontmatter.file;
+  const sourcePath = typeof frontmatterFile === 'string' && frontmatterFile.length > 0
+    ? frontmatterFile
+    : page.slug;
+  assertSafeExportSourcePath(sourcePath);
+  return sourcePath;
 }
 
 function confinedOutputPath(outDir: string, relativePath: string): string {
@@ -658,12 +682,20 @@ export async function runExport(engine: BrainEngine, args: string[]) {
       const tags = sourceId
         ? (scopedTags?.get(page.slug) ?? [])
         : await engine.getTags(page.slug);
-      const md = serializeMarkdown(
-        page.frontmatter,
-        page.compiled_truth,
-        page.timeline,
-        { type: page.type, title: page.title, tags },
-      );
+      const pageKind = page.type === 'code' ? 'code' : 'markdown';
+      const sourcePath = pageKind === 'code' ? codeExportSourcePath(page) : undefined;
+      // Code pages are exported as their original bytes. The recovery manifest
+      // carries the importer kind and trusted source path, so the `.md`
+      // snapshot filename remains a sealed page identity rather than silently
+      // routing code through the markdown importer.
+      const md = pageKind === 'code'
+        ? page.compiled_truth
+        : serializeMarkdown(
+          page.frontmatter,
+          page.compiled_truth,
+          page.timeline,
+          { type: page.type, title: page.title, tags },
+        );
 
       const pageRelativePath = `${page.slug}.md`;
       if (sourceId) {
@@ -711,6 +743,8 @@ export async function runExport(engine: BrainEngine, args: string[]) {
           markdown_sha256: sha256(md),
           raw_sidecar_sha256: rawSidecarSha256,
           raw_record_count: rawData.length,
+          page_kind: pageKind,
+          ...(sourcePath === undefined ? {} : { source_path: sourcePath }),
         });
       }
 
