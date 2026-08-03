@@ -15,6 +15,7 @@ import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runExport } from '../src/commands/export.ts';
+import { serializeMarkdown } from '../src/core/markdown.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { slugifyPath } from '../src/core/sync.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -36,7 +37,14 @@ function commitAll(repoPath: string, message: string): void {
   execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: repoPath, stdio: 'pipe' });
   execFileSync('git', ['config', 'user.name', 'GBrain Test'], { cwd: repoPath, stdio: 'pipe' });
   execFileSync('git', ['add', '-A'], { cwd: repoPath, stdio: 'pipe' });
-  execFileSync('git', ['commit', '-m', message], { cwd: repoPath, stdio: 'pipe' });
+  // Cloned updater fixtures do not inherit the seed checkout's local Git
+  // identity on Actions. Keep the author fixture-local rather than depending
+  // on a runner-wide Git config.
+  execFileSync(
+    'git',
+    ['-c', 'user.email=test@example.invalid', '-c', 'user.name=GBrain Test', 'commit', '-m', message],
+    { cwd: repoPath, stdio: 'pipe' },
+  );
 }
 
 function writeRecoveryManifest(
@@ -61,6 +69,31 @@ function writeRecoveryManifest(
       })),
     }),
   );
+}
+
+async function runExportCapturingExit(args: string[]): Promise<{ exitCode: number | null; stderr: string[] }> {
+  const originalExit = process.exit;
+  const originalErr = console.error;
+  let exitCode: number | null = null;
+  const stderr: string[] = [];
+  process.exit = ((code?: number) => {
+    exitCode = code ?? 0;
+    throw new Error(`__test_exit__:${code}`);
+  }) as typeof process.exit;
+  console.error = (...args: unknown[]) => {
+    stderr.push(args.map(String).join(' '));
+  };
+  try {
+    await runExport(engine, args);
+  } catch (error) {
+    if (!(error instanceof Error && error.message.startsWith('__test_exit__:'))) {
+      throw error;
+    }
+  } finally {
+    process.exit = originalExit;
+    console.error = originalErr;
+  }
+  return { exitCode, stderr };
 }
 
 async function reserveLoopbackPort(): Promise<number> {
@@ -208,7 +241,7 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('rejects source-scoped recovery sync when the receipt contains a code page', async () => {
+  test('rejects source-scoped recovery export when the source contains a code page', async () => {
     const { importCodeFile } = await import('../src/core/import-file.ts');
     const sourcePath = 'src/example.ts';
     const source = 'export const answer = 42;\n';
@@ -223,19 +256,10 @@ describe('source-scoped recovery export slug identity', () => {
       [sourcePath, 'default', codeSlug],
     );
 
-    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
-    expect(readFileSync(join(recoveryRepo, `${codeSlug}.md`), 'utf8')).toBe(source);
-    commitRecoveryCheckout(recoveryRepo);
-
-    const { performSync } = await import('../src/commands/sync.ts');
-    await expect(performSync(engine, {
-      repoPath: recoveryRepo,
-      sourceId: 'default',
-      strategy: 'code',
-      noPull: true,
-      noEmbed: true,
-      noExtract: true,
-    })).rejects.toThrow(/source-scoped recovery export supports only markdown pages.*src-example-ts.*code page/i);
+    const blocked = await runExportCapturingExit(['--dir', recoveryRepo, '--source', 'default']);
+    expect(blocked.exitCode).toBe(1);
+    expect(blocked.stderr.join('\n'))
+      .toMatch(/source-scoped recovery export supports only markdown pages.*src-example-ts.*code page/i);
 
     const restoredRows = await engine.executeRaw<{
       compiled_truth: string | null;
@@ -294,6 +318,55 @@ describe('source-scoped recovery export slug identity', () => {
       unlistedPath,
     )).toThrow(`unexpected recovery file ${unlistedPath}`);
     expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
+  test('rejects an older code-page recovery receipt before a code sync can reconcile it', async () => {
+    const codeSlug = 'src/recovery-fixture-ts';
+    const code = 'export const recoveryFixture = true;\n';
+    await engine.putPage(
+      codeSlug,
+      {
+        type: 'code',
+        page_kind: 'code',
+        title: 'src/recovery-fixture.ts (typescript)',
+        compiled_truth: code,
+        timeline: '',
+        frontmatter: { language: 'typescript', file: 'src/recovery-fixture.ts' },
+        source_path: 'src/recovery-fixture.ts',
+      },
+      { sourceId: 'default' },
+    );
+    mkdirSync(join(recoveryRepo, 'src'), { recursive: true });
+    writeFileSync(
+      join(recoveryRepo, `${codeSlug}.md`),
+      serializeMarkdown(
+        { language: 'typescript', file: 'src/recovery-fixture.ts' },
+        code,
+        '',
+        { type: 'code', title: 'src/recovery-fixture.ts (typescript)', tags: [] },
+      ),
+    );
+    const codePage = await engine.getPage(codeSlug, { sourceId: 'default' });
+    writeRecoveryManifest(recoveryRepo, [codeSlug], codePage!.content_hash ?? null);
+    commitRecoveryCheckout(recoveryRepo);
+
+    const { performSync } = await import('../src/commands/sync.ts');
+    await expect(performSync(engine, {
+      repoPath: recoveryRepo,
+      sourceId: 'default',
+      strategy: 'code',
+      noPull: true,
+      noEmbed: true,
+      noExtract: true,
+    })).rejects.toThrow(
+      `source-scoped recovery supports only markdown pages; ${codeSlug} is a code page`,
+    );
+
+    const rows = await engine.executeRaw<{ page_kind: string; source_path: string }>(
+      `SELECT page_kind, source_path FROM pages WHERE source_id = $1 AND slug = $2`,
+      ['default', codeSlug],
+    );
+    expect(rows).toEqual([{ page_kind: 'code', source_path: 'src/recovery-fixture.ts' }]);
   });
 
   test('rejects an edited receipt that tries to grant a new legacy identity during rename', async () => {
@@ -602,6 +675,37 @@ describe('source-scoped recovery export slug identity', () => {
     expect(result.error).toContain('trusted source page changed before write');
     expect((await engine.getPage(legacySlug, { sourceId: 'default' }))?.compiled_truth)
       .toBe('Concurrent source update.');
+  });
+
+  test('does not overwrite a source page changed to code after recovery preflight', async () => {
+    const legacySlug = await seedLegacyPage();
+    const relativePath = `${legacySlug}.md`;
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+
+    const { loadVerifiedRecoverySlugOverrides } = await import('../src/core/source-recovery-manifest.ts');
+    const recoverySlug = (await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default'))
+      .get(relativePath)!;
+    const { importFromFile } = await import('../src/core/import-file.ts');
+
+    // This bypasses only the preflight's row-kind query to model a concurrent
+    // trusted update between capability issuance and the final write lock.
+    await engine.executeRaw(
+      `UPDATE pages SET page_kind = 'code' WHERE source_id = $1 AND slug = $2`,
+      ['default', legacySlug],
+    );
+    const result = await importFromFile(engine, join(recoveryRepo, relativePath), relativePath, {
+      noEmbed: true,
+      sourceId: 'default',
+      recoverySlug,
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.error).toContain('trusted source page changed before write');
+    const rows = await engine.executeRaw<{ page_kind: string }>(
+      `SELECT page_kind FROM pages WHERE source_id = $1 AND slug = $2`,
+      ['default', legacySlug],
+    );
+    expect(rows).toEqual([{ page_kind: 'code' }]);
   });
 
   test('cannot retarget an issued recovery override to a different slug', async () => {

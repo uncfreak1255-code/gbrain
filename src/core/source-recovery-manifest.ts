@@ -13,7 +13,9 @@
  * The exported DB hash is a snapshot receipt, not authority: a first valid
  * recovery import can normalize a historical row to the current importer
  * hash. Rows whose current hash is not importer-shaped fall back to an exact
- * canonical render from the trusted row.
+ * canonical render from the trusted row. Source-scoped recovery deliberately
+ * supports only Markdown pages: code and image rows require their original
+ * importers and cannot be faithfully replayed from this Markdown receipt.
  */
 
 import { createHash } from 'crypto';
@@ -208,15 +210,19 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
   // Lock the active source row before comparing its identity. The lock stays
   // held through putPage in the caller's transaction, making check-and-write
   // atomic across Postgres and PGLite.
-  const rows = await tx.executeRaw<{ content_hash: string | null }>(
-    `SELECT content_hash
+  const rows = await tx.executeRaw<{ content_hash: string | null; page_kind: string }>(
+    `SELECT content_hash, page_kind
        FROM pages
       WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL
       FOR UPDATE`,
     [sourceId, slug],
   );
   const current = rows[0];
-  if (!current || (current.content_hash ?? null) !== issued.dbContentHash) {
+  if (
+    !current
+    || current.page_kind !== 'markdown'
+    || (current.content_hash ?? null) !== issued.dbContentHash
+  ) {
     throw new RecoverySlugOverrideInvalidError(
       `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
     );
@@ -573,6 +579,36 @@ async function assertManifestMatchesTrustedSourceCount(
 }
 
 /**
+ * Recovery exports serialize pages as Markdown. Code and image rows need their
+ * own source-path-aware importers, so accepting a receipt that names either
+ * kind could delete it under `--strategy code` or re-chunk it as Markdown.
+ * Query once per receipt, before collection or reconciliation can mutate data.
+ */
+async function assertTrustedSourceHasOnlyMarkdownPages(
+  engine: BrainEngine,
+  sourceId: string,
+  repoPath: string,
+): Promise<void> {
+  const rows = await engine.executeRaw<{ slug: string; page_kind: string }>(
+    `SELECT slug, page_kind
+       FROM pages
+      WHERE source_id = $1 AND deleted_at IS NULL AND page_kind <> 'markdown'
+      ORDER BY slug
+      LIMIT 1`,
+    [sourceId],
+  );
+  if (rows.length > 0) {
+    const page = rows[0]!;
+    failManifest(
+      repoPath,
+      `source-scoped recovery supports only markdown pages; `
+      + `${page.slug} is a ${page.page_kind} page. `
+      + 'Use the original source checkout for code or image recovery.',
+    );
+  }
+}
+
+/**
  * Return verified `repo-relative path -> stored slug` overrides for a recovery
  * checkout. An absent manifest, or a parseable manifest that explicitly names
  * another source, is an ordinary checkout and gets no override. Any malformed
@@ -613,6 +649,7 @@ export async function loadVerifiedRecoverySlugOverrides(
   if (manifestJson.source_id !== sourceId) return new Map();
   const manifest = parseManifest(repoPath, manifestJson);
   await assertManifestMatchesTrustedSourceCount(engine, manifest, sourceId, repoPath);
+  await assertTrustedSourceHasOnlyMarkdownPages(engine, sourceId, repoPath);
 
   const rootResolved = resolve(repoPath);
   const rootReal = realpathSync(repoPath);
