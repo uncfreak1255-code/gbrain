@@ -195,6 +195,18 @@ describe('resumeFilter', () => {
     const completed = new Set(['a.md', 'b.md']);
     expect(resumeFilter(all, '/tmp/example-brain', completed)).toEqual([]);
   });
+
+  test('normalizes Windows separators before checkpoint lookup', () => {
+    const all = ['notes\\done.md', 'notes\\todo.md'];
+    const completed = new Set(['notes/done.md']);
+    expect(resumeFilter(all, '/tmp/example-brain', completed)).toEqual(['notes\\todo.md']);
+  });
+
+  test('accepts legacy Windows-style completed checkpoint entries', () => {
+    const all = ['notes/done.md', 'notes/todo.md'];
+    const completed = new Set(['notes\\done.md']);
+    expect(resumeFilter(all, '/tmp/example-brain', completed)).toEqual(['notes/todo.md']);
+  });
 });
 
 describe('clearCheckpoint', () => {

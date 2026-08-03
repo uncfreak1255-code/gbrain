@@ -40,6 +40,13 @@ import { isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
 import { withActiveSourceProviderLease } from './source-embedding-lease.ts';
+import {
+  assertVerifiedRecoverySlugOverrideForWrite,
+  isVerifiedRecoverySlugOverride,
+  RecoverySlugOverrideInvalidError,
+  type VerifiedRecoverySlugOverride,
+} from './source-recovery-manifest.ts';
+import { hashParsedMarkdownForImport } from './import-content-hash.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -294,6 +301,12 @@ export async function importFromContent(
      * leave it unset → markers preserved (the gate + CLI own them).
      */
     remote?: boolean;
+    /**
+     * A recovery-only capability already checked against file bytes by
+     * importFromFile. The final row check happens inside this function's
+     * write transaction so a concurrent source update cannot be overwritten.
+     */
+    recoverySlug?: VerifiedRecoverySlugOverride;
   } = {},
 ): Promise<ImportResult> {
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
@@ -537,28 +550,10 @@ export async function importFromContent(
   // is real, unbounded embedding spend). Same bug class as the captured_at /
   // ingested_at fix above; the gate re-derives the markers deterministically
   // on the next import, so dropping them from the hash is safe.
-  const HASH_EPHEMERAL_FRONTMATTER_KEYS = [
-    'captured_at',
-    'ingested_at',
-    QUARANTINE_KEY,
-    CONTENT_FLAG_KEY,
-    EMBED_SKIP_KEY,
-  ];
-  const stableFrontmatter: Record<string, unknown> = { ...parsed.frontmatter };
-  for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) {
-    delete stableFrontmatter[k];
-  }
-  // Hash includes all meaningful fields for idempotency.
-  const hash = createHash('sha256')
-    .update(JSON.stringify({
-      title: parsed.title,
-      type: parsed.type,
-      compiled_truth: parsed.compiled_truth,
-      timeline: parsed.timeline,
-      frontmatter: stableFrontmatter,
-      tags: parsed.tags.sort(),
-    }))
-    .digest('hex');
+  // Hash includes all meaningful fields for idempotency. Kept in a shared
+  // helper so source-recovery verification binds its capability to the exact
+  // same content identity this importer will honor.
+  const hash = hashParsedMarkdownForImport(parsed);
 
   const parsedPage: ParsedPage = {
     type: parsed.type,
@@ -748,6 +743,14 @@ export async function importFromContent(
   // for single-source callers.
   const txOpts = sourceId ? { sourceId } : undefined;
   await engine.transaction(async (tx) => {
+    if (opts.recoverySlug !== undefined) {
+      await assertVerifiedRecoverySlugOverrideForWrite(
+        tx,
+        opts.recoverySlug,
+        sourceId ?? 'default',
+        slug,
+      );
+    }
     if (existing) await tx.createVersion(slug, txOpts);
 
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
@@ -936,6 +939,14 @@ export async function importFromFile(
      * never per file (codex perf finding #7).
      */
     activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> };
+    /**
+     * Internal recovery-only exception to path-derived slug authority. The
+     * caller must obtain this from a complete, source-matching recovery export
+     * manifest whose page bytes were verified before import. It never accepts
+     * an arbitrary path-to-slug pairing: the verifier only maps
+     * `<stored-slug>.md` back to that same stored slug.
+     */
+    recoverySlug?: VerifiedRecoverySlugOverride;
   } = {},
 ): Promise<ImportResult> {
   // Defense-in-depth: reject symlinks before reading content.
@@ -949,7 +960,10 @@ export async function importFromFile(
     return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)` };
   }
 
-  let content = readFileSync(filePath, 'utf-8');
+  // Read the exact bytes once. A recovery capability is bound to this digest,
+  // so reopening the path later would reintroduce a file TOCTOU window.
+  const contentBytes = readFileSync(filePath);
+  let content = contentBytes.toString('utf8');
 
   // Route code files through the code import path
   if (isCodeFilePath(relativePath)) {
@@ -986,7 +1000,43 @@ export async function importFromFile(
   let resolvedSlug = expectedSlug;
   let usedFrontmatterFallback = false;
 
-  if (expectedSlug === '') {
+  if (opts.recoverySlug !== undefined) {
+    if (!await isVerifiedRecoverySlugOverride(
+      engine,
+      opts.recoverySlug,
+      relativePath,
+      opts.sourceId ?? 'default',
+      contentBytes,
+    )) {
+      return {
+        slug: expectedSlug,
+        status: 'skipped',
+        chunks: 0,
+        error: `Unverified recovery slug override for ${relativePath}: receipt or trusted source page changed.`,
+      };
+    }
+    const recoverySlug = opts.recoverySlug.slug;
+    // A verified source-scoped recovery export may preserve a historical
+    // stored slug that current path slugification normalizes differently.
+    // The file can have no explicit frontmatter slug (parser yields the path
+    // slug), or name the stored recovery slug. Any third identity remains a
+    // hard rejection, preserving the normal anti-spoof boundary.
+    if (
+      parsed.slug !== ''
+      && parsed.slug !== expectedSlug
+      && parsed.slug !== recoverySlug
+    ) {
+      return {
+        slug: expectedSlug,
+        status: 'skipped',
+        chunks: 0,
+        error:
+          `Frontmatter slug "${parsed.slug}" does not match the verified recovery slug "${recoverySlug}" ` +
+          `or path-derived slug "${expectedSlug}" (from ${relativePath}).`,
+      };
+    }
+    resolvedSlug = recoverySlug;
+  } else if (expectedSlug === '') {
     if (parsed.slug && parsed.slug.length > 0) {
       // v0.32.7 CJK wave (PR #598 + codex C1/C6): path-derived slug is empty
       // (emoji / Thai / Arabic / exotic-script filename). Frontmatter slug
@@ -1031,11 +1081,26 @@ export async function importFromFile(
   // precedence in computeEffectiveDate. e.g. `daily/2024-03-15.md` →
   // filename `2024-03-15`.
   const fileBasename = basename(relativePath, '.md');
-  return importFromContent(engine, resolvedSlug, content, {
-    ...opts,
-    filename: fileBasename,
-    sourcePath: relativePath,
-  });
+  try {
+    return await importFromContent(engine, resolvedSlug, content, {
+      ...opts,
+      filename: fileBasename,
+      sourcePath: relativePath,
+    });
+  } catch (error) {
+    // A write-time recovery recheck is a recoverable per-file failure: return
+    // the usual skipped-with-error shape so sync records it in its failure
+    // ledger instead of advancing its bookmark.
+    if (error instanceof RecoverySlugOverrideInvalidError) {
+      return {
+        slug: expectedSlug,
+        status: 'skipped',
+        chunks: 0,
+        error: error.message,
+      };
+    }
+    throw error;
+  }
 }
 
 /**

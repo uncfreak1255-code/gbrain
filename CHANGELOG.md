@@ -2,6 +2,56 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.2.0] - 2026-08-03
+
+**Recovery snapshots now retain a page's established GBrain identity without relaxing import safety.** A source-scoped export can be restored or synced back into the same source even when a legacy database slug differs from its current filesystem path.
+
+Before this release, a legacy slug could turn into a duplicate when a recovery path changed. The sync looked successful while the source kept two identities for one page. A complete source-scoped export now carries the stored slug back only after GBrain checks the source count, exact page bytes, and the existing `(source_id, slug)` row. Ordinary imports keep the path and frontmatter checks, so an untrusted checkout cannot claim a different page.
+
+### How to use it
+
+Create a fresh source-scoped export, keep its manifest beside the pages, then sync it to the same source:
+
+```bash
+gbrain export --source <id> --dir ./gbrain-source-recovery
+gbrain sync --source <id> --repo ./gbrain-source-recovery
+```
+
+### What you'd see in a concrete example
+
+| Recovery input | Result |
+|---|---|
+| Complete same-source export of Markdown pages, unchanged | Legacy slug retained; no path duplicate. |
+| Normal, cross-source, partial, or edited receipt | Override denied; normal mismatch/error remains. |
+| Post-pull receipt edit or file swap | Fails before source mutation. |
+
+### Things to watch
+
+Receipts are evidence, not authority. Existing output directories, malformed manifests, unsafe paths or symlinks, changed hashes, and source-count drift fail closed. Source-scoped recovery currently supports Markdown pages only: code and image pages retain importer-specific path and chunking semantics, so export and restore reject them rather than risk mis-importing them. A first valid recovery sync may normalize a historical database content hash without changing the static receipt. A recovery export is not a full database backup; archival remains separate and reversible.
+
+## To take advantage of v0.47.2.0
+
+`gbrain upgrade` should apply this release. No schema migration or manual configuration change is required. If Doctor reports a partial upgrade, run:
+
+```bash
+gbrain apply-migrations --yes
+gbrain doctor --json
+```
+
+To verify recovery, keep the complete export together and run `gbrain sync --source <id> --repo <recovery-dir>`. If it still looks wrong, include Doctor output and `~/.gbrain/upgrade-errors.jsonl` when filing an issue.
+
+### Itemized changes
+
+### Fixed
+- **Verified recovery imports preserve legacy stored slugs.** GBrain accepts a legacy slug only when the complete receipt is bound to the same active source count and canonical content of its existing `(source_id, slug)` row. A receipt cannot self-authorize edited bytes or a new legacy identity; normal imports and unverified/cross-source manifests keep rejecting mismatched frontmatter slugs. A valid first recovery sync may normalize a legacy bookkeeping hash without invalidating the unchanged static snapshot.
+- **Recovery sync reloads and revalidates the current receipt after `git pull`.** An amended receipt that tries to add, rename, omit, or otherwise reassign recovery identity fails before any source mutation.
+- **Recovery receipts remain tamper-resistant.** Changed content, malformed hashes, dangling or escaping symlinks, altered source IDs, partial source snapshots, unlisted visible files, and a third arbitrary frontmatter slug are rejected before page mutation. The importer rechecks the exact receipt bytes at use time.
+- **Recovery verification now covers the final write.** The trusted source row is locked and rechecked in the import transaction, so a manual or MCP update that lands after recovery preflight is preserved rather than overwritten by a historical snapshot. That rejection is reported as a normal per-file sync failure, including for a rename, and cannot advance the sync bookmark.
+- **Import checkpoints normalize Windows paths on read, write, and resume.** A native Windows walk and an older checkpoint with backslash paths both match the same POSIX repo-relative identity, so a completed file is not re-imported solely because its separator form changed.
+
+### For contributors
+- The focused recovery round-trip suite now exercises the static round trip, source-count completeness, forged self-consistent receipts, post-pull amendments, unlisted recovery files, file and source-row TOCTOU, failed rename checkpointing, dangling manifests, Windows-style paths, malformed receipts, and attempted slug spoofing. The import-checkpoint suite covers both fresh and legacy Windows separator forms.
+
 ## [0.47.1.0] - 2026-07-29
 
 **GBrain can now rescue pages that exist only in its database before cleaning up a broken source.** When a source checkout disappears or points at the wrong place, Doctor, Advisor, and the remediation planner agree on the problem and stop unrelated paid work from running ahead of the repair. Empty duplicate sources can be archived safely, while sources that still contain unique pages are protected until those pages have a checked export.

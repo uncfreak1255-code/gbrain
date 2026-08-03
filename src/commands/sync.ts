@@ -4,6 +4,10 @@ import { join, relative } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
+import {
+  getVerifiedRecoverySlugOverrideForPath,
+  loadVerifiedRecoverySlugOverrides,
+} from '../core/source-recovery-manifest.ts';
 import { collectSyncableFiles } from './import.ts';
 import { createInterface } from 'readline';
 import {
@@ -1700,6 +1704,17 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     throw new Error(`No commits in repo ${repoPath}. Make at least one commit before syncing.`);
   }
 
+  // A verified source-scoped recovery export is the only exception to normal
+  // path-derived slug authority. Verify the working tree only after any pull:
+  // incremental imports below must use receipts and file hashes from the exact
+  // revision being diffed, not the pre-pull checkout. Full sync reloads the
+  // same verifier in runImport.
+  const recoverySlugOverrides = await loadVerifiedRecoverySlugOverrides(
+    engine,
+    repoPath,
+    opts.sourceId ?? DEFAULT_SOURCE_ID,
+  );
+
   // #1970: bookmark reachability. The ONLY thing that should force a full
   // reconcile is a truly-absent object; a present-but-non-ancestor bookmark
   // (history rewrite: force-push, master→main consolidation, squash) is still
@@ -1884,6 +1899,18 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     ]),
     renamed: manifest.renamed.filter(r => isSyncable(r.to, syncOpts)),
   };
+
+  // A recovery receipt is a sealed snapshot, not a normal repo manifest.
+  // Verify every input path before the delete/rename/import phases mutate any
+  // source rows, and repeat the lookup at use sites below to close the narrow
+  // window between this diff and each file import.
+  for (const path of [
+    ...filtered.added,
+    ...filtered.modified,
+    ...filtered.renamed.map(rename => rename.to),
+  ]) {
+    getVerifiedRecoverySlugOverrideForPath(recoverySlugOverrides, repoPath, path);
+  }
 
   // Delete pages that became un-syncable (modified but filtered out).
   // v0.20.0 Cathedral II SP-5: resolveSlugForPath picks the right slug shape
@@ -2331,8 +2358,17 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       const oldSlug = opts.sourceId
         ? (fromSlugByPath.get(from) ?? resolveSlugForPath(from))
         : await resolveSlugByPathOrSourcePath(engine, from, undefined);
-      // The new path doesn't yet have a row, so resolve from path only.
-      const newSlug = resolveSlugForPath(to);
+      // The new path doesn't yet have a row, so resolve from path only unless
+      // the post-pull recovery receipt proves a legacy stored identity for it.
+      // Keep updateSlug and the subsequent importFile on the same authority,
+      // otherwise a rename could leave a path-derived duplicate beside the
+      // recovered slug.
+      const recoverySlug = getVerifiedRecoverySlugOverrideForPath(
+        recoverySlugOverrides,
+        repoPath,
+        to,
+      );
+      const newSlug = recoverySlug?.slug ?? resolveSlugForPath(to);
       try {
         await engine.updateSlug(oldSlug, newSlug, renameOpts);
       } catch {
@@ -2341,8 +2377,22 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       // Reimport at new path (picks up content changes)
       const filePath = join(repoPath, to);
       if (existsSync(filePath)) {
-        const result = await importFile(engine, filePath, to, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack });
-        if (result.status === 'imported') chunksCreated += result.chunks;
+        const result = await importFile(engine, filePath, to, {
+          noEmbed,
+          sourceId: opts.sourceId,
+          activePack: syncActivePack,
+          recoverySlug,
+        });
+        if (result.status === 'imported') {
+          chunksCreated += result.chunks;
+        } else if (result.status === 'skipped' && result.error) {
+          // A rejected renamed file must use the same failure ledger as an
+          // add/modify. Advancing the destination checkpoint here would let
+          // the sync bookmark skip the failed import permanently.
+          failedFiles.push({ path: to, error: result.error });
+          progress.tick(1, newSlug);
+          continue;
+        }
       }
       pagesAffected.push(newSlug);
       await markCompleted(to);
@@ -2531,7 +2581,16 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         // 'default' was applied even for non-default sources, fabricating
         // duplicate rows that crashed bare-slug subqueries with Postgres 21000.
         const result = await observed(pacer, () =>
-          importFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack }));
+          importFile(eng, filePath, path, {
+            noEmbed,
+            sourceId: opts.sourceId,
+            activePack: syncActivePack,
+            recoverySlug: getVerifiedRecoverySlugOverrideForPath(
+              recoverySlugOverrides,
+              syncRepoPath,
+              path,
+            ),
+          }));
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
           pagesAffected.push(result.slug);

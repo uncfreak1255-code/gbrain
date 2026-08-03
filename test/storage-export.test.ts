@@ -479,6 +479,27 @@ describe('source-scoped recovery export', () => {
     }
   });
 
+  test('refuses non-markdown pages before publishing a source recovery receipt', async () => {
+    await engine.putPage(
+      'src/recovery-fixture-ts',
+      {
+        type: 'code',
+        page_kind: 'code',
+        title: 'src/recovery-fixture.ts (typescript)',
+        compiled_truth: 'export const recoveryFixture = true;\n',
+        source_path: 'src/recovery-fixture.ts',
+      },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toContain('source-scoped recovery export supports only markdown pages');
+    expect(stderr.join('\n')).toContain('src/recovery-fixture-ts');
+    expect(existsSync(outDir)).toBe(false);
+  });
+
   test('preserves raw keys named __proto__ without prototype assignment loss', async () => {
     await seedSourceVariant('default', 'default');
     await engine.putRawData(
@@ -637,7 +658,9 @@ describe('source recovery pagination', () => {
       kind: 'pglite' as const,
       executeRaw: async (sql: string) => sql.includes('FROM sources')
         ? [{ id: 'default' }]
-        : [{ n: pages.length }],
+        : sql.includes("page_kind <> 'markdown'")
+          ? []
+          : [{ n: pages.length }],
       listPages: async (filters: { offset?: number; limit?: number }) => {
         const offset = filters.offset ?? 0;
         const limit = filters.limit ?? 100;

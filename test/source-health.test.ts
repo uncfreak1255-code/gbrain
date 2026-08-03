@@ -17,6 +17,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFileSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import {
   computeAllSourceMetrics,
   resolvePriorityLabel,
@@ -57,6 +58,14 @@ function makeGitRepo(commitDate: Date, registry: string[]): { dir: string; head:
 let engine: PGLiteEngine;
 
 beforeAll(async () => {
+  // This file inserts a 1536-d fixture. Pin its schema before init so a
+  // sibling test's live ZeroEntropy/1280 gateway cannot make shard ordering
+  // decide whether this test passes.
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: 1536,
+    env: { ...process.env },
+  });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -64,6 +73,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  resetGateway();
 });
 
 beforeEach(async () => {
