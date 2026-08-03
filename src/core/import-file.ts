@@ -40,6 +40,10 @@ import { isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
 import { withActiveSourceProviderLease } from './source-embedding-lease.ts';
+import {
+  isVerifiedRecoverySlugOverride,
+  type VerifiedRecoverySlugOverride,
+} from './source-recovery-manifest.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -936,6 +940,14 @@ export async function importFromFile(
      * never per file (codex perf finding #7).
      */
     activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> };
+    /**
+     * Internal recovery-only exception to path-derived slug authority. The
+     * caller must obtain this from a complete, source-matching recovery export
+     * manifest whose page bytes were verified before import. It never accepts
+     * an arbitrary path-to-slug pairing: the verifier only maps
+     * `<stored-slug>.md` back to that same stored slug.
+     */
+    recoverySlug?: VerifiedRecoverySlugOverride;
   } = {},
 ): Promise<ImportResult> {
   // Defense-in-depth: reject symlinks before reading content.
@@ -986,7 +998,37 @@ export async function importFromFile(
   let resolvedSlug = expectedSlug;
   let usedFrontmatterFallback = false;
 
-  if (expectedSlug === '') {
+  if (opts.recoverySlug !== undefined) {
+    if (!isVerifiedRecoverySlugOverride(opts.recoverySlug, relativePath, opts.sourceId ?? 'default')) {
+      return {
+        slug: expectedSlug,
+        status: 'skipped',
+        chunks: 0,
+        error: `Unverified recovery slug override for ${relativePath}.`,
+      };
+    }
+    const recoverySlug = opts.recoverySlug.slug;
+    // A verified source-scoped recovery export may preserve a historical
+    // stored slug that current path slugification normalizes differently.
+    // The file can have no explicit frontmatter slug (parser yields the path
+    // slug), or name the stored recovery slug. Any third identity remains a
+    // hard rejection, preserving the normal anti-spoof boundary.
+    if (
+      parsed.slug !== ''
+      && parsed.slug !== expectedSlug
+      && parsed.slug !== recoverySlug
+    ) {
+      return {
+        slug: expectedSlug,
+        status: 'skipped',
+        chunks: 0,
+        error:
+          `Frontmatter slug "${parsed.slug}" does not match the verified recovery slug "${recoverySlug}" ` +
+          `or path-derived slug "${expectedSlug}" (from ${relativePath}).`,
+      };
+    }
+    resolvedSlug = recoverySlug;
+  } else if (expectedSlug === '') {
     if (parsed.slug && parsed.slug.length > 0) {
       // v0.32.7 CJK wave (PR #598 + codex C1/C6): path-derived slug is empty
       // (emoji / Thai / Arabic / exotic-script filename). Frontmatter slug

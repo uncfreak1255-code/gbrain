@@ -4,6 +4,7 @@ import { join, relative } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
+import { loadVerifiedRecoverySlugOverrides } from '../core/source-recovery-manifest.ts';
 import { collectSyncableFiles } from './import.ts';
 import { createInterface } from 'readline';
 import {
@@ -1700,6 +1701,16 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     throw new Error(`No commits in repo ${repoPath}. Make at least one commit before syncing.`);
   }
 
+  // A verified source-scoped recovery export is the only exception to normal
+  // path-derived slug authority. Verify the working tree only after any pull:
+  // incremental imports below must use receipts and file hashes from the exact
+  // revision being diffed, not the pre-pull checkout. Full sync reloads the
+  // same verifier in runImport.
+  const recoverySlugOverrides = loadVerifiedRecoverySlugOverrides(
+    repoPath,
+    opts.sourceId ?? DEFAULT_SOURCE_ID,
+  );
+
   // #1970: bookmark reachability. The ONLY thing that should force a full
   // reconcile is a truly-absent object; a present-but-non-ancestor bookmark
   // (history rewrite: force-push, master→main consolidation, squash) is still
@@ -2331,8 +2342,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       const oldSlug = opts.sourceId
         ? (fromSlugByPath.get(from) ?? resolveSlugForPath(from))
         : await resolveSlugByPathOrSourcePath(engine, from, undefined);
-      // The new path doesn't yet have a row, so resolve from path only.
-      const newSlug = resolveSlugForPath(to);
+      // The new path doesn't yet have a row, so resolve from path only unless
+      // the post-pull recovery receipt proves a legacy stored identity for it.
+      // Keep updateSlug and the subsequent importFile on the same authority,
+      // otherwise a rename could leave a path-derived duplicate beside the
+      // recovered slug.
+      const recoverySlug = recoverySlugOverrides.get(to);
+      const newSlug = recoverySlug?.slug ?? resolveSlugForPath(to);
       try {
         await engine.updateSlug(oldSlug, newSlug, renameOpts);
       } catch {
@@ -2341,7 +2357,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       // Reimport at new path (picks up content changes)
       const filePath = join(repoPath, to);
       if (existsSync(filePath)) {
-        const result = await importFile(engine, filePath, to, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack });
+        const result = await importFile(engine, filePath, to, {
+          noEmbed,
+          sourceId: opts.sourceId,
+          activePack: syncActivePack,
+          recoverySlug,
+        });
         if (result.status === 'imported') chunksCreated += result.chunks;
       }
       pagesAffected.push(newSlug);
@@ -2531,7 +2552,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         // 'default' was applied even for non-default sources, fabricating
         // duplicate rows that crashed bare-slug subqueries with Postgres 21000.
         const result = await observed(pacer, () =>
-          importFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack }));
+          importFile(eng, filePath, path, {
+            noEmbed,
+            sourceId: opts.sourceId,
+            activePack: syncActivePack,
+            recoverySlug: recoverySlugOverrides.get(path),
+          }));
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
           pagesAffected.push(result.slug);
