@@ -2,6 +2,18 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.2.0] - 2026-08-03
+
+**Recovery snapshots now retain a page's established GBrain identity without relaxing import safety.** A source-scoped export can be restored or synced back into the same source even when a legacy database slug differs from its current filesystem path.
+
+### Fixed
+- **Verified recovery imports preserve legacy stored slugs.** GBrain accepts a legacy slug only when the current source-scoped recovery manifest proves the exact page content, source, and snapshot hash. Normal imports and any unverified or cross-source manifest keep rejecting mismatched frontmatter slugs.
+- **Recovery sync recognizes the same verified identity after `git pull`.** Full imports, incremental adds, and renames reload the current receipt and preserve the existing page instead of creating a duplicate.
+- **Recovery receipts remain tamper-resistant.** Changed content, malformed hashes, symlink escapes, altered source IDs, and a third arbitrary frontmatter slug are rejected before page mutation.
+
+### For contributors
+- The focused recovery round-trip suite now exercises complete import, incremental add, rename, a real post-pull sync path, Windows-style paths, malformed and changed receipts, and attempted slug spoofing.
+
 ## [0.47.1.0] - 2026-07-29
 
 **GBrain can now rescue pages that exist only in its database before cleaning up a broken source.** When a source checkout disappears or points at the wrong place, Doctor, Advisor, and the remediation planner agree on the problem and stop unrelated paid work from running ahead of the repair. Empty duplicate sources can be archived safely, while sources that still contain unique pages are protected until those pages have a checked export.
