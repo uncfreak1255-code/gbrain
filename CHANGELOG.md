@@ -6,6 +6,42 @@ All notable changes to GBrain will be documented in this file.
 
 **Recovery snapshots now retain a page's established GBrain identity without relaxing import safety.** A source-scoped export can be restored or synced back into the same source even when a legacy database slug differs from its current filesystem path.
 
+Before this release, a legacy slug could turn into a duplicate when a recovery path changed. The sync looked successful while the source kept two identities for one page. A complete source-scoped export now carries the stored slug back only after GBrain checks the source count, exact page bytes, and the existing `(source_id, slug)` row. Ordinary imports keep the path and frontmatter checks, so an untrusted checkout cannot claim a different page.
+
+### How to use it
+
+Create a fresh source-scoped export, keep its manifest beside the pages, then sync it to the same source:
+
+```bash
+gbrain export --source <id> --dir ./gbrain-source-recovery
+gbrain sync --source <id> --repo ./gbrain-source-recovery
+```
+
+### What you'd see in a concrete example
+
+| Recovery input | Result |
+|---|---|
+| Complete same-source export, unchanged pages | Legacy slug retained; no path duplicate. |
+| Normal, cross-source, partial, or edited receipt | Override denied; normal mismatch/error remains. |
+| Post-pull receipt edit or file swap | Fails before source mutation. |
+
+### Things to watch
+
+Receipts are evidence, not authority. Existing output directories, malformed manifests, unsafe paths or symlinks, changed hashes, and source-count drift fail closed. A first valid recovery sync may normalize a historical database content hash without changing the static receipt. A recovery export is not a full database backup; archival remains separate and reversible.
+
+## To take advantage of v0.47.2.0
+
+`gbrain upgrade` should apply this release. No schema migration or manual configuration change is required. If Doctor reports a partial upgrade, run:
+
+```bash
+gbrain apply-migrations --yes
+gbrain doctor --json
+```
+
+To verify recovery, keep the complete export together and run `gbrain sync --source <id> --repo <recovery-dir>`. If it still looks wrong, include Doctor output and `~/.gbrain/upgrade-errors.jsonl` when filing an issue.
+
+### Itemized changes
+
 ### Fixed
 - **Verified recovery imports preserve legacy stored slugs.** GBrain accepts a legacy slug only when the complete receipt is bound to the same active source count and canonical content of its existing `(source_id, slug)` row. A receipt cannot self-authorize edited bytes or a new legacy identity; normal imports and unverified/cross-source manifests keep rejecting mismatched frontmatter slugs. A valid first recovery sync may normalize a legacy bookkeeping hash without invalidating the unchanged static snapshot.
 - **Recovery sync reloads and revalidates the current receipt after `git pull`.** An amended receipt that tries to add, rename, omit, or otherwise reassign recovery identity fails before any source mutation.
