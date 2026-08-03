@@ -45,12 +45,12 @@ To verify recovery, keep the complete export together and run `gbrain sync --sou
 ### Fixed
 - **Verified recovery imports preserve legacy stored slugs.** GBrain accepts a legacy slug only when the complete receipt is bound to the same active source count and canonical content of its existing `(source_id, slug)` row. A receipt cannot self-authorize edited bytes or a new legacy identity; normal imports and unverified/cross-source manifests keep rejecting mismatched frontmatter slugs. A valid first recovery sync may normalize a legacy bookkeeping hash without invalidating the unchanged static snapshot.
 - **Recovery sync reloads and revalidates the current receipt after `git pull`.** An amended receipt that tries to add, rename, omit, or otherwise reassign recovery identity fails before any source mutation.
-- **Recovery receipts remain tamper-resistant.** Changed content, malformed hashes, dangling or escaping symlinks, altered source IDs, partial source snapshots, and a third arbitrary frontmatter slug are rejected before page mutation. The importer rechecks the exact receipt bytes at use time.
+- **Recovery receipts remain tamper-resistant.** Changed content, malformed hashes, dangling or escaping symlinks, altered source IDs, partial source snapshots, unlisted visible files, and a third arbitrary frontmatter slug are rejected before page mutation. The importer rechecks the exact receipt bytes at use time.
 - **Recovery verification now covers the final write.** The trusted source row is locked and rechecked in the import transaction, so a manual or MCP update that lands after recovery preflight is preserved rather than overwritten by a historical snapshot. That rejection is reported as a normal per-file sync failure, including for a rename, and cannot advance the sync bookmark.
 - **Import checkpoints normalize Windows paths on read, write, and resume.** A native Windows walk and an older checkpoint with backslash paths both match the same POSIX repo-relative identity, so a completed file is not re-imported solely because its separator form changed.
 
 ### For contributors
-- The focused recovery round-trip suite now exercises the static round trip, source-count completeness, forged self-consistent receipts, post-pull amendments, file and source-row TOCTOU, failed rename checkpointing, dangling manifests, Windows-style paths, malformed receipts, and attempted slug spoofing. The import-checkpoint suite covers both fresh and legacy Windows separator forms.
+- The focused recovery round-trip suite now exercises the static round trip, source-count completeness, forged self-consistent receipts, post-pull amendments, unlisted recovery files, file and source-row TOCTOU, failed rename checkpointing, dangling manifests, Windows-style paths, malformed receipts, and attempted slug spoofing. The import-checkpoint suite covers both fresh and legacy Windows separator forms.
 
 ## [0.47.1.0] - 2026-07-29
 

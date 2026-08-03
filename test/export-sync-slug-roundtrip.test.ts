@@ -206,6 +206,28 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
+  test('fails closed when a recovery checkout adds an unlisted Markdown page', async () => {
+    const legacySlug = await seedLegacyPage();
+    const unlistedPath = 'notes/legacy-slug.md';
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    writeFileSync(
+      join(recoveryRepo, unlistedPath),
+      '---\ntype: note\ntitle: Unlisted recovery file\n---\n\nMust not be imported.\n',
+    );
+    commitRecoveryCheckout(recoveryRepo);
+
+    const { performSync } = await import('../src/commands/sync.ts');
+    await expect(performSync(engine, {
+      repoPath: recoveryRepo,
+      sourceId: 'default',
+      noPull: true,
+      noEmbed: true,
+      noExtract: true,
+    })).rejects.toThrow(`unexpected recovery file ${unlistedPath}`);
+
+    expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
   test('rejects an edited receipt that tries to grant a new legacy identity during rename', async () => {
     const legacySlug = await seedLegacyPage();
     const renamedSlug = 'notes/renamed legacy slug';

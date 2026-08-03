@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'crypto';
-import { lstatSync, readFileSync, realpathSync } from 'fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync } from 'fs';
 import { isAbsolute, join, relative, resolve, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { hashParsedMarkdownForImport } from './import-content-hash.ts';
@@ -322,6 +322,71 @@ function assertRegularPathWithoutSymlinkParents(
   }
 }
 
+/**
+ * A same-source recovery checkout is a sealed snapshot, not a normal working
+ * tree. The manifest already proves every listed page, but the import walker
+ * would otherwise accept an extra visible file under ordinary path-derived
+ * identity. Reject it before sync begins, so an addition cannot create a
+ * second page whose path happens to normalize a legacy stored slug.
+ *
+ * Hidden entries intentionally stay outside this inventory: the export
+ * manifest itself, Git metadata, and optional `.raw` sidecars are not
+ * syncable page inputs. The ordinary sync walker prunes those directories
+ * too. Every listed page is still checked separately, including an unusual
+ * hidden stored-slug path.
+ */
+function assertRecoveryHasNoUnlistedVisibleFiles(
+  repoPath: string,
+  expectedPagePaths: ReadonlySet<string>,
+): void {
+  function walk(directory: string, relativeDirectory: string): void {
+    let entries: string[];
+    try {
+      entries = readdirSync(directory);
+    } catch (error) {
+      failManifest(
+        repoPath,
+        `could not inspect recovery directory ${relativeDirectory || '.'} (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+
+    for (const entry of entries) {
+      // Both git-aware and filesystem import walks prune hidden paths. They
+      // cannot turn a recovery override into a page, so they are not part of
+      // this page-input inventory.
+      if (entry.startsWith('.')) continue;
+
+      const relativePath = relativeDirectory === '' ? entry : `${relativeDirectory}/${entry}`;
+      const fullPath = join(directory, entry);
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(fullPath);
+      } catch (error) {
+        failManifest(
+          repoPath,
+          `could not inspect recovery path ${relativePath} (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
+
+      if (stat.isSymbolicLink()) {
+        failManifest(repoPath, `unexpected recovery path ${relativePath} uses a symlink`);
+      }
+      if (stat.isDirectory()) {
+        walk(fullPath, relativePath);
+        continue;
+      }
+      if (!stat.isFile()) {
+        failManifest(repoPath, `unexpected recovery path ${relativePath} is not a regular file`);
+      }
+      if (!expectedPagePaths.has(relativePath)) {
+        failManifest(repoPath, `unexpected recovery file ${relativePath}`);
+      }
+    }
+  }
+
+  walk(repoPath, '');
+}
+
 async function verifyPageAgainstTrustedSource(
   engine: BrainEngine,
   page: ExportManifestPage,
@@ -472,6 +537,8 @@ export async function loadVerifiedRecoverySlugOverrides(
       }),
     );
   }
+
+  assertRecoveryHasNoUnlistedVisibleFiles(repoPath, new Set(overrides.keys()));
 
   return overrides;
 }
