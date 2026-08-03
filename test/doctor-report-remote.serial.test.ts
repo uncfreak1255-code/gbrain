@@ -77,6 +77,32 @@ describe('doctorReportRemote', () => {
     expect(q!.message).toContain('PGLite');
   });
 
+  test('reports an unsupported configured subagent model through the remote doctor surface', async () => {
+    const configuredModel = 'madeup-provider:remote-monitoring-regression';
+    const originalSubagent = await engine.getConfig('models.subagent');
+    const originalDefault = await engine.getConfig('models.default');
+    const originalTier = await engine.getConfig('models.tier.subagent');
+    try {
+      await engine.unsetConfig('models.subagent');
+      await engine.setConfig('models.default', configuredModel);
+      await engine.unsetConfig('models.tier.subagent');
+
+      const report = await doctorReportRemote(engine);
+      const check = report.checks.find(c => c.name === 'subagent_capability');
+      expect(check).toBeDefined();
+      expect(check!.status).toBe('warn');
+      expect(check!.message).toContain(`models.default is "${configuredModel}"`);
+      expect(check!.details).toEqual({ source: 'models.default', configured_model: configuredModel });
+    } finally {
+      if (originalSubagent === null) await engine.unsetConfig('models.subagent');
+      else await engine.setConfig('models.subagent', originalSubagent);
+      if (originalDefault === null) await engine.unsetConfig('models.default');
+      else await engine.setConfig('models.default', originalDefault);
+      if (originalTier === null) await engine.unsetConfig('models.tier.subagent');
+      else await engine.setConfig('models.tier.subagent', originalTier);
+    }
+  });
+
   test('full report on healthy brain is "healthy" status', async () => {
     const report = await doctorReportRemote(engine);
     expect(report.status).toMatch(/healthy|warnings/);
