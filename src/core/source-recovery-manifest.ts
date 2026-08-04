@@ -13,9 +13,7 @@
  * The exported DB hash is a snapshot receipt, not authority: a first valid
  * recovery import can normalize a historical row to the current importer
  * hash. Rows whose current hash is not importer-shaped fall back to an exact
- * canonical render from the trusted row. Source-scoped recovery deliberately
- * supports only Markdown pages: code and image rows require their original
- * importers and cannot be faithfully replayed from this Markdown receipt.
+ * canonical render from the trusted row.
  */
 
 import { createHash } from 'crypto';
@@ -31,6 +29,8 @@ interface ExportManifestPage {
   slug: string;
   db_content_hash: string | null;
   markdown_sha256: string;
+  page_kind?: 'markdown' | 'code';
+  source_path?: string;
 }
 
 interface ExportManifest {
@@ -52,6 +52,8 @@ export interface VerifiedRecoverySlugOverride {
   readonly relativePath: string;
   readonly slug: string;
   readonly sourceId: string;
+  readonly pageKind: 'markdown' | 'code';
+  readonly sourcePath?: string;
 }
 
 interface IssuedRecoverySlugOverride {
@@ -60,6 +62,8 @@ interface IssuedRecoverySlugOverride {
   sourceId: string;
   dbContentHash: string | null;
   markdownSha256: string;
+  pageKind: 'markdown' | 'code';
+  sourcePath?: string;
   /** Present only for source rows that predate import content hashes. */
   canonicalMarkdownSha256?: string;
 }
@@ -78,6 +82,8 @@ function createVerifiedRecoverySlugOverride(
     relativePath: value.relativePath,
     slug: value.slug,
     sourceId: value.sourceId,
+    pageKind: value.pageKind,
+    ...(value.sourcePath === undefined ? {} : { sourcePath: value.sourcePath }),
   };
   // The public shape is convenient for callers, but it is not the authority:
   // retain the receipt + source-row binding privately and freeze the object so
@@ -148,6 +154,18 @@ export async function isVerifiedRecoverySlugOverride(
     return false;
   }
 
+  if (issued.pageKind === 'code') {
+    if (
+    current.page_kind !== 'code'
+      || issued.sourcePath === undefined
+      || codeSourcePathForPage(current) !== issued.sourcePath
+      || !Buffer.from(current.compiled_truth, 'utf8').equals(content)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   // Historical rows can legitimately have no import content hash. In that
   // case, re-render the trusted row at use time rather than treating a null
   // value as an authority wildcard.
@@ -172,6 +190,8 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
   value: unknown,
   sourceId: string,
   slug: string,
+  expectedPageKind?: 'markdown' | 'code',
+  content?: Buffer,
 ): Promise<void> {
   const issued = issuedOverride(value);
   if (issued === undefined || issued.sourceId !== sourceId || issued.slug !== slug) {
@@ -179,11 +199,16 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
       `Unverified recovery slug override for ${issued?.relativePath ?? slug}: receipt or trusted source page changed.`,
     );
   }
+  if (expectedPageKind !== undefined && issued.pageKind !== expectedPageKind) {
+    throw new RecoverySlugOverrideInvalidError(
+      `Unverified recovery slug override for ${issued.relativePath}: importer kind changed before write.`,
+    );
+  }
 
   // Lock the active source row before comparing its identity. The lock stays
   // held through putPage in the caller's transaction, making check-and-write
   // atomic across Postgres and PGLite.
-  const rows = await tx.executeRaw<{ content_hash: string | null; page_kind: string }>(
+  const rows = await tx.executeRaw<{ content_hash: string | null; page_kind: string | null }>(
     `SELECT content_hash, page_kind
        FROM pages
       WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL
@@ -193,12 +218,33 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
   const current = rows[0];
   if (
     !current
-    || current.page_kind !== 'markdown'
+    || (current.page_kind ?? 'markdown') !== issued.pageKind
     || (current.content_hash ?? null) !== issued.dbContentHash
   ) {
     throw new RecoverySlugOverrideInvalidError(
       `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
     );
+  }
+
+  if (issued.pageKind === 'code') {
+    if (content === undefined) {
+      throw new RecoverySlugOverrideInvalidError(
+        `Unverified recovery slug override for ${issued.relativePath}: code bytes were not bound before write.`,
+      );
+    }
+    const page = await tx.getPage(slug, { sourceId });
+    if (
+      !page
+      || page.page_kind !== 'code'
+      || issued.sourcePath === undefined
+      || codeSourcePathForPage(page) !== issued.sourcePath
+      || !Buffer.from(page.compiled_truth, 'utf8').equals(content)
+    ) {
+      throw new RecoverySlugOverrideInvalidError(
+        `Unverified recovery slug override for ${issued.relativePath}: trusted source page changed before write.`,
+      );
+    }
+    return;
   }
 
   // Legacy rows can have no importer content hash. Preserve the same
@@ -234,6 +280,21 @@ function failManifest(repoPath: string, detail: string): never {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSafeRecoverySourcePath(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (value.includes('\\') || value.includes('\0') || isAbsolute(value)) return false;
+  return !value.split('/').some(part => part.length === 0 || part === '.' || part === '..');
+}
+
+function codeSourcePathForPage(
+  page: { source_path?: string | null; frontmatter: Record<string, unknown> },
+): string | undefined {
+  const sourcePath = typeof page.source_path === 'string' && page.source_path.length > 0
+    ? page.source_path
+    : page.frontmatter.file;
+  return isSafeRecoverySourcePath(sourcePath) ? sourcePath : undefined;
 }
 
 function isErrno(error: unknown, code: string): boolean {
@@ -293,10 +354,19 @@ function parseManifest(repoPath: string, parsed: unknown): ExportManifest {
     if (typeof value.markdown_sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(value.markdown_sha256)) {
       failManifest(repoPath, `pages[${index}].markdown_sha256 must be a SHA-256 digest`);
     }
+    const pageKind = value.page_kind === undefined ? 'markdown' : value.page_kind;
+    if (pageKind !== 'markdown' && pageKind !== 'code') {
+      failManifest(repoPath, `pages[${index}].page_kind must be markdown or code`);
+    }
+    if (pageKind === 'code' && !isSafeRecoverySourcePath(value.source_path)) {
+      failManifest(repoPath, `pages[${index}].source_path must be a safe relative path for code pages`);
+    }
     return {
       slug: value.slug,
       db_content_hash: value.db_content_hash === null ? null : value.db_content_hash.toLowerCase(),
       markdown_sha256: value.markdown_sha256.toLowerCase(),
+      page_kind: pageKind,
+      ...(pageKind === 'code' ? { source_path: value.source_path as string } : {}),
     };
   });
 
@@ -423,13 +493,35 @@ async function verifyPageAgainstTrustedSource(
   relativePath: string,
   content: Buffer,
   repoPath: string,
-): Promise<{ dbContentHash: string | null; canonicalMarkdownSha256?: string }> {
+): Promise<{
+  dbContentHash: string | null;
+  pageKind: 'markdown' | 'code';
+  sourcePath?: string;
+  canonicalMarkdownSha256?: string;
+}> {
   const sourcePage = await engine.getPage(page.slug, { sourceId });
   if (!sourcePage) {
     failManifest(repoPath, `no active trusted source page exists for ${page.slug}`);
   }
 
   const dbContentHash = sourcePage.content_hash ?? null;
+
+  if (page.page_kind === 'code') {
+    const sourcePath = codeSourcePathForPage(sourcePage);
+    if (sourcePage.page_kind !== 'code') {
+      failManifest(repoPath, `code recovery page ${relativePath} is not bound to a trusted code page`);
+    }
+    if (sourcePath === undefined || page.source_path !== sourcePath) {
+      failManifest(repoPath, `code source path does not match the trusted source page for ${relativePath}`);
+    }
+    if (!Buffer.from(sourcePage.compiled_truth, 'utf8').equals(content)) {
+      failManifest(repoPath, `Code content does not match the trusted source page for ${relativePath}`);
+    }
+    return { dbContentHash, pageKind: 'code', sourcePath };
+  }
+  if (sourcePage.page_kind === 'code') {
+    failManifest(repoPath, `code recovery page ${relativePath} must declare page_kind code`);
+  }
 
   // Most source rows originated through importFromContent, so this one pure
   // parse/hash check is the fast, exact authority binding used by the importer
@@ -440,7 +532,7 @@ async function verifyPageAgainstTrustedSource(
   if (dbContentHash !== null) {
     const parsed = parseMarkdown(content.toString('utf8'), relativePath);
     if (hashParsedMarkdownForImport(parsed) === dbContentHash) {
-      return { dbContentHash };
+      return { dbContentHash, pageKind: 'markdown' };
     }
   }
 
@@ -454,6 +546,7 @@ async function verifyPageAgainstTrustedSource(
   }
   return {
     dbContentHash,
+    pageKind: 'markdown',
     canonicalMarkdownSha256: sha256(canonical),
   };
 }
@@ -478,36 +571,6 @@ async function assertManifestMatchesTrustedSourceCount(
     failManifest(
       repoPath,
       `source page count ${manifest.source_page_count} does not match the trusted active source count ${actualCount}`,
-    );
-  }
-}
-
-/**
- * Recovery exports serialize pages as Markdown. Code and image rows need their
- * own source-path-aware importers, so accepting a receipt that names either
- * kind could delete it under `--strategy code` or re-chunk it as Markdown.
- * Query once per receipt, before collection or reconciliation can mutate data.
- */
-async function assertTrustedSourceHasOnlyMarkdownPages(
-  engine: BrainEngine,
-  sourceId: string,
-  repoPath: string,
-): Promise<void> {
-  const rows = await engine.executeRaw<{ slug: string; page_kind: string }>(
-    `SELECT slug, page_kind
-       FROM pages
-      WHERE source_id = $1 AND deleted_at IS NULL AND page_kind <> 'markdown'
-      ORDER BY slug
-      LIMIT 1`,
-    [sourceId],
-  );
-  if (rows.length > 0) {
-    const page = rows[0]!;
-    failManifest(
-      repoPath,
-      `source-scoped recovery supports only markdown pages; `
-      + `${page.slug} is a ${page.page_kind} page. `
-      + 'Use the original source checkout for code or image recovery.',
     );
   }
 }
@@ -553,7 +616,6 @@ export async function loadVerifiedRecoverySlugOverrides(
   if (manifestJson.source_id !== sourceId) return new Map();
   const manifest = parseManifest(repoPath, manifestJson);
   await assertManifestMatchesTrustedSourceCount(engine, manifest, sourceId, repoPath);
-  await assertTrustedSourceHasOnlyMarkdownPages(engine, sourceId, repoPath);
 
   const rootResolved = resolve(repoPath);
   const rootReal = realpathSync(repoPath);
@@ -593,6 +655,8 @@ export async function loadVerifiedRecoverySlugOverrides(
         sourceId,
         dbContentHash: binding.dbContentHash,
         markdownSha256: page.markdown_sha256,
+        pageKind: binding.pageKind,
+        sourcePath: binding.sourcePath,
         canonicalMarkdownSha256: binding.canonicalMarkdownSha256,
       }),
     );

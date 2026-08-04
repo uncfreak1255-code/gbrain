@@ -34,6 +34,8 @@ function commitRecoveryCheckout(repoPath: string): void {
 }
 
 function commitAll(repoPath: string, message: string): void {
+  execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: repoPath, stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.name', 'GBrain Test'], { cwd: repoPath, stdio: 'pipe' });
   execFileSync('git', ['add', '-A'], { cwd: repoPath, stdio: 'pipe' });
   // Cloned updater fixtures do not inherit the seed checkout's local Git
   // identity on Actions. Keep the author fixture-local rather than depending
@@ -214,6 +216,66 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
+  test('preserves code-page identity during a source-scoped recovery sync', async () => {
+    const sourcePath = 'src/example.ts';
+    const source = 'export const answer = 42;\n';
+    const codeSlug = 'src-example-ts';
+    await engine.putPage(
+      codeSlug,
+      {
+        type: 'note',
+        page_kind: 'code',
+        title: 'src/example.ts (typescript)',
+        compiled_truth: source,
+        timeline: '',
+        frontmatter: { language: 'typescript' },
+        source_path: sourcePath,
+      },
+      { sourceId: 'default' },
+    );
+    await engine.putPage(
+      'notes/recovery-markdown',
+      {
+        type: 'note',
+        title: 'Recovery markdown fixture',
+        compiled_truth: 'A markdown recovery page.\n',
+        timeline: '',
+        frontmatter: {},
+        source_path: 'notes/recovery-markdown.md',
+      },
+      { sourceId: 'default' },
+    );
+
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    const manifest = JSON.parse(
+      readFileSync(join(recoveryRepo, '.gbrain-export-manifest.json'), 'utf8'),
+    ) as { pages: Array<{ slug: string; page_kind?: string; source_path?: string }> };
+    expect(manifest.pages).toContainEqual(
+      expect.objectContaining({ slug: codeSlug, page_kind: 'code', source_path: sourcePath }),
+    );
+    expect(readFileSync(join(recoveryRepo, `${codeSlug}.md`), 'utf8')).toBe(source);
+    commitRecoveryCheckout(recoveryRepo);
+
+    const { performSync } = await import('../src/commands/sync.ts');
+    await performSync(engine, {
+      repoPath: recoveryRepo,
+      sourceId: 'default',
+      noPull: true,
+      noEmbed: true,
+      noExtract: true,
+    });
+
+    const restored = await engine.getPage(codeSlug, { sourceId: 'default' });
+    expect(restored?.type).toBe('code');
+    expect(restored?.compiled_truth).toBe(source);
+    const restoredRows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2`,
+      ['default', codeSlug],
+    );
+    expect(restoredRows[0]?.source_path).toBe(sourcePath);
+    expect(await activeSlugs()).toEqual(['notes/recovery-markdown', codeSlug]);
+  });
+
   test('fails closed when a recovery checkout adds an unlisted Markdown page', async () => {
     const legacySlug = await seedLegacyPage();
     const unlistedPath = 'notes/legacy-slug.md';
@@ -259,7 +321,7 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('rejects an older code-page recovery receipt before a code sync can reconcile it', async () => {
+  test('rejects an older markdown-only recovery receipt before a code sync can reconcile it', async () => {
     const codeSlug = 'src/recovery-fixture-ts';
     const code = 'export const recoveryFixture = true;\n';
     await engine.putPage(
@@ -297,9 +359,7 @@ describe('source-scoped recovery export slug identity', () => {
       noPull: true,
       noEmbed: true,
       noExtract: true,
-    })).rejects.toThrow(
-      `source-scoped recovery supports only markdown pages; ${codeSlug} is a code page`,
-    );
+    })).rejects.toThrow(`code recovery page ${codeSlug}.md must declare page_kind code`);
 
     const rows = await engine.executeRaw<{ page_kind: string; source_path: string }>(
       `SELECT page_kind, source_path FROM pages WHERE source_id = $1 AND slug = $2`,

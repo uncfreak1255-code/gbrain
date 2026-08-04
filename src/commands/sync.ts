@@ -8,7 +8,7 @@ import {
   getVerifiedRecoverySlugOverrideForPath,
   loadVerifiedRecoverySlugOverrides,
 } from '../core/source-recovery-manifest.ts';
-import { collectSyncableFiles } from './import.ts';
+import { collectSyncableFiles, normalizeImportRelativePath } from './import.ts';
 import { createInterface } from 'readline';
 import {
   isSyncable,
@@ -118,6 +118,22 @@ function buildRepoSyncFilterOpts(
   const exclude = resolveRepoLocalSyncExcludes(repoPath);
   if (strategy) return exclude.length > 0 ? { strategy, exclude } : { strategy };
   return exclude.length > 0 ? { exclude } : undefined;
+}
+
+function isRecoverySyncablePath(
+  path: string,
+  syncOpts: { strategy?: 'markdown' | 'code' | 'auto'; exclude?: string[] } | undefined,
+  recoveryOverrides: ReadonlyMap<string, import('../core/source-recovery-manifest.ts').VerifiedRecoverySlugOverride>,
+): boolean {
+  const override = recoveryOverrides.get(normalizeImportRelativePath(path));
+  if (override?.pageKind === 'code') {
+    // A sealed recovery manifest is authoritative about this file's page
+    // kind. Recovery archives use `.md` paths for code bytes, so the default
+    // markdown strategy must retain this path for code-aware importFile
+    // dispatch instead of silently skipping it.
+    return !(syncOpts?.exclude && syncOpts.exclude.length > 0 && matchesSyncGlobs(path, syncOpts.exclude));
+  }
+  return isSyncable(path, syncOpts);
 }
 
 function syncCheckpointKeys(
@@ -1888,16 +1904,18 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // set. isSyncable(r.from) excludes metafiles automatically, so a rename of a
   // metafile is left untouched (matching the #1433 metafile-skip invariant).
   const renamedToUnsyncable = manifest.renamed
-    .filter(r => isSyncable(r.from, syncOpts) && !isSyncable(r.to, syncOpts))
+    .filter(r =>
+      isRecoverySyncablePath(r.from, syncOpts, recoverySlugOverrides)
+      && !isRecoverySyncablePath(r.to, syncOpts, recoverySlugOverrides))
     .map(r => r.from);
   const filtered: SyncManifest = {
-    added: manifest.added.filter(p => isSyncable(p, syncOpts)),
-    modified: manifest.modified.filter(p => isSyncable(p, syncOpts)),
+    added: manifest.added.filter(p => isRecoverySyncablePath(p, syncOpts, recoverySlugOverrides)),
+    modified: manifest.modified.filter(p => isRecoverySyncablePath(p, syncOpts, recoverySlugOverrides)),
     deleted: unique([
-      ...manifest.deleted.filter(p => isSyncable(p, syncOpts)),
+      ...manifest.deleted.filter(p => isRecoverySyncablePath(p, syncOpts, recoverySlugOverrides)),
       ...renamedToUnsyncable,
     ]),
-    renamed: manifest.renamed.filter(r => isSyncable(r.to, syncOpts)),
+    renamed: manifest.renamed.filter(r => isRecoverySyncablePath(r.to, syncOpts, recoverySlugOverrides)),
   };
 
   // A recovery receipt is a sealed snapshot, not a normal repo manifest.
@@ -1935,7 +1953,9 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // delete the page. That's the same pre-fix behavior — removing the
   // page requires `gbrain pages purge-deleted` or a direct MCP delete.
   // Filed as v0.42+ follow-up for a `gbrain pages remove <slug>` surface.
-  const unsyncableModified = manifest.modified.filter(p => !isSyncable(p, syncOpts));
+  const unsyncableModified = manifest.modified.filter(
+    p => !isRecoverySyncablePath(p, syncOpts, recoverySlugOverrides),
+  );
   // v0.18.0+ multi-source: scope getPage + deletePage to opts.sourceId so
   // unsyncable cleanup in source A doesn't accidentally sweep same-slug
   // pages in sources B/C/D.
@@ -3047,6 +3067,12 @@ async function performFullSync(
   headCommit: string,
   opts: SyncOpts,
 ): Promise<SyncResult> {
+  const recoverySlugOverrides = await loadVerifiedRecoverySlugOverrides(
+    engine,
+    repoPath,
+    opts.sourceId ?? DEFAULT_SOURCE_ID,
+  );
+
   // Dry-run: walk the repo, count syncable files, return without writing.
   // Fixes the silent-write-on-dry-run bug where performFullSync called
   // runImport unconditionally regardless of opts.dryRun.
@@ -3057,7 +3083,10 @@ async function performFullSync(
   // code --dry-run` always reported zero files even when ~1500 code
   // files were waiting.
   if (opts.dryRun) {
-    const allFiles = collectSyncableFiles(repoPath, { strategy: opts.strategy ?? 'markdown' });
+    const allFiles = collectSyncableFiles(repoPath, {
+      strategy: opts.strategy ?? 'markdown',
+      recoveryOverrides: recoverySlugOverrides,
+    });
     slog(
       `Full-sync dry run (strategy=${opts.strategy ?? 'markdown'}): ` +
       `${allFiles.length} file(s) would be imported ` +
@@ -3208,8 +3237,15 @@ async function performFullSync(
     // backslash paths while a stored source_path can hold git-derived forward
     // slashes; without normalization every file-backed page mismatches, looks
     // stale, and the reconcile wipes the whole source.
-    const currentFiles = collectSyncableFiles(repoPath, { strategy: opts.strategy ?? 'markdown' })
-      .map(abs => relative(repoPath, abs));
+    const currentFiles = [
+      ...collectSyncableFiles(repoPath, {
+        strategy: opts.strategy ?? 'markdown',
+        recoveryOverrides: recoverySlugOverrides,
+      }).map(abs => relative(repoPath, abs)),
+      ...[...recoverySlugOverrides.values()]
+        .filter(override => override.pageKind === 'code' && override.sourcePath !== undefined)
+        .map(override => override.sourcePath as string),
+    ];
     const rows = await engine.executeRaw<{
       slug: string;
       source_path: string | null;

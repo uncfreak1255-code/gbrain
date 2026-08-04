@@ -137,6 +137,12 @@ export interface Page {
    */
   source_id: string;
 
+  /** v0.27.1: authoritative importer kind from `pages.page_kind`. */
+  page_kind?: PageKind;
+
+  /** v0.32.7: original filesystem path for source-aware imports. */
+  source_path?: string | null;
+
   // v0.39.3.0 provenance read-path (WARN-8 + CV5). Migration v81 columns
   // surfaced through getPage / list_pages so `gbrain call get_page | jq
   // .source_kind` actually returns the value the put_page op wrote. NULL
