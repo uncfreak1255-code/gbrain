@@ -127,9 +127,11 @@ function isRecoverySyncablePath(
 ): boolean {
   const override = recoveryOverrides.get(normalizeImportRelativePath(path));
   if (override?.pageKind === 'code') {
-    const strategy = syncOpts?.strategy ?? 'markdown';
-    return (strategy === 'code' || strategy === 'auto')
-      && !(syncOpts?.exclude && syncOpts.exclude.length > 0 && matchesSyncGlobs(path, syncOpts.exclude));
+    // A sealed recovery manifest is authoritative about this file's page
+    // kind. Recovery archives use `.md` paths for code bytes, so the default
+    // markdown strategy must retain this path for code-aware importFile
+    // dispatch instead of silently skipping it.
+    return !(syncOpts?.exclude && syncOpts.exclude.length > 0 && matchesSyncGlobs(path, syncOpts.exclude));
   }
   return isSyncable(path, syncOpts);
 }

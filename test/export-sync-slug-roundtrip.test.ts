@@ -71,31 +71,6 @@ function writeRecoveryManifest(
   );
 }
 
-async function runExportCapturingExit(args: string[]): Promise<{ exitCode: number | null; stderr: string[] }> {
-  const originalExit = process.exit;
-  const originalErr = console.error;
-  let exitCode: number | null = null;
-  const stderr: string[] = [];
-  process.exit = ((code?: number) => {
-    exitCode = code ?? 0;
-    throw new Error(`__test_exit__:${code}`);
-  }) as typeof process.exit;
-  console.error = (...args: unknown[]) => {
-    stderr.push(args.map(String).join(' '));
-  };
-  try {
-    await runExport(engine, args);
-  } catch (error) {
-    if (!(error instanceof Error && error.message.startsWith('__test_exit__:'))) {
-      throw error;
-    }
-  } finally {
-    process.exit = originalExit;
-    console.error = originalErr;
-  }
-  return { exitCode, stderr };
-}
-
 async function reserveLoopbackPort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
     const server = createServer();
@@ -241,38 +216,64 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('rejects source-scoped recovery export when the source contains a code page', async () => {
-    const { importCodeFile } = await import('../src/core/import-file.ts');
+  test('preserves code-page identity during a source-scoped recovery sync', async () => {
     const sourcePath = 'src/example.ts';
     const source = 'export const answer = 42;\n';
-    await importCodeFile(engine, sourcePath, source, { noEmbed: true });
-
     const codeSlug = 'src-example-ts';
-    await engine.executeRaw(
-      `UPDATE pages
-          SET source_path = $1,
-              content_hash = NULL
-        WHERE source_id = $2 AND slug = $3`,
-      [sourcePath, 'default', codeSlug],
+    await engine.putPage(
+      codeSlug,
+      {
+        type: 'note',
+        page_kind: 'code',
+        title: 'src/example.ts (typescript)',
+        compiled_truth: source,
+        timeline: '',
+        frontmatter: { language: 'typescript' },
+        source_path: sourcePath,
+      },
+      { sourceId: 'default' },
+    );
+    await engine.putPage(
+      'notes/recovery-markdown',
+      {
+        type: 'note',
+        title: 'Recovery markdown fixture',
+        compiled_truth: 'A markdown recovery page.\n',
+        timeline: '',
+        frontmatter: {},
+        source_path: 'notes/recovery-markdown.md',
+      },
+      { sourceId: 'default' },
     );
 
-    const blocked = await runExportCapturingExit(['--dir', recoveryRepo, '--source', 'default']);
-    expect(blocked.exitCode).toBe(1);
-    expect(blocked.stderr.join('\n'))
-      .toMatch(/source-scoped recovery export supports only markdown pages.*src-example-ts.*code page/i);
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    const manifest = JSON.parse(
+      readFileSync(join(recoveryRepo, '.gbrain-export-manifest.json'), 'utf8'),
+    ) as { pages: Array<{ slug: string; page_kind?: string; source_path?: string }> };
+    expect(manifest.pages).toContainEqual(
+      expect.objectContaining({ slug: codeSlug, page_kind: 'code', source_path: sourcePath }),
+    );
+    expect(readFileSync(join(recoveryRepo, `${codeSlug}.md`), 'utf8')).toBe(source);
+    commitRecoveryCheckout(recoveryRepo);
 
-    const restoredRows = await engine.executeRaw<{
-      compiled_truth: string | null;
-      page_kind: string | null;
-      source_path: string | null;
-    }>(
-      `SELECT compiled_truth, page_kind, source_path FROM pages WHERE source_id = $1 AND slug = $2`,
+    const { performSync } = await import('../src/commands/sync.ts');
+    await performSync(engine, {
+      repoPath: recoveryRepo,
+      sourceId: 'default',
+      noPull: true,
+      noEmbed: true,
+      noExtract: true,
+    });
+
+    const restored = await engine.getPage(codeSlug, { sourceId: 'default' });
+    expect(restored?.type).toBe('code');
+    expect(restored?.compiled_truth).toBe(source);
+    const restoredRows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2`,
       ['default', codeSlug],
     );
-    expect(restoredRows[0]?.compiled_truth).toBe(source);
-    expect(restoredRows[0]?.page_kind).toBe('code');
     expect(restoredRows[0]?.source_path).toBe(sourcePath);
-    expect(await activeSlugs()).toEqual([codeSlug]);
+    expect(await activeSlugs()).toEqual(['notes/recovery-markdown', codeSlug]);
   });
 
   test('fails closed when a recovery checkout adds an unlisted Markdown page', async () => {
@@ -320,7 +321,7 @@ describe('source-scoped recovery export slug identity', () => {
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 
-  test('rejects an older code-page recovery receipt before a code sync can reconcile it', async () => {
+  test('rejects an older markdown-only recovery receipt before a code sync can reconcile it', async () => {
     const codeSlug = 'src/recovery-fixture-ts';
     const code = 'export const recoveryFixture = true;\n';
     await engine.putPage(
@@ -358,9 +359,7 @@ describe('source-scoped recovery export slug identity', () => {
       noPull: true,
       noEmbed: true,
       noExtract: true,
-    })).rejects.toThrow(
-      `source-scoped recovery supports only markdown pages; ${codeSlug} is a code page`,
-    );
+    })).rejects.toThrow(`code recovery page ${codeSlug}.md must declare page_kind code`);
 
     const rows = await engine.executeRaw<{ page_kind: string; source_path: string }>(
       `SELECT page_kind, source_path FROM pages WHERE source_id = $1 AND slug = $2`,

@@ -13,9 +13,7 @@
  * The exported DB hash is a snapshot receipt, not authority: a first valid
  * recovery import can normalize a historical row to the current importer
  * hash. Rows whose current hash is not importer-shaped fall back to an exact
- * canonical render from the trusted row. Source-scoped recovery deliberately
- * supports only Markdown pages: code and image rows require their original
- * importers and cannot be faithfully replayed from this Markdown receipt.
+ * canonical render from the trusted row.
  */
 
 import { createHash } from 'crypto';
@@ -158,7 +156,7 @@ export async function isVerifiedRecoverySlugOverride(
 
   if (issued.pageKind === 'code') {
     if (
-      current.type !== 'code'
+    current.page_kind !== 'code'
       || issued.sourcePath === undefined
       || codeSourcePathForPage(current) !== issued.sourcePath
       || !Buffer.from(current.compiled_truth, 'utf8').equals(content)
@@ -210,7 +208,7 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
   // Lock the active source row before comparing its identity. The lock stays
   // held through putPage in the caller's transaction, making check-and-write
   // atomic across Postgres and PGLite.
-  const rows = await tx.executeRaw<{ content_hash: string | null; page_kind: string }>(
+  const rows = await tx.executeRaw<{ content_hash: string | null; page_kind: string | null }>(
     `SELECT content_hash, page_kind
        FROM pages
       WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL
@@ -220,7 +218,7 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
   const current = rows[0];
   if (
     !current
-    || current.page_kind !== 'markdown'
+    || (current.page_kind ?? 'markdown') !== issued.pageKind
     || (current.content_hash ?? null) !== issued.dbContentHash
   ) {
     throw new RecoverySlugOverrideInvalidError(
@@ -237,7 +235,7 @@ export async function assertVerifiedRecoverySlugOverrideForWrite(
     const page = await tx.getPage(slug, { sourceId });
     if (
       !page
-      || page.type !== 'code'
+      || page.page_kind !== 'code'
       || issued.sourcePath === undefined
       || codeSourcePathForPage(page) !== issued.sourcePath
       || !Buffer.from(page.compiled_truth, 'utf8').equals(content)
@@ -291,12 +289,11 @@ function isSafeRecoverySourcePath(value: unknown): value is string {
 }
 
 function codeSourcePathForPage(
-  page: { slug: string; frontmatter: Record<string, unknown> },
+  page: { source_path?: string | null; frontmatter: Record<string, unknown> },
 ): string | undefined {
-  const frontmatterFile = page.frontmatter.file;
-  const sourcePath = typeof frontmatterFile === 'string' && frontmatterFile.length > 0
-    ? frontmatterFile
-    : page.slug;
+  const sourcePath = typeof page.source_path === 'string' && page.source_path.length > 0
+    ? page.source_path
+    : page.frontmatter.file;
   return isSafeRecoverySourcePath(sourcePath) ? sourcePath : undefined;
 }
 
@@ -511,7 +508,7 @@ async function verifyPageAgainstTrustedSource(
 
   if (page.page_kind === 'code') {
     const sourcePath = codeSourcePathForPage(sourcePage);
-    if (sourcePage.type !== 'code') {
+    if (sourcePage.page_kind !== 'code') {
       failManifest(repoPath, `code recovery page ${relativePath} is not bound to a trusted code page`);
     }
     if (sourcePath === undefined || page.source_path !== sourcePath) {
@@ -522,7 +519,7 @@ async function verifyPageAgainstTrustedSource(
     }
     return { dbContentHash, pageKind: 'code', sourcePath };
   }
-  if (sourcePage.type === 'code') {
+  if (sourcePage.page_kind === 'code') {
     failManifest(repoPath, `code recovery page ${relativePath} must declare page_kind code`);
   }
 
@@ -579,36 +576,6 @@ async function assertManifestMatchesTrustedSourceCount(
 }
 
 /**
- * Recovery exports serialize pages as Markdown. Code and image rows need their
- * own source-path-aware importers, so accepting a receipt that names either
- * kind could delete it under `--strategy code` or re-chunk it as Markdown.
- * Query once per receipt, before collection or reconciliation can mutate data.
- */
-async function assertTrustedSourceHasOnlyMarkdownPages(
-  engine: BrainEngine,
-  sourceId: string,
-  repoPath: string,
-): Promise<void> {
-  const rows = await engine.executeRaw<{ slug: string; page_kind: string }>(
-    `SELECT slug, page_kind
-       FROM pages
-      WHERE source_id = $1 AND deleted_at IS NULL AND page_kind <> 'markdown'
-      ORDER BY slug
-      LIMIT 1`,
-    [sourceId],
-  );
-  if (rows.length > 0) {
-    const page = rows[0]!;
-    failManifest(
-      repoPath,
-      `source-scoped recovery supports only markdown pages; `
-      + `${page.slug} is a ${page.page_kind} page. `
-      + 'Use the original source checkout for code or image recovery.',
-    );
-  }
-}
-
-/**
  * Return verified `repo-relative path -> stored slug` overrides for a recovery
  * checkout. An absent manifest, or a parseable manifest that explicitly names
  * another source, is an ordinary checkout and gets no override. Any malformed
@@ -649,7 +616,6 @@ export async function loadVerifiedRecoverySlugOverrides(
   if (manifestJson.source_id !== sourceId) return new Map();
   const manifest = parseManifest(repoPath, manifestJson);
   await assertManifestMatchesTrustedSourceCount(engine, manifest, sourceId, repoPath);
-  await assertTrustedSourceHasOnlyMarkdownPages(engine, sourceId, repoPath);
 
   const rootResolved = resolve(repoPath);
   const rootReal = realpathSync(repoPath);

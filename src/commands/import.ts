@@ -550,8 +550,11 @@ function isCollectibleForWalker(
 ): boolean {
   const recoveryOverride = recoveryOverrides?.get(normalizeImportRelativePath(path));
   if (recoveryOverride?.pageKind === 'code') {
-    return (strategy === 'code' || strategy === 'auto')
-      && !(exclude && exclude.length > 0 && matchesSyncGlobs(path, exclude));
+    // A sealed source-recovery manifest is authoritative about this file's
+    // page kind. Its archive path ends in `.md` even when the recovered bytes
+    // are code, so the default markdown strategy must still collect it; the
+    // recovery override then dispatches importFile through importCodeFile.
+    return !(exclude && exclude.length > 0 && matchesSyncGlobs(path, exclude));
   }
   // Keep the historical markdown+multimodal image carve-out, but route
   // markdown/code paths through the shared syncability gate so full sync
