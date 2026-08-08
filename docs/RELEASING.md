@@ -49,6 +49,52 @@ shipping the v0.23.2 round-trip E2E (`type: 'reflection'` is not a
 member of `PageType`). Run `bun run typecheck` once before push, even
 when only test files changed.
 
+## Merge-conflict recovery on release metadata (memorize this)
+
+Every merge from master can conflict on the five release-metadata files, because
+master ships its own version bumps. Auto-merge sometimes resolves these silently
+in unexpected ways. When `git merge origin/master` reports conflicts on release
+metadata, resolve in this exact order:
+
+1. **VERSION** — overwrite with the wave's version (`echo -n "X.Y.Z.W"
+   > VERSION`). Highest semver wins; do NOT take master's lower version.
+2. **package.json** — strip the conflict markers, keep the wave's
+   version line. Sed pattern:
+   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/,/^>>>>>>> /d' package.json && rm package.json.bak`
+   (assumes ours is above the `=======`).
+3. **openclaw.plugin.json** — strip conflict markers and keep the wave's
+   version line so it matches `VERSION`.
+4. **skills/manifest.json** — strip conflict markers and keep the wave's
+   version line so it matches `VERSION`.
+5. **CHANGELOG.md** — strip ALL three conflict markers; both your entry
+   and master's entry stay. Sed pattern:
+   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/master$/d' CHANGELOG.md && rm CHANGELOG.md.bak`
+   Then verify your entry is the topmost `## [X.Y.Z.W]` and master's
+   newer-than-yours entries (if any) sit below.
+6. **Run the 5-line version-consistency audit** (the canonical copy is in
+   `CLAUDE.md`). If it doesn't show your version on all five lines, you
+   missed a marker.
+7. **Run `bun install`** to refresh `bun.lock` against the resolved
+   `package.json`. Stage and commit if it changed.
+8. **Run `bun run typecheck`** before committing the merge.
+9. Only THEN run `git commit` for the merge.
+
+If the audit shows drift after step 6, do NOT proceed to step 7. Re-run
+steps 1-5 against the actual file content; you missed a marker or
+resolved one in the wrong direction.
+
+**Anti-pattern to avoid:** Resolving via `git checkout --ours package.json`
+and `git checkout --theirs scripts/test-shard.sh` mixed in the same
+commit. The selective directional resolution is fine, but on release metadata
+specifically, ALWAYS use the explicit `echo > VERSION` + sed-strip-markers
+pattern above. The directional checkout flags have bitten us when the conflict
+shape was unexpected (e.g. master stripped a section we expected to keep).
+
+**Before pushing a merge commit**, run the 5-line audit one more time. If you've
+been editing the branch via `/ship`, Step 12's idempotency check covers you. If
+you've been editing manually (merge resolution, conflict fix, version bump), the
+audit is the last line of defense before CI yells at you.
+
 ## CHANGELOG + VERSION are branch-scoped
 
 **VERSION and CHANGELOG describe what THIS branch adds vs master, not how we got

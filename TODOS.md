@@ -1,5 +1,61 @@
 # TODOS
 
+## Source export/import slug stability (filed v0.47.1.0)
+
+### bug: source-scoped export/sync does not preserve legacy slug identity
+
+**What:** A `gbrain export --source` recovery snapshot can re-import as
+derived path slugs, creating duplicate active pages when a stored legacy slug
+is not stable under current path slugification. Live 2026-08-01: recovering
+the `default` source's checkout (rebuilding `.gstack-brain-worktree` after it
+had gone missing from disk entirely) produced 23 such duplicates alongside the
+original 494 active pages. The duplicates were soft-deleted as a one-time
+cleanup (recoverable 72h from deletion, then permanent); the slug-identity bug
+that produced them was not touched.
+
+**Why:** Any future export → recovery checkout → sync of this or another
+source hits the same bug and reproduces the same class of duplicates. The fix
+must preserve slug identity across that full round-trip, not clean up after it
+again.
+
+**Requirements for the fix:**
+- Preserve slug identity across export → recovery checkout → sync.
+- Add an ISOLATED regression test (fixture DB/repo) that asserts the active
+  slug set and count are unchanged after the round-trip, with no derived
+  duplicate created. Do not validate by replaying the live recovery again.
+- Preserve the anti-spoof rule for ordinary files with mismatched
+  `frontmatter.slug` — a recovery manifest must not weaken that boundary.
+
+**Non-goal:** `sources list` counting soft-deleted rows in `page_count` is
+intentional (`countPages` in `src/commands/sources.ts` is a raw
+`COUNT(*) FROM pages WHERE source_id = $1`, no `deleted_at` filter — so it
+will not drop after a soft-delete; check `source_path_health`/`sync_failures`
+in `gbrain doctor` instead of raw page counts to verify a recovery). A
+separate UX-only issue may later clarify that label versus an active-only
+`sources status`. Do not fold that into this bug.
+
+**Context:** Root cause traced live during the 2026-08-01 recovery.
+`.gstack-brain-worktree` was a standalone, no-origin private git repo (never
+meant to appear in `git worktree list` or be re-clonable), deliberately
+created 2026-07-27 from a DB export. `source_path_health` — new in PR #89 /
+v0.47.1.0 — was the first check that ever verified the path existed, and
+caught it missing entirely. Recovery used a fresh export from the live DB (494
+pages / 972 chunks) rather than the stale 443-page snapshot, verified
+manifest, atomic restore at the expected path. Reconciliation of the 23
+duplicates: private pre-delete backup at commit `85a0ded`; restored checkout
+clean at `6948803`. Post-fix, live readback confirmed 517 total rows / 494
+active, `source_path_health`/`sync_freshness`/`cycle_freshness` all `ok`.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** none
+
+**Effort:** M — audit what makes path-derived slugs diverge from source
+across an export/reimport round-trip, then add a regression test that
+reproduces a round-trip and asserts zero slug drift.
+**Priority:** P2
+**Depends on:** none
+
 ## Seascape GBrain Profile follow-ups (filed 2026-06-22)
 
 ### Seascape source-health readback

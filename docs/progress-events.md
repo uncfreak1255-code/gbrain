@@ -179,6 +179,37 @@ extract, import, backlinks) calls `job.updateProgress({done, total,
 The `jobs work` daemon itself emits coarse one-line-per-job stderr output
 for liveness only. Per-page detail lives in the DB.
 
+## Wiring a new bulk command
+
+Which commands already stream progress: doctor, embed, import, export, sync,
+extract, migrate, repair-jsonb, orphans, check-backlinks, lint, integrity auto,
+eval, files sync, and apply-migrations. All of them go through the shared
+reporter at `src/core/progress.ts`, so agents get heartbeats within 1 second of
+every iteration regardless of how slow the underlying work is.
+
+To add another:
+
+```ts
+import { createProgress } from '../core/progress.ts';
+import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+
+const reporter = createProgress(cliOptsToProgressOptions(getCliOptions()));
+reporter.start(phase, total);   // before the loop
+reporter.tick();                // inside it
+reporter.finish();              // after
+```
+
+For single long-running queries, use `startHeartbeat(reporter, note)` with a
+try/finally to guarantee cleanup.
+
+Never call `process.stdout.write('\r...')` in bulk paths — the CI guard
+(`scripts/check-progress-to-stdout.sh`, wired into `bun run test`) will fail the
+build.
+
+Minion handlers pass `job.updateProgress` as the `onProgress` callback to core
+functions (DB-backed primary progress channel); stderr from `jobs work` stays
+coarse, for daemon liveness only.
+
 ## Compatibility
 
 - **Added**: only. A new event type, a new field, a new phase name — all
