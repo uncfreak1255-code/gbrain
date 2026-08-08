@@ -32,7 +32,7 @@ export const PROJECT = {
   repoUrl: "https://github.com/garrytan/gbrain",
   rawBaseUrl:
     process.env.LLMS_REPO_BASE ??
-    "https://raw.githubusercontent.com/garrytan/gbrain/master",
+    "https://raw.githubusercontent.com/uncfreak1255-code/gbrain/master",
 };
 
 export const SECTIONS: DocSection[] = [

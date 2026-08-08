@@ -102,6 +102,9 @@ export function rowToPage(row: Record<string, unknown>): Page {
   const salienceTouchedAt = readOptionalDate(row.salience_touched_at);
   const effectiveDateSource = row.effective_date_source as Page['effective_date_source'] | undefined;
   const importFilename = row.import_filename as string | null | undefined;
+  const chunkerVersion = row.chunker_version == null ? undefined : Number(row.chunker_version);
+  const pageKind = row.page_kind === undefined ? undefined : row.page_kind as Page['page_kind'];
+  const sourcePath = row.source_path === undefined ? undefined : (row.source_path as string | null);
   // v0.39.3.0 CV5 — three-state read for provenance columns. Matches the
   // v0.26.5 deleted_at pattern: undefined when the SELECT projection didn't
   // include the column (older code paths); null when the column is NULL
@@ -128,6 +131,9 @@ export function rowToPage(row: Record<string, unknown>): Page {
     ...(effectiveDate !== undefined && { effective_date: effectiveDate }),
     ...(effectiveDateSource !== undefined && { effective_date_source: effectiveDateSource }),
     ...(importFilename !== undefined && { import_filename: importFilename }),
+    ...(chunkerVersion !== undefined && { chunker_version: chunkerVersion }),
+    ...(pageKind !== undefined && { page_kind: pageKind }),
+    ...(sourcePath !== undefined && { source_path: sourcePath }),
     ...(salienceTouchedAt !== undefined && { salience_touched_at: salienceTouchedAt }),
     // v0.39.3.0 (columns added in migration v81 — WARN-8 + CV5). Three-state
     // optional read; absent SELECT projections compile unchanged.

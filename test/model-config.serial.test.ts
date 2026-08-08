@@ -5,6 +5,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import {
   resolveModel,
+  resolveModelWithSource,
   resolveAlias,
   DEFAULT_ALIASES,
   TIER_DEFAULTS,
@@ -144,6 +145,17 @@ describe('resolveModel — 6-tier precedence', () => {
     expect(firstWarn).toContain('deprecated config');
     expect(stderrCapture).toBe('');
   });
+
+  test('resolveModelWithSource reports the winning key for deprecated config', async () => {
+    stub.set('dream.synthesize.model', 'opus');
+    const info = await resolveModelWithSource(stub as never, {
+      configKey: 'models.dream.synthesize',
+      deprecatedConfigKey: 'dream.synthesize.model',
+      fallback: 'sonnet',
+    });
+    expect(info.resolved).toBe(DEFAULT_ALIASES.opus);
+    expect(info.source).toBe('dream.synthesize.model');
+  });
 });
 
 describe('resolveModel — v0.31.12 tier system', () => {
@@ -165,6 +177,16 @@ describe('resolveModel — v0.31.12 tier system', () => {
       fallback: 'sonnet',
     });
     expect(m).toBe(DEFAULT_ALIASES.opus);
+  });
+
+  test('resolveModelWithSource reports env when no config wins', async () => {
+    process.env.GBRAIN_MODEL = 'haiku';
+    const info = await resolveModelWithSource(stub as never, {
+      tier: 'reasoning',
+      fallback: 'sonnet',
+    });
+    expect(info.resolved).toBe(DEFAULT_ALIASES.haiku);
+    expect(info.source).toBe('env:GBRAIN_MODEL');
   });
 
   test('TIER_DEFAULTS wins over caller fallback when no override', async () => {
@@ -194,11 +216,12 @@ describe('resolveModel — v0.31.12 tier system', () => {
     // resolver falls back to TIER_DEFAULTS.subagent rather than burn money on
     // an unverified model.
     stub.set('models.tier.subagent', 'madeup-provider:weird-model');
-    const m = await resolveModel(stub as never, {
+    const info = await resolveModelWithSource(stub as never, {
       tier: 'subagent',
       fallback: 'sonnet',
     });
-    expect(m).toBe(TIER_DEFAULTS.subagent);
+    expect(info.selected).toBe('madeup-provider:weird-model');
+    expect(info.resolved).toBe(TIER_DEFAULTS.subagent);
     expect(stderrCapture).toContain('tier.subagent');
   });
 

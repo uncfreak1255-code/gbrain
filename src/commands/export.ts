@@ -18,7 +18,7 @@ import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'
 import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
 import { isValidSourceId } from '../core/source-id.ts';
-import type { PageType, RawData } from '../core/types.ts';
+import type { RawData } from '../core/types.ts';
 import { renameDirectoryNoReplace } from '../core/atomic-directory-publish.ts';
 
 interface ExportManifestPage {
@@ -27,6 +27,8 @@ interface ExportManifestPage {
   markdown_sha256: string;
   raw_sidecar_sha256: string | null;
   raw_record_count: number;
+  page_kind: 'markdown' | 'code';
+  source_path?: string;
 }
 
 interface ExportManifest {
@@ -95,6 +97,41 @@ function assertSafeExportSlug(slug: string): void {
   ) {
     failExport(`unsafe page slug cannot be exported: ${JSON.stringify(slug)}`);
   }
+}
+
+function assertSafeExportSourcePath(sourcePath: string): void {
+  const segments = sourcePath.split('/');
+  if (
+    sourcePath.length === 0
+    || sourcePath.includes('\\')
+    || sourcePath.includes('\0')
+    || isAbsolute(sourcePath)
+    || segments.some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    failExport(`unsafe code source path cannot be exported: ${JSON.stringify(sourcePath)}`);
+  }
+}
+
+function resolveCodeExportSourcePath(
+  page: { source_path?: string | null; frontmatter: Record<string, unknown> },
+): string | undefined {
+  const sourcePath = typeof page.source_path === 'string' && page.source_path.length > 0
+    ? page.source_path
+    : page.frontmatter.file;
+  return typeof sourcePath === 'string' && sourcePath.length > 0 ? sourcePath : undefined;
+}
+
+function codeExportSourcePath(
+  page: { slug: string; source_path?: string | null; frontmatter: Record<string, unknown> },
+): string {
+  const sourcePath = resolveCodeExportSourcePath(page);
+  if (typeof sourcePath !== 'string' || sourcePath.length === 0) {
+    failExport(
+      `code page ${JSON.stringify(page.slug)} has no safe source path for source-scoped recovery export.`,
+    );
+  }
+  assertSafeExportSourcePath(sourcePath);
+  return sourcePath;
 }
 
 function confinedOutputPath(outDir: string, relativePath: string): string {
@@ -474,6 +511,25 @@ async function loadCompleteScopedPages(
       failExport(`source "${sourceId}" stopped being active before its recovery snapshot.`);
     }
 
+    const unsupported = await snapshot.executeRaw<{ slug: string; page_kind: string }>(
+      `SELECT slug, page_kind
+         FROM pages
+        WHERE source_id = $1
+          AND deleted_at IS NULL
+          AND page_kind NOT IN ('markdown', 'code')
+        ORDER BY slug
+        LIMIT 1`,
+      [sourceId],
+    );
+    if (unsupported.length > 0) {
+      const page = unsupported[0]!;
+      failExport(
+        `source-scoped recovery export supports only markdown and code pages; `
+        + `${JSON.stringify(page.slug)} is a ${page.page_kind} page. `
+        + 'Use the original source checkout for image recovery.',
+      );
+    }
+
     const sourcePageCountBefore = await countScopedPages(snapshot, sourceId);
     const pages: import('../core/types.ts').Page[] = [];
 
@@ -629,6 +685,7 @@ export async function runExport(engine: BrainEngine, args: string[]) {
     for (const page of pages) {
       assertSafeExportSlug(page.slug);
       confinedOutputPath(outDir, `${page.slug}.md`);
+      if (page.page_kind === 'code') codeExportSourcePath(page);
     }
     assertNonCollidingScopedWriteSet(outDir, pages, scopedRaw ?? new Map());
     if (sourcePageCount === undefined) {
@@ -658,12 +715,25 @@ export async function runExport(engine: BrainEngine, args: string[]) {
       const tags = sourceId
         ? (scopedTags?.get(page.slug) ?? [])
         : await engine.getTags(page.slug);
-      const md = serializeMarkdown(
-        page.frontmatter,
-        page.compiled_truth,
-        page.timeline,
-        { type: page.type, title: page.title, tags },
-      );
+      const pageKind: 'markdown' | 'code' = page.page_kind === 'code' ? 'code' : 'markdown';
+      const sourcePath = sourceId && pageKind === 'code' ? codeExportSourcePath(page) : undefined;
+      const archiveFrontmatter = !sourceId && pageKind === 'code'
+        && resolveCodeExportSourcePath(page) !== undefined
+        && typeof page.frontmatter.file !== 'string'
+        ? { ...page.frontmatter, file: resolveCodeExportSourcePath(page) }
+        : page.frontmatter;
+      // Code pages are exported as their original bytes. The recovery manifest
+      // carries the importer kind and trusted source path, so the `.md`
+      // snapshot filename remains a sealed page identity rather than silently
+      // routing code through the markdown importer.
+      const md = sourceId && pageKind === 'code'
+        ? page.compiled_truth
+        : serializeMarkdown(
+          archiveFrontmatter,
+          page.compiled_truth,
+          page.timeline,
+          { type: pageKind === 'code' ? 'code' : page.type, title: page.title, tags },
+        );
 
       const pageRelativePath = `${page.slug}.md`;
       if (sourceId) {
@@ -711,6 +781,8 @@ export async function runExport(engine: BrainEngine, args: string[]) {
           markdown_sha256: sha256(md),
           raw_sidecar_sha256: rawSidecarSha256,
           raw_record_count: rawData.length,
+          page_kind: pageKind,
+          ...(sourcePath === undefined ? {} : { source_path: sourcePath }),
         });
       }
 

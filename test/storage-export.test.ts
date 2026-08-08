@@ -212,6 +212,32 @@ describe('export --restore-only resolution chain (D5)', () => {
     expect(stdout.some((line) => line.includes('Exporting 0'))).toBe(true);
     expect(existsSync(join(outDir, '.gbrain-export-manifest.json'))).toBe(false);
   });
+
+  test('unscoped export serializes code pages as self-describing page archives', async () => {
+    await engine.putPage(
+      'src-example-ts',
+      {
+        type: 'code',
+        page_kind: 'code',
+        title: 'src/example.ts (typescript)',
+        compiled_truth: 'export const answer = 42;\n',
+        timeline: '',
+        frontmatter: { language: 'typescript' },
+        source_path: 'src/example.ts',
+      },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir]);
+
+    expect(exitCode).toBeNull();
+    const exported = readFileSync(join(outDir, 'src-example-ts.md'), 'utf8');
+    expect(exported).toContain('type: code');
+    expect(exported).toContain('title: src/example.ts (typescript)');
+    expect(exported).toContain('file: src/example.ts');
+    expect(exported).toContain('export const answer = 42;');
+    expect(exported).not.toBe('export const answer = 42;\n');
+  });
 });
 
 describe('source-scoped recovery export', () => {
@@ -479,6 +505,51 @@ describe('source-scoped recovery export', () => {
     }
   });
 
+  test('refuses source-scoped code recovery export without a safe source path', async () => {
+    await seedSourceVariant('default', 'default');
+    await engine.putPage(
+      'src/recovery-fixture-ts',
+      {
+        type: 'code',
+        page_kind: 'code',
+        title: 'src/recovery-fixture.ts (typescript)',
+        compiled_truth: 'export const recoveryFixture = true;\n',
+        frontmatter: { language: 'typescript' },
+      },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toContain('has no safe source path');
+    expect(stderr.join('\n')).toContain('src/recovery-fixture-ts');
+    expect(existsSync(outDir)).toBe(false);
+    expect(readdirSync(tmp).some((entry) => entry.startsWith('.out.gbrain-export-stage-')))
+      .toBe(false);
+  });
+
+  test('refuses source-scoped image recovery export', async () => {
+    await engine.putPage(
+      'images/recovery-fixture.png',
+      {
+        type: 'image',
+        page_kind: 'image',
+        title: 'images/recovery-fixture.png',
+        compiled_truth: '',
+        frontmatter: {},
+      },
+      { sourceId: 'default' },
+    );
+
+    await tryRunExport(['--dir', outDir, '--source', 'default']);
+
+    expect(exitCode).toBe(1);
+    expect(stderr.join('\n')).toContain('supports only markdown and code pages');
+    expect(stderr.join('\n')).toContain('images/recovery-fixture.png');
+    expect(existsSync(outDir)).toBe(false);
+  });
+
   test('preserves raw keys named __proto__ without prototype assignment loss', async () => {
     await seedSourceVariant('default', 'default');
     await engine.putRawData(
@@ -637,6 +708,8 @@ describe('source recovery pagination', () => {
       kind: 'pglite' as const,
       executeRaw: async (sql: string) => sql.includes('FROM sources')
         ? [{ id: 'default' }]
+        : sql.includes("page_kind NOT IN ('markdown', 'code')")
+          ? []
         : [{ n: pages.length }],
       listPages: async (filters: { offset?: number; limit?: number }) => {
         const offset = filters.offset ?? 0;

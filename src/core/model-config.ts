@@ -47,6 +47,23 @@ export interface ResolveModelOpts {
   fallback: string;
 }
 
+export interface ResolvedModelInfo {
+  /**
+   * Alias-resolved winner before the subagent runtime capability guard. Use
+   * this for diagnostics so a rejected configured model is not hidden by the
+   * runtime fallback.
+   */
+  selected: string;
+  /** Runtime model after any applicable subagent capability fallback. */
+  resolved: string;
+  /**
+   * Resolution winner. Config keys are returned as their literal key
+   * (`models.default`, `models.tier.reasoning`, etc.); env sources are
+   * `env:VAR`; tier defaults use `default`; CLI overrides use `cli`.
+   */
+  source: string;
+}
+
 /** Default aliases shipped in code. Users override via `models.aliases.<name>` config.
  *  Values include the `provider:` prefix so resolved model strings always
  *  carry an explicit provider — required by the v0.40.8+ subagent queue's
@@ -129,15 +146,20 @@ function emitDeprecationWarning(oldKey: string, newKey: string, ignored: boolean
  * reads config from the engine. Pass `engine: null` for callsites that don't
  * have an engine (rare; usually CLI bootstrap before connect).
  */
-export async function resolveModel(
+export async function resolveModelWithSource(
   engine: BrainEngine | null,
   opts: ResolveModelOpts,
-): Promise<string> {
+): Promise<ResolvedModelInfo> {
   const envVar = opts.envVar ?? 'GBRAIN_MODEL';
 
   // 1. CLI flag wins
   if (opts.cliFlag && opts.cliFlag.trim()) {
-    return await resolveAlias(engine, opts.cliFlag.trim());
+    const selected = await resolveAlias(engine, opts.cliFlag.trim());
+    return {
+      selected,
+      resolved: selected,
+      source: 'cli',
+    };
   }
 
   if (engine) {
@@ -152,7 +174,12 @@ export async function resolveModel(
             emitDeprecationWarning(opts.deprecatedConfigKey, opts.configKey, /*ignored=*/ true);
           }
         }
-        return await resolveAlias(engine, v.trim());
+        const selected = await resolveAlias(engine, v.trim());
+        return {
+          selected,
+          resolved: selected,
+          source: opts.configKey,
+        };
       }
     }
 
@@ -161,23 +188,36 @@ export async function resolveModel(
       const v = await engine.getConfig(opts.deprecatedConfigKey);
       if (v && v.trim()) {
         emitDeprecationWarning(opts.deprecatedConfigKey, opts.configKey ?? '<no replacement>', /*ignored=*/ false);
-        return await resolveAlias(engine, v.trim());
+        const selected = await resolveAlias(engine, v.trim());
+        return {
+          selected,
+          resolved: selected,
+          source: opts.deprecatedConfigKey,
+        };
       }
     }
 
     // 4. Global default
     const def = await engine.getConfig('models.default');
     if (def && def.trim()) {
-      const resolved = await resolveAlias(engine, def.trim());
-      return enforceSubagentCapable(resolved, opts.tier, 'models.default');
+      const selected = await resolveAlias(engine, def.trim());
+      return {
+        selected,
+        resolved: enforceSubagentCapable(selected, opts.tier, 'models.default'),
+        source: 'models.default',
+      };
     }
 
     // 5. Tier override (v0.31.12)
     if (opts.tier) {
       const tierVal = await engine.getConfig(`models.tier.${opts.tier}`);
       if (tierVal && tierVal.trim()) {
-        const resolved = await resolveAlias(engine, tierVal.trim());
-        return enforceSubagentCapable(resolved, opts.tier, `models.tier.${opts.tier}`);
+        const selected = await resolveAlias(engine, tierVal.trim());
+        return {
+          selected,
+          resolved: enforceSubagentCapable(selected, opts.tier, `models.tier.${opts.tier}`),
+          source: `models.tier.${opts.tier}`,
+        };
       }
     }
   }
@@ -185,18 +225,39 @@ export async function resolveModel(
   // 6. Env var
   const env = process.env[envVar];
   if (env && env.trim()) {
-    const resolved = await resolveAlias(engine, env.trim());
-    return enforceSubagentCapable(resolved, opts.tier, `env:${envVar}`);
+    const selected = await resolveAlias(engine, env.trim());
+    return {
+      selected,
+      resolved: enforceSubagentCapable(selected, opts.tier, `env:${envVar}`),
+      source: `env:${envVar}`,
+    };
   }
 
   // 7. Tier default (v0.31.12 — when no override beats us, the tier's
   //    canonical model wins over caller-supplied fallback)
   if (opts.tier && TIER_DEFAULTS[opts.tier]) {
-    return await resolveAlias(engine, TIER_DEFAULTS[opts.tier]);
+    const selected = await resolveAlias(engine, TIER_DEFAULTS[opts.tier]);
+    return {
+      selected,
+      resolved: selected,
+      source: 'default',
+    };
   }
 
   // 8. Hardcoded fallback (caller-supplied)
-  return await resolveAlias(engine, opts.fallback);
+  const selected = await resolveAlias(engine, opts.fallback);
+  return {
+    selected,
+    resolved: selected,
+    source: 'default',
+  };
+}
+
+export async function resolveModel(
+  engine: BrainEngine | null,
+  opts: ResolveModelOpts,
+): Promise<string> {
+  return (await resolveModelWithSource(engine, opts)).resolved;
 }
 
 /**

@@ -988,8 +988,8 @@ export class PGLiteEngine implements BrainEngine {
       where.push('deleted_at IS NULL');
     }
     const { rows } = await this.db.query(
-      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
-              source_kind, source_uri, ingested_via, ingested_at
+      `SELECT id, source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
+              source_path, source_kind, source_uri, ingested_via, ingested_at
        FROM pages WHERE ${where.join(' AND ')} LIMIT 1`,
       params
     );
@@ -1070,7 +1070,7 @@ export class PGLiteEngine implements BrainEngine {
          source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
          ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
          ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
-       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
+       RETURNING id, source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
       [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
     );
     return rowToPage(rows[0] as Record<string, unknown>);

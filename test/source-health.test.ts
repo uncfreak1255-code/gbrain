@@ -17,6 +17,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFileSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import {
   computeAllSourceMetrics,
   resolvePriorityLabel,
@@ -27,6 +28,7 @@ import {
 } from '../src/core/source-health.ts';
 import { isSourceUnchangedSinceSync } from '../src/core/git-head.ts';
 import { loadAllSources } from '../src/core/sources-load.ts';
+import { probeEmbeddingDim } from './fixtures/retrieval-quality/relational/corpus.ts';
 
 const HOUR = 3600_000;
 
@@ -57,6 +59,14 @@ function makeGitRepo(commitDate: Date, registry: string[]): { dir: string; head:
 let engine: PGLiteEngine;
 
 beforeAll(async () => {
+  // This file inserts a 1536-d fixture. Pin its schema before init so a
+  // sibling test's live ZeroEntropy/1280 gateway cannot make shard ordering
+  // decide whether this test passes.
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: 1536,
+    env: { ...process.env },
+  });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -64,6 +74,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  resetGateway();
 });
 
 beforeEach(async () => {
@@ -239,8 +250,9 @@ describe('computeAllSourceMetrics', () => {
   test('aggregates pages + chunks + embedding coverage per source', async () => {
     await engine.putPage('a', { type: 'note', title: 'a', compiled_truth: 'a' });
     await engine.putPage('b', { type: 'note', title: 'b', compiled_truth: 'b' });
+    const embeddingDim = await probeEmbeddingDim(engine);
     await engine.upsertChunks('a', [
-      { chunk_index: 0, chunk_text: 'one', chunk_source: 'compiled_truth', token_count: 1, embedding: new Float32Array(1536) },
+      { chunk_index: 0, chunk_text: 'one', chunk_source: 'compiled_truth', token_count: 1, embedding: new Float32Array(embeddingDim) },
       { chunk_index: 1, chunk_text: 'two', chunk_source: 'compiled_truth', token_count: 1, embedding: undefined },
     ]);
     await engine.upsertChunks('b', [
