@@ -69,6 +69,12 @@ export const SECTIONS: DocSection[] = [
         includeInFull: false,
       },
       {
+        title: "docs/progress-events.md",
+        description:
+          "Bulk-command progress event schema, routing, and stdout/stderr contract.",
+        path: "docs/progress-events.md",
+      },
+      {
         title: "INSTALL_FOR_AGENTS.md",
         description: "9-step agent installation.",
         path: "INSTALL_FOR_AGENTS.md",
@@ -88,6 +94,18 @@ export const SECTIONS: DocSection[] = [
   {
     heading: "Configuration",
     entries: [
+      {
+        title: "docs/architecture/search-mode-config.md",
+        description:
+          "Search mode bundles, cost matrices, knob resolution, and cache-isolation rules.",
+        path: "docs/architecture/search-mode-config.md",
+      },
+      {
+        title: "docs/operations/pace-mode.md",
+        description:
+          "DB-contention-aware backfill pacing modes, resolution order, and fail-open invariants.",
+        path: "docs/operations/pace-mode.md",
+      },
       {
         title: "docs/ENGINES.md",
         description: "PGLite vs Postgres trade-off and when to migrate.",
