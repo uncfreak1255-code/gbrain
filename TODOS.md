@@ -6,12 +6,10 @@
 
 **What:** A `gbrain export --source` recovery snapshot can re-import as
 derived path slugs, creating duplicate active pages when a stored legacy slug
-is not stable under current path slugification. Live 2026-08-01: recovering
-the `default` source's checkout (rebuilding `.gstack-brain-worktree` after it
-had gone missing from disk entirely) produced 23 such duplicates alongside the
-original 494 active pages. The duplicates were soft-deleted as a one-time
-cleanup (recoverable 72h from deletion, then permanent); the slug-identity bug
-that produced them was not touched.
+is not stable under current path slugification. A live recovery exposed this
+class by producing path-derived duplicates beside existing active pages. The
+operational cleanup was one-time and private; this TODO tracks the durable
+slug-identity fix only.
 
 **Why:** Any future export → recovery checkout → sync of this or another
 source hits the same bug and reproduces the same class of duplicates. The fix
@@ -34,17 +32,13 @@ in `gbrain doctor` instead of raw page counts to verify a recovery). A
 separate UX-only issue may later clarify that label versus an active-only
 `sources status`. Do not fold that into this bug.
 
-**Context:** Root cause traced live during the 2026-08-01 recovery.
-`.gstack-brain-worktree` was a standalone, no-origin private git repo (never
-meant to appear in `git worktree list` or be re-clonable), deliberately
-created 2026-07-27 from a DB export. `source_path_health` — new in PR #89 /
-v0.47.1.0 — was the first check that ever verified the path existed, and
-caught it missing entirely. Recovery used a fresh export from the live DB (494
-pages / 972 chunks) rather than the stale 443-page snapshot, verified
-manifest, atomic restore at the expected path. Reconciliation of the 23
-duplicates: private pre-delete backup at commit `85a0ded`; restored checkout
-clean at `6948803`. Post-fix, live readback confirmed 517 total rows / 494
-active, `source_path_health`/`sync_freshness`/`cycle_freshness` all `ok`.
+**Context:** Root cause was traced during a real recovery of a source checkout
+that was no longer available on disk. `source_path_health` — new in PR #89 /
+v0.47.1.0 — surfaced the missing checkout; a fresh source-scoped export plus a
+verified manifest restored the tree, but the follow-up sync showed that legacy
+stored slugs could still drift into new path-derived identities. Keep future
+proofs isolated to fixture DBs/repos so public TODOs do not carry live recovery
+paths, counts, backup refs, or readback details.
 
 **Effort:** M
 **Priority:** P2
