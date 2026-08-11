@@ -234,6 +234,34 @@ describe('source-scoped recovery export slug identity', () => {
     ).toEqual([]);
   });
 
+  test('rejects recovery-manifest downgrade before destructive reconciliation', async () => {
+    const legacySlug = await seedLegacyPage();
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+
+    const {
+      assertRecoverySlugOverridesUnchanged,
+      loadVerifiedRecoverySlugOverrides,
+    } = await import('../src/core/source-recovery-manifest.ts');
+    const initial = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
+    expect(initial.size).toBe(1);
+
+    rmSync(join(recoveryRepo, '.gbrain-export-manifest.json'));
+    const missingManifest = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
+    expect(() =>
+      assertRecoverySlugOverridesUnchanged(recoveryRepo, initial, missingManifest),
+    ).toThrow('recovery manifest changed before destructive reconciliation');
+
+    writeFileSync(
+      join(recoveryRepo, '.gbrain-export-manifest.json'),
+      JSON.stringify({ source_id: 'another-source', schema_version: 1 }),
+    );
+    const otherSourceManifest = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
+    expect(() =>
+      assertRecoverySlugOverridesUnchanged(recoveryRepo, initial, otherSourceManifest),
+    ).toThrow('recovery manifest changed before destructive reconciliation');
+    expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
   test('preserves code-page identity during a source-scoped recovery sync', async () => {
     const sourcePath = 'src/example.ts';
     const source = 'export const answer = 42;\n';

@@ -5,6 +5,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
 import {
+  assertRecoverySlugOverridesUnchanged,
   getVerifiedRecoverySlugOverrideForPath,
   loadVerifiedRecoverySlugOverrides,
 } from '../core/source-recovery-manifest.ts';
@@ -3230,9 +3231,11 @@ async function performFullSync(
     // may have run long enough for the checkout or receipt to change, and the
     // normal reconcile below must never treat a manifest-owned page as stale.
     // This also makes the autopilot job path fail closed before it can delete.
+    const revalidatedRecoverySlugOverrides = await loadVerifiedRecoverySlugOverrides(engine, repoPath, sid);
+    assertRecoverySlugOverridesUnchanged(repoPath, recoverySlugOverrides, revalidatedRecoverySlugOverrides);
     const verifiedRecoverySlugs = new Set(
       Array.from(
-        (await loadVerifiedRecoverySlugOverrides(engine, repoPath, sid)).values(),
+        revalidatedRecoverySlugOverrides.values(),
         override => override.slug,
       ),
     );
