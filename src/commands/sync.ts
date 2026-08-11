@@ -3225,6 +3225,17 @@ async function performFullSync(
   let reconciledDeletes = 0;
   if (opts.sourceId) {
     const sid = opts.sourceId;
+    // A recovery manifest is a source/path-bound capability, not just an
+    // import exception. Re-validate it at the destructive boundary: import
+    // may have run long enough for the checkout or receipt to change, and the
+    // normal reconcile below must never treat a manifest-owned page as stale.
+    // This also makes the autopilot job path fail closed before it can delete.
+    const verifiedRecoverySlugs = new Set(
+      Array.from(
+        (await loadVerifiedRecoverySlugOverrides(engine, repoPath, sid)).values(),
+        override => override.slug,
+      ),
+    );
     const repoLocalExcludes = resolveRepoLocalSyncExcludes(repoPath);
     const reconcileSyncOpts = buildRepoSyncFilterOpts(repoPath, opts.strategy);
     // collectSyncableFiles returns ABSOLUTE paths; source_path is stored
@@ -3264,6 +3275,7 @@ async function performFullSync(
           && matchesSyncGlobs(p, repoLocalExcludes);
         return repoLocalExcluded || isSyncable(p, reconcileSyncOpts);
       },
+      verifiedRecoverySlugs,
     );
     if (plan.staleSlugs.length > 0 && plan.massDelete && !massReconcileAllowed()) {
       // #2828 mass-delete safety valve: a reconcile that would sweep more than
@@ -3427,11 +3439,13 @@ export interface ReconcilePlan {
  * @param rows           pages with a non-null `source_path` (deleted_at IS NULL).
  * @param currentFiles   repo-relative paths present in the working tree.
  * @param isSyncablePath predicate excluding metafiles and the wrong strategy.
+ * @param protectedSlugs pages proven present by a verified recovery manifest.
  */
 export function planReconcileDeletes(
   rows: ReadonlyArray<{ slug: string; source_path: string | null }>,
   currentFiles: Iterable<string>,
   isSyncablePath: (p: string) => boolean,
+  protectedSlugs: ReadonlySet<string> = new Set(),
 ): ReconcilePlan {
   const current = new Set<string>();
   for (const f of currentFiles) current.add(normalizeReconcilePath(f));
@@ -3439,7 +3453,11 @@ export function planReconcileDeletes(
     r => r.source_path != null && isSyncablePath(r.source_path),
   );
   const staleSlugs = reconcilable
-    .filter(r => !current.has(normalizeReconcilePath(r.source_path as string)))
+    .filter(
+      r =>
+        !protectedSlugs.has(r.slug) &&
+        !current.has(normalizeReconcilePath(r.source_path as string)),
+    )
     .map(r => r.slug);
   const massDelete =
     reconcilable.length > MASS_RECONCILE_MIN_PAGES &&
