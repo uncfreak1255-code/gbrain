@@ -18,6 +18,7 @@ import { runExport } from '../src/commands/export.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { slugifyPath } from '../src/core/sync.ts';
+import { planReconcileDeletes } from '../src/commands/sync.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -212,6 +213,23 @@ describe('source-scoped recovery export slug identity', () => {
     });
 
     expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
+  test('does not reconcile-delete a recovery-manifest-owned legacy page', () => {
+    const rows = [{ slug: 'notes/legacy slug', source_path: 'historical/location-before-recovery.md' }];
+    const isMarkdown = (path: string) => path.endsWith('.md');
+
+    expect(
+      planReconcileDeletes(rows, ['notes/legacy slug.md'], isMarkdown).staleSlugs,
+    ).toEqual(['notes/legacy slug']);
+    expect(
+      planReconcileDeletes(
+        rows,
+        ['notes/legacy slug.md'],
+        isMarkdown,
+        new Set(['notes/legacy slug']),
+      ).staleSlugs,
+    ).toEqual([]);
   });
 
   test('fails closed when a recovery checkout adds an unlisted Markdown page', async () => {
