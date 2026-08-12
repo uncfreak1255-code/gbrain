@@ -18,6 +18,7 @@ import { runExport } from '../src/commands/export.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { slugifyPath } from '../src/core/sync.ts';
+import { planReconcileDeletes } from '../src/commands/sync.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -213,6 +214,51 @@ describe('source-scoped recovery export slug identity', () => {
       noExtract: true,
     });
 
+    expect(await activeSlugs()).toEqual([legacySlug]);
+  });
+
+  test('does not reconcile-delete a recovery-manifest-owned legacy page', () => {
+    const rows = [{ slug: 'notes/legacy slug', source_path: 'historical/location-before-recovery.md' }];
+    const isMarkdown = (path: string) => path.endsWith('.md');
+
+    expect(
+      planReconcileDeletes(rows, ['notes/legacy slug.md'], isMarkdown).staleSlugs,
+    ).toEqual(['notes/legacy slug']);
+    expect(
+      planReconcileDeletes(
+        rows,
+        ['notes/legacy slug.md'],
+        isMarkdown,
+        new Set(['notes/legacy slug']),
+      ).staleSlugs,
+    ).toEqual([]);
+  });
+
+  test('rejects recovery-manifest downgrade before destructive reconciliation', async () => {
+    const legacySlug = await seedLegacyPage();
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+
+    const {
+      assertRecoverySlugOverridesUnchanged,
+      loadVerifiedRecoverySlugOverrides,
+    } = await import('../src/core/source-recovery-manifest.ts');
+    const initial = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
+    expect(initial.size).toBe(1);
+
+    rmSync(join(recoveryRepo, '.gbrain-export-manifest.json'));
+    const missingManifest = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
+    expect(() =>
+      assertRecoverySlugOverridesUnchanged(recoveryRepo, initial, missingManifest),
+    ).toThrow('recovery manifest changed before destructive reconciliation');
+
+    writeFileSync(
+      join(recoveryRepo, '.gbrain-export-manifest.json'),
+      JSON.stringify({ source_id: 'another-source', schema_version: 1 }),
+    );
+    const otherSourceManifest = await loadVerifiedRecoverySlugOverrides(engine, recoveryRepo, 'default');
+    expect(() =>
+      assertRecoverySlugOverridesUnchanged(recoveryRepo, initial, otherSourceManifest),
+    ).toThrow('recovery manifest changed before destructive reconciliation');
     expect(await activeSlugs()).toEqual([legacySlug]);
   });
 

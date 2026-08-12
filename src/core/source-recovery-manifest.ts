@@ -119,6 +119,41 @@ export function getVerifiedRecoverySlugOverrideForPath(
   return override;
 }
 
+/**
+ * A full sync revalidates recovery authority immediately before destructive
+ * reconciliation. If the run started from a same-source recovery checkout, that
+ * later read must still be the same sealed capability set, not an ordinary
+ * checkout downgrade.
+ */
+export function assertRecoverySlugOverridesUnchanged(
+  repoPath: string,
+  initial: ReadonlyMap<string, VerifiedRecoverySlugOverride>,
+  revalidated: ReadonlyMap<string, VerifiedRecoverySlugOverride>,
+): void {
+  if (!sealedRecoveryOverrideMaps.has(initial)) return;
+  if (!sealedRecoveryOverrideMaps.has(revalidated) || initial.size !== revalidated.size) {
+    failManifest(repoPath, 'recovery manifest changed before destructive reconciliation');
+  }
+
+  for (const [relativePath, initialOverride] of initial) {
+    const revalidatedOverride = revalidated.get(relativePath);
+    const initialIssued = issuedOverride(initialOverride);
+    const revalidatedIssued = issuedOverride(revalidatedOverride);
+    if (
+      initialIssued === undefined
+      || revalidatedIssued === undefined
+      || initialIssued.relativePath !== revalidatedIssued.relativePath
+      || initialIssued.slug !== revalidatedIssued.slug
+      || initialIssued.sourceId !== revalidatedIssued.sourceId
+      || initialIssued.markdownSha256 !== revalidatedIssued.markdownSha256
+      || initialIssued.pageKind !== revalidatedIssued.pageKind
+      || initialIssued.sourcePath !== revalidatedIssued.sourcePath
+    ) {
+      failManifest(repoPath, 'recovery manifest changed before destructive reconciliation');
+    }
+  }
+}
+
 /** A recovery capability no longer matches the trusted source at write time. */
 export class RecoverySlugOverrideInvalidError extends Error {
   constructor(message: string) {
