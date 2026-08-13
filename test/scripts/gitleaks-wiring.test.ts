@@ -32,6 +32,8 @@ describe("secret scan wiring", () => {
     const gitleaksJob = workflow.slice(start, end);
 
     expect(gitleaksJob).toContain("scripts/gitleaks-scan.sh --scope merge");
+    expect(gitleaksJob).toContain("sha256sum -c -");
+    expect(gitleaksJob).toContain("551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb");
     expect(gitleaksJob).not.toContain("needs: cache-check");
     expect(gitleaksJob).not.toContain("cache-check.outputs");
     expect(workflow).not.toContain("gitleaks/gitleaks-action");
