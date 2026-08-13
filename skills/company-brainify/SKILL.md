@@ -296,33 +296,38 @@ AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
 AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
 AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"
 if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
-  # Record matching daemon PIDs before uninstall removes the launcher/wrapper.
-  AUTOPILOT_PIDS="$(
-    ps -ww -Ao pid=,command= |
-      awk -v repo="$AUTOPILOT_REPO"         'index($0, "autopilot --repo " repo) { print $1 }'
-  )"
+  # Record the daemon PID from the lock before uninstall removes its launcher.
+  AUTOPILOT_LOCK="$HOME/.gbrain/autopilot.lock"
+  AUTOPILOT_PID="$(cat "$AUTOPILOT_LOCK" 2>/dev/null || true)"
+  case "$AUTOPILOT_PID" in
+    ''|*[!0-9]*) AUTOPILOT_PID="" ;;
+  esac
   gbrain autopilot --uninstall
   gbrain autopilot --status --json  # must report inactive/uninstalled
 
   # Uninstall removes cron/ephemeral launch hooks but cannot kill a daemon that
-  # already launched. Stop only the recorded processes for the exact repository.
-  for pid in $AUTOPILOT_PIDS; do
-    [ "$pid" -ne "$" ] 2>/dev/null || continue
-    kill -TERM "$pid" 2>/dev/null || true
-  done
-  for pid in $AUTOPILOT_PIDS; do
-    for attempt in $(seq 1 10); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 1
-    done
-  done
-  REMAINING_AUTOPILOT_PIDS="$(
-    ps -ww -Ao pid=,command= |
-      awk -v repo="$AUTOPILOT_REPO"         'index($0, "autopilot --repo " repo) { print $1 }'
-  )"
-  [ -z "$REMAINING_AUTOPILOT_PIDS" ]     || { echo "autopilot daemon still running — ABORT"; exit 1; }
-  AUTOPILOT_LOCK="$HOME/.gbrain/autopilot.lock"
+  # already launched. Verify the lock PID belongs to the exact saved repository
+  # before signaling it; a mismatch is an abort, never a broad kill.
+  if [ -n "$AUTOPILOT_PID" ]; then
+    AUTOPILOT_ARGS="$(ps -p "$AUTOPILOT_PID" -o args= 2>/dev/null || true)"
+    case "$AUTOPILOT_ARGS" in
+      *" --repo $AUTOPILOT_REPO"|*" --repo $AUTOPILOT_REPO "*)
+        kill -TERM "$AUTOPILOT_PID" 2>/dev/null || true
+        for attempt in $(seq 1 10); do
+          kill -0 "$AUTOPILOT_PID" 2>/dev/null || break
+          sleep 1
+        done
+        ;;
+      "")
+        ;;
+      *)
+        echo "autopilot lock PID does not match saved repository — ABORT"
+        exit 1
+        ;;
+    esac
+  fi
   [ ! -e "$AUTOPILOT_LOCK" ]     || { echo "autopilot lock still held — ABORT"; exit 1; }
+fi
 fi
 
 gbrain sync --source "$SOURCE_ID"
