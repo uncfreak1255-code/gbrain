@@ -328,7 +328,6 @@ if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
   fi
   [ ! -e "$AUTOPILOT_LOCK" ]     || { echo "autopilot lock still held — ABORT"; exit 1; }
 fi
-fi
 
 gbrain sync --source "$SOURCE_ID"
 gbrain dream --source "$SOURCE_ID" --phase extract_facts --json
