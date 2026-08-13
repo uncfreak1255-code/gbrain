@@ -118,12 +118,16 @@ describe('company-brainify safety contract', () => {
   test('history purge materializes every remote branch before rewriting', () => {
     const fetchRefs = SKILL.indexOf("'+refs/heads/*:refs/remotes/origin/*'");
     const materialize = SKILL.indexOf("git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/");
+    const branchGate = SKILL.indexOf('NONDEFAULT_BRANCH="$(grep -Fxv "$DEFAULT_BRANCH"');
     const applyCarrier = SKILL.indexOf('rsync -a --delete "$SANITIZED_CARRIER/$d/"');
     const filterRepo = SKILL.indexOf('git filter-repo --invert-paths');
 
     expect(fetchRefs).toBeGreaterThanOrEqual(0);
     expect(materialize).toBeGreaterThan(fetchRefs);
     expect(SKILL).toContain('git branch "$branch" "refs/remotes/origin/$branch"');
+    expect(branchGate).toBeGreaterThan(materialize);
+    expect(branchGate).toBeLessThan(filterRepo);
+    expect(SKILL).toContain('needs its own sanitized carrier');
     expect(applyCarrier).toBeGreaterThan(materialize);
     expect(filterRepo).toBeGreaterThan(applyCarrier);
     expect(SKILL).toContain('BRANCHES_AFTER_FILTER="$WORK/branches-after-filter.txt"');
@@ -162,7 +166,13 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
     expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
     expect(SKILL).toContain('BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"');
-    expect(SKILL).toContain('BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"; rm -rf -- "$BACKUP_PATH"');
+    expect(SKILL).toContain('BACKUP_PATH="$(<"$HOME/.gbrain/backups/brainify-backup-path.txt")"; rm -rf -- "$BACKUP_PATH"');
+  });
+
+  test('CI merge scan fetches history needed by merge-base', () => {
+    const workflow = readFileSync(join(import.meta.dir, '..', '.github/workflows/test.yml'), 'utf8');
+    expect(workflow).toContain('git fetch origin master');
+    expect(workflow).not.toContain('git fetch origin master --depth=1');
   });
 
   test('new skill workflows use supported retrieval and deletion gates', () => {
@@ -186,7 +196,10 @@ describe('company-brainify safety contract', () => {
 
     expect(RESOLVE_BEFORE_ASKING).toContain('gbrain query "{entity}" --limit 5');
     expect(RESOLVE_BEFORE_ASKING).toContain('gbrain mounts list --json');
-    expect(RESOLVE_BEFORE_ASKING).toContain('GBRAIN_BRAIN_ID="<brain-id-or-host>" gbrain query');
+    expect(RESOLVE_BEFORE_ASKING).toContain('GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query');
+    expect(RESOLVE_BEFORE_ASKING).toContain("for SOURCE_ID in $(printf '%s' \"$SOURCES_JSON\" | jq -r '.sources[].id')");
+    expect(RESOLVE_BEFORE_ASKING).toContain('--source-id "$SOURCE_ID"');
+    expect(RESOLVE_BEFORE_ASKING).toContain('GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain sources list --json');
     expect(RESOLVE_BEFORE_ASKING).not.toContain('gbrain search "{entity}"');
     expect(FACT_CHECK).not.toContain('gbrain search "<entity>"');
     expect(CONVERSATION_ARCHIVE).not.toContain('gbrain search "');
