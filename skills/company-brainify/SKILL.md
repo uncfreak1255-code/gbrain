@@ -291,8 +291,11 @@ gbrain autopilot --status --json
 # sync.repo_path: a custom --repo install may point elsewhere.
 AUTOPILOT_TARGET="<installed target from schedule.targets>"
 AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
-AUTOPILOT_WAS_RUNNING="<true-or-false>"
-if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
+# Pause every installed schedule, even when its current active state is false or
+# null (for example cron/ephemeral bootstrap or an inactive systemd service).
+AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
+AUTOPILOT_WAS_RUNNING="<true-or-false from active>"
+if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
   gbrain autopilot --uninstall
   gbrain autopilot --status --json  # must report inactive/uninstalled
 fi
@@ -300,8 +303,9 @@ fi
 gbrain sync --source "$SOURCE_ID"
 gbrain dream --source "$SOURCE_ID" --phase extract_facts --json
 
-# Only if the first status reported an active install:
-if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
+# Restore every schedule that was installed, preserving its original target and
+# repository even if it was not active when reconciliation began.
+if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
   gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"
   gbrain autopilot --status --json  # must report active again
 fi
