@@ -124,11 +124,11 @@ BRAIN="<absolute path to the checkout being sanitized>"
 PERSONAL="$(gbrain config get sync.repo_path)"
 [ -d "$BRAIN/.git" ] \
   || { echo "selected checkout is not a git repo — ABORT" >&2; exit 1; }
+cd "$BRAIN"
 gbrain sources current --json  # must identify the source whose local_path is $BRAIN
 BRAIN_SOURCE_ID="<registered source id whose local_path is exactly $BRAIN>"
 [ -n "$BRAIN_SOURCE_ID" ] \
   || { echo "selected checkout is not registered — ABORT" >&2; exit 1; }
-cd "$BRAIN"
 ```
 
 ### Phase 1: Identify scope (retrieval-first)

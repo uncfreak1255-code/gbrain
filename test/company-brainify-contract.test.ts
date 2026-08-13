@@ -78,6 +78,7 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('BRAIN_SOURCE_ID="<registered source id whose local_path is exactly $BRAIN>"');
     expect(SKILL).toContain('--source-id "$BRAIN_SOURCE_ID"');
     expect(SKILL).toContain('gbrain call --source "$BRAIN_SOURCE_ID" takes_search');
+    expect(SKILL.indexOf('cd "$BRAIN"')).toBeLessThan(SKILL.indexOf('gbrain sources current --json'));
   });
 
   test('manual facts reconciliation pauses and restores autopilot safely', () => {
