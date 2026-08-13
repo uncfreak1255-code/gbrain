@@ -113,10 +113,21 @@ A pass that only covers `people/` will certify a brain that still leaks.
 
 ## Procedure
 
-All paths below are relative to the brain repo root:
+All paths below are relative to the explicitly selected checkout:
 
 ```bash
-BRAIN="$(gbrain config get sync.repo_path)"
+# For a NEW team export, this is the personal source being copied into staging.
+# For an EXISTING team re-audit, it MUST be the shared checkout — never infer it
+# from sync.repo_path. Confirm the registered source and path before discovery;
+# every retrieval below is scoped to this source.
+BRAIN="<absolute path to the checkout being sanitized>"
+PERSONAL="$(gbrain config get sync.repo_path)"
+[ -d "$BRAIN/.git" ] \
+  || { echo "selected checkout is not a git repo — ABORT" >&2; exit 1; }
+gbrain sources current --json  # must identify the source whose local_path is $BRAIN
+BRAIN_SOURCE_ID="<registered source id whose local_path is exactly $BRAIN>"
+[ -n "$BRAIN_SOURCE_ID" ] \
+  || { echo "selected checkout is not registered — ABORT" >&2; exit 1; }
 cd "$BRAIN"
 ```
 
@@ -126,11 +137,11 @@ cd "$BRAIN"
    keyword pattern will:
 
    ```bash
-   gbrain query "compensation, equity, or salary discussions about team members" --limit 50
-   gbrain query "performance concerns, underperformance, or who is struggling" --limit 50
-   gbrain query "considering leaving, retention conversations, departure rumors" --limit 50
-   gbrain takes search "performance" --limit 50
-   gbrain recall --grep "salary"
+   gbrain query "compensation, equity, or salary discussions about team members" --source-id "$BRAIN_SOURCE_ID" --limit 50
+   gbrain query "performance concerns, underperformance, or who is struggling" --source-id "$BRAIN_SOURCE_ID" --limit 50
+   gbrain query "considering leaving, retention conversations, departure rumors" --source-id "$BRAIN_SOURCE_ID" --limit 50
+   gbrain call --source "$BRAIN_SOURCE_ID" takes_search '{"query":"performance","limit":50}'
+   gbrain recall --source "$BRAIN_SOURCE_ID" --grep "salary"
    ```
 
    Collect every returned slug into the scope list.
@@ -356,9 +367,24 @@ the sanitized brain/source (scope with `--source <team-source-id>` when the
 shared source is mounted alongside personal content):
 
 ```bash
-gbrain query "what is alice-example's compensation" --limit 10
-gbrain query "who is underperforming or at risk of leaving" --limit 10
-gbrain takes search "weakness" --limit 20
+# A staging directory is not a source merely because the shell is in it. Build
+# an isolated, non-federated source over the exact sanitized tree, then sync it
+# before retrieval; otherwise the commands can read the host/default source.
+VERIFY_SOURCE_ID="$BRAIN_SOURCE_ID"
+if [ -n "${STAGING:-}" ]; then
+  git -C "$STAGING" init -b main
+  git -C "$STAGING" add -A
+  git -C "$STAGING" diff --cached --quiet \
+    || git -C "$STAGING" commit -m "Sanitized verification snapshot"
+  STAGING_SOURCE_ID="<fresh isolated staging source id>"
+  gbrain sources add "$STAGING_SOURCE_ID" --path "$STAGING" --no-federated
+  gbrain sync --source "$STAGING_SOURCE_ID"
+  VERIFY_SOURCE_ID="$STAGING_SOURCE_ID"
+fi
+
+gbrain query "what is alice-example's compensation" --source-id "$VERIFY_SOURCE_ID" --limit 10
+gbrain query "who is underperforming or at risk of leaving" --source-id "$VERIFY_SOURCE_ID" --limit 10
+gbrain call --source "$VERIFY_SOURCE_ID" takes_search '{"query":"weakness","limit":20}'
 ```
 
 Every one of these must come back empty or with only keep-category content.
@@ -390,8 +416,10 @@ cd "$STAGING"
 # the staging tree is what ships, and it is the tree that must certify clean.
 # ... Phase 4 greps against $STAGING ...
 
-git init -b main
-git add -A && git commit -m "Initial import — sanitized team brain"
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init -b main
+git add -A
+git diff --cached --quiet || git commit -m "Initial import — sanitized team brain"
+git branch -M main
 git remote add origin <TEAM_REPO_URL>
 git push -u origin main
 ```
@@ -553,15 +581,28 @@ done
 rm -rf .git/filter-repo
 git filter-repo --invert-paths $(for d in $PURGE_DIRS; do printf -- '--path %s/ ' "$d"; done) --force
 
-# Restore clean files and re-commit as a single new commit — same $PURGE_DIRS
-for d in $PURGE_DIRS; do
-  [ -d "$CLEAN/$d" ] || continue
-  mkdir -p "$d" && cp -r "$CLEAN/$d/." "$d/"
-done
+# Restore clean files and re-commit on EVERY surviving local branch. A single
+# checkout/commit only repairs the default branch; the other materialized
+# branches would otherwise be pushed with the purged directories still absent.
+BRANCHES_AFTER_FILTER="$WORK/branches-after-filter.txt"
+git for-each-ref --format='%(refname:strip=2)' refs/heads/ > "$BRANCHES_AFTER_FILTER"
+CLEAN_READD_COMMITS="$WORK/clean-readd-commits.txt"
+: > "$CLEAN_READD_COMMITS"
+while IFS= read -r branch; do
+  [ -n "$branch" ] || continue
+  git checkout --force "$branch"
+  for d in $PURGE_DIRS; do
+    [ -d "$CLEAN/$d" ] || continue
+    mkdir -p "$d" && cp -r "$CLEAN/$d/." "$d/"
+    git add "$d/"
+  done
+  if ! git diff --cached --quiet; then
+    git commit -m "Re-add sanitized directories"
+    git rev-parse HEAD >> "$CLEAN_READD_COMMITS"
+  fi
+done < "$BRANCHES_AFTER_FILTER"
+git checkout --force "$DEFAULT_BRANCH"
 git remote add origin <SHARED_REPO_URL>   # filter-repo removes remotes
-for d in $PURGE_DIRS; do [ -d "$d" ] && git add "$d/"; done
-git commit -m "Re-add sanitized directories"
-CLEAN_READD_COMMIT="$(git rev-parse HEAD)"
 
 # VERIFY RESTORE COMPLETENESS before the irreversible push — a partial restore
 # would ship a smaller tree than was sanitized. Compare file counts (and, for
@@ -603,8 +644,11 @@ done < "$REMOTE_REFS_AFTER"
 for d in $PURGE_DIRS; do
   [ -d "$d" ] || continue
   path_commits="$(git log --all --format=%H -- "$d" | sort -u)"
-  [ "$path_commits" = "$CLEAN_READD_COMMIT" ] \
-    || { echo "purged-path history remains for $d — ABORT"; exit 1; }
+  while IFS= read -r path_commit; do
+    [ -n "$path_commit" ] || continue
+    grep -Fxq "$path_commit" "$CLEAN_READD_COMMITS" \
+      || { echo "purged-path history remains for $d — ABORT"; exit 1; }
+  done <<< "$path_commits"
 done
 ```
 

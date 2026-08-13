@@ -73,6 +73,11 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('ABORT: non-Markdown files require type-aware review or gated exclusion');
     expect(SKILL).toContain('non-Markdown file remains unreviewed');
     expect(SKILL).not.toContain('>> /tmp/brainify-scope.txt');
+    expect(SKILL).toContain('BRAIN="<absolute path to the checkout being sanitized>"');
+    expect(SKILL).toContain('gbrain sources current --json');
+    expect(SKILL).toContain('BRAIN_SOURCE_ID="<registered source id whose local_path is exactly $BRAIN>"');
+    expect(SKILL).toContain('--source-id "$BRAIN_SOURCE_ID"');
+    expect(SKILL).toContain('gbrain call --source "$BRAIN_SOURCE_ID" takes_search');
   });
 
   test('manual facts reconciliation pauses and restores autopilot safely', () => {
@@ -105,6 +110,25 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('git branch "$branch" "refs/remotes/origin/$branch"');
     expect(applyCarrier).toBeGreaterThan(materialize);
     expect(filterRepo).toBeGreaterThan(applyCarrier);
+    expect(SKILL).toContain('BRANCHES_AFTER_FILTER="$WORK/branches-after-filter.txt"');
+    expect(SKILL).toContain('git checkout --force "$branch"');
+    expect(SKILL).toContain('CLEAN_READD_COMMITS="$WORK/clean-readd-commits.txt"');
+    expect(SKILL).toContain('git checkout --force "$DEFAULT_BRANCH"');
+    expect(SKILL).toContain('grep -Fxq "$path_commit" "$CLEAN_READD_COMMITS"');
+  });
+
+  test('staging retrieval is indexed and explicitly source-scoped', () => {
+    const init = SKILL.indexOf('git -C "$STAGING" init -b main');
+    const register = SKILL.indexOf('gbrain sources add "$STAGING_SOURCE_ID" --path "$STAGING" --no-federated');
+    const sync = SKILL.indexOf('gbrain sync --source "$STAGING_SOURCE_ID"');
+    const verifyQuery = SKILL.indexOf('gbrain query "what is alice-example\'s compensation" --source-id "$VERIFY_SOURCE_ID"');
+    const verifyTakes = SKILL.indexOf('gbrain call --source "$VERIFY_SOURCE_ID" takes_search');
+
+    expect(init).toBeGreaterThanOrEqual(0);
+    expect(register).toBeGreaterThan(init);
+    expect(sync).toBeGreaterThan(register);
+    expect(verifyQuery).toBeGreaterThan(sync);
+    expect(verifyTakes).toBeGreaterThan(verifyQuery);
   });
 
   test('brain-ingest gate uses the supported retrieval command', () => {
