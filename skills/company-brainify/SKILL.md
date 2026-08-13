@@ -290,8 +290,10 @@ gbrain autopilot --status --json
 # launcher/service BEFORE uninstalling. Do not infer the repository from
 # sync.repo_path: a custom --repo install may point elsewhere.
 AUTOPILOT_TARGET="<installed target from schedule.targets>"
-AUTOPILOT_HOME="${GBRAIN_HOME:-$HOME/.gbrain}"
-AUTOPILOT_REPO="<exact --repo path from $AUTOPILOT_HOME/autopilot-run.sh>"
+AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
+# The daemon lock follows configDir(): GBRAIN_HOME is a parent and .gbrain is
+# appended; the installed wrapper remains under the host HOME.
+AUTOPILOT_HOME="${GBRAIN_HOME:-$HOME}/.gbrain"
 # Pause every installed schedule, even when its current active state is false or
 # null (for example cron/ephemeral bootstrap or an inactive systemd service).
 AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
