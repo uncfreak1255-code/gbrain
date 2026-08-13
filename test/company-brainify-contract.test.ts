@@ -107,8 +107,10 @@ describe('company-brainify safety contract', () => {
     const pause = SKILL.indexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const stop = SKILL.indexOf('gbrain autopilot --uninstall');
     const verifyStopped = SKILL.indexOf('must report inactive/uninstalled');
-    const stopDaemons = SKILL.indexOf('ps -ww -Ao pid=,command=');
+    const recordDaemons = SKILL.indexOf('Record matching daemon PIDs before uninstall');
+    const stopDaemons = SKILL.indexOf('kill -TERM "$pid"');
     const verifyNoDaemons = SKILL.indexOf('autopilot daemon still running — ABORT');
+    const verifyNoLock = SKILL.indexOf('autopilot lock still held — ABORT');
     const dream = SKILL.indexOf('gbrain dream --source "$SOURCE_ID" --phase extract_facts --json');
     const restore = SKILL.lastIndexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const restart = SKILL.indexOf('gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"');
@@ -120,9 +122,11 @@ describe('company-brainify safety contract', () => {
     expect(pause).toBeGreaterThan(activeRecord);
     expect(stop).toBeGreaterThan(pause);
     expect(verifyStopped).toBeGreaterThan(stop);
-    expect(stopDaemons).toBeGreaterThan(verifyStopped);
+    expect(recordDaemons).toBeGreaterThanOrEqual(verifyStopped);
+    expect(stopDaemons).toBeGreaterThan(recordDaemons);
     expect(verifyNoDaemons).toBeGreaterThan(stopDaemons);
-    expect(dream).toBeGreaterThan(verifyNoDaemons);
+    expect(verifyNoLock).toBeGreaterThan(verifyNoDaemons);
+    expect(dream).toBeGreaterThan(verifyNoLock);
     expect(restore).toBeGreaterThan(dream);
     expect(restart).toBeGreaterThan(restore);
     expect(verifyRunning).toBeGreaterThan(restart);
@@ -130,6 +134,8 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('must report installed with original target/repo');
     expect(SKILL).toContain('must also report active=true');
     expect(SKILL).toContain('kill -TERM "$pid"');
+    expect(SKILL).toContain('[ "$pid" -ne "$" ]');
+    expect(SKILL).toContain('AUTOPILOT_LOCK="$HOME/.gbrain/autopilot.lock"');
     expect(SKILL).toContain('index($0, "autopilot --repo " repo)');
     expect(SKILL).not.toContain('AUTOPILOT_REPO="$(gbrain config get sync.repo_path)"');
     expect(SKILL).not.toContain('gbrain autopilot --status --json  # must report active again');
