@@ -132,7 +132,7 @@ describe('company-brainify safety contract', () => {
     expect(verifyRunning).toBeGreaterThan(restart);
     expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"');
     expect(SKILL).toContain('GBRAIN_HOME_RAW="${GBRAIN_HOME:-$HOME}"');
-    expect(SKILL).toContain('GBRAIN_HOME_TRIMMED="$(printf \'%s\' "$GBRAIN_HOME_RAW" | perl -CSD -pe \'s/^[\\s\\x{FEFF}]+|[\\s\\x{FEFF}]+$//gu\')"');
+    expect(SKILL).toContain('GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e \'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())\')"');
     expect(SKILL).toContain('if [ -n "$GBRAIN_HOME_TRIMMED" ]; then');
     expect(SKILL).toContain('AUTOPILOT_HOME="$HOME/.gbrain"');
     expect(SKILL).toContain('must report installed with original target/repo');
