@@ -206,6 +206,8 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH"');
     expect(SKILL).toContain('remote refs changed during purge — ABORT, do not force-push');
     expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
+    expect(SKILL).toContain('refs/heads/*) local_ref="refs/remotes/origin/${ref#refs/heads/}"');
+    expect(SKILL).toContain('local_sha="$(git rev-parse --verify "$local_ref"');
     expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
     expect(SKILL).toContain('BACKUP_PATH_FILE="${BACKUP_PATH%.git}.path"');
     expect(SKILL).toContain('BACKUP_PATH_FILE="${BACKUP_PATH_FILE:?set the exact per-run pointer path from Step 1\'s confirmation card}"');

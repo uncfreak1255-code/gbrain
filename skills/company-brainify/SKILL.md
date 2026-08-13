@@ -737,7 +737,11 @@ git fetch --prune origin \
 git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_AFTER"
 while read -r remote_sha ref; do
   [ -z "$ref" ] && continue
-  local_sha="$(git rev-parse --verify "$ref" 2>/dev/null || true)"
+  case "$ref" in
+    refs/heads/*) local_ref="refs/remotes/origin/${ref#refs/heads/}" ;;
+    *) local_ref="$ref" ;;
+  esac
+  local_sha="$(git rev-parse --verify "$local_ref" 2>/dev/null || true)"
   [ "$local_sha" = "$remote_sha" ] \
     || { echo "remote ref mismatch: $ref — ABORT"; exit 1; }
 done < "$REMOTE_REFS_AFTER"
