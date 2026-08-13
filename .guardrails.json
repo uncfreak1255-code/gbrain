@@ -1,0 +1,27 @@
+{
+  "workflow": "feature-branch",
+  "protectedBranches": [
+    "main",
+    "master"
+  ],
+  "generatedPaths": [
+    "_site/",
+    "_site_verify",
+    "tmp/",
+    "dist/",
+    "build/"
+  ],
+  "testCommand": "bun run verify",
+  "buildCommand": "",
+  "mergeBase": "origin/master...HEAD",
+  "autoMerge": {
+    "enabled": true,
+    "baseBranches": [
+      "master"
+    ],
+    "mergeMethod": "squash",
+    "requireUpToDate": true,
+    "requireBuild": false,
+    "mergeTriggersDeploy": false
+  }
+}
