@@ -169,8 +169,10 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('git ls-remote --refs origin');
     expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
     expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
-    expect(SKILL).toContain('BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"');
-    expect(SKILL).toContain('BACKUP_PATH="$(<"$HOME/.gbrain/backups/brainify-backup-path.txt")"; rm -rf -- "$BACKUP_PATH"');
+    expect(SKILL).toContain('BACKUP_PATH_FILE="${BACKUP_PATH%.git}.path"');
+    expect(SKILL).toContain('Per-run cleanup pointer: $BACKUP_PATH_FILE');
+    expect(SKILL).toContain('do not use a shared/fixed pointer');
+    expect(SKILL).toContain('rm -f -- "$BACKUP_PATH_FILE"');
   });
 
   test('CI merge scan fetches history needed by merge-base', () => {
@@ -194,6 +196,9 @@ describe('company-brainify safety contract', () => {
     expect(BLOG_INGEST).toContain('gbrain delete <slug>');
     expect(BLOG_INGEST).toContain('gbrain restore <slug>');
     expect(BLOG_INGEST).toContain('git rm -- "$SOURCE_PATH"');
+    expect(BLOG_INGEST).toContain('git ls-files --error-unmatch -- "$SOURCE_PATH"');
+    expect(BLOG_INGEST).toContain('git diff --cached --name-only -- "$SOURCE_PATH"');
+    expect(BLOG_INGEST).toContain('git commit -m "Remove gated husk source"');
     expect(BLOG_INGEST).toContain('gbrain sync --no-pull --no-embed');
 
     expect(BRAIN_LINK_DISCIPLINE).toContain('ENCODED_BRANCH="$(printf \'%s\' "$BRANCH" | jq -sRr @uri)"');
