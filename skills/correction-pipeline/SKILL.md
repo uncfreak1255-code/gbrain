@@ -28,8 +28,8 @@ upstream: correction-pipeline@fc834ee
 # Correction Pipeline
 
 > **Convention:** see [conventions/brain-first.md](../conventions/brain-first.md)
-> — Step 1 of the root-cause chain IS the brain-first lookup chain (`search`
-> for exact tokens, `query` for concept-shaped questions) before anything else.
+> — Step 1 of the root-cause chain IS the brain-first lookup chain (`query`
+> for exact tokens and concept-shaped questions) before anything else.
 >
 > **Convention:** see [_brain-filing-rules.md](../_brain-filing-rules.md) —
 > corrections edit pages in place; the page stays filed by primary subject.
@@ -54,7 +54,7 @@ Run these steps IN ORDER. Report findings to the user.
 ### Step 1: Search the brain
 
 ```bash
-gbrain search "<relevant terms>" --limit 10
+gbrain query "<relevant terms>" --limit 10
 ```
 
 For concept-shaped or synonym-phrased claims, escalate to `gbrain query
@@ -162,7 +162,7 @@ or memory files.
 
 ```bash
 grep -ri "<wrong claim terms>" "$BRAIN_DIR" 2>/dev/null | grep -v ".git"
-gbrain search "<wrong claim terms>" --limit 20
+gbrain query "<wrong claim terms>" --limit 20
 ```
 
 Fix ALL instances, not just the first one found. Re-sync after repo edits.
@@ -218,7 +218,7 @@ This skill guarantees:
 - Source fixes land at the REAL fix surface for the error class (page edit +
   commit + re-sync; `forget`/`extract_facts` for facts rows; answer bank +
   re-render for SOUL/USER — never a direct edit to a rendered file)
-- Propagation is checked (whole-brain grep + `gbrain search`)
+- Propagation is checked (whole-brain grep + `gbrain query`)
 - The user gets a clear report of what was wrong, why, and what was fixed
 - Routing matches the canonical triggers in the frontmatter
 - Privacy contract preserved: no real names, no fork-specific filesystem path

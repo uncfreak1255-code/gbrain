@@ -256,9 +256,16 @@ boilerplate. Husks poison recall — a search hit that says nothing.
   or whose body matches subscribe/paywall boilerplate.
 - **Repair pass:** re-fetch each husk slowly (one at a time, full pacing).
   Real content this time → rewrite the page in place.
-- **Gated husk:** if the re-fetch confirms the post is gated, DELETE the husk
-  and record it as `skipped: gated`. Never leave husks in the brain, and never
-  retry a gated post forever.
+- **Gated husk:** if the re-fetch confirms the post is gated, count the
+  candidates and stop before deleting any of them. For a repair sweep (or any
+  scripted deletion), route the complete set through the
+  [data-loss-gate](../data-loss-gate/SKILL.md): present the confirmation and
+  recoverability card with the exact slugs, count, size, location, reason,
+  `gbrain restore_page` recovery path, what would be lost, and an alternative;
+  require typed `yes`/`do it`. Only after confirmation, soft-delete each
+  candidate with `gbrain delete <slug>`, log it as `skipped: gated`, and verify
+  the deletion. Never leave husks in the brain, and never retry a gated post
+  forever.
 
 ## Output Format
 

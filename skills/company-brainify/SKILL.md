@@ -137,13 +137,26 @@ cd "$BRAIN"
 
 2. Structural discovery — first enumerate the COMPLETE intended share corpus.
    This list is the shipping set; sensitivity hits only prioritize review and
-   must never replace it. If this is a company-specific export, remove
+   must never replace it. Enumerate every regular file, not just Markdown. The
+   sanitizer and verification below are deliberately Markdown-only, so fail
+   closed on attachments or other non-Markdown files: inspect each with a
+   type-appropriate reader, then either extend the sanitizer and verification
+   for that file type or route its exclusion/deletion through the
+   [data-loss-gate](../data-loss-gate/SKILL.md). Never publish while this list
+   contains an unreviewed file. If this is a company-specific export, remove
    unrelated files from this complete candidate list by explicit judgment,
    not by dropping files that lack sensitive keywords:
 
    ```bash
    find people/ meetings/ daily/ companies/ projects/ analysis/ \
-     -type f -name '*.md' -print 2>/dev/null | sort -u > /tmp/brainify-scope.txt
+     -type f -print 2>/dev/null | sort -u > /tmp/brainify-scope.txt
+
+   find people/ meetings/ daily/ companies/ projects/ analysis/ \
+     -type f ! -name '*.md' -print 2>/dev/null | sort -u > /tmp/brainify-nonmarkdown.txt
+   if [ -s /tmp/brainify-nonmarkdown.txt ]; then
+     echo "ABORT: non-Markdown files require type-aware review or gated exclusion" >&2
+     exit 1
+   fi
 
    # Sensitivity hits are a separate triage list, not the export scope.
    grep -rli 'company: *"acme-example"' people/ --include="*.md" | sort > /tmp/brainify-sensitive-hits.txt
@@ -261,8 +274,24 @@ same source — page import alone does not remove a stale derived row:
 
 ```bash
 SOURCE_ID="<shared-source-id>"
+AUTOPILOT_REPO="$(gbrain config get sync.repo_path)"
+gbrain autopilot --status --json
+# Record whether the status above reports an installed/running autopilot.
+AUTOPILOT_WAS_RUNNING="<true-or-false>"
+if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
+  gbrain autopilot --uninstall
+  gbrain autopilot --status --json  # must report inactive/uninstalled
+fi
+
 gbrain sync --source "$SOURCE_ID"
 gbrain dream --source "$SOURCE_ID" --phase extract_facts --json
+gbrain eval dream-quality
+
+# Only if the first status reported an active install:
+if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
+  gbrain autopilot --install --repo "$AUTOPILOT_REPO"
+  gbrain autopilot --status --json  # must report active again
+fi
 ```
 
 Read the JSON result and resolve any `warn` or `fail` status before
@@ -291,6 +320,13 @@ Re-run the Phase 2 triage — the count of flagged files should drop to
 (near-)zero. Then targeted greps:
 
 ```bash
+# The Markdown checks below cannot certify attachments. Refuse to certify or
+# ship while any non-Markdown file remains in the intended export set.
+find people/ meetings/ daily/ companies/ projects/ analysis/ \
+  -type f ! -name '*.md' -print 2>/dev/null | sort -u > /tmp/brainify-nonmarkdown-after.txt
+[ ! -s /tmp/brainify-nonmarkdown-after.txt ] \
+  || { echo "ABORT: non-Markdown file remains unreviewed" >&2; exit 1; }
+
 # Rating fields remaining in frontmatter
 grep -rn -E '^[a-z_]*(score|rating|skill)[a-z_]*: *[0-9]' people/ --include="*.md"
 
