@@ -170,6 +170,8 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
     expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
     expect(SKILL).toContain('BACKUP_PATH_FILE="${BACKUP_PATH%.git}.path"');
+    expect(SKILL).toContain('BACKUP_PATH_FILE="${BACKUP_PATH_FILE:?set the exact per-run pointer path from Step 1\'s confirmation card}"');
+    expect(SKILL).not.toContain('BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"');
     expect(SKILL).toContain('Per-run cleanup pointer: $BACKUP_PATH_FILE');
     expect(SKILL).toContain('do not use a shared/fixed pointer');
     expect(SKILL).toContain('rm -f -- "$BACKUP_PATH_FILE"');
