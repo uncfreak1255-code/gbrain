@@ -2,13 +2,3 @@ title = "GBrain gitleaks config"
 
 [extend]
 useDefault = true
-
-[allowlist]
-  paths = [
-    '''.env\.testing\.example''',
-    '''.env\.example''',
-    '''test/''',
-    '''skills/''',
-    '''.claude/skills/''',
-    '''GBRAIN_SKILLPACK\.md''',
-  ]
