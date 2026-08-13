@@ -293,27 +293,29 @@ AUTOPILOT_TARGET="<installed target from schedule.targets>"
 AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
 # The daemon lock follows configDir(): trim GBRAIN_HOME like the runtime,
 # append .gbrain, and keep the installed wrapper under the host HOME.
-if [ -n "${GBRAIN_HOME:-}" ]; then
-  GBRAIN_HOME_RAW="$GBRAIN_HOME"
-  # Use the repository runtime's JavaScript trim semantics exactly, including
-  # the runtime's handling of Unicode whitespace and FEFF. Fail closed if the
-  # runtime is unavailable or normalization fails; never guess the lock path.
-  command -v bun >/dev/null 2>&1     || { echo "bun is required to normalize GBRAIN_HOME — ABORT"; exit 1; }
-  GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e 'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())')"     || { echo "GBRAIN_HOME normalization failed — ABORT"; exit 1; }
-  if [ -n "$GBRAIN_HOME_TRIMMED" ]; then
-    AUTOPILOT_HOME="$GBRAIN_HOME_TRIMMED/.gbrain"
-  else
-    AUTOPILOT_HOME="$HOME/.gbrain"
-  fi
-else
-  # configDir() falls back to homedir() without trimming HOME.
-  AUTOPILOT_HOME="$HOME/.gbrain"
-fi
+
 # Pause every installed schedule, even when its current active state is false or
 # null (for example cron/ephemeral bootstrap or an inactive systemd service).
 AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
 AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"
 if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
+  # Resolve the lock path only when an installed schedule needs pausing.
+  if [ -n "${GBRAIN_HOME:-}" ]; then
+    GBRAIN_HOME_RAW="$GBRAIN_HOME"
+    # Use the repository runtime's JavaScript trim semantics exactly, including
+    # the runtime's handling of Unicode whitespace and FEFF. Fail closed if the
+    # runtime is unavailable or normalization fails; never guess the lock path.
+    command -v bun >/dev/null 2>&1     || { echo "bun is required to normalize GBRAIN_HOME — ABORT"; exit 1; }
+    GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e 'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())')"     || { echo "GBRAIN_HOME normalization failed — ABORT"; exit 1; }
+    if [ -n "$GBRAIN_HOME_TRIMMED" ]; then
+      AUTOPILOT_HOME="$GBRAIN_HOME_TRIMMED/.gbrain"
+    else
+      AUTOPILOT_HOME="$HOME/.gbrain"
+    fi
+  else
+    # configDir() falls back to homedir() without trimming HOME.
+    AUTOPILOT_HOME="$HOME/.gbrain"
+  fi
   # Record the daemon PID from the lock before uninstall removes its launcher.
   AUTOPILOT_LOCK="$AUTOPILOT_HOME/autopilot.lock"
   AUTOPILOT_PID="$(cat "$AUTOPILOT_LOCK" 2>/dev/null || true)"
