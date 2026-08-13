@@ -22,6 +22,10 @@ const BLOG_INGEST = readFileSync(
   join(import.meta.dir, '..', 'skills/blog-ingest/SKILL.md'),
   'utf8',
 );
+const BRAIN_LINK_DISCIPLINE = readFileSync(
+  join(import.meta.dir, '..', 'skills/brain-link-discipline/SKILL.md'),
+  'utf8',
+);
 const BULK_INGEST = readFileSync(
   join(import.meta.dir, '..', 'skills/bulk-ingestion/SKILL.md'),
   'utf8',
@@ -189,6 +193,11 @@ describe('company-brainify safety contract', () => {
     expect(BLOG_INGEST).toContain('require typed `yes`/`do it`');
     expect(BLOG_INGEST).toContain('gbrain delete <slug>');
     expect(BLOG_INGEST).toContain('gbrain restore <slug>');
+    expect(BLOG_INGEST).toContain('git rm -- "$SOURCE_PATH"');
+    expect(BLOG_INGEST).toContain('gbrain sync --no-pull --no-embed');
+
+    expect(BRAIN_LINK_DISCIPLINE).toContain('ENCODED_BRANCH="$(printf \'%s\' "$BRANCH" | jq -sRr @uri)"');
+    expect(BRAIN_LINK_DISCIPLINE).toContain('contents/<repo-relative-path>?ref=$ENCODED_BRANCH');
 
     expect(BULK_INGEST).toContain('"cwd": "/absolute/path/to/brain-repo"');
     expect(BULK_MANIFEST).toContain('"cwd": "/absolute/path/to/brain-repo"');
