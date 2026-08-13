@@ -268,14 +268,22 @@ boilerplate. Husks poison recall — a search hit that says nothing.
 
   ```bash
   SOURCE_PATH="<exact repo-relative source path for this slug>"
-  [ -n "$SOURCE_PATH" ] && git rm -- "$SOURCE_PATH"
-  ! git ls-files --error-unmatch -- "$SOURCE_PATH" >/dev/null 2>&1
+  [ -n "$SOURCE_PATH" ] && [ -f "$SOURCE_PATH" ] \
+    || { echo "ABORT: exact husk source path is missing" >&2; exit 1; }
+  git ls-files --error-unmatch -- "$SOURCE_PATH" >/dev/null 2>&1 \
+    || { echo "ABORT: husk source is untracked or unidentified" >&2; exit 1; }
+  git rm -- "$SOURCE_PATH"
+  git diff --cached --name-only -- "$SOURCE_PATH" \
+    | grep -Fxq "$SOURCE_PATH" \
+    || { echo "ABORT: husk source deletion was not staged" >&2; exit 1; }
+  git commit -m "Remove gated husk source"
   gbrain delete <slug>
   gbrain sync --no-pull --no-embed
   ```
 
-  Abort if the exact source path cannot be identified. Then verify both the
-  soft-deleted row and the removed source file before logging `skipped: gated`.
+  Abort if the exact source path cannot be identified, is untracked, or cannot
+  be committed. Then verify both the soft-deleted row and the removed source
+  file before logging `skipped: gated`.
   Never leave husks in the brain, and never retry a gated post forever.
 
 ## Output Format
