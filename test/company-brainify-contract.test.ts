@@ -134,6 +134,8 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('must report installed with original target/repo');
     expect(SKILL).toContain('must also report active=true');
     expect(SKILL).toContain('kill -TERM "$AUTOPILOT_PID"');
+    expect(SKILL).toContain('for attempt in $(seq 1 45); do');
+    expect(SKILL).toContain('SIGTERM handler can drain workers for up to 35 seconds');
     expect(SKILL).toContain('AUTOPILOT_PID="$(cat "$AUTOPILOT_LOCK" 2>/dev/null || true)"');
     expect(SKILL).toContain('AUTOPILOT_LOCK="$HOME/.gbrain/autopilot.lock"');
     expect(SKILL).toContain('*" --repo $AUTOPILOT_REPO"|*" --repo $AUTOPILOT_REPO "*)');
