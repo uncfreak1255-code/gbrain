@@ -174,7 +174,10 @@ describe('company-brainify safety contract', () => {
   });
 
   test('history purge updates, prunes, and verifies every branch and tag ref', () => {
-    expect(SKILL).toContain('git push --force-with-lease --prune origin');
+    expect(SKILL).toContain('PUSH_LEASES=()');
+    expect(SKILL).toContain('PUSH_LEASES+=( "--force-with-lease=$ref:$old_sha" )');
+    expect(SKILL).toContain('git push --prune "${PUSH_LEASES[@]}" origin');
+    expect(SKILL).not.toContain('git push --force-with-lease --prune origin');
     expect(SKILL).toContain("'refs/heads/*:refs/heads/*'");
     expect(SKILL).toContain("'refs/tags/*:refs/tags/*'");
     expect(SKILL).toContain('git ls-remote --refs origin');
