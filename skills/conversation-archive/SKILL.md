@@ -120,9 +120,11 @@ PII, and redact each match to a labeled placeholder (`[REDACTED_API_KEY]`,
 - Personal data the transcript wasn't meant to publish: phone numbers, home
   addresses, government ids, private emails.
 
-The model is gbrain's own `~/.gbrain` deny-list / `runPrivacyLint` pattern
-(`src/core/skillpack/harvest-lint.ts`): a fixed set of secret-shaped patterns
-matched deterministically, redacted before the content is committed. Redaction
+Use gbrain's deny-list / `runPrivacyLint` pattern
+(`src/core/skillpack/harvest-lint.ts`) as a fail-closed scanner model, not as a
+redactor: the helper reports and rejects hits; it does not rewrite content for
+you. Redact the matched spans before writing the page, then rerun the scanner
+or an equivalent deterministic check against the redacted page. Redaction
 changes the transcript, so note it in the import receipt (`Redacted: N secrets
 / M PII spans`) — this is the one sanctioned edit to an otherwise-verbatim
 transcript, and "verbatim" never means "ship a live credential."

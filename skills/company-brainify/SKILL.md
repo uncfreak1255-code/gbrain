@@ -340,11 +340,11 @@ find people/ meetings/ daily/ companies/ projects/ analysis/ \
 [ ! -s /tmp/brainify-nonmarkdown-after.txt ] \
   || { echo "ABORT: non-Markdown file remains unreviewed" >&2; exit 1; }
 
-# Rating fields remaining in frontmatter
-grep -rn -E '^[a-z_]*(score|rating|skill)[a-z_]*: *[0-9]' people/ --include="*.md"
+# Rating fields remaining in frontmatter (full scan scope, not just people/)
+grep -rn -E '^[a-z_]*(score|rating|skill)[a-z_]*: *[0-9]' people/ meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null
 
-# Phone numbers
-grep -rn -E '\+1[0-9]{10}|\([0-9]{3}\) [0-9]{3}-[0-9]{4}' people/ --include="*.md"
+# Phone numbers (full scan scope, not just people/)
+grep -rn -E '\+1[0-9]{10}|\([0-9]{3}\) [0-9]{3}-[0-9]{4}' people/ meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null
 
 # Comp keywords (full scan scope, not just people/)
 grep -rin -E 'carry|comp change|equity|salary' people/ meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null
@@ -421,8 +421,11 @@ git add -A
 git diff --cached --quiet || git commit -m "Initial import — sanitized team brain"
 git branch -M main
 git remote add origin <TEAM_REPO_URL>
-git push -u origin main
+echo "READY TO PUBLISH: use the normal ship path for <TEAM_REPO_URL>"
 ```
+
+Do not publish until the operator gives current-turn publication approval for
+the exact team repo URL and sanitized tree.
 
 Only when a shared repo ALREADY exists with sensitive history in it do you
 need the purge below.
@@ -439,6 +442,7 @@ before touching anything.
 
 ```bash
 PERSONAL="$(gbrain config get sync.repo_path)"
+PERSONAL_REAL="$(cd "$PERSONAL" && pwd -P)"
 mkdir -p "$HOME/.gbrain/backups" && chmod 700 "$HOME/.gbrain/backups"
 WORK="$HOME/.gbrain/backups/brainify-purge-$(date +%Y%m%d-%H%M%S)"
 
@@ -448,7 +452,8 @@ WORK="$HOME/.gbrain/backups/brainify-purge-$(date +%Y%m%d-%H%M%S)"
 SANITIZED_TREE="${STAGING:-$(git rev-parse --show-toplevel)}"
 [ -d "$SANITIZED_TREE" ] \
   || { echo "sanitized tree missing — ABORT"; exit 1; }
-[ "$SANITIZED_TREE" != "$PERSONAL" ] \
+SANITIZED_TREE_REAL="$(cd "$SANITIZED_TREE" && pwd -P)"
+[ "$SANITIZED_TREE_REAL" != "$PERSONAL_REAL" ] \
   || { echo "sanitized tree IS sync.repo_path (personal brain) — ABORT"; exit 1; }
 
 # Durable carrier: the purge clone must consume this exact sanitized tree,
@@ -463,7 +468,8 @@ done
 
 git clone <SHARED_REPO_URL> "$WORK/shared"
 cd "$WORK/shared"
-[ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
+SHARED_REAL="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
+[ "$SHARED_REAL" != "$PERSONAL_REAL" ] \
   || { echo "target IS sync.repo_path (personal brain) — ABORT"; exit 1; }
 
 # Materialize every remote branch locally before filter-repo. A normal clone
@@ -472,6 +478,8 @@ cd "$WORK/shared"
 git fetch origin \
   '+refs/heads/*:refs/remotes/origin/*' \
   '+refs/tags/*:refs/tags/*'
+REMOTE_REFS_BEFORE="$WORK/remote-refs-before.txt"
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE"
 DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
 [ -n "$DEFAULT_BRANCH" ] \
   || { echo "remote default branch not found — ABORT"; exit 1; }
@@ -573,12 +581,13 @@ brain's history must stay intact.** The commands below reuse `$WORK` and
 
 ```bash
 cd "$WORK/shared"
-[ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
+TARGET_REAL="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
+[ "$TARGET_REAL" != "$PERSONAL_REAL" ] \
   || { echo "target IS sync.repo_path — ABORT, do not filter-repo"; exit 1; }
 
 # Step 1 may have run in a different shell before the confirmation card. Set
 # this from the exact per-run pointer printed on that card; never fall back to
-# a shared filename or an ephemeral BACKUP_PATH variable.
+# a shared/fixed pointer or an ephemeral BACKUP_PATH variable.
 BACKUP_PATH_FILE="${BACKUP_PATH_FILE:?set the exact per-run pointer path from Step 1's confirmation card}"
 [ -r "$BACKUP_PATH_FILE" ] \
   || { echo "backup pointer missing — ABORT, do not filter-repo"; exit 1; }
@@ -646,10 +655,18 @@ after=$(for d in $PURGE_DIRS; do [ -d "$d" ] && find "$d" -type f; done | wc -l 
 git -C "$BACKUP_PATH" log -1 >/dev/null \
   || { echo "backup missing/unreadable — ABORT, do not force-push"; exit 1; }
 
+# Refuse to erase remote work that landed after Step 1. The wildcard force-push
+# below is allowed only when the remote refs still exactly match the pre-purge
+# readback captured before filter-repo.
+REMOTE_REFS_BEFORE_PUSH="$WORK/remote-refs-before-push.txt"
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE_PUSH"
+diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH" \
+  || { echo "remote refs changed during purge — ABORT, do not force-push"; exit 1; }
+
 # Update EVERY shared branch and tag, and prune remote refs that no longer
 # exist locally. Pushing only `main` leaves an old branch or tag able to serve
 # the pre-sanitization history.
-git push --force --prune origin \
+git push --force-with-lease --prune origin \
   'refs/heads/*:refs/heads/*' \
   'refs/tags/*:refs/tags/*'
 

@@ -3,8 +3,8 @@ name: fact-check
 version: 1.0.0
 description: |
   Systematic claim-by-claim verification for any content before it ships.
-  Modeled on professional fact-checking desks (The New Yorker, ProPublica,
-  IFCN standards): extract every verifiable claim, check each against live
+  Modeled on professional fact-checking desks and public verification
+  standards: extract every verifiable claim, check each against live
   citable sources (never training data), assign a 6-level confidence status,
   apply corrections, and produce a scored pass/fail report. Includes a
   data-derived-claims gate for outputs produced FROM the brain or a database:
@@ -51,14 +51,14 @@ upstream: fact-check@fc834ee
 ## What This Is
 
 A systematic, claim-by-claim verification pass modeled on professional
-fact-checking departments (The New Yorker, ProPublica, IFCN standards).
+fact-checking departments and public verification standards.
 Every specific claim gets checked against live, citable sources — not
 training data.
 
-The New Yorker employs 16-20 full-time fact-checkers and spends 1-3 weeks
-on a single long-form piece. This skill compresses that to minutes with
-AI-assisted triage and parallel verification, but the rigor standard is the
-same: independent verification of every checkable claim.
+Professional long-form verification can take days or weeks for one piece.
+This skill compresses that to minutes with AI-assisted triage and parallel
+verification, but the rigor standard is the same: independent verification of
+every checkable claim.
 
 Two verification lanes, chosen per claim:
 
@@ -100,10 +100,8 @@ verification. Every claim must be checked against external, citable,
 timestamped sources. The whole point of fact-checking is independent
 verification. If you "know" a fact from training, you still verify it.
 
-This is the lesson from every major fact-checking failure: trust-based
-systems fail. The NYT trusted Jayson Blair. The New Yorker's blog team
-trusted Jonah Lehrer. Der Spiegel trusted Claas Relotius. Independent
-verification is not optional.
+This is the lesson from major fact-checking failures: trust-based systems fail.
+Independent verification is not optional.
 
 ## What Counts as a Verifiable Claim
 
@@ -166,7 +164,7 @@ Always prefer sources higher on this list:
 1. **Primary sources** — SEC filings, official press releases, government databases, company blogs, court records
 2. **Primary documentation** — Recordings, transcripts, original emails/letters
 3. **Wikipedia** — Good starting point for dates/names/basic facts; cross-reference for anything contentious
-4. **Credible journalism** — Named reporters at NYT, Bloomberg, TechCrunch, Wired, The Verge, Reuters, AP
+4. **Credible journalism** — Named reporters at established outlets with corrections policies
 5. **Industry databases** — Crunchbase, PitchBook (for funding), LinkedIn (for titles/roles)
 6. **Academic peer-reviewed sources** — Studies with transparent methodology
 7. **Wayback Machine** — For historical web content that may have changed
@@ -393,21 +391,21 @@ NOTES: ...
 **Gate (convention):** content does not ship to the user until MEDIUM or
 higher AND zero data-derived hard fails remain.
 
-## Lessons from Famous Failures
+## Lessons from Verification Failures
 
-These patterns from real fact-checking disasters inform the process:
+These patterns from public fact-checking failures inform the process:
 
-**The Blair Pattern (NYT 2003):** Never trust without verifying. Even when
-a claim "feels right" or comes from a trusted source, verify independently.
+**The trust-failure pattern:** Never trust without verifying. Even when a claim
+"feels right" or comes from a trusted source, verify independently.
 
-**The Lehrer Pattern (New Yorker 2012):** Check ALL content at the same
-standard. No two-tier system where some pieces get checked and others don't.
-Also: the gap between "the study exists" and "the study says what the writer
-claims" is where sophisticated errors hide.
+**The uneven-standard pattern:** Check ALL content at the same standard. No
+two-tier system where some pieces get checked and others don't. Also: the gap
+between "the study exists" and "the study says what the writer claims" is where
+sophisticated errors hide.
 
-**The Relotius Pattern (Der Spiegel 2018):** Stories that are "too good" and
-align too perfectly with the narrative deserve MORE scrutiny, not less.
-Confirmation bias is the fact-checker's enemy.
+**The too-neat-story pattern:** Stories that are "too good" and align too
+perfectly with the narrative deserve MORE scrutiny, not less. Confirmation bias
+is the fact-checker's enemy.
 
 **The "Common Knowledge" Pattern:** The most dangerous errors are the ones
 everybody "knows" are true. Zombie statistics, misattributed quotes, and

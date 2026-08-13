@@ -121,12 +121,14 @@ describe('company-brainify safety contract', () => {
 
   test('history purge materializes every remote branch before rewriting', () => {
     const fetchRefs = SKILL.indexOf("'+refs/heads/*:refs/remotes/origin/*'");
+    const remoteRefsBefore = SKILL.indexOf('REMOTE_REFS_BEFORE="$WORK/remote-refs-before.txt"');
     const materialize = SKILL.indexOf("git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/");
     const branchGate = SKILL.indexOf('NONDEFAULT_BRANCH="$(grep -Fxv "$DEFAULT_BRANCH"');
     const applyCarrier = SKILL.indexOf('rsync -a --delete "$SANITIZED_CARRIER/$d/"');
     const filterRepo = SKILL.indexOf('git filter-repo --invert-paths');
 
     expect(fetchRefs).toBeGreaterThanOrEqual(0);
+    expect(remoteRefsBefore).toBeGreaterThan(fetchRefs);
     expect(materialize).toBeGreaterThan(fetchRefs);
     expect(SKILL).toContain('git branch "$branch" "refs/remotes/origin/$branch"');
     expect(branchGate).toBeGreaterThan(materialize);
@@ -163,10 +165,13 @@ describe('company-brainify safety contract', () => {
   });
 
   test('history purge updates, prunes, and verifies every branch and tag ref', () => {
-    expect(SKILL).toContain('git push --force --prune origin');
+    expect(SKILL).toContain('git push --force-with-lease --prune origin');
     expect(SKILL).toContain("'refs/heads/*:refs/heads/*'");
     expect(SKILL).toContain("'refs/tags/*:refs/tags/*'");
     expect(SKILL).toContain('git ls-remote --refs origin');
+    expect(SKILL).toContain('REMOTE_REFS_BEFORE_PUSH="$WORK/remote-refs-before-push.txt"');
+    expect(SKILL).toContain('diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH"');
+    expect(SKILL).toContain('remote refs changed during purge — ABORT, do not force-push');
     expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
     expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
     expect(SKILL).toContain('BACKUP_PATH_FILE="${BACKUP_PATH%.git}.path"');
@@ -222,5 +227,30 @@ describe('company-brainify safety contract', () => {
     expect(SKILL_AUTOBENCH).not.toContain('gbrain search "');
     expect(DRAFT_IN_VOICE).not.toContain('gbrain search "');
     expect(RESEARCH_COMPENDIUM).not.toContain('gbrain search <terms>');
+  });
+
+  test('new skill workflows do not publish from unattended instructions', () => {
+    expect(SKILL).not.toContain('git push -u origin main');
+    expect(SKILL).toContain('READY TO PUBLISH: use the normal ship path');
+    expect(SKILL).toContain('current-turn publication approval');
+    expect(BULK_MANIFEST).not.toContain('&& git push');
+    expect(BULK_MANIFEST).toContain('Heartbeat jobs are commit-only.');
+    expect(BULK_MANIFEST).toContain('current operator approval');
+    expect(BULK_MANIFEST).not.toContain('direct per-item JSON updates with a');
+    expect(BULK_MANIFEST).toContain('one explicitly named coordinator');
+  });
+
+  test('company-brainify guards use canonical paths and full-scope verification', () => {
+    expect(SKILL).toContain('PERSONAL_REAL="$(cd "$PERSONAL" && pwd -P)"');
+    expect(SKILL).toContain('SANITIZED_TREE_REAL="$(cd "$SANITIZED_TREE" && pwd -P)"');
+    expect(SKILL).toContain('[ "$SANITIZED_TREE_REAL" != "$PERSONAL_REAL" ]');
+    expect(SKILL).toContain('SHARED_REAL="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"');
+    expect(SKILL).toContain('[ "$SHARED_REAL" != "$PERSONAL_REAL" ]');
+    expect(SKILL).toContain('TARGET_REAL="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"');
+    expect(SKILL).toContain('[ "$TARGET_REAL" != "$PERSONAL_REAL" ]');
+    expect(SKILL).not.toContain('[ "$SANITIZED_TREE" != "$PERSONAL" ]');
+    expect(SKILL).not.toContain('[ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ]');
+    expect(SKILL).toContain("grep -rn -E '^[a-z_]*(score|rating|skill)[a-z_]*: *[0-9]' people/ meetings/ daily/ companies/ projects/ analysis/");
+    expect(SKILL).toContain("grep -rn -E '\\+1[0-9]{10}|\\([0-9]{3}\\) [0-9]{3}-[0-9]{4}' people/ meetings/ daily/ companies/ projects/ analysis/");
   });
 });
