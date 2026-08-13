@@ -120,13 +120,13 @@ gbrain mounts list --json
 for BRAIN_ID in host $(gbrain mounts list --json | jq -r '.mounts[] | select(.enabled != false) | .id'); do
   SOURCES_JSON="$(GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain sources list --json)"
   for SOURCE_ID in $(printf '%s' "$SOURCES_JSON" | jq -r '.sources[].id'); do
-    GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query "emails with {entity}" --source-id "$SOURCE_ID" --limit 10
-    GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query "meetings with {entity}" --source-id "$SOURCE_ID" --limit 5
+    GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query "emails with {entity}" --source "$SOURCE_ID" --limit 10
+    GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query "meetings with {entity}" --source "$SOURCE_ID" --limit 5
   done
 done
 ```
 
-`GBRAIN_BRAIN_ID` selects the database; `--source-id` selects a repo within
+`GBRAIN_BRAIN_ID` selects the database; `--source` selects a repo within
 that database. Repeat the queries for every source in every enabled mount
 before escalating. A bare host-brain lookup, or a host source list, is not
 evidence that a mounted brain is empty.
