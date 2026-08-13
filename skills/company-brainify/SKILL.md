@@ -295,8 +295,10 @@ AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
 # append .gbrain, and keep the installed wrapper under the host HOME.
 GBRAIN_HOME_RAW="${GBRAIN_HOME:-$HOME}"
 # Use the repository runtime's JavaScript trim semantics exactly, including
-# the runtime's handling of Unicode whitespace and FEFF.
-GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e 'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())')"
+# the runtime's handling of Unicode whitespace and FEFF. Fail closed if the
+# runtime is unavailable or normalization fails; never guess the lock path.
+command -v bun >/dev/null 2>&1   || { echo "bun is required to normalize GBRAIN_HOME — ABORT"; exit 1; }
+GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e 'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())')"   || { echo "GBRAIN_HOME normalization failed — ABORT"; exit 1; }
 if [ -n "$GBRAIN_HOME_TRIMMED" ]; then
   AUTOPILOT_HOME="$GBRAIN_HOME_TRIMMED/.gbrain"
 else
