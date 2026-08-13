@@ -291,9 +291,10 @@ gbrain autopilot --status --json
 # sync.repo_path: a custom --repo install may point elsewhere.
 AUTOPILOT_TARGET="<installed target from schedule.targets>"
 AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
-# The daemon lock follows configDir(): GBRAIN_HOME is a parent and .gbrain is
-# appended; the installed wrapper remains under the host HOME.
-AUTOPILOT_HOME="${GBRAIN_HOME:-$HOME}/.gbrain"
+# The daemon lock follows configDir(): trim GBRAIN_HOME like the runtime,
+# append .gbrain, and keep the installed wrapper under the host HOME.
+GBRAIN_HOME_RAW="${GBRAIN_HOME:-$HOME}"
+AUTOPILOT_HOME="$(printf '%s' "$GBRAIN_HOME_RAW" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')/.gbrain"
 # Pause every installed schedule, even when its current active state is false or
 # null (for example cron/ephemeral bootstrap or an inactive systemd service).
 AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
