@@ -483,6 +483,17 @@ done < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/)
 git show-ref --verify --quiet "refs/heads/$DEFAULT_BRANCH" \
   || { echo "default branch was not materialized — ABORT"; exit 1; }
 
+# This procedure has one sanitized working-tree carrier, so it cannot safely
+# reconstruct branch-specific content under a purged directory. Do not silently
+# replace a feature branch with the default branch's sanitized snapshot: stop
+# before filter-repo and require a separate sanitized carrier for every branch
+# (or a single-branch purge run).
+BRANCHES_BEFORE_FILTER="$WORK/branches-before-filter.txt"
+git for-each-ref --format='%(refname:strip=2)' refs/heads/ > "$BRANCHES_BEFORE_FILTER"
+NONDEFAULT_BRANCH="$(grep -Fxv "$DEFAULT_BRANCH" "$BRANCHES_BEFORE_FILTER" | head -n1 || true)"
+[ -z "$NONDEFAULT_BRANCH" ] \
+  || { echo "ABORT: non-default branch $NONDEFAULT_BRANCH needs its own sanitized carrier; do not purge or force-push"; exit 1; }
+
 # Apply the carried sanitized tree, then COMMIT it BEFORE the mirror clone. A
 # mirror captures COMMITTED state only; the carrier makes this safe for both
 # staging and in-place edits without requiring a live push before the gate.
@@ -563,6 +574,17 @@ brain's history must stay intact.** The commands below reuse `$WORK` and
 cd "$WORK/shared"
 [ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
   || { echo "target IS sync.repo_path — ABORT, do not filter-repo"; exit 1; }
+
+# Step 1 may have run in a different shell before the confirmation card. Read
+# the durable pointer again instead of relying on an ephemeral BACKUP_PATH.
+BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"
+[ -r "$BACKUP_PATH_FILE" ] \
+  || { echo "backup pointer missing — ABORT, do not filter-repo"; exit 1; }
+BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"
+case "$BACKUP_PATH" in
+  "$HOME/.gbrain/backups/"*.git) ;;
+  *) echo "backup pointer escapes ~/.gbrain/backups — ABORT"; exit 1 ;;
+esac
 
 # The purge list derives from the COMPLETE set of sanitized paths — the same
 # directories Phases 1-4 scanned. A filter list narrower than the scan
@@ -680,9 +702,11 @@ recovery line.
   mirror-clone backup in `~/.gbrain/backups/` for a retention window
   (~30 days is a sane default), then delete it — it contains the
   pre-sanitization history and should not accumulate indefinitely:
-  read the persisted path from `BACKUP_PATH_FILE` recorded in Step 1, verify it
-  is an absolute path under `~/.gbrain/backups/`, then run
-  `BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"; rm -rf -- "$BACKUP_PATH"`.
+  read the persisted path from the literal pointer
+  `"$HOME/.gbrain/backups/brainify-backup-path.txt"` (reassign the pointer
+  variable in the later shell if desired), verify it is an absolute path under
+  `~/.gbrain/backups/`, then run
+  `BACKUP_PATH="$(<"$HOME/.gbrain/backups/brainify-backup-path.txt")"; rm -rf -- "$BACKUP_PATH"`.
 - If the repo carries push hooks or auto-hardening wiring, re-verify remotes
   and hooks survived the rewrite before handing the repo to the team
 
