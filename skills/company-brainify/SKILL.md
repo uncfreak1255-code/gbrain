@@ -298,6 +298,28 @@ AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"
 if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
   gbrain autopilot --uninstall
   gbrain autopilot --status --json  # must report inactive/uninstalled
+
+  # Uninstall removes cron/ephemeral launch hooks but cannot kill a daemon that
+  # already launched. Stop only the process for the exact saved repository.
+  AUTOPILOT_PIDS="$(
+    ps -ww -Ao pid=,command= |
+      awk -v repo="$AUTOPILOT_REPO"         'index($0, "autopilot --repo " repo) { print $1 }'
+  )"
+  for pid in $AUTOPILOT_PIDS; do
+    [ "$pid" -ne "$" ] 2>/dev/null || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in $AUTOPILOT_PIDS; do
+    for attempt in $(seq 1 10); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+  done
+  REMAINING_AUTOPILOT_PIDS="$(
+    ps -ww -Ao pid=,command= |
+      awk -v repo="$AUTOPILOT_REPO"         'index($0, "autopilot --repo " repo) { print $1 }'
+  )"
+  [ -z "$REMAINING_AUTOPILOT_PIDS" ]     || { echo "autopilot daemon still running — ABORT"; exit 1; }
 fi
 
 gbrain sync --source "$SOURCE_ID"
