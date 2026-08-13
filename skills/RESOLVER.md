@@ -29,9 +29,9 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | "bulk delete", "wipe the", "rm -rf", "purge the", "bulk forget" | `skills/data-loss-gate/SKILL.md` |
 | "fact check", "fact-check", "verify the facts", "check the claims" | `skills/fact-check/SKILL.md` |
 | "resolve before asking", "before asking the user", "unidentified contact", "unknown relationship" | `skills/resolve-before-asking/SKILL.md` |
-| "move this to brain", "migrate to brain", "copy these files into the brain", "is this already in the brain" | `skills/brain-ingest-gate/SKILL.md` |
+| "move this to brain", "migrate to brain", "copy these files into the brain", "is this already in the brain", "check for duplicates before writing", "dedup before saving", "raw copy to brain" | `skills/brain-ingest-gate/SKILL.md` |
 | "that's wrong", "that's not true", "I never said that", "where did you get that" | `skills/correction-pipeline/SKILL.md` |
-| "company brain", "team brain", "brainify", "sanitize the brain" | `skills/company-brainify/SKILL.md` |
+| "company brain", "team brain", "brainify", "sanitize the brain", "share my brain with the team", "strip sensitive data from the brain", "scrub employee data", "audit the shared brain", "make the brain safe to share" | `skills/company-brainify/SKILL.md` |
 | "citation graph", "citation graph ingest", "typed citation graph", "build a reference graph" | `skills/citation-graph-ingest/SKILL.md` |
 | "give me the link", "where is the page", "why does this link 404", "brain link discipline" | `skills/brain-link-discipline/SKILL.md` |
 | "compendium", "research everything about", "read them all and summarize", "definitive guide" | `skills/research-compendium/SKILL.md` |
@@ -47,7 +47,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | Generic "ingest this" (auto-routes to above) | `skills/ingest/SKILL.md` |
 | "two-tier extraction", "triage then deep read", "smart model routing", "cheap triage expensive analysis" | `skills/two-tier-extraction/SKILL.md` |
 | "bulk ingest", "bulk import", "ingest all", "ingestion pipeline" | `skills/bulk-ingestion/SKILL.md` |
-| "ingest this publication", "ingest this whole blog", "ingest this feed", "ingest this newsletter archive" | `skills/blog-ingest/SKILL.md` |
+| "ingest this publication", "ingest this whole blog", "ingest this feed", "ingest this newsletter archive", "save this whole substack", "backfill this blog", "walk this RSS feed", "ingest every post from" | `skills/blog-ingest/SKILL.md` |
 | "chatgpt export", "claude export", "perplexity export", "conversation history" | `skills/conversation-archive/SKILL.md` |
 
 ## Thinking skills (from GStack)
