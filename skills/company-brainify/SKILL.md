@@ -576,9 +576,10 @@ cd "$WORK/shared"
 [ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
   || { echo "target IS sync.repo_path — ABORT, do not filter-repo"; exit 1; }
 
-# Step 1 may have run in a different shell before the confirmation card. Read
-# the durable pointer again instead of relying on an ephemeral BACKUP_PATH.
-BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"
+# Step 1 may have run in a different shell before the confirmation card. Set
+# this from the exact per-run pointer printed on that card; never fall back to
+# a shared filename or an ephemeral BACKUP_PATH variable.
+BACKUP_PATH_FILE="${BACKUP_PATH_FILE:?set the exact per-run pointer path from Step 1's confirmation card}"
 [ -r "$BACKUP_PATH_FILE" ] \
   || { echo "backup pointer missing — ABORT, do not filter-repo"; exit 1; }
 BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"
