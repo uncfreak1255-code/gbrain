@@ -6,6 +6,10 @@ const SKILL = readFileSync(
   join(import.meta.dir, '..', 'skills/company-brainify/SKILL.md'),
   'utf8',
 );
+const INGEST_GATE = readFileSync(
+  join(import.meta.dir, '..', 'skills/brain-ingest-gate/SKILL.md'),
+  'utf8',
+);
 
 describe('company-brainify safety contract', () => {
   test('the purge clone consumes an explicit sanitized tree for both paths', () => {
@@ -31,5 +35,33 @@ describe('company-brainify safety contract', () => {
       'gbrain recall --source "$SOURCE_ID" --grep "$REMOVED_FACT_TEXT" --include-expired --json',
     );
     expect(SKILL).toContain('That readback must return zero rows.');
+  });
+
+  test('all intended shareable pages enter scope before sensitivity triage', () => {
+    const completeScope = SKILL.indexOf(
+      "find people/ meetings/ daily/ companies/ projects/ analysis/ \\",
+    );
+    const sensitivityTriage = SKILL.indexOf('Sensitivity hits are a separate triage list');
+
+    expect(completeScope).toBeGreaterThanOrEqual(0);
+    expect(sensitivityTriage).toBeGreaterThan(completeScope);
+    expect(SKILL).toContain("-type f -name '*.md' -print 2>/dev/null | sort -u > /tmp/brainify-scope.txt");
+    expect(SKILL).not.toContain('>> /tmp/brainify-scope.txt');
+  });
+
+  test('brain-ingest gate uses the supported retrieval command', () => {
+    expect(INGEST_GATE).toContain('gbrain query "<name>" --limit 10');
+    expect(INGEST_GATE).toContain('gbrain query "<core claim>" --limit 5');
+    expect(INGEST_GATE).toContain('gbrain query "<core claim>" --limit 3');
+    expect(INGEST_GATE).not.toContain('gbrain search "');
+  });
+
+  test('history purge updates, prunes, and verifies every branch and tag ref', () => {
+    expect(SKILL).toContain('git push --force --prune origin');
+    expect(SKILL).toContain("'refs/heads/*:refs/heads/*'");
+    expect(SKILL).toContain("'refs/tags/*:refs/tags/*'");
+    expect(SKILL).toContain('git ls-remote --refs origin');
+    expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
+    expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
   });
 });

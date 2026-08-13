@@ -135,14 +135,21 @@ cd "$BRAIN"
 
    Collect every returned slug into the scope list.
 
-2. Structural discovery — people files that belong to the company, plus
-   keyword hits across the wider scan scope:
+2. Structural discovery — first enumerate the COMPLETE intended share corpus.
+   This list is the shipping set; sensitivity hits only prioritize review and
+   must never replace it. If this is a company-specific export, remove
+   unrelated files from this complete candidate list by explicit judgment,
+   not by dropping files that lack sensitive keywords:
 
    ```bash
-   grep -rli 'company: *"acme-example"' people/ --include="*.md" | sort > /tmp/brainify-scope.txt
+   find people/ meetings/ daily/ companies/ projects/ analysis/ \
+     -type f -name '*.md' -print 2>/dev/null | sort -u > /tmp/brainify-scope.txt
+
+   # Sensitivity hits are a separate triage list, not the export scope.
+   grep -rli 'company: *"acme-example"' people/ --include="*.md" | sort > /tmp/brainify-sensitive-hits.txt
    grep -rli -E 'salary|equity|carry|retention|underperform|performance review|hard conversation' \
-     meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null >> /tmp/brainify-scope.txt
-   sort -u -o /tmp/brainify-scope.txt /tmp/brainify-scope.txt
+     meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null >> /tmp/brainify-sensitive-hits.txt
+   sort -u -o /tmp/brainify-sensitive-hits.txt /tmp/brainify-sensitive-hits.txt
    ```
 
 3. Cross-reference against the company's public people page (website,
@@ -494,6 +501,7 @@ done
 git remote add origin <SHARED_REPO_URL>   # filter-repo removes remotes
 for d in $PURGE_DIRS; do [ -d "$d" ] && git add "$d/"; done
 git commit -m "Re-add sanitized directories"
+CLEAN_READD_COMMIT="$(git rev-parse HEAD)"
 
 # VERIFY RESTORE COMPLETENESS before the irreversible push — a partial restore
 # would ship a smaller tree than was sanitized. Compare file counts (and, for
@@ -510,7 +518,34 @@ after=$(for d in $PURGE_DIRS; do [ -d "$d" ] && find "$d" -type f; done | wc -l 
 git -C "$BACKUP_PATH" log -1 >/dev/null \
   || { echo "backup missing/unreadable — ABORT, do not force-push"; exit 1; }
 
-git push --force origin main
+# Update EVERY shared branch and tag, and prune remote refs that no longer
+# exist locally. Pushing only `main` leaves an old branch or tag able to serve
+# the pre-sanitization history.
+git push --force --prune origin \
+  'refs/heads/*:refs/heads/*' \
+  'refs/tags/*:refs/tags/*'
+
+# Verify remote readback matches the rewritten local refs, then inspect every
+# surviving ref (including remote-tracking refs) for purged-path history. Each
+# purged directory may appear only in the single clean re-add commit; any
+# additional commit means a branch or tag still retains old history — ABORT.
+REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"
+git fetch --prune origin \
+  '+refs/heads/*:refs/remotes/origin/*' \
+  '+refs/tags/*:refs/tags/*'
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_AFTER"
+while read -r remote_sha ref; do
+  [ -z "$ref" ] && continue
+  local_sha="$(git rev-parse --verify "$ref" 2>/dev/null || true)"
+  [ "$local_sha" = "$remote_sha" ] \
+    || { echo "remote ref mismatch: $ref — ABORT"; exit 1; }
+done < "$REMOTE_REFS_AFTER"
+for d in $PURGE_DIRS; do
+  [ -d "$d" ] || continue
+  path_commits="$(git log --all --format=%H -- "$d" | sort -u)"
+  [ "$path_commits" = "$CLEAN_READD_COMMIT" ] \
+    || { echo "purged-path history remains for $d — ABORT"; exit 1; }
+done
 ```
 
 **Step 4 — log it (to the PERSONAL brain, NEVER the shared repo).** Per
