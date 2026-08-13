@@ -262,10 +262,21 @@ boilerplate. Husks poison recall — a search hit that says nothing.
   [data-loss-gate](../data-loss-gate/SKILL.md): present the confirmation and
   recoverability card with the exact slugs, count, size, location, reason,
   `gbrain restore <slug>` recovery path, what would be lost, and an alternative;
-  require typed `yes`/`do it`. Only after confirmation, soft-delete each
-  candidate with `gbrain delete <slug>`, log it as `skipped: gated`, and verify
-  the deletion. Never leave husks in the brain, and never retry a gated post
-  forever.
+  require typed `yes`/`do it`. A database soft-delete is not enough: before
+  `gbrain delete`, resolve each candidate to its exact tracked source file and
+  remove or quarantine that file under the same gate. For a repo-backed page:
+
+  ```bash
+  SOURCE_PATH="<exact repo-relative source path for this slug>"
+  [ -n "$SOURCE_PATH" ] && git rm -- "$SOURCE_PATH"
+  ! git ls-files --error-unmatch -- "$SOURCE_PATH" >/dev/null 2>&1
+  gbrain delete <slug>
+  gbrain sync --no-pull --no-embed
+  ```
+
+  Abort if the exact source path cannot be identified. Then verify both the
+  soft-deleted row and the removed source file before logging `skipped: gated`.
+  Never leave husks in the brain, and never retry a gated post forever.
 
 ## Output Format
 
