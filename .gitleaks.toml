@@ -1,5 +1,8 @@
 title = "GBrain gitleaks config"
 
+[extend]
+useDefault = true
+
 [allowlist]
   paths = [
     '''.env\.testing\.example''',
