@@ -120,9 +120,10 @@ describe('company-brainify safety contract', () => {
     expect(installedRecord).toBeGreaterThan(status);
     expect(activeRecord).toBeGreaterThan(installedRecord);
     expect(pause).toBeGreaterThan(activeRecord);
+    expect(recordDaemon).toBeGreaterThanOrEqual(pause);
+    expect(recordDaemon).toBeLessThan(stop);
     expect(stop).toBeGreaterThan(pause);
     expect(verifyStopped).toBeGreaterThan(stop);
-    expect(recordDaemon).toBeGreaterThanOrEqual(verifyStopped);
     expect(stopDaemon).toBeGreaterThan(recordDaemon);
     expect(verifyOwner).toBeGreaterThan(stopDaemon);
     expect(verifyNoLock).toBeGreaterThan(verifyOwner);
