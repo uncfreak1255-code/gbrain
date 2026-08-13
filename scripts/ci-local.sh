@@ -5,8 +5,8 @@
 # of E2E) inside Docker. See docker-compose.ci.yml.
 #
 # Modes:
-#   bash scripts/ci-local.sh              # full local gate: gitleaks + unit + ALL E2E (4-way sharded)
-#   bash scripts/ci-local.sh --diff       # full local gate: gitleaks + unit + selected E2E (4-way sharded)
+#   bash scripts/ci-local.sh              # full local gate: merge secret scan + unit + ALL E2E (4-way sharded)
+#   bash scripts/ci-local.sh --diff       # full local gate: merge secret scan + unit + selected E2E (4-way sharded)
 #   bash scripts/ci-local.sh --no-pull    # skip docker compose pull (offline / debug)
 #   bash scripts/ci-local.sh --clean      # nuke named volumes for cold debug
 #   bash scripts/ci-local.sh --no-shard   # debug: run E2E sequentially against postgres-1 only
@@ -55,20 +55,15 @@ if [ "$CLEAN" = "1" ]; then
 fi
 
 # Tier 2: --diff fast-path. If the diff is doc-only (or empty), skip the
-# whole heavy gate (postgres + bun install + unit + E2E) and just verify
-# gitleaks on host. Doc-only diffs go from ~25 min to ~5 seconds.
+# whole heavy gate (postgres + bun install + unit + E2E) and just run the
+# merge secret scan on host. Doc-only diffs go from ~25 min to ~5 seconds.
 if [ "$DIFF" = "1" ]; then
   CLASSIFICATION=$(bun run scripts/select-e2e.ts --classify-only 2>/dev/null || echo "ERR")
   case "$CLASSIFICATION" in
     DOC_ONLY)
       echo "[ci-local] --diff: diff is doc-only — skipping postgres + unit + E2E (Tier 2 fast-path)."
-      echo "[ci-local] Running gitleaks on host as the only gate..."
-      if ! command -v gitleaks >/dev/null 2>&1; then
-        echo "[ci-local] WARN: gitleaks not installed; skipping. brew install gitleaks." >&2
-      else
-        gitleaks dir . --redact --no-banner
-        gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
-      fi
+      echo "[ci-local] Running merge secret scan on host as the only gate..."
+      bash scripts/gitleaks-scan.sh --scope merge --base origin/master
       echo "[ci-local] Doc-only fast-path complete. No code paths exercised."
       trap - EXIT
       exit 0
@@ -108,21 +103,11 @@ export GBRAIN_CI_PG_PORT_2=$((PG_PORT_BASE + 1))
 export GBRAIN_CI_PG_PORT_3=$((PG_PORT_BASE + 2))
 export GBRAIN_CI_PG_PORT_4=$((PG_PORT_BASE + 3))
 
-# Step 0: gitleaks on the host (no docker, no postgres, no bun needed).
-# Mirrors test.yml's separate gitleaks job. Fail loudly if not installed.
-echo "[ci-local] gitleaks detect (host)..."
-if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "[ci-local] ERROR: gitleaks not installed on host." >&2
-  echo "[ci-local]   macOS:  brew install gitleaks" >&2
-  echo "[ci-local]   Linux:  https://github.com/gitleaks/gitleaks/releases" >&2
-  exit 1
-fi
-# Two scopes for pre-push:
-#   1. Working-tree files (catch uncommitted secrets sitting in files)
-#   2. Branch commits vs origin/master (catch secrets committed on this branch)
-# Full-history scan is ~4 min on this repo's 3700+ commits; not useful pre-push.
-gitleaks dir . --redact --no-banner
-gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
+# Step 0: merge secret scan on the host (no docker, no postgres, no bun needed).
+# Mirrors test.yml's separate gitleaks job. Workspace hygiene is available as
+# `bun run check:secrets:hygiene`, but it does not decide CI pass/fail.
+echo "[ci-local] merge secret scan (host)..."
+bash scripts/gitleaks-scan.sh --scope merge --base origin/master
 
 # Step 1: pull. Refreshes pgvector + oven/bun:1 (both are `image:` not `build:`).
 if [ "$NO_PULL" = "0" ]; then
