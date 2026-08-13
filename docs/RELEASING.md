@@ -12,8 +12,8 @@ Before shipping (/ship) or reviewing (/review), always run the full test suite.
 Two equivalent paths:
 
 **Path A — local CI gate (recommended, v0.23.1+):**
-- `bun run ci:local` runs the entire stack inside Docker: gitleaks (host),
-  guards + typecheck, then 4-shard parallel unit + E2E against four pgvector
+- `bun run ci:local` runs the entire stack inside Docker: a host merge-range
+  secret scan, guards + typecheck, then 4-shard parallel unit + E2E against four pgvector
   containers plus a transaction-mode PgBouncer service (unit phase keeps
   `DATABASE_URL` unset; `--no-shard` for the legacy sequential flow). Stronger
   than PR CI's 2-file Tier 1 set; closer to what nightly Tier 1 catches. Spins
@@ -30,6 +30,12 @@ Two equivalent paths:
   run `bun run test:e2e`, then tear it down.
 
 Both must pass. Do not ship with failing E2E tests. Do not skip E2E tests.
+
+Secret scanning has two scopes. The merge scan blocks new committed secrets only:
+it scans the merge base through `HEAD` with `scripts/gitleaks-scan.sh --scope merge`.
+Workspace hygiene is separate: `bun run check:secrets:hygiene` reports findings
+already present in the checkout, including uncommitted files. A hygiene finding
+needs remediation, but it does not change a CI result.
 
 **Always run typecheck before pushing.** `bun test` (the bun runner)
 skips TypeScript type checking — it only enforces runtime behavior.
@@ -406,7 +412,7 @@ All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Before shi
 (`/ship`) or reviewing (`/review`), check for stale pins and update them:
 
 ```bash
-for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions/download-artifact softprops/action-gh-release gitleaks/gitleaks-action; do
+for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions/download-artifact softprops/action-gh-release; do
   tag=$(grep -r "$action@" .github/workflows/ | head -1 | grep -o '#.*' | tr -d '# ')
   [ -n "$tag" ] && echo "$action@$tag: $(gh api repos/$action/git/ref/tags/$tag --jq .object.sha 2>/dev/null)"
 done
