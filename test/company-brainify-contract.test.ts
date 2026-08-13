@@ -146,6 +146,7 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('git ls-remote --refs origin');
     expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
     expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
+    expect(SKILL).toContain('rm -rf -- "$BACKUP_PATH"');
   });
 
   test('new skill workflows use supported retrieval and deletion gates', () => {
@@ -161,6 +162,7 @@ describe('company-brainify safety contract', () => {
     expect(BLOG_INGEST).toContain('exact slugs, count, size, location, reason');
     expect(BLOG_INGEST).toContain('require typed `yes`/`do it`');
     expect(BLOG_INGEST).toContain('gbrain delete <slug>');
+    expect(BLOG_INGEST).toContain('gbrain restore <slug>');
 
     expect(BULK_INGEST).toContain('"cwd": "/absolute/path/to/brain-repo"');
     expect(BULK_MANIFEST).toContain('"cwd": "/absolute/path/to/brain-repo"');

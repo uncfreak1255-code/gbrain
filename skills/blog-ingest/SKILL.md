@@ -261,7 +261,7 @@ boilerplate. Husks poison recall — a search hit that says nothing.
   scripted deletion), route the complete set through the
   [data-loss-gate](../data-loss-gate/SKILL.md): present the confirmation and
   recoverability card with the exact slugs, count, size, location, reason,
-  `gbrain restore_page` recovery path, what would be lost, and an alternative;
+  `gbrain restore <slug>` recovery path, what would be lost, and an alternative;
   require typed `yes`/`do it`. Only after confirmation, soft-delete each
   candidate with `gbrain delete <slug>`, log it as `skipped: gated`, and verify
   the deletion. Never leave husks in the brain, and never retry a gated post

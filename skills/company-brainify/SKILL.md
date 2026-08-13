@@ -677,7 +677,7 @@ recovery line.
   mirror-clone backup in `~/.gbrain/backups/` for a retention window
   (~30 days is a sane default), then delete it — it contains the
   pre-sanitization history and should not accumulate indefinitely:
-  `rm -rf ~/.gbrain/backups/brain-history-backup-<date>.git`
+  `rm -rf -- "$BACKUP_PATH"` (the exact mirror path captured in Step 1)
 - If the repo carries push hooks or auto-hardening wiring, re-verify remotes
   and hooks survived the rewrite before handing the repo to the team
 
