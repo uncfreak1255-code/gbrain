@@ -79,17 +79,34 @@ jobs:
           fi
 
   gitleaks:
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            | tar -xz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+      - name: Resolve scan base
+        id: scan-base
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE="${{ github.event.before }}"
+          else
+            git fetch origin master --depth=1
+            BASE="origin/master"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+      - name: Run merge secret scan
+        run: bash scripts/gitleaks-scan.sh --scope merge --base "${{ steps.scan-base.outputs.base }}"
 
   verify:
     # Pre-test gates: privacy/jsonb/source-id/etc + typecheck + admin-build.
@@ -276,7 +293,7 @@ jobs:
           TEST="${{ needs.test.result }}"
           echo "cache-check.hit=$HIT"
           echo "gitleaks=$GITLEAKS  verify=$VERIFY  serial-tests=$SERIAL  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  test=$TEST"
-          if [ "$HIT" = "true" ]; then
+          if [ "$HIT" = "true" ] && [ "$GITLEAKS" = "success" ]; then
             echo "✓ cache HIT for hash ${{ needs.cache-check.outputs.hash }} — CI green"
             exit 0
           fi
