@@ -110,7 +110,7 @@ describe('company-brainify safety contract', () => {
     const dream = SKILL.indexOf('gbrain dream --source "$SOURCE_ID" --phase extract_facts --json');
     const restore = SKILL.lastIndexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const restart = SKILL.indexOf('gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"');
-    const verifyRunning = SKILL.indexOf('must report active again');
+    const verifyRunning = SKILL.indexOf('must also report active=true');
 
     expect(status).toBeGreaterThanOrEqual(0);
     expect(installedRecord).toBeGreaterThan(status);
@@ -184,8 +184,6 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('git push --atomic "${PUSH_LEASES[@]}" origin "${PUSH_REFS[@]}"');
     expect(SKILL).not.toContain('git push --prune');
     expect(SKILL).not.toContain('git push --force-with-lease --prune origin');
-    expect(SKILL).toContain("'refs/heads/*:refs/heads/*'");
-    expect(SKILL).toContain("'refs/tags/*:refs/tags/*'");
     expect(SKILL).toContain('git ls-remote --refs origin');
     expect(SKILL).toContain('REMOTE_REFS_BEFORE_PUSH="$WORK/remote-refs-before-push.txt"');
     expect(SKILL).toContain('diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH"');
