@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   cpSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -32,11 +31,12 @@ function secretLikeText(): string {
 function shell(
   cwd: string,
   args: string[],
-  opts: { ok?: boolean; input?: string } = {},
+  opts: { ok?: boolean; input?: string; env?: Record<string, string> } = {},
 ) {
   const r = spawnSync(args[0], args.slice(1), {
     cwd,
     encoding: "utf8",
+    env: { ...process.env, ...opts.env },
     input: opts.input,
   });
   if (opts.ok !== false && r.status !== 0) {
@@ -69,15 +69,75 @@ function makeFixtureRepo(): string {
   git(root, "config", "user.email", "test@example.com");
   git(root, "config", "user.name", "Test User");
   mkdirSync(join(root, "scripts"), { recursive: true });
-  if (existsSync(SCRIPT_SRC)) cpSync(SCRIPT_SRC, join(root, "scripts/gitleaks-scan.sh"));
+  cpSync(SCRIPT_SRC, join(root, "scripts/gitleaks-scan.sh"));
   cpSync(CONFIG_SRC, join(root, ".gitleaks.toml"));
+  writeFakeGitleaks(root);
   write(root, "README.md", "# fixture\n");
   commit(root, "initial");
   return root;
 }
 
 function runScan(root: string, ...args: string[]) {
-  return shell(root, ["bash", "scripts/gitleaks-scan.sh", ...args], { ok: false });
+  return shell(root, ["bash", "scripts/gitleaks-scan.sh", ...args], {
+    ok: false,
+    env: { PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}` },
+  });
+}
+
+function writeFakeGitleaks(root: string) {
+  const binDir = join(root, "bin");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(
+    join(binDir, "gitleaks"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+mode="\${1:-}"
+shift || true
+range=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --log-opts)
+      range="\${2:-}"
+      shift 2
+      ;;
+    --log-opts=*)
+      range="\${1#--log-opts=}"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+case "$mode" in
+  git)
+    if [ -z "$range" ]; then
+      echo "fake gitleaks: missing --log-opts" >&2
+      exit 2
+    fi
+    while IFS= read -r path; do
+      if [ -f "$path" ] && grep -q -E 'ghp_[[:alnum:]_]+' "$path"; then
+        echo "fake gitleaks: leaks found" >&2
+        exit 1
+      fi
+    done < <(git diff --name-only "$range")
+    exit 0
+    ;;
+  dir)
+    if grep -R --exclude-dir=.git --exclude-dir=bin -q -E 'ghp_[[:alnum:]_]+' .; then
+      echo "fake gitleaks: leaks found" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *)
+    echo "fake gitleaks: unsupported mode $mode" >&2
+    exit 2
+    ;;
+esac
+`,
+    { mode: 0o755 },
+  );
 }
 
 describe("scripts/gitleaks-scan.sh — merge scope", () => {
