@@ -100,22 +100,31 @@ describe('company-brainify safety contract', () => {
     expect(SKILL.indexOf('cd "$BRAIN"')).toBeLessThan(SKILL.indexOf('gbrain sources current --json'));
   });
 
-  test('manual facts reconciliation pauses and restores autopilot safely', () => {
+  test('manual facts reconciliation pauses and restores every installed autopilot schedule', () => {
     const status = SKILL.indexOf('gbrain autopilot --status --json');
+    const installedRecord = SKILL.indexOf('AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"');
+    const activeRecord = SKILL.indexOf('AUTOPILOT_WAS_RUNNING="<true-or-false from active>"');
+    const pause = SKILL.indexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const stop = SKILL.indexOf('gbrain autopilot --uninstall');
     const verifyStopped = SKILL.indexOf('must report inactive/uninstalled');
     const dream = SKILL.indexOf('gbrain dream --source "$SOURCE_ID" --phase extract_facts --json');
+    const restore = SKILL.lastIndexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const restart = SKILL.indexOf('gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"');
     const verifyRunning = SKILL.indexOf('must report active again');
 
     expect(status).toBeGreaterThanOrEqual(0);
-    expect(stop).toBeGreaterThan(status);
+    expect(installedRecord).toBeGreaterThan(status);
+    expect(activeRecord).toBeGreaterThan(installedRecord);
+    expect(pause).toBeGreaterThan(activeRecord);
+    expect(stop).toBeGreaterThan(pause);
     expect(verifyStopped).toBeGreaterThan(stop);
     expect(dream).toBeGreaterThan(verifyStopped);
-    expect(restart).toBeGreaterThan(dream);
+    expect(restore).toBeGreaterThan(dream);
+    expect(restart).toBeGreaterThan(restore);
     expect(verifyRunning).toBeGreaterThan(restart);
     expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"');
     expect(SKILL).not.toContain('AUTOPILOT_REPO="$(gbrain config get sync.repo_path)"');
+    expect(SKILL).not.toContain('if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then');
     expect(SKILL).not.toContain('gbrain eval dream-quality');
   });
 
@@ -238,6 +247,16 @@ describe('company-brainify safety contract', () => {
     expect(BULK_MANIFEST).toContain('current operator approval');
     expect(BULK_MANIFEST).not.toContain('direct per-item JSON updates with a');
     expect(BULK_MANIFEST).toContain('one explicitly named coordinator');
+  });
+
+  test('public fact-check examples stay generic', () => {
+    expect(FACT_CHECK).toContain('alice-example');
+    expect(FACT_CHECK).toContain('charlie-example');
+    expect(FACT_CHECK).toContain('## Lessons from Verification Failures');
+    expect(FACT_CHECK).not.toContain('## Lessons from Famous Failures');
+    expect(FACT_CHECK).toContain('The trust-failure pattern');
+    expect(FACT_CHECK).toContain('The uneven-standard pattern');
+    expect(FACT_CHECK).toContain('The too-neat-story pattern');
   });
 
   test('company-brainify guards use canonical paths and full-scope verification', () => {
