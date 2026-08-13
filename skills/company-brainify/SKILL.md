@@ -513,7 +513,7 @@ git add -A && git commit -m "Sanitize: strip sensitive content before history pu
 BACKUP_PATH="$HOME/.gbrain/backups/shared-brain-history-backup-$(date +%Y%m%d-%H%M%S).git"
 git clone --mirror "$WORK/shared" "$BACKUP_PATH"
 git -C "$BACKUP_PATH" log -1 >/dev/null || { echo "backup unreadable — ABORT"; exit 1; }
-BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"
+BACKUP_PATH_FILE="${BACKUP_PATH%.git}.path"
 printf '%s\n' "$BACKUP_PATH" > "$BACKUP_PATH_FILE"
 chmod 600 "$BACKUP_PATH_FILE"
 ```
@@ -544,6 +544,7 @@ Why: prior commits contain pre-sanitization versions of pages that were
 Recoverable?
 - [x] Mirror-clone backup at $BACKUP_PATH
       (verified: exists, `git -C "$BACKUP_PATH" log` works)
+      Per-run cleanup pointer: $BACKUP_PATH_FILE
 - [ ] NOT recoverable from the rewritten remote — old SHAs become unreachable
 
 What we'd lose:
@@ -684,8 +685,8 @@ log), never into the shared repo. The log names the purged paths AND the
 backup location; in the shared repo those two facts would tell every team
 member exactly which paths held sensitive content and where the
 pre-sanitization backup lives — the audit trail becomes a treasure map.
-Record: timestamp, purged paths, commit counts, and `$BACKUP_PATH` as the
-recovery line.
+Record: timestamp, purged paths, commit counts, `$BACKUP_PATH` as the recovery
+line, and `$BACKUP_PATH_FILE` as this purge's immutable cleanup pointer.
 
 **After the force push:**
 
@@ -702,11 +703,11 @@ recovery line.
   mirror-clone backup in `~/.gbrain/backups/` for a retention window
   (~30 days is a sane default), then delete it — it contains the
   pre-sanitization history and should not accumulate indefinitely:
-  read the persisted path from the literal pointer
-  `"$HOME/.gbrain/backups/brainify-backup-path.txt"` (reassign the pointer
-  variable in the later shell if desired), verify it is an absolute path under
+  read the persisted path from the exact per-run pointer
+  `"<absolute $BACKUP_PATH_FILE path from this purge's confirmation card>"`
+  (do not use a shared/fixed pointer), verify it is an absolute path under
   `~/.gbrain/backups/`, then run
-  `BACKUP_PATH="$(<"$HOME/.gbrain/backups/brainify-backup-path.txt")"; rm -rf -- "$BACKUP_PATH"`.
+  `BACKUP_PATH_FILE="<that exact per-run pointer path>"; BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"; rm -rf -- "$BACKUP_PATH"; rm -f -- "$BACKUP_PATH_FILE"`.
 - If the repo carries push hooks or auto-hardening wiring, re-verify remotes
   and hooks survived the rewrite before handing the repo to the team
 
