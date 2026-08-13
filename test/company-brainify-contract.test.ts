@@ -103,7 +103,7 @@ describe('company-brainify safety contract', () => {
   test('manual facts reconciliation pauses and restores every installed autopilot schedule', () => {
     const status = SKILL.indexOf('gbrain autopilot --status --json');
     const installedRecord = SKILL.indexOf('AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"');
-    const activeRecord = SKILL.indexOf('AUTOPILOT_WAS_RUNNING="<true-or-false from active>"');
+    const activeRecord = SKILL.indexOf('AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"');
     const pause = SKILL.indexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const stop = SKILL.indexOf('gbrain autopilot --uninstall');
     const verifyStopped = SKILL.indexOf('must report inactive/uninstalled');
@@ -123,8 +123,10 @@ describe('company-brainify safety contract', () => {
     expect(restart).toBeGreaterThan(restore);
     expect(verifyRunning).toBeGreaterThan(restart);
     expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"');
+    expect(SKILL).toContain('must report installed with original target/repo');
+    expect(SKILL).toContain('must also report active=true');
     expect(SKILL).not.toContain('AUTOPILOT_REPO="$(gbrain config get sync.repo_path)"');
-    expect(SKILL).not.toContain('if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then');
+    expect(SKILL).not.toContain('gbrain autopilot --status --json  # must report active again');
     expect(SKILL).not.toContain('gbrain eval dream-quality');
   });
 
@@ -173,10 +175,14 @@ describe('company-brainify safety contract', () => {
     expect(INGEST_GATE).not.toContain('gbrain search "');
   });
 
-  test('history purge updates, prunes, and verifies every branch and tag ref', () => {
+  test('history purge updates only snapshotted refs atomically', () => {
     expect(SKILL).toContain('PUSH_LEASES=()');
+    expect(SKILL).toContain('PUSH_REFS=()');
     expect(SKILL).toContain('PUSH_LEASES+=( "--force-with-lease=$ref:$old_sha" )');
-    expect(SKILL).toContain('git push --prune "${PUSH_LEASES[@]}" origin');
+    expect(SKILL).toContain('PUSH_REFS+=( "$ref:$ref" )');
+    expect(SKILL).toContain('PUSH_REFS+=( ":$ref" )');
+    expect(SKILL).toContain('git push --atomic "${PUSH_LEASES[@]}" origin "${PUSH_REFS[@]}"');
+    expect(SKILL).not.toContain('git push --prune');
     expect(SKILL).not.toContain('git push --force-with-lease --prune origin');
     expect(SKILL).toContain("'refs/heads/*:refs/heads/*'");
     expect(SKILL).toContain("'refs/tags/*:refs/tags/*'");
