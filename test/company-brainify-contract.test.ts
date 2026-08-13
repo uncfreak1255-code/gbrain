@@ -198,7 +198,7 @@ describe('company-brainify safety contract', () => {
     expect(RESOLVE_BEFORE_ASKING).toContain('gbrain mounts list --json');
     expect(RESOLVE_BEFORE_ASKING).toContain('GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query');
     expect(RESOLVE_BEFORE_ASKING).toContain("for SOURCE_ID in $(printf '%s' \"$SOURCES_JSON\" | jq -r '.sources[].id')");
-    expect(RESOLVE_BEFORE_ASKING).toContain('--source-id "$SOURCE_ID"');
+    expect(RESOLVE_BEFORE_ASKING).toContain('--source "$SOURCE_ID"');
     expect(RESOLVE_BEFORE_ASKING).toContain('GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain sources list --json');
     expect(RESOLVE_BEFORE_ASKING).not.toContain('gbrain search "{entity}"');
     expect(FACT_CHECK).not.toContain('gbrain search "<entity>"');
