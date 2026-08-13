@@ -107,6 +107,8 @@ describe('company-brainify safety contract', () => {
     const pause = SKILL.indexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const stop = SKILL.indexOf('gbrain autopilot --uninstall');
     const verifyStopped = SKILL.indexOf('must report inactive/uninstalled');
+    const stopDaemons = SKILL.indexOf('ps -ww -Ao pid=,command=');
+    const verifyNoDaemons = SKILL.indexOf('autopilot daemon still running — ABORT');
     const dream = SKILL.indexOf('gbrain dream --source "$SOURCE_ID" --phase extract_facts --json');
     const restore = SKILL.lastIndexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
     const restart = SKILL.indexOf('gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"');
@@ -118,13 +120,17 @@ describe('company-brainify safety contract', () => {
     expect(pause).toBeGreaterThan(activeRecord);
     expect(stop).toBeGreaterThan(pause);
     expect(verifyStopped).toBeGreaterThan(stop);
-    expect(dream).toBeGreaterThan(verifyStopped);
+    expect(stopDaemons).toBeGreaterThan(verifyStopped);
+    expect(verifyNoDaemons).toBeGreaterThan(stopDaemons);
+    expect(dream).toBeGreaterThan(verifyNoDaemons);
     expect(restore).toBeGreaterThan(dream);
     expect(restart).toBeGreaterThan(restore);
     expect(verifyRunning).toBeGreaterThan(restart);
     expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"');
     expect(SKILL).toContain('must report installed with original target/repo');
     expect(SKILL).toContain('must also report active=true');
+    expect(SKILL).toContain('kill -TERM "$pid"');
+    expect(SKILL).toContain('index($0, "autopilot --repo " repo)');
     expect(SKILL).not.toContain('AUTOPILOT_REPO="$(gbrain config get sync.repo_path)"');
     expect(SKILL).not.toContain('gbrain autopilot --status --json  # must report active again');
     expect(SKILL).not.toContain('gbrain eval dream-quality');
