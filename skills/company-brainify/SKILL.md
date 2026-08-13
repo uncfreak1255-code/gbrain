@@ -294,7 +294,7 @@ AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
 # Pause every installed schedule, even when its current active state is false or
 # null (for example cron/ephemeral bootstrap or an inactive systemd service).
 AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
-AUTOPILOT_WAS_RUNNING="<true-or-false from active>"
+AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"
 if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
   gbrain autopilot --uninstall
   gbrain autopilot --status --json  # must report inactive/uninstalled
@@ -304,10 +304,15 @@ gbrain sync --source "$SOURCE_ID"
 gbrain dream --source "$SOURCE_ID" --phase extract_facts --json
 
 # Restore every schedule that was installed, preserving its original target and
-# repository even if it was not active when reconciliation began.
+# repository even if it was not active when reconciliation began. Verify
+# schedule.installed=true and the original target/repository. An originally
+# inactive cron/ephemeral target may legitimately report active=false or null.
 if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
   gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"
-  gbrain autopilot --status --json  # must report active again
+  gbrain autopilot --status --json  # must report installed with original target/repo
+  if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
+    gbrain autopilot --status --json  # must also report active=true
+  fi
 fi
 ```
 
@@ -667,21 +672,25 @@ git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE_
 diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH" \
   || { echo "remote refs changed during purge — ABORT, do not force-push"; exit 1; }
 
-# Update EVERY shared branch and tag, and prune remote refs that no longer
-# exist locally. Pushing only `main` leaves an old branch or tag able to serve
-# the pre-sanitization history. filter-repo removed remote-tracking refs, so
-# derive an explicit lease for every pre-purge ref instead of relying on the
-# short `--force-with-lease` form.
+# Update EVERY pre-purge shared branch and tag, and explicitly delete only
+# pre-purge refs that are absent locally. Do not use wildcard --prune: a new
+# collaborator ref created after the final readback must be preserved, not
+# silently deleted. filter-repo removed remote-tracking refs, so derive both
+# explicit leases and explicit refspecs from the pre-purge snapshot.
 PUSH_LEASES=()
+PUSH_REFS=()
 while read -r old_sha ref; do
   [ -n "$ref" ] || continue
   PUSH_LEASES+=( "--force-with-lease=$ref:$old_sha" )
+  if git rev-parse --verify --quiet "$ref" >/dev/null; then
+    PUSH_REFS+=( "$ref:$ref" )
+  else
+    PUSH_REFS+=( ":$ref" )
+  fi
 done < "$REMOTE_REFS_BEFORE"
-[ "${#PUSH_LEASES[@]}" -gt 0 ] \
+[ "${#PUSH_LEASES[@]}" -gt 0 ] && [ "${#PUSH_REFS[@]}" -gt 0 ] \
   || { echo "no pre-purge refs available — ABORT, do not force-push"; exit 1; }
-git push --prune "${PUSH_LEASES[@]}" origin \
-  'refs/heads/*:refs/heads/*' \
-  'refs/tags/*:refs/tags/*'
+git push --atomic "${PUSH_LEASES[@]}" origin "${PUSH_REFS[@]}"
 
 # Verify remote readback matches the rewritten local refs, then inspect every
 # surviving ref (including remote-tracking refs) for purged-path history. Each
