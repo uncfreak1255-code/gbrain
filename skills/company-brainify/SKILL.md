@@ -294,9 +294,9 @@ AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
 # The daemon lock follows configDir(): trim GBRAIN_HOME like the runtime,
 # append .gbrain, and keep the installed wrapper under the host HOME.
 GBRAIN_HOME_RAW="${GBRAIN_HOME:-$HOME}"
-# Perl's Unicode \\s plus FEFF matches JavaScript String.trim() at the
+# Perl's Unicode \s plus FEFF matches JavaScript String.trim() at the
 # boundaries; keep the empty-after-trim fallback below.
-GBRAIN_HOME_TRIMMED="$(printf '%s' "$GBRAIN_HOME_RAW" | perl -CSD -pe 's/^[\\s\\x{FEFF}]+|[\\s\\x{FEFF}]+$//gu')"
+GBRAIN_HOME_TRIMMED="$(printf '%s' "$GBRAIN_HOME_RAW" | perl -CSD -pe 's/^[\s\x{FEFF}]+|[\s\x{FEFF}]+$//gu')"
 if [ -n "$GBRAIN_HOME_TRIMMED" ]; then
   AUTOPILOT_HOME="$GBRAIN_HOME_TRIMMED/.gbrain"
 else
