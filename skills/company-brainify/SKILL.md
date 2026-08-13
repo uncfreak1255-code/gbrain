@@ -313,7 +313,9 @@ if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
     case "$AUTOPILOT_ARGS" in
       *" --repo $AUTOPILOT_REPO"|*" --repo $AUTOPILOT_REPO "*)
         kill -TERM "$AUTOPILOT_PID" 2>/dev/null || true
-        for attempt in $(seq 1 10); do
+        # The daemon's SIGTERM handler can drain workers for up to 35 seconds;
+        # allow a margin before declaring the lock stuck.
+        for attempt in $(seq 1 45); do
           kill -0 "$AUTOPILOT_PID" 2>/dev/null || break
           sleep 1
         done
