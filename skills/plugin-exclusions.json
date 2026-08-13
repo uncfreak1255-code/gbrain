@@ -1,0 +1,7 @@
+{
+  "_comment": "Skills in skills/manifest.json deliberately NOT bundled into openclaw.plugin.json (Tier B: host-repo only). This file is the machine-readable curation record: manifest = plugin + exclusions with no overlap.",
+  "exclusions": {
+    "migrate": "host-side data-migration workflows; not useful to a downstream plugin install",
+    "setup": "host install/provisioning flow; plugin installs arrive already set up"
+  }
+}
