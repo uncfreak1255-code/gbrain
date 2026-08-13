@@ -105,6 +105,7 @@ describe('company-brainify safety contract', () => {
     const installedRecord = SKILL.indexOf('AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"');
     const activeRecord = SKILL.indexOf('AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"');
     const pause = SKILL.indexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
+    const normalizeHome = SKILL.indexOf('if [ -n "${GBRAIN_HOME:-}" ]; then');
     const stop = SKILL.indexOf('gbrain autopilot --uninstall');
     const verifyStopped = SKILL.indexOf('must report inactive/uninstalled');
     const recordDaemon = SKILL.indexOf('Record the daemon PID from the lock before uninstall');
@@ -120,18 +121,30 @@ describe('company-brainify safety contract', () => {
     expect(installedRecord).toBeGreaterThan(status);
     expect(activeRecord).toBeGreaterThan(installedRecord);
     expect(pause).toBeGreaterThan(activeRecord);
-    expect(stop).toBeGreaterThan(pause);
+    // No installed schedule means no lock path needs resolving; normalization
+    // must be inside the pause branch, before the lock is read.
+    expect(normalizeHome).toBeGreaterThan(pause);
+    expect(normalizeHome).toBeLessThan(recordDaemon);
+    expect(recordDaemon).toBeGreaterThan(activeRecord);
+    expect(stop).toBeGreaterThan(recordDaemon);
     expect(verifyStopped).toBeGreaterThan(stop);
-    expect(recordDaemon).toBeGreaterThanOrEqual(verifyStopped);
-    expect(stopDaemon).toBeGreaterThan(recordDaemon);
+    expect(stopDaemon).toBeGreaterThan(verifyStopped);
     expect(verifyOwner).toBeGreaterThan(stopDaemon);
     expect(verifyNoLock).toBeGreaterThan(verifyOwner);
     expect(dream).toBeGreaterThan(verifyNoLock);
     expect(restore).toBeGreaterThan(dream);
     expect(restart).toBeGreaterThan(restore);
     expect(verifyRunning).toBeGreaterThan(restart);
-    expect(SKILL).toContain('AUTOPILOT_HOME="${GBRAIN_HOME:-$HOME/.gbrain}"');
-    expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $AUTOPILOT_HOME/autopilot-run.sh>"');
+    expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"');
+    expect(SKILL).toContain('if [ -n "${GBRAIN_HOME:-}" ]; then');
+    expect(SKILL).toContain('GBRAIN_HOME_RAW="$GBRAIN_HOME"');
+    expect(SKILL).toContain('command -v bun >/dev/null 2>&1');
+    expect(SKILL).not.toContain('GBRAIN_HOME_RAW="${GBRAIN_HOME:-$HOME}"');
+    expect(SKILL).toContain('bun is required to normalize GBRAIN_HOME — ABORT');
+    expect(SKILL).toContain('GBRAIN_HOME normalization failed — ABORT');
+    expect(SKILL).toContain('GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e \'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())\')"');
+    expect(SKILL).toContain('if [ -n "$GBRAIN_HOME_TRIMMED" ]; then');
+    expect(SKILL).toContain('AUTOPILOT_HOME="$HOME/.gbrain"');
     expect(SKILL).toContain('must report installed with original target/repo');
     expect(SKILL).toContain('must also report active=true');
     expect(SKILL).toContain('kill -TERM "$AUTOPILOT_PID"');
