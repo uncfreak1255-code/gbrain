@@ -190,7 +190,7 @@ per [conventions/cron-via-minions.md](../conventions/cron-via-minions.md) —
 a recurring shell job shaped like:
 
 ```bash
-gbrain jobs submit shell --params '{"cmd": "cd <brain-repo> && git add projects/<pipeline-name> <output-dirs> && git commit -m \"<pipeline-name> ingest checkpoint\" && git push"}'
+gbrain jobs submit shell --params '{"cmd": "git add projects/<pipeline-name> <output-dirs> && git commit -m \"<pipeline-name> ingest checkpoint\" && git push", "cwd": "/absolute/path/to/brain-repo"}'
 ```
 
 Shell jobs require `GBRAIN_ALLOW_SHELL_JOBS=1` on the WORKER environment — see

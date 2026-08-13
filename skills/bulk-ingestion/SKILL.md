@@ -277,7 +277,7 @@ Execution routes through Minions (`skills/minion-orchestrator/SKILL.md`):
 
 ```bash
 # Deterministic pipeline as a shell job (durable, observable):
-gbrain jobs submit shell --params '{"cmd": "<your pipeline command> --offset 0 --limit 100"}'
+gbrain jobs submit shell --params '{"cmd": "<your pipeline command> --offset 0 --limit 100", "cwd": "/absolute/path/to/brain-repo"}'
 
 # LLM-heavy pipeline as a subagent (steerable, transcripted):
 gbrain agent run "Read skills/<pipeline-name>/SKILL.md and process the next 50 pending manifest items"

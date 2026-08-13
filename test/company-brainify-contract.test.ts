@@ -22,6 +22,14 @@ const BLOG_INGEST = readFileSync(
   join(import.meta.dir, '..', 'skills/blog-ingest/SKILL.md'),
   'utf8',
 );
+const BULK_INGEST = readFileSync(
+  join(import.meta.dir, '..', 'skills/bulk-ingestion/SKILL.md'),
+  'utf8',
+);
+const BULK_MANIFEST = readFileSync(
+  join(import.meta.dir, '..', 'skills/bulk-ingestion/MANIFEST-PATTERN.md'),
+  'utf8',
+);
 
 describe('company-brainify safety contract', () => {
   test('the purge clone consumes an explicit sanitized tree for both paths', () => {
@@ -29,7 +37,8 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('SANITIZED_CARRIER="$WORK/sanitized-tree"');
     expect(SKILL).toContain('rsync -a "$SANITIZED_TREE/$d/" "$SANITIZED_CARRIER/$d/"');
     expect(SKILL).toContain('git clone <SHARED_REPO_URL> "$WORK/shared"');
-    expect(SKILL).toContain('rsync -a "$SANITIZED_CARRIER/$d/" "./$d/"');
+    expect(SKILL).toContain('rsync -a --delete "$SANITIZED_CARRIER/$d/" "./$d/"');
+    expect(SKILL).toContain('git rm -r --ignore-unmatch -- "$d"');
     expect(SKILL.indexOf('rsync -a "$SANITIZED_TREE/$d/"')).toBeLessThan(
       SKILL.indexOf('git clone <SHARED_REPO_URL> "$WORK/shared"'),
     );
@@ -71,7 +80,7 @@ describe('company-brainify safety contract', () => {
     const stop = SKILL.indexOf('gbrain autopilot --uninstall');
     const verifyStopped = SKILL.indexOf('must report inactive/uninstalled');
     const dream = SKILL.indexOf('gbrain dream --source "$SOURCE_ID" --phase extract_facts --json');
-    const restart = SKILL.indexOf('gbrain autopilot --install --repo "$AUTOPILOT_REPO"');
+    const restart = SKILL.indexOf('gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"');
     const verifyRunning = SKILL.indexOf('must report active again');
 
     expect(status).toBeGreaterThanOrEqual(0);
@@ -80,6 +89,22 @@ describe('company-brainify safety contract', () => {
     expect(dream).toBeGreaterThan(verifyStopped);
     expect(restart).toBeGreaterThan(dream);
     expect(verifyRunning).toBeGreaterThan(restart);
+    expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"');
+    expect(SKILL).not.toContain('AUTOPILOT_REPO="$(gbrain config get sync.repo_path)"');
+    expect(SKILL).not.toContain('gbrain eval dream-quality');
+  });
+
+  test('history purge materializes every remote branch before rewriting', () => {
+    const fetchRefs = SKILL.indexOf("'+refs/heads/*:refs/remotes/origin/*'");
+    const materialize = SKILL.indexOf("git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/");
+    const applyCarrier = SKILL.indexOf('rsync -a --delete "$SANITIZED_CARRIER/$d/"');
+    const filterRepo = SKILL.indexOf('git filter-repo --invert-paths');
+
+    expect(fetchRefs).toBeGreaterThanOrEqual(0);
+    expect(materialize).toBeGreaterThan(fetchRefs);
+    expect(SKILL).toContain('git branch "$branch" "refs/remotes/origin/$branch"');
+    expect(applyCarrier).toBeGreaterThan(materialize);
+    expect(filterRepo).toBeGreaterThan(applyCarrier);
   });
 
   test('brain-ingest gate uses the supported retrieval command', () => {
@@ -111,5 +136,9 @@ describe('company-brainify safety contract', () => {
     expect(BLOG_INGEST).toContain('exact slugs, count, size, location, reason');
     expect(BLOG_INGEST).toContain('require typed `yes`/`do it`');
     expect(BLOG_INGEST).toContain('gbrain delete <slug>');
+
+    expect(BULK_INGEST).toContain('"cwd": "/absolute/path/to/brain-repo"');
+    expect(BULK_MANIFEST).toContain('"cwd": "/absolute/path/to/brain-repo"');
+    expect(BULK_MANIFEST).not.toContain('"cmd": "cd <brain-repo> &&');
   });
 });

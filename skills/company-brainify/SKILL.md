@@ -274,9 +274,12 @@ same source — page import alone does not remove a stale derived row:
 
 ```bash
 SOURCE_ID="<shared-source-id>"
-AUTOPILOT_REPO="$(gbrain config get sync.repo_path)"
 gbrain autopilot --status --json
-# Record whether the status above reports an installed/running autopilot.
+# Record the installed target and the exact repository from the installed
+# launcher/service BEFORE uninstalling. Do not infer the repository from
+# sync.repo_path: a custom --repo install may point elsewhere.
+AUTOPILOT_TARGET="<installed target from schedule.targets>"
+AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
 AUTOPILOT_WAS_RUNNING="<true-or-false>"
 if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
   gbrain autopilot --uninstall
@@ -285,11 +288,10 @@ fi
 
 gbrain sync --source "$SOURCE_ID"
 gbrain dream --source "$SOURCE_ID" --phase extract_facts --json
-gbrain eval dream-quality
 
 # Only if the first status reported an active install:
 if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
-  gbrain autopilot --install --repo "$AUTOPILOT_REPO"
+  gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"
   gbrain autopilot --status --json  # must report active again
 fi
 ```
@@ -436,11 +438,33 @@ cd "$WORK/shared"
 [ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
   || { echo "target IS sync.repo_path (personal brain) — ABORT"; exit 1; }
 
+# Materialize every remote branch locally before filter-repo. A normal clone
+# checks out only the default branch; pushing refs/heads/* from that clone would
+# otherwise prune every other remote branch instead of rewriting it.
+git fetch origin \
+  '+refs/heads/*:refs/remotes/origin/*' \
+  '+refs/tags/*:refs/tags/*'
+DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+[ -n "$DEFAULT_BRANCH" ] \
+  || { echo "remote default branch not found — ABORT"; exit 1; }
+while IFS= read -r branch; do
+  [ "$branch" = "HEAD" ] && continue
+  git show-ref --verify --quiet "refs/heads/$branch" \
+    || git branch "$branch" "refs/remotes/origin/$branch"
+done < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/)
+git show-ref --verify --quiet "refs/heads/$DEFAULT_BRANCH" \
+  || { echo "default branch was not materialized — ABORT"; exit 1; }
+
 # Apply the carried sanitized tree, then COMMIT it BEFORE the mirror clone. A
 # mirror captures COMMITTED state only; the carrier makes this safe for both
 # staging and in-place edits without requiring a live push before the gate.
 for d in people meetings daily companies projects analysis; do
-  [ -d "$SANITIZED_CARRIER/$d" ] && rsync -a "$SANITIZED_CARRIER/$d/" "./$d/"
+  if [ -d "$SANITIZED_CARRIER/$d" ]; then
+    mkdir -p "./$d"
+    rsync -a --delete "$SANITIZED_CARRIER/$d/" "./$d/"
+  else
+    git rm -r --ignore-unmatch -- "$d"
+  fi
 done
 git add -A && git commit -m "Sanitize: strip sensitive content before history purge"
 
