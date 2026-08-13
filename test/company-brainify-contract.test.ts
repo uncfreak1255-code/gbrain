@@ -132,6 +132,9 @@ describe('company-brainify safety contract', () => {
     expect(verifyRunning).toBeGreaterThan(restart);
     expect(SKILL).toContain('AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"');
     expect(SKILL).toContain('GBRAIN_HOME_RAW="${GBRAIN_HOME:-$HOME}"');
+    expect(SKILL).toContain('command -v bun >/dev/null 2>&1');
+    expect(SKILL).toContain('bun is required to normalize GBRAIN_HOME — ABORT');
+    expect(SKILL).toContain('GBRAIN_HOME normalization failed — ABORT');
     expect(SKILL).toContain('GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e \'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())\')"');
     expect(SKILL).toContain('if [ -n "$GBRAIN_HOME_TRIMMED" ]; then');
     expect(SKILL).toContain('AUTOPILOT_HOME="$HOME/.gbrain"');
