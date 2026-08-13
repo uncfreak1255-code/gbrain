@@ -114,16 +114,22 @@ Don't hardcode channels. Check what the brain holds, then query it:
 ```bash
 gbrain sources list
 gbrain mounts list --json
-# For the host and every relevant mount id returned above, run the same
-# source-scoped queries with the brain selector set for that database.
-GBRAIN_BRAIN_ID="<brain-id-or-host>" gbrain query "emails with {entity}" --limit 10
-GBRAIN_BRAIN_ID="<brain-id-or-host>" gbrain query "meetings with {entity}" --limit 5
+# For the host and every enabled mount id returned above, enumerate that
+# database's sources and query each relevant source explicitly. The source
+# list is per-database; listing it once on the host is not sufficient.
+for BRAIN_ID in host $(gbrain mounts list --json | jq -r '.mounts[] | select(.enabled != false) | .id'); do
+  SOURCES_JSON="$(GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain sources list --json)"
+  for SOURCE_ID in $(printf '%s' "$SOURCES_JSON" | jq -r '.sources[].id'); do
+    GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query "emails with {entity}" --source-id "$SOURCE_ID" --limit 10
+    GBRAIN_BRAIN_ID="$BRAIN_ID" gbrain query "meetings with {entity}" --source-id "$SOURCE_ID" --limit 5
+  done
+done
 ```
 
-`GBRAIN_BRAIN_ID` selects the database; `--source`/`GBRAIN_SOURCE` selects a
-repo within that database. Repeat the queries for each relevant mount before
-escalating. A bare host-brain lookup is not evidence that a mounted brain is
-empty.
+`GBRAIN_BRAIN_ID` selects the database; `--source-id` selects a repo within
+that database. Repeat the queries for every source in every enabled mount
+before escalating. A bare host-brain lookup, or a host source list, is not
+evidence that a mounted brain is empty.
 
 Whatever is mounted — an email archive, calendar imports, chat transcripts,
 meeting notes — a handful of subject lines or meeting titles usually reveals
