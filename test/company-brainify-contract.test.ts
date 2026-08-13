@@ -105,6 +105,7 @@ describe('company-brainify safety contract', () => {
     const installedRecord = SKILL.indexOf('AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"');
     const activeRecord = SKILL.indexOf('AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"');
     const pause = SKILL.indexOf('if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then');
+    const normalizeHome = SKILL.indexOf('if [ -n "${GBRAIN_HOME:-}" ]; then');
     const stop = SKILL.indexOf('gbrain autopilot --uninstall');
     const verifyStopped = SKILL.indexOf('must report inactive/uninstalled');
     const recordDaemon = SKILL.indexOf('Record the daemon PID from the lock before uninstall');
@@ -120,6 +121,10 @@ describe('company-brainify safety contract', () => {
     expect(installedRecord).toBeGreaterThan(status);
     expect(activeRecord).toBeGreaterThan(installedRecord);
     expect(pause).toBeGreaterThan(activeRecord);
+    // No installed schedule means no lock path needs resolving; normalization
+    // must be inside the pause branch, before the lock is read.
+    expect(normalizeHome).toBeGreaterThan(pause);
+    expect(normalizeHome).toBeLessThan(recordDaemon);
     expect(recordDaemon).toBeGreaterThan(activeRecord);
     expect(stop).toBeGreaterThan(recordDaemon);
     expect(verifyStopped).toBeGreaterThan(stop);
