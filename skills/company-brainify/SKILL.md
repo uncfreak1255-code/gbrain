@@ -290,14 +290,15 @@ gbrain autopilot --status --json
 # launcher/service BEFORE uninstalling. Do not infer the repository from
 # sync.repo_path: a custom --repo install may point elsewhere.
 AUTOPILOT_TARGET="<installed target from schedule.targets>"
-AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
+AUTOPILOT_HOME="${GBRAIN_HOME:-$HOME/.gbrain}"
+AUTOPILOT_REPO="<exact --repo path from $AUTOPILOT_HOME/autopilot-run.sh>"
 # Pause every installed schedule, even when its current active state is false or
 # null (for example cron/ephemeral bootstrap or an inactive systemd service).
 AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
 AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"
 if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
   # Record the daemon PID from the lock before uninstall removes its launcher.
-  AUTOPILOT_LOCK="$HOME/.gbrain/autopilot.lock"
+  AUTOPILOT_LOCK="$AUTOPILOT_HOME/autopilot.lock"
   AUTOPILOT_PID="$(cat "$AUTOPILOT_LOCK" 2>/dev/null || true)"
   case "$AUTOPILOT_PID" in
     ''|*[!0-9]*) AUTOPILOT_PID="" ;;
