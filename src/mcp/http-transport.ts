@@ -34,6 +34,7 @@ import { VERSION } from '../version.ts';
 import { dispatchToolCall } from './dispatch.ts';
 import { buildDefaultLimiters, type RateLimiter } from './rate-limit.ts';
 import { sqlQueryForEngine } from '../core/sql-query.ts';
+import { healthSummary, readMaintenanceHealth } from '../core/maintenance-health.ts';
 import { parseLegacyTokenScope } from '../core/legacy-token-scope.ts';
 export { parseLegacyTokenScope };
 
@@ -259,8 +260,16 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       if (path === '/health') {
         try {
           await sql`SELECT 1`;
+          const maintenance = await readMaintenanceHealth(sql, 250);
           return Response.json(
-            { status: 'ok', version: VERSION, transport: 'http', db: 'ok' },
+            {
+              status: 'ok',
+              version: VERSION,
+              transport: 'http',
+              db: 'ok',
+              maintenance: maintenance.state,
+              health: healthSummary(maintenance.state),
+            },
             { headers: corsHeaders(origin) },
           );
         } catch (e: any) {

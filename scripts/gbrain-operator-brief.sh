@@ -79,6 +79,7 @@ queue_active="$(json_get "$TMP_DIR/status.out" 'data.queue && data.queue.active'
 queue_waiting="$(json_get "$TMP_DIR/status.out" 'data.queue && data.queue.waiting' || printf '?')"
 queue_failed="$(json_get "$TMP_DIR/status.out" 'data.queue && data.queue.failed' || printf '?')"
 autopilot_running="$(json_get "$TMP_DIR/status.out" 'data.autopilot && data.autopilot.running' || printf 'unknown')"
+watchdog_summary="$(json_get "$TMP_DIR/status.out" 'data.health && data.health.summary' || printf 'database unavailable / maintenance unknown')"
 autopilot_schedule_installed="$(json_get "$TMP_DIR/autopilot_status.out" 'data.installed' || printf 'unknown')"
 autopilot_schedule_targets="$(json_get "$TMP_DIR/autopilot_status.out" 'data.schedule && Array.isArray(data.schedule.targets) ? data.schedule.targets.filter((t) => t.installed).map((t) => `${t.target}: ${t.detail}`).join(" | ") : ""' || printf '')"
 worker_crashes="$(json_get "$TMP_DIR/status.out" 'data.workers && data.workers.crashes_24h' || printf '?')"
@@ -108,6 +109,7 @@ fi
   printf -- '- Active queue: `%s`; waiting: `%s`; failed: `%s`\n' "$queue_active" "$queue_waiting" "$queue_failed"
   printf -- '- Supervisor running: `%s`; manual workers listed: `%s`\n' "$supervisor_running" "$manual_workers"
   printf -- '- Autopilot running: `%s`\n' "$autopilot_running"
+  printf -- '- Watchdog: `%s`\n' "$watchdog_summary"
   printf -- '- Autopilot schedule installed: `%s`\n' "$autopilot_schedule_installed"
   if [ -n "$autopilot_schedule_targets" ]; then
     printf -- '- Autopilot schedule readback: %s\n' "$autopilot_schedule_targets"

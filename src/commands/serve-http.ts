@@ -36,6 +36,7 @@ import { buildError, serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
+import { healthSummary, readMaintenanceHealth } from '../core/maintenance-health.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
 import {
   computeContentHash,
@@ -165,7 +166,7 @@ export async function probeHealth(
 /**
  * Lightweight liveness probe. Races `SELECT 1` against the same timeout
  * `probeHealth` uses, returns the same tagged-union result type, but the
- * 200 body is intentionally bare: `{status, version, engine}` — no engine
+ * 200 body avoids engine stats while carrying database and maintenance health
  * stats. Stats moved to `/admin/api/full-stats` (admin auth) in v0.28.10
  * because `getStats()`'s six count(*) queries exceeded HEALTH_TIMEOUT_MS
  * on production brains through PgBouncer, producing false 503s that
@@ -185,10 +186,24 @@ export async function probeLiveness(
         timer = setTimeout(() => reject(new Error('health_timeout')), timeoutMs);
       }),
     ]);
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+
+    // Keep the liveness decision tied to SELECT 1. A slow config-table read
+    // can make maintenance unknown, but must not turn a live DB into a false
+    // 503.
+    const maintenance = await readMaintenanceHealth(sql, Math.min(timeoutMs, 250));
     return {
       ok: true,
       status: 200,
-      body: { status: 'ok', version, engine: engineName },
+      body: {
+        status: 'ok',
+        version,
+        engine: engineName,
+        db: 'ok',
+        maintenance: maintenance.state,
+        health: healthSummary(maintenance.state),
+      },
     };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'unknown';

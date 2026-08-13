@@ -38,6 +38,12 @@ import { logSelfUpgrade } from '../core/audit/self-upgrade-audit.ts';
 import { detectInstallMethod } from './upgrade.ts';
 import { evaluateQuietHours } from '../core/minions/quiet-hours.ts';
 import { inspectLock } from '../core/db-lock.ts';
+import {
+  classifyAutopilotRuntime,
+  clearManualAutomationDisabledMarker,
+  readManualAutomationDisabledReason,
+  writeManualAutomationDisabledMarker,
+} from '../core/autopilot-status.ts';
 
 /**
  * v0.37.7.0 #1162 — classify autopilot reconnect-loop errors.
@@ -473,7 +479,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
     return;
   }
   if (args.includes('--status')) {
-    showStatus(args.includes('--json'));
+    runAutopilotStatus(args);
     return;
   }
 
@@ -1474,6 +1480,11 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
       process.exit(2);
     }
   }
+
+  // A successful install is the explicit re-enable action. Do this only after
+  // the supervisor artifact has been written so a failed install does not erase
+  // the operator's disabled state.
+  clearManualAutomationDisabledMarker();
 }
 
 // v0.37.7.0 #1162 — pure function for plist generation so tests can
@@ -1708,7 +1719,7 @@ function installCrontab(wrapperPath: string, home: string) {
   const cronLine = `*/5 * * * * '${safeWrapperPath}' >> '${home.replace(/'/g, "'\\''")}/.gbrain/autopilot.log' 2>&1`;
   try {
     const existing = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
-    if (existing.includes('gbrain autopilot') || existing.includes('autopilot-run.sh')) {
+    if (crontabIndicatesAutopilotInstall(existing)) {
       console.log('Crontab entry already exists. Remove with: gbrain autopilot --uninstall');
       return;
     }
@@ -1725,7 +1736,7 @@ function installCrontab(wrapperPath: string, home: string) {
   }
 }
 
-function uninstallDaemon() {
+export function uninstallDaemon() {
   const home = process.env.HOME || '';
   const wrapperPath = join(home, '.gbrain', 'autopilot-run.sh');
 
@@ -1803,10 +1814,8 @@ function uninstallDaemon() {
   // --target linux-cron` on a different machine that now has the crontab).
   try {
     const existing = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
-    if (existing.includes('gbrain autopilot') || existing.includes('autopilot-run.sh')) {
-      const filtered = existing.split('\n').filter(l =>
-        !l.includes('gbrain autopilot') && !l.includes('autopilot-run.sh'),
-      ).join('\n');
+    if (crontabIndicatesAutopilotInstall(existing)) {
+      const filtered = existing.split('\n').filter(l => !crontabIndicatesAutopilotInstall(l)).join('\n');
       const tmpFile = join(home, '.gbrain', 'crontab.tmp');
       mkdirSync(join(home, '.gbrain'), { recursive: true });
       writeFileSync(tmpFile, filtered);
@@ -1829,17 +1838,40 @@ function uninstallDaemon() {
   if (removed === 0) {
     console.log('No autopilot install found on this host. Nothing to uninstall.');
   }
+
+  // Keep the operator's intent visible after schedule artifacts are removed.
+  // Without this marker, a deliberate manual off state is indistinguishable
+  // from an accidental missing install on the next watchdog read.
+  try {
+    writeManualAutomationDisabledMarker(`manual automation disabled at ${new Date().toISOString()}`);
+    console.log('Manual automation disabled. Re-enable with `gbrain autopilot --install`.');
+  } catch (e) {
+    console.error(`  [warn] could not persist manual disabled state: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
-export function readAutopilotSchedule(): AutopilotScheduleReadback {
+/**
+ * Identify an automation schedule line, while leaving a status-only watchdog
+ * line intact. The latter is a monitor, not an install receipt.
+ */
+export function crontabIndicatesAutopilotInstall(crontab: string): boolean {
+  return crontab.split('\n').some((line) => {
+    if (line.trimStart().startsWith('#')) return false;
+    if (line.includes('autopilot-run.sh')) return true;
+    return line.includes('gbrain autopilot') && !line.includes('--status');
+  });
+}
+
+export function readAutopilotSchedule(timeoutMs?: number): AutopilotScheduleReadback {
   const targets: AutopilotScheduleTargetReadback[] = [];
   const home = process.env.HOME || '';
+  const probeOptions = timeoutMs !== undefined && timeoutMs > 0 ? { timeout: timeoutMs } : {};
 
   const plist = plistPath();
   let launchdActive: boolean | null = null;
   if (existsSync(plist)) {
     try {
-      const out = execSync('launchctl list 2>/dev/null || true', { encoding: 'utf-8' });
+      const out = execSync('launchctl list 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions });
       launchdActive = out.includes('com.gbrain.autopilot');
     } catch {
       launchdActive = null;
@@ -1860,13 +1892,13 @@ export function readAutopilotSchedule(): AutopilotScheduleReadback {
   let systemdActive: boolean | null = null;
   if (existsSync(unit)) {
     try {
-      execSync('systemctl --user is-enabled --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: 3000 });
+      execSync('systemctl --user is-enabled --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: Math.min(timeoutMs ?? 3000, 3000) });
       systemdEnabled = true;
     } catch {
       systemdEnabled = false;
     }
     try {
-      execSync('systemctl --user is-active --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: 3000 });
+      execSync('systemctl --user is-active --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: Math.min(timeoutMs ?? 3000, 3000) });
       systemdActive = true;
     } catch {
       systemdActive = false;
@@ -1897,9 +1929,9 @@ export function readAutopilotSchedule(): AutopilotScheduleReadback {
   let cronInstalled = false;
   let cronDetail = 'crontab unavailable or no autopilot entry';
   try {
-    const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8' });
-    const lines = crontab.split('\n').filter((line) => line.includes('gbrain autopilot') || line.includes('autopilot-run.sh'));
-    cronInstalled = lines.length > 0;
+    const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions });
+    const lines = crontab.split('\n').filter((line) => crontabIndicatesAutopilotInstall(line));
+    cronInstalled = crontabIndicatesAutopilotInstall(crontab);
     cronDetail = cronInstalled ? lines.map((line) => line.trim()).join(' | ') : 'no crontab autopilot entry';
   } catch {
     /* leave unavailable detail */
@@ -1918,6 +1950,10 @@ export function readAutopilotSchedule(): AutopilotScheduleReadback {
   };
 }
 
+export function runAutopilotStatus(args: string[]): void {
+  showStatus(args.includes('--json'));
+}
+
 function showStatus(json: boolean) {
   const logFile = join(process.env.HOME || '', '.gbrain', 'autopilot.log');
   let lastLine = '';
@@ -1928,11 +1964,39 @@ function showStatus(json: boolean) {
   } catch { /* no log */ }
 
   const schedule = readAutopilotSchedule();
+  const lock = inspectAutopilotLock(gbrainHomePath('autopilot.lock'));
+  const runtime = classifyAutopilotRuntime({
+    scheduleInstalled: schedule.installed,
+    lockfilePresent: lock.exists,
+    pid: lock.pid,
+    running: lock.running,
+    lockFresh: lock.fresh,
+    manualDisabledReason: readManualAutomationDisabledReason(),
+  });
 
   if (json) {
-    console.log(JSON.stringify({ installed: schedule.installed, schedule, last_log: lastLine }));
+    console.log(JSON.stringify({ ...runtime, schedule, last_log: lastLine }));
   } else {
-    console.log(`Autopilot: ${schedule.installed ? 'installed' : 'not installed'}`);
+    switch (runtime.state) {
+      case 'manual_disabled':
+        console.log('Autopilot: manual automation disabled.');
+        break;
+      case 'stale_lock':
+        console.log(
+          `Autopilot: stale lock (PID ${runtime.pid ?? '?'} is not running). ` +
+          `${runtime.installed ? 'Scheduler is installed.' : 'No scheduler is installed.'}`,
+        );
+        break;
+      case 'running':
+        console.log(`Autopilot: running (PID ${runtime.pid}).`);
+        break;
+      case 'installed':
+        console.log('Autopilot: installed but not running.');
+        break;
+      case 'not_installed':
+        console.log('Autopilot: not installed.');
+        break;
+    }
     for (const target of schedule.targets.filter((t) => t.installed)) {
       console.log(`Schedule: ${target.target} — ${target.detail}`);
     }

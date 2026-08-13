@@ -101,7 +101,12 @@ describe('probeLiveness (v0.28.10)', () => {
       // Regression: the lightweight body must NOT spread getStats() fields.
       // The original PR's pre-refactor /health leaked page_count etc.;
       // tightening this assertion is the iron-rule regression test.
-      expect(Object.keys(result.body).sort()).toEqual(['engine', 'status', 'version']);
+      expect(Object.keys(result.body).sort()).toEqual([
+        'db', 'engine', 'health', 'maintenance', 'status', 'version',
+      ]);
+      expect(result.body.db).toBe('ok');
+      expect(result.body.maintenance).toBe('stale');
+      expect(result.body.health).toBe('database healthy / maintenance stale');
       expect((result.body as Record<string, unknown>).page_count).toBeUndefined();
       expect((result.body as Record<string, unknown>).chunk_count).toBeUndefined();
     }
@@ -131,6 +136,21 @@ describe('probeLiveness (v0.28.10)', () => {
     if (!result.ok) {
       expect(result.body.error).toBe('service_unavailable');
       expect(result.body.error_description).toBe('Database connection failed');
+    }
+  });
+
+  test('slow maintenance read does not turn a live database into 503', async () => {
+    let calls = 0;
+    const sql = makeMockSql(() => {
+      calls++;
+      return calls === 1 ? Promise.resolve([{ '?column?': 1 }]) : new Promise(() => { /* never resolves */ });
+    });
+    const result = await probeLiveness(sql, 'postgres', '0.28.10', 100);
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    if (result.ok) {
+      expect(result.body.maintenance).toBe('unknown');
+      expect(result.body.health).toBe('database healthy / maintenance unknown');
     }
   });
 
