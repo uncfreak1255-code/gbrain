@@ -75,13 +75,13 @@ whenever ANY of these are true —
 
 ## The Lookup Chain (run in order; STOP at the first clear answer)
 
-### Step 1: `think` — cross-brain synthesis (solves most cases)
+### Step 1: `think` — host-brain synthesis (solves most cases)
 
 ```bash
 gbrain think "Who is {entity}? What is their relationship to the user? What role do they play? Use all available context — meetings, timeline, imported archives, facts."
 ```
 
-`think` synthesizes across ALL brain data. If the entity has a page with
+`think` synthesizes across ALL data in the selected brain. If the entity has a page with
 imported-activity stats, timeline entries, and meeting history, `think` will
 connect the dots. Over MCP, `entity("{entity}")` first gives a zero-LLM card
 (aliases, last-touched, top edges); `synthesize` is the heavy cross-page
@@ -89,10 +89,10 @@ answer when the card isn't enough.
 
 **If this returns a clear answer → STOP. Use the answer. Do not ask the user.**
 
-### Step 2: `search` + full page read
+### Step 2: `query` + full page read
 
 ```bash
-gbrain search "{entity}" --limit 5
+gbrain query "{entity}" --limit 5
 gbrain get {entity-slug}
 ```
 
@@ -107,15 +107,23 @@ What to look for:
 **If timeline entries repeat a consistent role → STOP. The role is obvious.
 Do not ask the user.**
 
-### Step 3: Query each mounted source the brain actually has
+### Step 3: Query each mounted brain and source the host actually has
 
 Don't hardcode channels. Check what the brain holds, then query it:
 
 ```bash
 gbrain sources list
-gbrain query "emails with {entity}" --limit 10
-gbrain query "meetings with {entity}" --limit 5
+gbrain mounts list --json
+# For the host and every relevant mount id returned above, run the same
+# source-scoped queries with the brain selector set for that database.
+GBRAIN_BRAIN_ID="<brain-id-or-host>" gbrain query "emails with {entity}" --limit 10
+GBRAIN_BRAIN_ID="<brain-id-or-host>" gbrain query "meetings with {entity}" --limit 5
 ```
+
+`GBRAIN_BRAIN_ID` selects the database; `--source`/`GBRAIN_SOURCE` selects a
+repo within that database. Repeat the queries for each relevant mount before
+escalating. A bare host-brain lookup is not evidence that a mounted brain is
+empty.
 
 Whatever is mounted — an email archive, calendar imports, chat transcripts,
 meeting notes — a handful of subject lines or meeting titles usually reveals

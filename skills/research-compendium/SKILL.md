@@ -164,7 +164,7 @@ exists and the user says "go deeper," bump exactly one level.
 
 ### Phase 1 — Find everything
 
-Brain first: `gbrain query "<topic>"` and `gbrain search <terms>` — the brain
+Brain first: `gbrain query "<topic>"` — the brain
 may already hold part of the corpus. Then the open web: route web research
 through [perplexity-research](../perplexity-research/SKILL.md) and whatever
 search/fetch tools the harness provides. Never fetch search-engine result

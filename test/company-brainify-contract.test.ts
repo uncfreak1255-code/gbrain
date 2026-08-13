@@ -30,6 +30,21 @@ const BULK_MANIFEST = readFileSync(
   join(import.meta.dir, '..', 'skills/bulk-ingestion/MANIFEST-PATTERN.md'),
   'utf8',
 );
+const RESOLVE_BEFORE_ASKING = readFileSync(
+  join(import.meta.dir, '..', 'skills/resolve-before-asking/SKILL.md'),
+  'utf8',
+);
+const FACT_CHECK = readFileSync(join(import.meta.dir, '..', 'skills/fact-check/SKILL.md'), 'utf8');
+const CONVERSATION_ARCHIVE = readFileSync(
+  join(import.meta.dir, '..', 'skills/conversation-archive/SKILL.md'),
+  'utf8',
+);
+const SKILL_AUTOBENCH = readFileSync(join(import.meta.dir, '..', 'skills/skill-autobench/SKILL.md'), 'utf8');
+const DRAFT_IN_VOICE = readFileSync(join(import.meta.dir, '..', 'skills/draft-in-voice/SKILL.md'), 'utf8');
+const RESEARCH_COMPENDIUM = readFileSync(
+  join(import.meta.dir, '..', 'skills/research-compendium/SKILL.md'),
+  'utf8',
+);
 
 describe('company-brainify safety contract', () => {
   test('the purge clone consumes an explicit sanitized tree for both paths', () => {
@@ -146,7 +161,8 @@ describe('company-brainify safety contract', () => {
     expect(SKILL).toContain('git ls-remote --refs origin');
     expect(SKILL).toContain('REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"');
     expect(SKILL).toContain('path_commits="$(git log --all --format=%H -- "$d" | sort -u)"');
-    expect(SKILL).toContain('rm -rf -- "$BACKUP_PATH"');
+    expect(SKILL).toContain('BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"');
+    expect(SKILL).toContain('BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"; rm -rf -- "$BACKUP_PATH"');
   });
 
   test('new skill workflows use supported retrieval and deletion gates', () => {
@@ -167,5 +183,15 @@ describe('company-brainify safety contract', () => {
     expect(BULK_INGEST).toContain('"cwd": "/absolute/path/to/brain-repo"');
     expect(BULK_MANIFEST).toContain('"cwd": "/absolute/path/to/brain-repo"');
     expect(BULK_MANIFEST).not.toContain('"cmd": "cd <brain-repo> &&');
+
+    expect(RESOLVE_BEFORE_ASKING).toContain('gbrain query "{entity}" --limit 5');
+    expect(RESOLVE_BEFORE_ASKING).toContain('gbrain mounts list --json');
+    expect(RESOLVE_BEFORE_ASKING).toContain('GBRAIN_BRAIN_ID="<brain-id-or-host>" gbrain query');
+    expect(RESOLVE_BEFORE_ASKING).not.toContain('gbrain search "{entity}"');
+    expect(FACT_CHECK).not.toContain('gbrain search "<entity>"');
+    expect(CONVERSATION_ARCHIVE).not.toContain('gbrain search "');
+    expect(SKILL_AUTOBENCH).not.toContain('gbrain search "');
+    expect(DRAFT_IN_VOICE).not.toContain('gbrain search "');
+    expect(RESEARCH_COMPENDIUM).not.toContain('gbrain search <terms>');
   });
 });

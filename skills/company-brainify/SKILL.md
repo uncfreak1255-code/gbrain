@@ -502,6 +502,9 @@ git add -A && git commit -m "Sanitize: strip sensitive content before history pu
 BACKUP_PATH="$HOME/.gbrain/backups/shared-brain-history-backup-$(date +%Y%m%d-%H%M%S).git"
 git clone --mirror "$WORK/shared" "$BACKUP_PATH"
 git -C "$BACKUP_PATH" log -1 >/dev/null || { echo "backup unreadable — ABORT"; exit 1; }
+BACKUP_PATH_FILE="$HOME/.gbrain/backups/brainify-backup-path.txt"
+printf '%s\n' "$BACKUP_PATH" > "$BACKUP_PATH_FILE"
+chmod 600 "$BACKUP_PATH_FILE"
 ```
 
 Verify the mirror exists and reads before presenting the card — it is the
@@ -677,7 +680,9 @@ recovery line.
   mirror-clone backup in `~/.gbrain/backups/` for a retention window
   (~30 days is a sane default), then delete it — it contains the
   pre-sanitization history and should not accumulate indefinitely:
-  `rm -rf -- "$BACKUP_PATH"` (the exact mirror path captured in Step 1)
+  read the persisted path from `BACKUP_PATH_FILE` recorded in Step 1, verify it
+  is an absolute path under `~/.gbrain/backups/`, then run
+  `BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"; rm -rf -- "$BACKUP_PATH"`.
 - If the repo carries push hooks or auto-hardening wiring, re-verify remotes
   and hooks survived the rewrite before handing the repo to the team
 

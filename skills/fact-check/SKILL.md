@@ -218,7 +218,7 @@ Before any external verification, search the brain for entities mentioned in
 the content:
 
 ```
-gbrain search "<entity>"
+gbrain query "<entity>"
 ```
 
 for each person, company, concept, or product referenced in claims.
@@ -252,8 +252,8 @@ producer's query reproduces the producer's bug. Each atomic claim is
 
 | Producer used | Verify with |
 |---|---|
-| `gbrain query` (expansion/synthesis) | `gbrain search "<exact token>"` + `gbrain get <slug>` to read the page itself |
-| `gbrain search` (hybrid retrieval) | `gbrain graph-query <slug> --type <edge>` or `gbrain backlinks <slug>` |
+| `gbrain query` (expansion/synthesis) | `gbrain query "<exact token>"` + `gbrain get <slug>` to read the page itself |
+| `gbrain query` (hybrid retrieval) | `gbrain graph-query <slug> --type <edge>` or `gbrain backlinks <slug>` |
 | graph traversal (`gbrain graph` / `graph-query`) | direct page read (`gbrain get <slug>`) — does the page actually assert this? |
 | raw SQL / an aggregate | a second query on a different key or grouping, or per-row page reads |
 

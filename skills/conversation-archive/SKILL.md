@@ -266,7 +266,7 @@ session history permanent, searchable, and fact-extracted.
 ## Retrieval & Tracing
 
 - **Find a conversation:**
-  `gbrain search "<what you remember>" --limit 20` — then filter results to
+  `gbrain query "<what you remember>" --limit 20` — then filter results to
   `conversations/` slugs (prefix per provider: `conversations/chatgpt/`, …).
 - **Pull a thread:** `gbrain get conversations/chatgpt/2025-03-15-agent-memory`
 - **"When did I first discuss X":**
