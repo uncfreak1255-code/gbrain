@@ -669,8 +669,17 @@ diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH" \
 
 # Update EVERY shared branch and tag, and prune remote refs that no longer
 # exist locally. Pushing only `main` leaves an old branch or tag able to serve
-# the pre-sanitization history.
-git push --force-with-lease --prune origin \
+# the pre-sanitization history. filter-repo removed remote-tracking refs, so
+# derive an explicit lease for every pre-purge ref instead of relying on the
+# short `--force-with-lease` form.
+PUSH_LEASES=()
+while read -r old_sha ref; do
+  [ -n "$ref" ] || continue
+  PUSH_LEASES+=( "--force-with-lease=$ref:$old_sha" )
+done < "$REMOTE_REFS_BEFORE"
+[ "${#PUSH_LEASES[@]}" -gt 0 ] \
+  || { echo "no pre-purge refs available — ABORT, do not force-push"; exit 1; }
+git push --prune "${PUSH_LEASES[@]}" origin \
   'refs/heads/*:refs/heads/*' \
   'refs/tags/*:refs/tags/*'
 
