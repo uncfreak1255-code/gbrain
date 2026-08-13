@@ -248,18 +248,35 @@ deeply interwoven throughout.
 serves it via `--include-expired`. An expired fact is retained, not gone.
 For sanitization, sensitive fact rows must be ACTUALLY REMOVED: find them
 (`gbrain recall --grep`), then delete the row from the page's Facts fence
-(step 5), exactly like a sensitive take. On an in-place shared brain, the
-page edit must then be re-synced (`gbrain sync` re-imports the edited page)
-so the shared database no longer serves the row — an edited page over an
-un-synced DB still leaks through retrieval. `forget` alone can never certify
-a brain clean.
+(step 5), exactly like a sensitive take. On an in-place shared brain, sync
+the edited page and then explicitly reconcile the derived facts index for the
+same source — page import alone does not remove a stale derived row:
+
+```bash
+SOURCE_ID="<shared-source-id>"
+gbrain sync --source "$SOURCE_ID"
+gbrain dream --source "$SOURCE_ID" --phase extract_facts --json
+```
+
+Read the JSON result and resolve any `warn` or `fail` status before
+certifying the brain. Then verify every removed fact text is absent from the
+derived index, including expired rows:
+
+```bash
+REMOVED_FACT_TEXT="<distinct-removed-fact-text>"
+gbrain recall --source "$SOURCE_ID" --grep "$REMOVED_FACT_TEXT" --include-expired --json
+```
+
+That readback must return zero rows. `forget` alone can never certify a brain
+clean.
 
 After edits: on the **staging-copy** path the fact rows are removed by editing
 the copied markdown directly (there is no live DB to re-sync yet — the team DB
 is built fresh when Phase 5 Step 0 turns the export into a source). On the
-**in-place shared-brain** path, `gbrain sync` re-imports the changed pages so
-the DB matches the markdown. Either way, run `gbrain check-backlinks check` to
-catch pages still pointing at removed content.
+**in-place shared-brain** path, run the source-scoped `sync` plus
+`dream --phase extract_facts` sequence above, then the `recall --include-expired`
+readback. Either way, run `gbrain check-backlinks check` to catch pages still
+pointing at removed content.
 
 ### Phase 4: Verify
 
@@ -337,27 +354,50 @@ git push -u origin main
 Only when a shared repo ALREADY exists with sensitive history in it do you
 need the purge below.
 
-**Step 1 — target the SHARED repo, commit the clean tree, then mirror-clone.**
+**Step 1 — carry the sanitized tree into the SHARED purge clone, then mirror-clone.**
 The purge operates on the SHARED repo, NEVER on `sync.repo_path` (the personal
 brain) — Step 0's guarantee that the personal repo keeps full history depends
-on it. Clone the shared repo to a durable work dir, stay there for every step
-below, and assert the target is not the personal repo before touching anything.
+on it. Freeze an explicit carrier from the sanitized staging tree or the
+in-place shared checkout **before** cloning. This is what prevents the
+in-place path (where `STAGING` is unset) from silently copying nothing into
+the purge checkout. Then clone the shared repo to a durable work dir, stay
+there for every step below, and assert the target is not the personal repo
+before touching anything.
 
 ```bash
 PERSONAL="$(gbrain config get sync.repo_path)"
 mkdir -p "$HOME/.gbrain/backups" && chmod 700 "$HOME/.gbrain/backups"
 WORK="$HOME/.gbrain/backups/brainify-purge-$(date +%Y%m%d-%H%M%S)"
+
+# Capture the actual sanitized source before changing directories. STAGING is
+# set for a new-team export; for an existing shared-brain re-audit, the
+# sanitized checkout is the current git worktree instead.
+SANITIZED_TREE="${STAGING:-$(git rev-parse --show-toplevel)}"
+[ -d "$SANITIZED_TREE" ] \
+  || { echo "sanitized tree missing — ABORT"; exit 1; }
+[ "$SANITIZED_TREE" != "$PERSONAL" ] \
+  || { echo "sanitized tree IS sync.repo_path (personal brain) — ABORT"; exit 1; }
+
+# Durable carrier: the purge clone must consume this exact sanitized tree,
+# including the in-place path's uncommitted edits. Do this before cloning.
+SANITIZED_CARRIER="$WORK/sanitized-tree"
+mkdir -p "$SANITIZED_CARRIER"
+for d in people meetings daily companies projects analysis; do
+  [ -d "$SANITIZED_TREE/$d" ] || continue
+  mkdir -p "$SANITIZED_CARRIER/$d"
+  rsync -a "$SANITIZED_TREE/$d/" "$SANITIZED_CARRIER/$d/"
+done
+
 git clone <SHARED_REPO_URL> "$WORK/shared"
 cd "$WORK/shared"
 [ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
   || { echo "target IS sync.repo_path (personal brain) — ABORT"; exit 1; }
 
-# Apply the sanitized tree, then COMMIT it BEFORE the mirror clone. A mirror
-# captures COMMITTED state only; if the clean tree lives only in volatile
-# staging during the rewrite window, a crash loses the sanitization work.
-# Committing makes the clean state durable and recoverable.
+# Apply the carried sanitized tree, then COMMIT it BEFORE the mirror clone. A
+# mirror captures COMMITTED state only; the carrier makes this safe for both
+# staging and in-place edits without requiring a live push before the gate.
 for d in people meetings daily companies projects analysis; do
-  [ -d "$STAGING/$d" ] && rsync -a "$STAGING/$d/" "./$d/"   # or sanitize in place here
+  [ -d "$SANITIZED_CARRIER/$d" ] && rsync -a "$SANITIZED_CARRIER/$d/" "./$d/"
 done
 git add -A && git commit -m "Sanitize: strip sensitive content before history purge"
 
