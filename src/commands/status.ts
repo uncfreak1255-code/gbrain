@@ -361,6 +361,24 @@ export function buildHealthSummary(maintenance: MaintenanceStatus['state']): Hea
   };
 }
 
+export function formatAutopilotStatusLine(status: AutopilotStatus): string {
+  switch (status.state) {
+    case 'manual_disabled':
+      return status.running
+        ? `manual automation disabled, but live process remains (PID ${status.pid ?? '?'}). Stop it before manual work.`
+        : 'manual automation disabled. Re-enable with `gbrain autopilot --install`.';
+    case 'stale_lock':
+      return `stale lock (PID ${status.pid ?? '?'} not alive). ` +
+        `${status.installed ? 'Scheduler is installed.' : 'No scheduler is installed.'}`;
+    case 'running':
+      return `running (PID ${status.pid})`;
+    case 'installed':
+      return 'installed but not running.';
+    case 'not_installed':
+      return 'not installed. Install with `gbrain autopilot --install`.';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
@@ -636,26 +654,7 @@ function renderHuman(report: StatusReport): string {
       lines.push('  local-only — N/A on remote brain');
     } else {
       const a = report.autopilot;
-      switch (a.state) {
-        case 'manual_disabled':
-          lines.push('  manual automation disabled. Re-enable with `gbrain autopilot --install`.');
-          break;
-        case 'stale_lock':
-          lines.push(
-            `  stale lock (PID ${a.pid ?? '?'} not alive). ` +
-            `${a.installed ? 'Scheduler is installed.' : 'No scheduler is installed.'}`,
-          );
-          break;
-        case 'running':
-          lines.push(`  running (PID ${a.pid})`);
-          break;
-        case 'installed':
-          lines.push('  installed but not running.');
-          break;
-        case 'not_installed':
-          lines.push('  not installed. Install with `gbrain autopilot --install`.');
-          break;
-      }
+      lines.push(`  ${formatAutopilotStatusLine(a)}`);
     }
     lines.push('');
   }

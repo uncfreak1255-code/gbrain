@@ -358,6 +358,9 @@ cd "$WORK/shared"
 git fetch origin \
   '+refs/heads/*:refs/remotes/origin/*' \
   '+refs/tags/*:refs/tags/*'
+DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+[ -n "$DEFAULT_BRANCH" ] \
+  || { echo "remote default branch not found — ABORT"; exit 1; }
 while IFS= read -r branch; do
   [ "$branch" = "HEAD" ] && continue
   git show-ref --verify --quiet "refs/heads/$branch" \
@@ -471,14 +474,28 @@ done
 rm -rf .git/filter-repo
 git filter-repo --invert-paths $(for d in $PURGE_DIRS; do printf -- '--path %s/ ' "$d"; done) --force
 
-# Restore clean files and re-commit as a single new commit — same $PURGE_DIRS
-for d in $PURGE_DIRS; do
-  [ -d "$CLEAN/$d" ] || continue
-  mkdir -p "$d" && cp -r "$CLEAN/$d/." "$d/"
-done
+# Restore clean files and re-commit on EVERY surviving local branch. A single
+# checkout/commit only repairs the default branch; the other materialized
+# branches would otherwise be pushed with the purged directories absent.
+BRANCHES_AFTER_FILTER="$WORK/branches-after-filter.txt"
+git for-each-ref --format='%(refname:strip=2)' refs/heads/ > "$BRANCHES_AFTER_FILTER"
+CLEAN_READD_COMMITS="$WORK/clean-readd-commits.txt"
+: > "$CLEAN_READD_COMMITS"
+while IFS= read -r branch; do
+  [ -n "$branch" ] || continue
+  git checkout --force "$branch"
+  for d in $PURGE_DIRS; do
+    [ -d "$CLEAN/$d" ] || continue
+    mkdir -p "$d" && cp -r "$CLEAN/$d/." "$d/"
+    git add "$d/"
+  done
+  if ! git diff --cached --quiet; then
+    git commit -m "Re-add sanitized directories"
+    git rev-parse HEAD >> "$CLEAN_READD_COMMITS"
+  fi
+done < "$BRANCHES_AFTER_FILTER"
+git checkout --force "$DEFAULT_BRANCH"
 git remote add origin <SHARED_REPO_URL>   # filter-repo removes remotes
-for d in $PURGE_DIRS; do [ -d "$d" ] && git add "$d/"; done
-git commit -m "Re-add sanitized directories"
 
 # VERIFY RESTORE COMPLETENESS before the irreversible push — a partial restore
 # would ship a smaller tree than was sanitized. Compare file counts (and, for
