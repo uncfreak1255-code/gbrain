@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildHealthSummary,
 } from '../src/commands/status.ts';
-import { classifyAutopilotRuntime } from '../src/core/autopilot-status.ts';
-import { crontabIndicatesAutopilotInstall } from '../src/commands/autopilot.ts';
+import {
+  classifyAutopilotRuntime,
+  crontabIndicatesAutopilotInstall,
+} from '../src/core/autopilot-status.ts';
 
 describe('autopilot runtime status', () => {
   test('a stale lock does not claim that automation is installed', () => {

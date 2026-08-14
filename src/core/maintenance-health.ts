@@ -3,6 +3,7 @@ import type { SqlQuery } from './sql-query.ts';
 export const DEFAULT_GLOBAL_MAINTENANCE_FLOOR_MINUTES = 60;
 
 export type MaintenanceHealthState = 'fresh' | 'stale' | 'unknown';
+export type MaintenanceSummaryState = MaintenanceHealthState | 'manual_disabled';
 
 export interface MaintenanceHealth {
   state: MaintenanceHealthState;
@@ -30,9 +31,23 @@ export function classifyMaintenanceHealth(
   };
 }
 
-export function healthSummary(maintenance: MaintenanceHealthState | 'manual_disabled'): string {
+export interface DatabaseMaintenanceSummary {
+  database: 'healthy';
+  maintenance: MaintenanceSummaryState;
+  summary: string;
+}
+
+export function healthSummary(maintenance: MaintenanceSummaryState): string {
   const label = maintenance === 'manual_disabled' ? 'manual automation disabled' : maintenance;
   return `database healthy / maintenance ${label}`;
+}
+
+export function buildDatabaseMaintenanceSummary(maintenance: MaintenanceSummaryState): DatabaseMaintenanceSummary {
+  return {
+    database: 'healthy',
+    maintenance,
+    summary: healthSummary(maintenance),
+  };
 }
 
 /** Read the DB-plane maintenance receipt without turning liveness into a hard failure. */

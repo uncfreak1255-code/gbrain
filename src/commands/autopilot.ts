@@ -39,8 +39,15 @@ import { detectInstallMethod } from './upgrade.ts';
 import { evaluateQuietHours } from '../core/minions/quiet-hours.ts';
 import { inspectLock } from '../core/db-lock.ts';
 import {
+  autopilotEphemeralStartScriptPath,
+  autopilotPlistPath,
+  autopilotSystemdUnitPath,
   classifyAutopilotRuntime,
   clearManualAutomationDisabledMarker,
+  crontabIndicatesAutopilotInstall,
+  decideAutopilotLockAcquisition,
+  inspectAutopilotLock,
+  readAutopilotSchedule,
   readManualAutomationDisabledReason,
   writeManualAutomationDisabledMarker,
 } from '../core/autopilot-status.ts';
@@ -119,73 +126,6 @@ export function decideAutopilotDispatch(input: AutopilotDispatchDecisionInput): 
 function parseArg(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   return idx >= 0 && idx + 1 < args.length ? args[idx + 1] : undefined;
-}
-
-export interface AutopilotLockState {
-  exists: boolean;
-  pid: number | null;
-  running: boolean;
-  fresh: boolean;
-}
-
-export type AutopilotLockDecision =
-  | { action: 'acquire' }
-  | { action: 'exit'; holderPid: number }
-  | { action: 'takeover'; reason: 'dead' | 'stale' | 'unreadable' };
-
-export function decideAutopilotLockAcquisition(lock: AutopilotLockState): AutopilotLockDecision {
-  if (!lock.exists) return { action: 'acquire' };
-  // PID liveness is authoritative. A long synchronous phase can leave an old
-  // mtime even while the holder is healthy; never start a second autopilot in
-  // that case.
-  if (lock.running && lock.pid !== null) return { action: 'exit', holderPid: lock.pid };
-  if (lock.pid !== null) return { action: 'takeover', reason: 'dead' };
-  if (!lock.fresh) return { action: 'takeover', reason: 'stale' };
-  return { action: 'takeover', reason: 'unreadable' };
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-export function inspectAutopilotLock(
-  lockPath: string,
-  nowMs: number = Date.now(),
-  isAlive: (pid: number) => boolean = isPidAlive,
-): AutopilotLockState {
-  if (!existsSync(lockPath)) {
-    return { exists: false, pid: null, running: false, fresh: false };
-  }
-
-  let pid: number | null = null;
-  let running = false;
-  let fresh = false;
-
-  try {
-    const stat = require('fs').statSync(lockPath);
-    fresh = ((nowMs - stat.mtimeMs) / 60000) < 10;
-  } catch {
-    fresh = false;
-  }
-
-  try {
-    const raw = readFileSync(lockPath, 'utf8').trim();
-    const parsed = parseInt(raw, 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      pid = parsed;
-      running = isAlive(parsed);
-    }
-  } catch {
-    pid = null;
-    running = false;
-  }
-
-  return { exists: true, pid, running, fresh };
 }
 
 function logError(phase: string, e: unknown) {
@@ -1342,33 +1282,11 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
 
 // --- Install/Uninstall ---
 
-function plistPath(): string {
-  return join(process.env.HOME || '', 'Library', 'LaunchAgents', 'com.gbrain.autopilot.plist');
-}
-
-function systemdUnitPath(): string {
-  return join(process.env.HOME || '', '.config', 'systemd', 'user', 'gbrain-autopilot.service');
-}
-
-function ephemeralStartScriptPath(): string {
-  return join(process.env.HOME || '', '.gbrain', 'start-autopilot.sh');
-}
+const plistPath = autopilotPlistPath;
+const systemdUnitPath = autopilotSystemdUnitPath;
+const ephemeralStartScriptPath = autopilotEphemeralStartScriptPath;
 
 export type InstallTarget = 'macos' | 'linux-systemd' | 'ephemeral-container' | 'linux-cron';
-
-export interface AutopilotScheduleTargetReadback {
-  target: InstallTarget;
-  installed: boolean;
-  path?: string;
-  active?: boolean | null;
-  enabled?: boolean | null;
-  detail: string;
-}
-
-export interface AutopilotScheduleReadback {
-  installed: boolean;
-  targets: AutopilotScheduleTargetReadback[];
-}
 
 /**
  * Detect the right supervisor for this host.
@@ -1848,106 +1766,6 @@ export function uninstallDaemon() {
   } catch (e) {
     console.error(`  [warn] could not persist manual disabled state: ${e instanceof Error ? e.message : e}`);
   }
-}
-
-/**
- * Identify an automation schedule line, while leaving a status-only watchdog
- * line intact. The latter is a monitor, not an install receipt.
- */
-export function crontabIndicatesAutopilotInstall(crontab: string): boolean {
-  return crontab.split('\n').some((line) => {
-    if (line.trimStart().startsWith('#')) return false;
-    if (line.includes('autopilot-run.sh')) return true;
-    return line.includes('gbrain autopilot') && !line.includes('--status');
-  });
-}
-
-export function readAutopilotSchedule(timeoutMs?: number): AutopilotScheduleReadback {
-  const targets: AutopilotScheduleTargetReadback[] = [];
-  const home = process.env.HOME || '';
-  const probeOptions = timeoutMs !== undefined && timeoutMs > 0 ? { timeout: timeoutMs } : {};
-
-  const plist = plistPath();
-  let launchdActive: boolean | null = null;
-  if (existsSync(plist)) {
-    try {
-      const out = execSync('launchctl list 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions });
-      launchdActive = out.includes('com.gbrain.autopilot');
-    } catch {
-      launchdActive = null;
-    }
-  }
-  targets.push({
-    target: 'macos',
-    installed: existsSync(plist),
-    path: plist,
-    active: existsSync(plist) ? launchdActive : false,
-    detail: existsSync(plist)
-      ? `launchd plist present${launchdActive === null ? '' : launchdActive ? ' and loaded' : ' but not loaded'}`
-      : 'launchd plist absent',
-  });
-
-  const unit = systemdUnitPath();
-  let systemdEnabled: boolean | null = null;
-  let systemdActive: boolean | null = null;
-  if (existsSync(unit)) {
-    try {
-      execSync('systemctl --user is-enabled --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: Math.min(timeoutMs ?? 3000, 3000) });
-      systemdEnabled = true;
-    } catch {
-      systemdEnabled = false;
-    }
-    try {
-      execSync('systemctl --user is-active --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: Math.min(timeoutMs ?? 3000, 3000) });
-      systemdActive = true;
-    } catch {
-      systemdActive = false;
-    }
-  }
-  targets.push({
-    target: 'linux-systemd',
-    installed: existsSync(unit),
-    path: unit,
-    active: existsSync(unit) ? systemdActive : false,
-    enabled: existsSync(unit) ? systemdEnabled : false,
-    detail: existsSync(unit)
-      ? `systemd user unit present${systemdEnabled === null ? '' : systemdEnabled ? ', enabled' : ', not enabled'}${systemdActive === null ? '' : systemdActive ? ', active' : ', inactive'}`
-      : 'systemd user unit absent',
-  });
-
-  const startScript = ephemeralStartScriptPath();
-  targets.push({
-    target: 'ephemeral-container',
-    installed: existsSync(startScript),
-    path: startScript,
-    active: null,
-    detail: existsSync(startScript)
-      ? 'ephemeral start script present; host bootstrap must invoke it'
-      : 'ephemeral start script absent',
-  });
-
-  let cronInstalled = false;
-  let cronDetail = 'crontab unavailable or no autopilot entry';
-  try {
-    const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions });
-    const lines = crontab.split('\n').filter((line) => crontabIndicatesAutopilotInstall(line));
-    cronInstalled = crontabIndicatesAutopilotInstall(crontab);
-    cronDetail = cronInstalled ? lines.map((line) => line.trim()).join(' | ') : 'no crontab autopilot entry';
-  } catch {
-    /* leave unavailable detail */
-  }
-  targets.push({
-    target: 'linux-cron',
-    installed: cronInstalled,
-    path: join(home, '.gbrain', 'autopilot-run.sh'),
-    active: cronInstalled ? null : false,
-    detail: cronDetail,
-  });
-
-  return {
-    installed: targets.some((target) => target.installed),
-    targets,
-  };
 }
 
 export function runAutopilotStatus(args: string[]): void {

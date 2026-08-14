@@ -37,7 +37,12 @@
 
 import type { BrainEngine } from '../core/engine.ts';
 import { gbrainPath, loadConfig, isThinClient } from '../core/config.ts';
-import { classifyAutopilotRuntime, readManualAutomationDisabledReason } from '../core/autopilot-status.ts';
+import {
+  classifyAutopilotRuntime,
+  inspectAutopilotLock,
+  readAutopilotSchedule,
+  readManualAutomationDisabledReason,
+} from '../core/autopilot-status.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
 import { VERSION } from '../version.ts';
 import {
@@ -48,11 +53,11 @@ import {
   readSupervisorEvents,
   summarizeCrashes,
 } from '../core/minions/handlers/supervisor-audit.ts';
-import { inspectAutopilotLock, readAutopilotSchedule } from './autopilot.ts';
 import {
+  buildDatabaseMaintenanceSummary,
   classifyMaintenanceHealth,
   DEFAULT_GLOBAL_MAINTENANCE_FLOOR_MINUTES,
-  healthSummary,
+  type DatabaseMaintenanceSummary,
 } from '../core/maintenance-health.ts';
 
 const SCHEMA_VERSION = 1 as const;
@@ -119,11 +124,7 @@ export interface MaintenanceStatus {
   stale_after_minutes: number;
 }
 
-export interface HealthSummary {
-  database: 'healthy';
-  maintenance: MaintenanceStatus['state'];
-  summary: string;
-}
+export type HealthSummary = DatabaseMaintenanceSummary;
 
 export interface StatusReport {
   schema_version: typeof SCHEMA_VERSION;
@@ -360,11 +361,7 @@ async function buildMaintenanceStatus(
 }
 
 export function buildHealthSummary(maintenance: MaintenanceStatus['state']): HealthSummary {
-  return {
-    database: 'healthy',
-    maintenance,
-    summary: healthSummary(maintenance),
-  };
+  return buildDatabaseMaintenanceSummary(maintenance);
 }
 
 // ---------------------------------------------------------------------------

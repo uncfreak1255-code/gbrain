@@ -4874,7 +4874,7 @@ export async function buildChecks(
     let autopilotWorkerCount = 0;
     if (!running) {
       try {
-        const { inspectAutopilotLock } = await import('./autopilot.ts');
+        const { inspectAutopilotLock } = await import('../core/autopilot-status.ts');
         const { readWorkers } = await import('../core/minions/worker-registry.ts');
         const autoLock = inspectAutopilotLock(gbrainPath('autopilot.lock'));
         const liveWorkers = readWorkers();

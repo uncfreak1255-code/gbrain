@@ -36,7 +36,7 @@ import { buildError, serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
-import { healthSummary, readMaintenanceHealth } from '../core/maintenance-health.ts';
+import { buildDatabaseMaintenanceSummary, readMaintenanceHealth } from '../core/maintenance-health.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
 import {
   computeContentHash,
@@ -193,6 +193,7 @@ export async function probeLiveness(
     // can make maintenance unknown, but must not turn a live DB into a false
     // 503.
     const maintenance = await readMaintenanceHealth(sql, Math.min(timeoutMs, 250));
+    const health = buildDatabaseMaintenanceSummary(maintenance.state);
     return {
       ok: true,
       status: 200,
@@ -201,8 +202,8 @@ export async function probeLiveness(
         version,
         engine: engineName,
         db: 'ok',
-        maintenance: maintenance.state,
-        health: healthSummary(maintenance.state),
+        maintenance: health.maintenance,
+        health: health.summary,
       },
     };
   } catch (e: unknown) {
