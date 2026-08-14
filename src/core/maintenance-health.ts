@@ -24,13 +24,14 @@ export function classifyMaintenanceHealth(
   staleAfterMinutes = DEFAULT_GLOBAL_MAINTENANCE_FLOOR_MINUTES,
 ): MaintenanceHealth {
   const parsed = lastGlobalAt ? new Date(lastGlobalAt).getTime() : NaN;
-  const age_seconds = Number.isFinite(parsed)
+  const future = Number.isFinite(parsed) && parsed > nowMs;
+  const age_seconds = Number.isFinite(parsed) && !future
     ? Math.max(0, Math.floor((nowMs - parsed) / 1000))
     : null;
-  const stale = !Number.isFinite(parsed)
+  const stale = !Number.isFinite(parsed) || future
     || (nowMs - parsed) / 60_000 >= staleAfterMinutes;
   return {
-    state: stale ? 'stale' : 'fresh',
+    state: future ? 'unknown' : stale ? 'stale' : 'fresh',
     last_global_at: lastGlobalAt,
     age_seconds,
     stale_after_minutes: staleAfterMinutes,

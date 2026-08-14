@@ -66,6 +66,20 @@ describe('autopilot runtime status', () => {
     expect(status.lock_status).toBe('absent');
   });
 
+  test('a live unscheduled daemon is reported as running', () => {
+    const status = classifyAutopilotRuntime({
+      scheduleInstalled: false,
+      lockfilePresent: true,
+      pid: 1234,
+      running: true,
+      lockFresh: true,
+      manualDisabledReason: null,
+    });
+    expect(status.state).toBe('running');
+    expect(status.installed).toBe(false);
+    expect(status.lock_status).toBe('running');
+  });
+
   test('manual disable is explicit and outranks scheduler and lock evidence', () => {
     const status = classifyAutopilotRuntime({
       scheduleInstalled: true,

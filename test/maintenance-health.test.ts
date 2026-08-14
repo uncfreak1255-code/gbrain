@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { readMaintenanceHealth } from '../src/core/maintenance-health.ts';
+import {
+  classifyMaintenanceHealth,
+  readMaintenanceHealth,
+} from '../src/core/maintenance-health.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 describe('readMaintenanceHealth timeout contract', () => {
@@ -18,5 +21,14 @@ describe('readMaintenanceHealth timeout contract', () => {
     expect(health.state).toBe('unknown');
     expect(signal?.aborted).toBe(true);
     expect(timedOut).toBe(true);
+  });
+
+  test('future receipts are unknown rather than fresh', () => {
+    const health = classifyMaintenanceHealth(
+      '2026-08-14T12:01:00.000Z',
+      Date.parse('2026-08-14T12:00:00.000Z'),
+    );
+    expect(health.state).toBe('unknown');
+    expect(health.age_seconds).toBeNull();
   });
 });

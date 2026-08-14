@@ -352,12 +352,32 @@ cd "$WORK/shared"
 [ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
   || { echo "target IS sync.repo_path (personal brain) — ABORT"; exit 1; }
 
+# Materialize every remote branch locally before filter-repo. A normal clone
+# checks out only the default branch; the final explicit-ref push must not
+# mistake remote-only branches for intentional deletions.
+git fetch origin \
+  '+refs/heads/*:refs/remotes/origin/*' \
+  '+refs/tags/*:refs/tags/*'
+while IFS= read -r branch; do
+  [ "$branch" = "HEAD" ] && continue
+  git show-ref --verify --quiet "refs/heads/$branch" \
+    || git branch "$branch" "refs/remotes/origin/$branch"
+done < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/)
+
 # Apply the sanitized tree, then COMMIT it BEFORE the mirror clone. A mirror
 # captures COMMITTED state only; if the clean tree lives only in volatile
 # staging during the rewrite window, a crash loses the sanitization work.
 # Committing makes the clean state durable and recoverable.
+# Set SANITIZED_SOURCE to the Phase 3 shared checkout for the in-place path;
+# the staging path is the source for the new-team path. Never rely on an
+# unset/stale STAGING variable to supply the sanitized tree.
+if [ -n "${STAGING:-}" ]; then
+  SANITIZED_SOURCE="${SANITIZED_SOURCE:-$STAGING}"
+else
+  : "${SANITIZED_SOURCE:?Set SANITIZED_SOURCE to the sanitized shared checkout before Step 1}"
+fi
 for d in people meetings daily companies projects analysis; do
-  [ -d "$STAGING/$d" ] && rsync -a "$STAGING/$d/" "./$d/"   # or sanitize in place here
+  [ -d "$SANITIZED_SOURCE/$d" ] && rsync -a "$SANITIZED_SOURCE/$d/" "./$d/"
 done
 git add -A && git commit -m "Sanitize: strip sensitive content before history purge"
 
