@@ -23,14 +23,16 @@
  *   2  usage error (bad --section value)
  *
  * Thin-client mode (isThinClient(cfg)):
- *   - Sync + Cycle route through `get_status_snapshot` MCP op (admin scope)
+ *   - Sync + Cycle + Maintenance/Health route through `get_status_snapshot`
+ *     MCP op (admin scope)
  *   - Locks/Workers/Queue/Autopilot render "local-only — N/A on remote brain"
  *     because they're host-local concerns; pretending the local install's
  *     local-host operational state is the remote brain's would lie to the
  *     operator.
  *
  * --json emits a stable envelope:
- *   { schema_version: 1, sync, cycle, locks?, workers?, queue?, autopilot? }
+ *   { schema_version: 1, sync, cycle, maintenance?, health?, locks?,
+ *     workers?, queue?, autopilot? }
  * Sections may be omitted (thin-client mode, --section filter, or
  * section-build failure that didn't break the whole snapshot).
  */
@@ -50,9 +52,8 @@ import {
 } from '../core/minions/handlers/supervisor-audit.ts';
 import { inspectAutopilotLock, readAutopilotSchedule } from './autopilot.ts';
 import {
-  classifyMaintenanceHealth,
-  DEFAULT_GLOBAL_MAINTENANCE_FLOOR_MINUTES,
   healthSummary,
+  readMaintenanceHealth,
 } from '../core/maintenance-health.ts';
 
 const SCHEMA_VERSION = 1 as const;
@@ -337,26 +338,19 @@ export function buildAutopilotStatus(timeoutMs?: number): AutopilotStatus {
 async function buildMaintenanceStatus(
   engine: BrainEngine,
   automation: AutopilotStatus | undefined,
+  timeoutMs: number | undefined,
+  onTimeout?: () => void,
 ): Promise<MaintenanceStatus> {
-  let stale_after_minutes = DEFAULT_GLOBAL_MAINTENANCE_FLOOR_MINUTES;
-  try {
-    const rawFloor = await engine.getConfig('autopilot.global_floor_min');
-    const parsedFloor = rawFloor == null ? NaN : Number.parseInt(rawFloor, 10);
-    if (Number.isFinite(parsedFloor) && parsedFloor >= 1) stale_after_minutes = parsedFloor;
-  } catch {
-    /* use the documented default */
-  }
-
+  const health = await readMaintenanceHealth(engine, timeoutMs, onTimeout);
   if (automation?.state === 'manual_disabled') {
-    return { state: 'manual_disabled', last_global_at: null, age_seconds: null, stale_after_minutes };
+    return {
+      state: 'manual_disabled',
+      last_global_at: null,
+      age_seconds: null,
+      stale_after_minutes: health.stale_after_minutes,
+    };
   }
-
-  try {
-    const last_global_at = await engine.getConfig('autopilot.last_global_at');
-    return classifyMaintenanceHealth(last_global_at, Date.now(), stale_after_minutes);
-  } catch {
-    return { state: 'unknown', last_global_at: null, age_seconds: null, stale_after_minutes };
-  }
+  return health;
 }
 
 export function buildHealthSummary(maintenance: MaintenanceStatus['state']): HealthSummary {
@@ -398,10 +392,10 @@ async function buildLocalReport(
   const deadlineAt = opts.deadlineMs && opts.deadlineMs > 0 ? Date.now() + opts.deadlineMs : null;
   const remaining = (): number | undefined =>
     deadlineAt === null ? undefined : Math.max(1, deadlineAt - Date.now());
-  const markStale = (name: Section) => {
+  const markStale = (name: Section | 'maintenance', result = 'stale') => {
     staleSections.push(name);
     report.partial = true;
-    warnings.push(`${name} section exceeded the --deadline-ms budget (returned stale)`);
+    warnings.push(`${name} section exceeded the --deadline-ms budget (returned ${result})`);
   };
 
   if (want('sync')) {
@@ -446,23 +440,13 @@ async function buildLocalReport(
     report.autopilot = buildAutopilotStatus(remaining());
   }
   if (!opts.sections) {
-    const maintenance = await withSectionDeadline(
-      buildMaintenanceStatus(
-        engine,
-        report.autopilot && !('local_only_remote' in report.autopilot) ? report.autopilot : undefined,
-      ),
+    const maintenance = await buildMaintenanceStatus(
+      engine,
+      report.autopilot && !('local_only_remote' in report.autopilot) ? report.autopilot : undefined,
       remaining(),
-      () => {
-        report.partial = true;
-        warnings.push('maintenance section exceeded the --deadline-ms budget (returned unknown)');
-      },
+      () => markStale('maintenance', 'unknown'),
     );
-    report.maintenance = maintenance ?? {
-      state: 'unknown',
-      last_global_at: null,
-      age_seconds: null,
-      stale_after_minutes: DEFAULT_GLOBAL_MAINTENANCE_FLOOR_MINUTES,
-    };
+    report.maintenance = maintenance;
     report.health = buildHealthSummary(report.maintenance.state);
   }
   if (staleSections.length > 0) report.stale_sections = staleSections;
@@ -501,6 +485,8 @@ async function buildThinClientReport(
             version?: string;
             sync: SyncStatusReport;
             cycle: CycleSnapshot;
+            maintenance: MaintenanceStatus;
+            health: HealthSummary;
           }>(raw);
         })(),
         opts.deadlineMs && opts.deadlineMs > 0 ? opts.deadlineMs : undefined,
@@ -522,6 +508,10 @@ async function buildThinClientReport(
         if (payload.version) report.remote_version = payload.version;
         if (want('sync')) report.sync = payload.sync;
         if (want('cycle')) report.cycle = payload.cycle;
+        if (!opts.sections) {
+          report.maintenance = payload.maintenance;
+          report.health = payload.health;
+        }
       }
     } catch (err) {
       warnings.push(`remote snapshot failed: ${(err as Error).message}`);

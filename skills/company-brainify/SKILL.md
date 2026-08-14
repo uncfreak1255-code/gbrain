@@ -367,6 +367,11 @@ git add -A && git commit -m "Sanitize: strip sensitive content before history pu
 BACKUP_PATH="$HOME/.gbrain/backups/shared-brain-history-backup-$(date +%Y%m%d-%H%M%S).git"
 git clone --mirror "$WORK/shared" "$BACKUP_PATH"
 git -C "$BACKUP_PATH" log -1 >/dev/null || { echo "backup unreadable — ABORT"; exit 1; }
+
+# Capture the exact remote tips before the rewrite. The final push must lease
+# every pre-purge ref so concurrent remote work cannot be overwritten.
+REMOTE_REFS_BEFORE="$WORK/remote-refs-before.txt"
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE"
 ```
 
 Verify the mirror exists and reads before presenting the card — it is the
@@ -470,7 +475,27 @@ after=$(for d in $PURGE_DIRS; do [ -d "$d" ] && find "$d" -type f; done | wc -l 
 git -C "$BACKUP_PATH" log -1 >/dev/null \
   || { echo "backup missing/unreadable — ABORT, do not force-push"; exit 1; }
 
-git push --force origin main
+# Refuse to erase remote work that landed after Step 1, then use an explicit
+# lease for every pre-purge ref instead of an unguarded force push.
+REMOTE_REFS_BEFORE_PUSH="$WORK/remote-refs-before-push.txt"
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE_PUSH"
+diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH" \
+  || { echo "remote refs changed during purge — ABORT, do not force-push"; exit 1; }
+
+PUSH_LEASES=()
+PUSH_REFS=()
+while read -r old_sha ref; do
+  [ -n "$ref" ] || continue
+  PUSH_LEASES+=( "--force-with-lease=$ref:$old_sha" )
+  if git rev-parse --verify --quiet "$ref" >/dev/null; then
+    PUSH_REFS+=( "$ref:$ref" )
+  else
+    PUSH_REFS+=( ":$ref" )
+  fi
+done < "$REMOTE_REFS_BEFORE"
+[ "${#PUSH_LEASES[@]}" -gt 0 ] && [ "${#PUSH_REFS[@]}" -gt 0 ] \
+  || { echo "no pre-purge refs available — ABORT, do not force-push"; exit 1; }
+git push --atomic "${PUSH_LEASES[@]}" origin "${PUSH_REFS[@]}"
 ```
 
 **Step 4 — log it (to the PERSONAL brain, NEVER the shared repo).** Per

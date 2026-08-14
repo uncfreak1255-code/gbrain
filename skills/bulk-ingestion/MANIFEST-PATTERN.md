@@ -173,14 +173,16 @@ When fanning out processing across chunks/workers/subagents:
    ~20 light workers, and keep CPU below ~75% so lock heartbeats and
    checkpoints keep firing.
 
-### Per-worker progress files (for high parallelism)
+### Per-worker progress files
 
 When many workers run concurrently, having them all write one JSON races.
 Instead each writes `worker-<id>-progress.json` with
 `{"processed_ids": [], "stats": {}}`; a merge step folds them into the
-master manifest. (Proven at 20 workers on an email-takeout ingest.) For low
-parallelism (<=4 chunks), direct per-item JSON updates with a
-`git pull --rebase` before each commit is simpler and fine.
+master manifest. (Proven at 20 workers on an email-takeout ingest.) Use the
+same pattern for low parallelism too unless one explicitly named coordinator
+is the only process allowed to write `manifest.json`. `git pull --rebase`
+before a commit is conflict cleanup, not a lock, and it does not make
+concurrent JSON writes safe.
 
 ## Periodic commit during long runs
 

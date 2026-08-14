@@ -47,7 +47,7 @@ export function classifyAutopilotRuntime(input: AutopilotRuntimeInput): Autopilo
   let state: AutopilotRuntimeState;
   if (input.manualDisabledReason !== null) {
     state = 'manual_disabled';
-  } else if (input.lockfilePresent && !input.running && (input.pid !== null || !input.lockFresh)) {
+  } else if (input.lockfilePresent && !input.running) {
     state = 'stale_lock';
   } else if (!input.scheduleInstalled) {
     state = 'not_installed';

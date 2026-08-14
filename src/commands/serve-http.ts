@@ -177,6 +177,7 @@ export async function probeLiveness(
   engineName: string,
   version: string,
   timeoutMs: number = HEALTH_TIMEOUT_MS,
+  engine?: BrainEngine,
 ): Promise<ProbeHealthResult> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
@@ -192,7 +193,7 @@ export async function probeLiveness(
     // Keep the liveness decision tied to SELECT 1. A slow config-table read
     // can make maintenance unknown, but must not turn a live DB into a false
     // 503.
-    const maintenance = await readMaintenanceHealth(sql, Math.min(timeoutMs, 250));
+    const maintenance = await readMaintenanceHealth(engine ?? sql, Math.min(timeoutMs, 250));
     return {
       ok: true,
       status: 200,
@@ -799,7 +800,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // /admin/api/full-stats (requireAdmin). See probeLiveness above for the why.
   // ---------------------------------------------------------------------------
   app.get('/health', async (_req, res) => {
-    const result = await probeLiveness(sql, config.engine || 'pglite', VERSION);
+    const result = await probeLiveness(sql, config.engine || 'pglite', VERSION, HEALTH_TIMEOUT_MS, engine);
     res.status(result.status).json(result.body);
   });
 

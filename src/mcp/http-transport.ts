@@ -260,7 +260,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       if (path === '/health') {
         try {
           await sql`SELECT 1`;
-          const maintenance = await readMaintenanceHealth(sql, 250);
+          const maintenance = await readMaintenanceHealth(engine, 250);
           return Response.json(
             {
               status: 'ok',

@@ -3,7 +3,10 @@ import {
   buildHealthSummary,
 } from '../src/commands/status.ts';
 import { classifyAutopilotRuntime } from '../src/core/autopilot-status.ts';
-import { crontabIndicatesAutopilotInstall } from '../src/commands/autopilot.ts';
+import {
+  crontabIndicatesAutopilotInstall,
+  remainingAutopilotProbeTimeout,
+} from '../src/commands/autopilot.ts';
 
 describe('autopilot runtime status', () => {
   test('a stale lock does not claim that automation is installed', () => {
@@ -32,6 +35,19 @@ describe('autopilot runtime status', () => {
     });
     expect(status.state).toBe('stale_lock');
     expect(status.installed).toBe(true);
+    expect(status.lock_status).toBe('stale');
+  });
+
+  test('a fresh unreadable lock is still stale', () => {
+    const status = classifyAutopilotRuntime({
+      scheduleInstalled: true,
+      lockfilePresent: true,
+      pid: null,
+      running: false,
+      lockFresh: true,
+      manualDisabledReason: null,
+    });
+    expect(status.state).toBe('stale_lock');
     expect(status.lock_status).toBe('stale');
   });
 
@@ -80,5 +96,13 @@ describe('autopilot crontab classification', () => {
     expect(crontabIndicatesAutopilotInstall('*/10 * * * * gbrain autopilot --status --json')).toBe(false);
     expect(crontabIndicatesAutopilotInstall('# gbrain autopilot --repo /brain')).toBe(false);
     expect(crontabIndicatesAutopilotInstall("*/5 * * * * '/brain/.gbrain/autopilot-run.sh'")).toBe(true);
+  });
+});
+
+describe('autopilot scheduler probe budget', () => {
+  test('remaining budget never resets for later probes', () => {
+    expect(remainingAutopilotProbeTimeout(1_000, 100)).toBe(900);
+    expect(remainingAutopilotProbeTimeout(1_000, 1_050)).toBe(1);
+    expect(remainingAutopilotProbeTimeout(null, 1_000)).toBeUndefined();
   });
 });

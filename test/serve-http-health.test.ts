@@ -154,6 +154,22 @@ describe('probeLiveness (v0.28.10)', () => {
     }
   });
 
+  test('aborting maintenance read propagates to the engine query', async () => {
+    let signal: AbortSignal | undefined;
+    const sql = makeMockSql(async () => [{ '?column?': 1 }]);
+    const engine = {
+      executeRaw: async (_sql: string, _params?: unknown[], opts?: { signal?: AbortSignal }) => {
+        signal = opts?.signal;
+        return new Promise<never>(() => { /* cancelled by the timeout */ });
+      },
+    } as unknown as BrainEngine;
+    const result = await probeLiveness(sql, 'postgres', '0.28.10', 100, engine);
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    expect(signal?.aborted).toBe(true);
+    if (result.ok) expect(result.body.maintenance).toBe('unknown');
+  });
+
   test('timer-cleanup: 100 fast successful probes do not leak pending timers', async () => {
     const sql = makeMockSql(async () => [{ '?column?': 1 }]);
     // Snapshot active handles before; same after. If the finally-block

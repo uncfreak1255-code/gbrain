@@ -128,6 +128,14 @@ export interface AutopilotLockState {
   fresh: boolean;
 }
 
+/** Return the remaining shared budget for one synchronous scheduler probe. */
+export function remainingAutopilotProbeTimeout(
+  deadlineAt: number | null,
+  nowMs = Date.now(),
+): number | undefined {
+  return deadlineAt === null ? undefined : Math.max(1, deadlineAt - nowMs);
+}
+
 export type AutopilotLockDecision =
   | { action: 'acquire' }
   | { action: 'exit'; holderPid: number }
@@ -1865,13 +1873,18 @@ export function crontabIndicatesAutopilotInstall(crontab: string): boolean {
 export function readAutopilotSchedule(timeoutMs?: number): AutopilotScheduleReadback {
   const targets: AutopilotScheduleTargetReadback[] = [];
   const home = process.env.HOME || '';
-  const probeOptions = timeoutMs !== undefined && timeoutMs > 0 ? { timeout: timeoutMs } : {};
+  const deadlineAt = timeoutMs !== undefined && timeoutMs > 0 ? Date.now() + timeoutMs : null;
+  const probeOptions = (fallbackMs?: number): { timeout?: number } => {
+    const remaining = remainingAutopilotProbeTimeout(deadlineAt);
+    const timeout = remaining === undefined ? fallbackMs : Math.min(fallbackMs ?? remaining, remaining);
+    return timeout === undefined ? {} : { timeout };
+  };
 
   const plist = plistPath();
   let launchdActive: boolean | null = null;
   if (existsSync(plist)) {
     try {
-      const out = execSync('launchctl list 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions });
+      const out = execSync('launchctl list 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions() });
       launchdActive = out.includes('com.gbrain.autopilot');
     } catch {
       launchdActive = null;
@@ -1892,13 +1905,13 @@ export function readAutopilotSchedule(timeoutMs?: number): AutopilotScheduleRead
   let systemdActive: boolean | null = null;
   if (existsSync(unit)) {
     try {
-      execSync('systemctl --user is-enabled --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: Math.min(timeoutMs ?? 3000, 3000) });
+      execSync('systemctl --user is-enabled --quiet gbrain-autopilot.service', { stdio: 'pipe', ...probeOptions(3000) });
       systemdEnabled = true;
     } catch {
       systemdEnabled = false;
     }
     try {
-      execSync('systemctl --user is-active --quiet gbrain-autopilot.service', { stdio: 'pipe', timeout: Math.min(timeoutMs ?? 3000, 3000) });
+      execSync('systemctl --user is-active --quiet gbrain-autopilot.service', { stdio: 'pipe', ...probeOptions(3000) });
       systemdActive = true;
     } catch {
       systemdActive = false;
@@ -1929,7 +1942,7 @@ export function readAutopilotSchedule(timeoutMs?: number): AutopilotScheduleRead
   let cronInstalled = false;
   let cronDetail = 'crontab unavailable or no autopilot entry';
   try {
-    const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions });
+    const crontab = execSync('crontab -l 2>/dev/null || true', { encoding: 'utf-8', ...probeOptions() });
     const lines = crontab.split('\n').filter((line) => crontabIndicatesAutopilotInstall(line));
     cronInstalled = crontabIndicatesAutopilotInstall(crontab);
     cronDetail = cronInstalled ? lines.map((line) => line.trim()).join(' | ') : 'no crontab autopilot entry';

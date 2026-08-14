@@ -1,6 +1,13 @@
+import type { BrainEngine } from './engine.ts';
 import type { SqlQuery } from './sql-query.ts';
 
 export const DEFAULT_GLOBAL_MAINTENANCE_FLOOR_MINUTES = 60;
+
+const MAINTENANCE_HEALTH_SQL = `
+      SELECT key, value
+        FROM config
+       WHERE key IN ('autopilot.last_global_at', 'autopilot.global_floor_min')
+    `;
 
 export type MaintenanceHealthState = 'fresh' | 'stale' | 'unknown';
 
@@ -35,20 +42,41 @@ export function healthSummary(maintenance: MaintenanceHealthState | 'manual_disa
   return `database healthy / maintenance ${label}`;
 }
 
-/** Read the DB-plane maintenance receipt without turning liveness into a hard failure. */
-export async function readMaintenanceHealth(sql: SqlQuery, timeoutMs?: number): Promise<MaintenanceHealth> {
+/**
+ * Read the DB-plane maintenance receipt without turning liveness into a hard
+ * failure. Production callers pass the engine so the timeout aborts the
+ * underlying Postgres query instead of merely abandoning its promise. The
+ * SqlQuery form remains for lightweight test adapters that cannot expose the
+ * engine's cancellation hook.
+ */
+export async function readMaintenanceHealth(
+  source: BrainEngine | SqlQuery,
+  timeoutMs?: number,
+  onTimeout?: () => void,
+): Promise<MaintenanceHealth> {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  const controller = timeoutMs !== undefined && timeoutMs > 0 ? new AbortController() : null;
   try {
-    const query = sql`
+    const query = typeof source === 'function'
+      ? source`
       SELECT key, value
         FROM config
        WHERE key IN ('autopilot.last_global_at', 'autopilot.global_floor_min')
-    `;
+    `
+      : source.executeRaw<Record<string, unknown>>(
+        MAINTENANCE_HEALTH_SQL,
+        undefined,
+        controller ? { signal: controller.signal } : undefined,
+      );
     const rows = timeoutMs !== undefined && timeoutMs > 0
       ? await Promise.race([
         query,
         new Promise<null>((resolve) => {
-          timer = setTimeout(() => resolve(null), timeoutMs);
+          timer = setTimeout(() => {
+            controller?.abort();
+            onTimeout?.();
+            resolve(null);
+          }, timeoutMs);
         }),
       ])
       : await query;
