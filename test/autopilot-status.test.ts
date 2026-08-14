@@ -5,6 +5,7 @@ import {
 import { classifyAutopilotRuntime } from '../src/core/autopilot-status.ts';
 import {
   crontabIndicatesAutopilotInstall,
+  formatAutopilotStatus,
   remainingAutopilotProbeTimeout,
 } from '../src/commands/autopilot.ts';
 
@@ -92,6 +93,7 @@ describe('autopilot runtime status', () => {
 
     expect(status.state).toBe('manual_disabled');
     expect(status.manual_disabled_reason).toBe('manual automation disabled');
+    expect(formatAutopilotStatus(status)).toContain('live process remains (PID 123)');
   });
 });
 

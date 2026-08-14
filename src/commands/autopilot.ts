@@ -44,6 +44,7 @@ import {
   readManualAutomationDisabledReason,
   writeManualAutomationDisabledMarker,
 } from '../core/autopilot-status.ts';
+import type { AutopilotRuntimeStatus } from '../core/autopilot-status.ts';
 
 /**
  * v0.37.7.0 #1162 — classify autopilot reconnect-loop errors.
@@ -1967,6 +1968,24 @@ export function runAutopilotStatus(args: string[]): void {
   showStatus(args.includes('--json'));
 }
 
+export function formatAutopilotStatus(runtime: AutopilotRuntimeStatus): string {
+  switch (runtime.state) {
+    case 'manual_disabled':
+      return runtime.running
+        ? `Autopilot: manual automation disabled, but live process remains (PID ${runtime.pid ?? '?'}). Stop it before manual work.`
+        : 'Autopilot: manual automation disabled.';
+    case 'stale_lock':
+      return `Autopilot: stale lock (PID ${runtime.pid ?? '?'} is not running). ` +
+        `${runtime.installed ? 'Scheduler is installed.' : 'No scheduler is installed.'}`;
+    case 'running':
+      return `Autopilot: running (PID ${runtime.pid}).`;
+    case 'installed':
+      return 'Autopilot: installed but not running.';
+    case 'not_installed':
+      return 'Autopilot: not installed.';
+  }
+}
+
 function showStatus(json: boolean) {
   const logFile = join(process.env.HOME || '', '.gbrain', 'autopilot.log');
   let lastLine = '';
@@ -1990,26 +2009,7 @@ function showStatus(json: boolean) {
   if (json) {
     console.log(JSON.stringify({ ...runtime, schedule, last_log: lastLine }));
   } else {
-    switch (runtime.state) {
-      case 'manual_disabled':
-        console.log('Autopilot: manual automation disabled.');
-        break;
-      case 'stale_lock':
-        console.log(
-          `Autopilot: stale lock (PID ${runtime.pid ?? '?'} is not running). ` +
-          `${runtime.installed ? 'Scheduler is installed.' : 'No scheduler is installed.'}`,
-        );
-        break;
-      case 'running':
-        console.log(`Autopilot: running (PID ${runtime.pid}).`);
-        break;
-      case 'installed':
-        console.log('Autopilot: installed but not running.');
-        break;
-      case 'not_installed':
-        console.log('Autopilot: not installed.');
-        break;
-    }
+    console.log(formatAutopilotStatus(runtime));
     for (const target of schedule.targets.filter((t) => t.installed)) {
       console.log(`Schedule: ${target.target} — ${target.detail}`);
     }
