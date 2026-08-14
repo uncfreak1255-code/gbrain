@@ -352,12 +352,35 @@ cd "$WORK/shared"
 [ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
   || { echo "target IS sync.repo_path (personal brain) — ABORT"; exit 1; }
 
+# Materialize every remote branch locally before filter-repo. A normal clone
+# checks out only the default branch; the final explicit-ref push must not
+# mistake remote-only branches for intentional deletions.
+git fetch origin \
+  '+refs/heads/*:refs/remotes/origin/*' \
+  '+refs/tags/*:refs/tags/*'
+DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+[ -n "$DEFAULT_BRANCH" ] \
+  || { echo "remote default branch not found — ABORT"; exit 1; }
+while IFS= read -r branch; do
+  [ "$branch" = "HEAD" ] && continue
+  git show-ref --verify --quiet "refs/heads/$branch" \
+    || git branch "$branch" "refs/remotes/origin/$branch"
+done < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/)
+
 # Apply the sanitized tree, then COMMIT it BEFORE the mirror clone. A mirror
 # captures COMMITTED state only; if the clean tree lives only in volatile
 # staging during the rewrite window, a crash loses the sanitization work.
 # Committing makes the clean state durable and recoverable.
+# Set SANITIZED_SOURCE to the Phase 3 shared checkout for the in-place path;
+# the staging path is the source for the new-team path. Never rely on an
+# unset/stale STAGING variable to supply the sanitized tree.
+if [ -n "${STAGING:-}" ]; then
+  SANITIZED_SOURCE="${SANITIZED_SOURCE:-$STAGING}"
+else
+  : "${SANITIZED_SOURCE:?Set SANITIZED_SOURCE to the sanitized shared checkout before Step 1}"
+fi
 for d in people meetings daily companies projects analysis; do
-  [ -d "$STAGING/$d" ] && rsync -a "$STAGING/$d/" "./$d/"   # or sanitize in place here
+  [ -d "$SANITIZED_SOURCE/$d" ] && rsync -a "$SANITIZED_SOURCE/$d/" "./$d/"
 done
 git add -A && git commit -m "Sanitize: strip sensitive content before history purge"
 
@@ -367,6 +390,11 @@ git add -A && git commit -m "Sanitize: strip sensitive content before history pu
 BACKUP_PATH="$HOME/.gbrain/backups/shared-brain-history-backup-$(date +%Y%m%d-%H%M%S).git"
 git clone --mirror "$WORK/shared" "$BACKUP_PATH"
 git -C "$BACKUP_PATH" log -1 >/dev/null || { echo "backup unreadable — ABORT"; exit 1; }
+
+# Capture the exact remote tips before the rewrite. The final push must lease
+# every pre-purge ref so concurrent remote work cannot be overwritten.
+REMOTE_REFS_BEFORE="$WORK/remote-refs-before.txt"
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE"
 ```
 
 Verify the mirror exists and reads before presenting the card — it is the
@@ -446,14 +474,28 @@ done
 rm -rf .git/filter-repo
 git filter-repo --invert-paths $(for d in $PURGE_DIRS; do printf -- '--path %s/ ' "$d"; done) --force
 
-# Restore clean files and re-commit as a single new commit — same $PURGE_DIRS
-for d in $PURGE_DIRS; do
-  [ -d "$CLEAN/$d" ] || continue
-  mkdir -p "$d" && cp -r "$CLEAN/$d/." "$d/"
-done
+# Restore clean files and re-commit on EVERY surviving local branch. A single
+# checkout/commit only repairs the default branch; the other materialized
+# branches would otherwise be pushed with the purged directories absent.
+BRANCHES_AFTER_FILTER="$WORK/branches-after-filter.txt"
+git for-each-ref --format='%(refname:strip=2)' refs/heads/ > "$BRANCHES_AFTER_FILTER"
+CLEAN_READD_COMMITS="$WORK/clean-readd-commits.txt"
+: > "$CLEAN_READD_COMMITS"
+while IFS= read -r branch; do
+  [ -n "$branch" ] || continue
+  git checkout --force "$branch"
+  for d in $PURGE_DIRS; do
+    [ -d "$CLEAN/$d" ] || continue
+    mkdir -p "$d" && cp -r "$CLEAN/$d/." "$d/"
+    git add "$d/"
+  done
+  if ! git diff --cached --quiet; then
+    git commit -m "Re-add sanitized directories"
+    git rev-parse HEAD >> "$CLEAN_READD_COMMITS"
+  fi
+done < "$BRANCHES_AFTER_FILTER"
+git checkout --force "$DEFAULT_BRANCH"
 git remote add origin <SHARED_REPO_URL>   # filter-repo removes remotes
-for d in $PURGE_DIRS; do [ -d "$d" ] && git add "$d/"; done
-git commit -m "Re-add sanitized directories"
 
 # VERIFY RESTORE COMPLETENESS before the irreversible push — a partial restore
 # would ship a smaller tree than was sanitized. Compare file counts (and, for
@@ -470,7 +512,27 @@ after=$(for d in $PURGE_DIRS; do [ -d "$d" ] && find "$d" -type f; done | wc -l 
 git -C "$BACKUP_PATH" log -1 >/dev/null \
   || { echo "backup missing/unreadable — ABORT, do not force-push"; exit 1; }
 
-git push --force origin main
+# Refuse to erase remote work that landed after Step 1, then use an explicit
+# lease for every pre-purge ref instead of an unguarded force push.
+REMOTE_REFS_BEFORE_PUSH="$WORK/remote-refs-before-push.txt"
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE_PUSH"
+diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH" \
+  || { echo "remote refs changed during purge — ABORT, do not force-push"; exit 1; }
+
+PUSH_LEASES=()
+PUSH_REFS=()
+while read -r old_sha ref; do
+  [ -n "$ref" ] || continue
+  PUSH_LEASES+=( "--force-with-lease=$ref:$old_sha" )
+  if git rev-parse --verify --quiet "$ref" >/dev/null; then
+    PUSH_REFS+=( "$ref:$ref" )
+  else
+    PUSH_REFS+=( ":$ref" )
+  fi
+done < "$REMOTE_REFS_BEFORE"
+[ "${#PUSH_LEASES[@]}" -gt 0 ] && [ "${#PUSH_REFS[@]}" -gt 0 ] \
+  || { echo "no pre-purge refs available — ABORT, do not force-push"; exit 1; }
+git push --atomic "${PUSH_LEASES[@]}" origin "${PUSH_REFS[@]}"
 ```
 
 **Step 4 — log it (to the PERSONAL brain, NEVER the shared repo).** Per

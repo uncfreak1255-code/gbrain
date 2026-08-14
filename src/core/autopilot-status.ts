@@ -77,12 +77,12 @@ export function classifyAutopilotRuntime(input: AutopilotRuntimeInput): Autopilo
   let state: AutopilotRuntimeState;
   if (input.manualDisabledReason !== null) {
     state = 'manual_disabled';
-  } else if (input.lockfilePresent && !input.running && (input.pid !== null || !input.lockFresh)) {
+  } else if (input.running) {
+    state = 'running';
+  } else if (input.lockfilePresent) {
     state = 'stale_lock';
   } else if (!input.scheduleInstalled) {
     state = 'not_installed';
-  } else if (input.running) {
-    state = 'running';
   } else {
     // A schedule artifact exists, but no process currently owns the lock.
     // Keep this distinct from both a stale lock and a clean machine.

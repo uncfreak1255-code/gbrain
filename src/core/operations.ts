@@ -2507,7 +2507,8 @@ const advisor: Operation = {
 /**
  * v0.41.19.0 — `gbrain status` thin-client surface.
  *
- * Returns a snapshot of sync freshness + last cycle state for thin-client
+ * Returns a snapshot of sync freshness, last cycle state, and maintenance
+ * health for thin-client
  * `gbrain status` callers. Per D2/D10 in the plan:
  *
  *   - Scope: admin (NOT localOnly). The op exposes operational state
@@ -2516,8 +2517,8 @@ const advisor: Operation = {
  *     (adding locks/workers/queue counters) from quietly leaking ops state
  *     to read-scoped clients.
  *
- *   - Payload: `{schema_version: 1, sync, cycle}` ONLY. Locks, Workers,
- *     Queue, and Autopilot sections are deliberately omitted from the
+ *   - Payload: `{schema_version: 1, sync, cycle, maintenance, health}`.
+ *     Locks, Workers, Queue, and Autopilot sections are deliberately omitted from the
  *     remote payload — they are local-host concerns that thin-client
  *     callers shouldn't see at all (and the local `gbrain status` renders
  *     them as "N/A on remote brain" instead of pretending they exist).
@@ -2527,11 +2528,12 @@ const advisor: Operation = {
  */
 const get_status_snapshot: Operation = {
   name: 'get_status_snapshot',
-  description: 'Snapshot for `gbrain status` thin-client mode: sync freshness + last cycle. Admin-scope.',
+  description: 'Snapshot for `gbrain status` thin-client mode: sync, cycle, and maintenance health. Admin-scope.',
   params: {},
   handler: async (ctx) => {
     const { buildSyncStatusReport } = await import('../commands/sync.ts');
-    const { buildCycleSnapshot } = await import('../commands/status.ts');
+    const { buildCycleSnapshot, buildHealthSummary } = await import('../commands/status.ts');
+    const { readMaintenanceHealth } = await import('./maintenance-health.ts');
     // Pull sources first (handles brains with zero declared sources too).
     let sources: Array<{ id: string; name: string; local_path: string | null; config: Record<string, unknown> }> = [];
     try {
@@ -2566,10 +2568,18 @@ const get_status_snapshot: Operation = {
     }
     const sync = await buildSyncStatusReport(ctx.engine, sources);
     const cycle = await buildCycleSnapshot(ctx.engine);
+    const maintenance = await readMaintenanceHealth(ctx.engine, 250);
     // #1984: report the brain server's version so a thin-client `gbrain status`
     // can surface remote_version alongside its own local CLI version.
     const { VERSION } = await import('../version.ts');
-    return { schema_version: 1 as const, version: VERSION, sync, cycle };
+    return {
+      schema_version: 1 as const,
+      version: VERSION,
+      sync,
+      cycle,
+      maintenance,
+      health: buildHealthSummary(maintenance.state),
+    };
   },
   scope: 'admin',
   localOnly: false,

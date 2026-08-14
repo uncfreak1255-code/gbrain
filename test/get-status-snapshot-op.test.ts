@@ -6,7 +6,7 @@
  *     from seeing brain-host operational state).
  *   - localOnly: false (remote thin-client `gbrain status` callers need
  *     it via HTTP MCP — that's the whole point).
- *   - payload returns ONLY {schema_version: 1, sync, cycle}. Locks /
+ *   - payload returns {schema_version: 1, sync, cycle, maintenance, health}. Locks /
  *     Workers / Queue / Autopilot are deliberately omitted from the
  *     remote shape; the local CLI's `gbrain status` renders them as
  *     "N/A on remote brain" instead.
@@ -42,7 +42,7 @@ describe('get_status_snapshot op definition', () => {
 });
 
 describe('get_status_snapshot handler shape', () => {
-  test('returns only {schema_version, sync, cycle} keys (no Locks/Workers/Queue/Autopilot)', async () => {
+  test('returns maintenance health plus no local-only sections', async () => {
     const op = operationsByName.get_status_snapshot;
     // Stub engine that returns empty rows for any executeRaw and a minimal
     // BrainEngine shape. The sync helper degrades to an empty sources list
@@ -64,6 +64,10 @@ describe('get_status_snapshot handler shape', () => {
     expect(result.schema_version).toBe(1);
     expect(result).toHaveProperty('sync');
     expect(result).toHaveProperty('cycle');
+    expect(result).toHaveProperty('maintenance');
+    expect(result).toHaveProperty('health');
+    expect((result.maintenance as any).state).toBe('stale');
+    expect((result.health as any).summary).toBe('database healthy / maintenance stale');
     // #1984: the op now also reports the brain server's version (thin-client parity).
     expect(typeof result.version).toBe('string');
     expect(result).not.toHaveProperty('locks');

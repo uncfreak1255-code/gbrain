@@ -165,8 +165,8 @@ export async function probeHealth(
 /**
  * Lightweight liveness probe. Races `SELECT 1` against the same timeout
  * `probeHealth` uses, returns the same tagged-union result type, but the
- * 200 body avoids engine stats while carrying database and maintenance health
- * stats. Stats moved to `/admin/api/full-stats` (admin auth) in v0.28.10
+ * 200 body is EXACTLY {status, version, engine} — liveness only. Stats
+ * moved to `/admin/api/full-stats` (admin auth) in v0.28.10
  * because `getStats()`'s six count(*) queries exceeded HEALTH_TIMEOUT_MS
  * on production brains through PgBouncer, producing false 503s that
  * triggered orchestrator restart cascades and advisory-lock pile-ups.
@@ -189,12 +189,13 @@ export async function probeLiveness(
     timer = null;
 
     // v0.28.10 invariant: the public /health body is EXACTLY
-    // {status, version, engine} — liveness only. The Aug 13 WIP briefly
-    // spread maintenance/health summary fields here; the E2E regression
-    // guard (serve-http-oauth.test.ts "liveness-only body") caught it.
-    // Maintenance detail is unauthenticated information disclosure on a
-    // public route — it lives in `gbrain status`, `gbrain doctor`, and the
-    // admin-gated /admin/api/full-stats instead.
+    // {status, version, engine} — liveness only, one query. Both parallel
+    // Aug 13/14 branches independently added a maintenance read + body
+    // fields here; the E2E regression guard (serve-http-oauth.test.ts
+    // "liveness-only body") pins the law and both were reverted in the
+    // 2026-08-14 merge. Maintenance detail is unauthenticated information
+    // disclosure on a public route — it lives in `gbrain status`,
+    // `gbrain doctor`, and the admin-gated /admin/api/full-stats instead.
     return {
       ok: true,
       status: 200,
