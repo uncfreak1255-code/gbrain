@@ -1961,7 +1961,11 @@ describeE2E('source hygiene archive/write concurrency', () => {
       await engine.setConfig('version', '135');
 
       const migrated = await runMigrations(engine);
-      expect(migrated).toMatchObject({ applied: 1, current: LATEST_VERSION });
+      // v136 is the migration under test, but later schema versions also
+      // apply from the pinned 135 starting point. Hardcoding `applied: 1`
+      // broke the first time a migration landed after 136 (v137); compute
+      // the count so the fixture tracks LATEST_VERSION.
+      expect(migrated).toMatchObject({ applied: LATEST_VERSION - 135, current: LATEST_VERSION });
       const triggers = await engine.executeRaw<{ definition: string }>(
         `SELECT pg_get_triggerdef(oid) AS definition
            FROM pg_trigger

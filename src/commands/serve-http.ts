@@ -36,7 +36,6 @@ import { buildError, serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
-import { buildDatabaseMaintenanceSummary, readMaintenanceHealth } from '../core/maintenance-health.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
 import {
   computeContentHash,
@@ -189,11 +188,13 @@ export async function probeLiveness(
     if (timer !== null) clearTimeout(timer);
     timer = null;
 
-    // Keep the liveness decision tied to SELECT 1. A slow config-table read
-    // can make maintenance unknown, but must not turn a live DB into a false
-    // 503.
-    const maintenance = await readMaintenanceHealth(sql, Math.min(timeoutMs, 250));
-    const health = buildDatabaseMaintenanceSummary(maintenance.state);
+    // v0.28.10 invariant: the public /health body is EXACTLY
+    // {status, version, engine} — liveness only. The Aug 13 WIP briefly
+    // spread maintenance/health summary fields here; the E2E regression
+    // guard (serve-http-oauth.test.ts "liveness-only body") caught it.
+    // Maintenance detail is unauthenticated information disclosure on a
+    // public route — it lives in `gbrain status`, `gbrain doctor`, and the
+    // admin-gated /admin/api/full-stats instead.
     return {
       ok: true,
       status: 200,
@@ -201,9 +202,6 @@ export async function probeLiveness(
         status: 'ok',
         version,
         engine: engineName,
-        db: 'ok',
-        maintenance: health.maintenance,
-        health: health.summary,
       },
     };
   } catch (e: unknown) {
