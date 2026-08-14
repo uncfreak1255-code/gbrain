@@ -2,6 +2,10 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.48.0.0] - 2026-08-14
+
+**Autopilot and maintenance now report explicit health states instead of silent green.** `gbrain status`, `gbrain doctor`, and the MCP HTTP surface distinguish healthy, degraded, and stalled autopilot/maintenance runs, so a wedged loop reads as a problem rather than as quiet success. Checkpoint of the Aug 13 session; shipped under a recorded one-release /ship policy exception (the /ship skill was lost with the retired gstack repo - restoration is a named follow-up).
+
 ## [0.47.2.0] - 2026-08-03
 
 **Recovery snapshots now retain a page's established GBrain identity without relaxing import safety.** A source-scoped export can be restored or synced back into the same source even when a legacy database slug differs from its current filesystem path.
