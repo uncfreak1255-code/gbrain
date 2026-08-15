@@ -87,18 +87,44 @@ None invokes `gbrain sync`. Freshness depends entirely on an agent choosing to
 run `brain-sync` mid-session — which is exactly the step that was skipped, and
 which observation 2 says has been skipped for four days.
 
-### 4. A federated source is backed by a transient worktree
+### 4. A federated source is backed by a single-copy, unbacked-up local repo
+
+> **Corrected 2026-08-15 after first publication.** The original text claimed a
+> `worktree-janitor` prune would delete this directory. That was wrong and is
+> retracted: `scripts/run-worktree-janitor.sh` scopes to
+> `SEASCAPE_PRIMARY_RUNTIME_REPO` (seascape-ops) only and never walks
+> `~/.codex/worktrees/`. The path is also **not** a dangling git worktree — it
+> is a standalone repository with its own `.git` directory. The durability
+> concern below survives that correction; the imminence does not.
 
 `sawyer-brain` (federated, 38 pages) points at
-`~/.codex/worktrees/brain-gbrain-structure-pass`. The directory exists, but
-`git worktree list` in `~/gbrain` does **not** list it — it is not a live
-registered worktree of this repo. A `worktree-janitor` prune, or any cleanup
-sweep over `~/.codex/worktrees/`, deletes the backing store of a federated
-source. Sawyer runs such sweeps; `com.seascape.worktree-janitor.plist` is
-installed on this machine.
+`~/.codex/worktrees/brain-gbrain-structure-pass`. That path is:
 
-*This one is independent of the memory question and may be the more urgent
-finding. Rank it yourself — do not inherit my ordering.*
+- a **standalone git repo**, branch `recovery/sawyer-brain-20260811`, one commit
+  (`82ef05f recovery: preserve source snapshot`), working tree clean;
+- **remote-less** — `git remote -v` is empty, so the only copy of that history
+  is this disk;
+- 37 markdown files plus `.gbrain-export-manifest.json`, 572K;
+- sited under a directory named `worktrees/`, which Codex creates and reaps
+  routinely, and which reads as scratch space to any human or agent doing
+  cleanup.
+
+The name says "recovery snapshot" and it was made 2026-08-11 — the same day as
+the last sync of every source. Whatever incident produced it, the artifact
+preserving the result is single-copy and lives somewhere disposable.
+
+*What I could NOT prove:* that anything actively deletes this path today. I
+checked the one janitor I knew about and it does not. Codex should either find a
+reaper that does reach `~/.codex/worktrees/` — Codex's own worktree lifecycle is
+the obvious candidate and I did not audit it — or downgrade this to
+"unbacked-up, not endangered."
+
+**Mitigation already applied 2026-08-15:** a verified copy now exists at
+`~/.gbrain/backups/sawyer-brain-source-20260815/` (37/37 files, `git fsck`
+clean, same commit). It is a backup only — inert, deliberately NOT placed under
+`~/.gbrain/sources/` so it cannot be mistaken for or auto-registered as a
+source. The live source registration is unchanged and still points at the
+original path.
 
 ---
 
@@ -137,6 +163,8 @@ and what is the smallest fix?
 - No source was registered, changed, or removed.
 - No sync was run.
 - Nothing in `~/.claude` or any brain was written from this investigation.
+- The only filesystem change is the additive backup named in observation 4.
+  Nothing was moved or deleted.
 - I did not read `src/` to trace ingestion paths — that is the falsification
   work asked for in observation 1, and I deliberately left it for a reviewer
   who has not already committed to a conclusion.
