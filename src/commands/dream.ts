@@ -39,7 +39,7 @@ import {
 import { existsSync } from 'fs';
 import { resolve } from 'node:path';
 import { gbrainPath } from '../core/config.ts';
-import { inspectAutopilotLock } from './autopilot.ts';
+import { inspectAutopilotLock } from '../core/autopilot-status.ts';
 import {
   buildBudgetReconcileReport,
   parseBudgetDreamRunArgs,

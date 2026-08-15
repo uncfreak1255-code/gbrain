@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { decideAutopilotLockAcquisition, inspectAutopilotLock } from '../src/commands/autopilot.ts';
+import {
+  decideAutopilotLockAcquisition,
+  inspectAutopilotLock,
+} from '../src/core/autopilot-status.ts';
 
 describe('inspectAutopilotLock', () => {
   test('fresh lock with a live pid stays authoritative', () => {

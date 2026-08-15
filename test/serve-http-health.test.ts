@@ -98,12 +98,18 @@ describe('probeLiveness (v0.28.10)', () => {
       expect(result.body.status).toBe('ok');
       expect(result.body.version).toBe('0.28.10');
       expect(result.body.engine).toBe('postgres');
-      // Regression: the lightweight body must NOT spread getStats() fields.
-      // The original PR's pre-refactor /health leaked page_count etc.;
-      // tightening this assertion is the iron-rule regression test.
-      expect(Object.keys(result.body).sort()).toEqual(['engine', 'status', 'version']);
+      // Regression: the lightweight body must NOT spread getStats() fields,
+      // and it must not carry maintenance/health detail either — /health is
+      // public and unauthenticated. The v0.28.10 invariant (pinned by the
+      // serve-http-oauth E2E) is a body of EXACTLY {status, version, engine}.
+      // The Aug 13 WIP briefly widened this; reverted.
+      expect(Object.keys(result.body).sort()).toEqual([
+        'engine', 'status', 'version',
+      ]);
       expect((result.body as Record<string, unknown>).page_count).toBeUndefined();
       expect((result.body as Record<string, unknown>).chunk_count).toBeUndefined();
+      expect((result.body as Record<string, unknown>).maintenance).toBeUndefined();
+      expect((result.body as Record<string, unknown>).health).toBeUndefined();
     }
   });
 
@@ -132,6 +138,21 @@ describe('probeLiveness (v0.28.10)', () => {
       expect(result.body.error).toBe('service_unavailable');
       expect(result.body.error_description).toBe('Database connection failed');
     }
+  });
+
+  test('liveness makes exactly one query — no secondary config/maintenance reads', async () => {
+    // The Aug 13 WIP added a maintenance read after SELECT 1; reverted with
+    // the body-shape change. Pin the call count so a secondary read (which
+    // could hang or leak state onto the public route) can't quietly return.
+    let calls = 0;
+    const sql = makeMockSql(() => {
+      calls++;
+      return calls === 1 ? Promise.resolve([{ '?column?': 1 }]) : new Promise(() => { /* never resolves */ });
+    });
+    const result = await probeLiveness(sql, 'postgres', '0.28.10', 100);
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    expect(calls).toBe(1);
   });
 
   test('timer-cleanup: 100 fast successful probes do not leak pending timers', async () => {

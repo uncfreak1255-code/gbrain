@@ -20,7 +20,8 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { detectInstallTarget, readAutopilotSchedule } from '../src/commands/autopilot.ts';
+import { detectInstallTarget } from '../src/commands/autopilot.ts';
+import { readAutopilotSchedule } from '../src/core/autopilot-status.ts';
 
 let tmp: string;
 const envSnapshot: Record<string, string | undefined> = {};

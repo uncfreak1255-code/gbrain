@@ -259,6 +259,12 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       if (path === '/health') {
         try {
           await sql`SELECT 1`;
+          // Public, unauthenticated, unratelimited: body stays the established
+          // {status, version, transport, db} — no maintenance/health detail
+          // (same v0.28.10-class invariant as serve-http's /health; both
+          // parallel Aug 13/14 branches leaked it here and were reverted).
+          // Maintenance detail lives in `gbrain status` / `gbrain doctor` /
+          // admin-gated surfaces.
           return Response.json(
             { status: 'ok', version: VERSION, transport: 'http', db: 'ok' },
             { headers: corsHeaders(origin) },

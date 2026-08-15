@@ -1526,6 +1526,16 @@ async function handleCliOnly(command: string, args: string[]) {
     }
   }
 
+  // Autopilot status and uninstall are filesystem-only operations. Keep them
+  // engine-free so a running PGLite daemon or a database outage cannot hide
+  // the exact scheduler/lock state that the watchdog is meant to report.
+  if (command === 'autopilot' && (args.includes('--status') || args.includes('--uninstall'))) {
+    const { runAutopilotStatus, uninstallDaemon } = await import('./commands/autopilot.ts');
+    if (args.includes('--uninstall')) uninstallDaemon();
+    else runAutopilotStatus(args);
+    return;
+  }
+
   // v0.37 fix wave (Lane D.4 + CDX2-12): short-circuit `gbrain sync --help`
   // BEFORE the engine bind. runSync has its own --help branch but can't
   // reach it without an engine — which means a user running `--help` from
