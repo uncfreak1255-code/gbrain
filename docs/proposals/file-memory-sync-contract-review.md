@@ -7,6 +7,52 @@
 
 ---
 
+## VERDICT — Codex, 2026-08-15. Review closed.
+
+| # | Codex finding | Disposition |
+|---|---|---|
+| 1 | **High.** Core finding valid: file-memory is not a registered source, so `brain-sync` cannot make it searchable. The contract is false and can trigger unrelated all-source synchronization. | **Fixed.** sawyer-skills PR #91 |
+| 2 | **High.** Observation 4 incomplete: the recovery repo holds 37 pages against a live source of 38, and the backup preserves the same incomplete snapshot. A manifest-recovery blocker, not a deletion risk. | **Open.** See below |
+| 3 | **Medium.** "One manual sync run" not proven — the timestamps show batch activity; autopilot produces the same pattern. | **Retracted.** Observation 2 downgraded to "batch activity of unknown origin" |
+| 4 | **Medium.** The `file_upload` trust boundary is irrelevant here; normal source sync reads registered `local_path` roots directly. | **Retracted.** Struck from the questions section |
+
+**Decision: do not create a file-memory source or scheduler.** Correct the owning
+sawyer-skills closeout language instead —
+
+- remove "GBrain searches the above";
+- remove the automatic GBrain sync after file-memory writes;
+- `session-closeout-save` remains the routing authority;
+- keep explicit "save to GBrain" and session-bridge capture as separate paths.
+
+Shipped in [sawyer-skills PR #91](https://github.com/uncfreak1255-code/sawyer-skills/pull/91)
+(founder-kit 1.7.2 → 1.7.3; `scripts/test.sh` 22/22 groups OK, hygiene clean).
+
+**For `sawyer-brain`:** decide whether to retain the 38th incident page, then
+build and verify a complete sealed 38-page export **before** changing the
+registered path or restarting autopilot.
+
+### New evidence found while closing the verdict
+
+`mcp__gbrain__sources_status --id sawyer-brain` returns:
+
+```
+page_count:   38
+last_commit:  82ef05f673bdbe132f5aabe1893f93b94c095978
+clone_state:  "corrupted"
+```
+
+GBrain's own per-source diagnostic already classifies this clone as **not
+syncable**. That is consistent with finding 2 and sharpens it: the 37/38 gap is
+not merely a stale export, it is an export GBrain will not re-sync from in its
+current state. The 38 pages themselves are intact in the database and covered by
+`com.gbrain.postgres-backup`. The disk copy is the broken half.
+
+Anyone picking up finding 2 should start here, not from the filesystem.
+
+---
+
+---
+
 ## Why this exists
 
 During a routine closeout I wrote a lesson to file-memory and then reported that
@@ -73,8 +119,12 @@ and most of this document collapses. **Look for that first.**
 ### 2. Every source is four days stale, with a uniform timestamp
 
 All 13 `last_sync_at` values fall in `2026-08-11T18:49Z`–`18:59Z` — a ten-minute
-window four days ago. That is the signature of one manual `gbrain sync` run, not
-a cadence.
+window four days ago.
+
+> **Downgraded 2026-08-15 (Codex finding 3).** I called this "the signature of
+> one manual `gbrain sync` run." Not proven — the timestamps establish batch
+> activity, and autopilot produces the same pattern. The staleness stands; the
+> attribution does not.
 
 ### 3. No scheduled job runs a source sync
 
@@ -149,9 +199,12 @@ Arguments that it should:
 
 **Second — if the shape is right,** what is the minimum correct mechanism?
 Register a source, or ingest via an existing path? What owns freshness given
-observation 3? Note the trust boundary in `AGENTS.md`: file-memory lives
-outside every current source root, so anything reading it touches the
-`file_upload` confinement contract in `src/core/operations.ts`.
+observation 3?
+
+> **Struck 2026-08-15 (Codex finding 4).** This question originally invoked the
+> `file_upload` confinement contract in `src/core/operations.ts`. Irrelevant:
+> normal source sync reads registered `local_path` roots directly and never
+> crosses that boundary. Answered moot anyway — the shape was ruled wrong.
 
 **Third — regardless of the above,** is observation 4 a live data-loss risk,
 and what is the smallest fix?
