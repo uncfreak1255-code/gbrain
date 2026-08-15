@@ -69,7 +69,7 @@ is worse than asking.
    their origin arc, their texture. Use for *substance* so the content is
    true to how they think, not just how they sound.
 3. **(optional) Topic-specific pages** — if the draft is about a specific
-   idea or company, pull the relevant page (`gbrain search "<topic>"`, then
+   idea or company, pull the relevant page (`gbrain query "<topic>"`, then
    `gbrain get <slug>`) so every claim is accurate, not invented.
 
 ## The hard rules (read them OFF the profile)
@@ -163,7 +163,7 @@ stops the same way drafting stops without a profile.
   samples must be short posts; launch copy needs at least a few statement-
   register samples.
 - Check what the brain already holds before asking for uploads:
-  `gbrain search "<person name>"`, `gbrain backlinks people/<slug>`, and any
+  `gbrain query "<person name>"`, `gbrain backlinks people/<slug>`, and any
   `media/` archives. Ingest new samples through the normal ingest skills
   first so the profile's provenance can point at real pages.
 

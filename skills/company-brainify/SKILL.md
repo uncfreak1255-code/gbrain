@@ -113,11 +113,22 @@ A pass that only covers `people/` will certify a brain that still leaks.
 
 ## Procedure
 
-All paths below are relative to the brain repo root:
+All paths below are relative to the explicitly selected checkout:
 
 ```bash
-BRAIN="$(gbrain config get sync.repo_path)"
+# For a NEW team export, this is the personal source being copied into staging.
+# For an EXISTING team re-audit, it MUST be the shared checkout — never infer it
+# from sync.repo_path. Confirm the registered source and path before discovery;
+# every retrieval below is scoped to this source.
+BRAIN="<absolute path to the checkout being sanitized>"
+PERSONAL="$(gbrain config get sync.repo_path)"
+[ -d "$BRAIN/.git" ] \
+  || { echo "selected checkout is not a git repo — ABORT" >&2; exit 1; }
 cd "$BRAIN"
+gbrain sources current --json  # must identify the source whose local_path is $BRAIN
+BRAIN_SOURCE_ID="<registered source id whose local_path is exactly $BRAIN>"
+[ -n "$BRAIN_SOURCE_ID" ] \
+  || { echo "selected checkout is not registered — ABORT" >&2; exit 1; }
 ```
 
 ### Phase 1: Identify scope (retrieval-first)
@@ -126,23 +137,43 @@ cd "$BRAIN"
    keyword pattern will:
 
    ```bash
-   gbrain query "compensation, equity, or salary discussions about team members" --limit 50
-   gbrain query "performance concerns, underperformance, or who is struggling" --limit 50
-   gbrain query "considering leaving, retention conversations, departure rumors" --limit 50
-   gbrain takes search "performance" --limit 50
-   gbrain recall --grep "salary"
+   gbrain query "compensation, equity, or salary discussions about team members" --source-id "$BRAIN_SOURCE_ID" --limit 50
+   gbrain query "performance concerns, underperformance, or who is struggling" --source-id "$BRAIN_SOURCE_ID" --limit 50
+   gbrain query "considering leaving, retention conversations, departure rumors" --source-id "$BRAIN_SOURCE_ID" --limit 50
+   gbrain call --source "$BRAIN_SOURCE_ID" takes_search '{"query":"performance","limit":50}'
+   gbrain recall --source "$BRAIN_SOURCE_ID" --grep "salary"
    ```
 
    Collect every returned slug into the scope list.
 
-2. Structural discovery — people files that belong to the company, plus
-   keyword hits across the wider scan scope:
+2. Structural discovery — first enumerate the COMPLETE intended share corpus.
+   This list is the shipping set; sensitivity hits only prioritize review and
+   must never replace it. Enumerate every regular file, not just Markdown. The
+   sanitizer and verification below are deliberately Markdown-only, so fail
+   closed on attachments or other non-Markdown files: inspect each with a
+   type-appropriate reader, then either extend the sanitizer and verification
+   for that file type or route its exclusion/deletion through the
+   [data-loss-gate](../data-loss-gate/SKILL.md). Never publish while this list
+   contains an unreviewed file. If this is a company-specific export, remove
+   unrelated files from this complete candidate list by explicit judgment,
+   not by dropping files that lack sensitive keywords:
 
    ```bash
-   grep -rli 'company: *"acme-example"' people/ --include="*.md" | sort > /tmp/brainify-scope.txt
+   find people/ meetings/ daily/ companies/ projects/ analysis/ \
+     -type f -print 2>/dev/null | sort -u > /tmp/brainify-scope.txt
+
+   find people/ meetings/ daily/ companies/ projects/ analysis/ \
+     -type f ! -name '*.md' -print 2>/dev/null | sort -u > /tmp/brainify-nonmarkdown.txt
+   if [ -s /tmp/brainify-nonmarkdown.txt ]; then
+     echo "ABORT: non-Markdown files require type-aware review or gated exclusion" >&2
+     exit 1
+   fi
+
+   # Sensitivity hits are a separate triage list, not the export scope.
+   grep -rli 'company: *"acme-example"' people/ --include="*.md" | sort > /tmp/brainify-sensitive-hits.txt
    grep -rli -E 'salary|equity|carry|retention|underperform|performance review|hard conversation' \
-     meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null >> /tmp/brainify-scope.txt
-   sort -u -o /tmp/brainify-scope.txt /tmp/brainify-scope.txt
+     meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null >> /tmp/brainify-sensitive-hits.txt
+   sort -u -o /tmp/brainify-sensitive-hits.txt /tmp/brainify-sensitive-hits.txt
    ```
 
 3. Cross-reference against the company's public people page (website,
@@ -248,18 +279,113 @@ deeply interwoven throughout.
 serves it via `--include-expired`. An expired fact is retained, not gone.
 For sanitization, sensitive fact rows must be ACTUALLY REMOVED: find them
 (`gbrain recall --grep`), then delete the row from the page's Facts fence
-(step 5), exactly like a sensitive take. On an in-place shared brain, the
-page edit must then be re-synced (`gbrain sync` re-imports the edited page)
-so the shared database no longer serves the row — an edited page over an
-un-synced DB still leaks through retrieval. `forget` alone can never certify
-a brain clean.
+(step 5), exactly like a sensitive take. On an in-place shared brain, sync
+the edited page and then explicitly reconcile the derived facts index for the
+same source — page import alone does not remove a stale derived row:
+
+```bash
+SOURCE_ID="<shared-source-id>"
+gbrain autopilot --status --json
+# Record the installed target and the exact repository from the installed
+# launcher/service BEFORE uninstalling. Do not infer the repository from
+# sync.repo_path: a custom --repo install may point elsewhere.
+AUTOPILOT_TARGET="<installed target from schedule.targets>"
+AUTOPILOT_REPO="<exact --repo path from $HOME/.gbrain/autopilot-run.sh>"
+# The daemon lock follows configDir(): trim GBRAIN_HOME like the runtime,
+# append .gbrain, and keep the installed wrapper under the host HOME.
+
+# Pause every installed schedule, even when its current active state is false or
+# null (for example cron/ephemeral bootstrap or an inactive systemd service).
+AUTOPILOT_WAS_INSTALLED="<true-or-false from schedule.installed>"
+AUTOPILOT_WAS_RUNNING="<true-false-or-null from active>"
+if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
+  # Resolve the lock path only when an installed schedule needs pausing.
+  if [ -n "${GBRAIN_HOME:-}" ]; then
+    GBRAIN_HOME_RAW="$GBRAIN_HOME"
+    # Use the repository runtime's JavaScript trim semantics exactly, including
+    # the runtime's handling of Unicode whitespace and FEFF. Fail closed if the
+    # runtime is unavailable or normalization fails; never guess the lock path.
+    command -v bun >/dev/null 2>&1     || { echo "bun is required to normalize GBRAIN_HOME — ABORT"; exit 1; }
+    GBRAIN_HOME_TRIMMED="$(GBRAIN_HOME_RAW="$GBRAIN_HOME_RAW" bun -e 'process.stdout.write((process.env.GBRAIN_HOME_RAW ?? "").trim())')"     || { echo "GBRAIN_HOME normalization failed — ABORT"; exit 1; }
+    if [ -n "$GBRAIN_HOME_TRIMMED" ]; then
+      AUTOPILOT_HOME="$GBRAIN_HOME_TRIMMED/.gbrain"
+    else
+      AUTOPILOT_HOME="$HOME/.gbrain"
+    fi
+  else
+    # configDir() falls back to homedir() without trimming HOME.
+    AUTOPILOT_HOME="$HOME/.gbrain"
+  fi
+  # Record the daemon PID from the lock before uninstall removes its launcher.
+  AUTOPILOT_LOCK="$AUTOPILOT_HOME/autopilot.lock"
+  AUTOPILOT_PID="$(cat "$AUTOPILOT_LOCK" 2>/dev/null || true)"
+  case "$AUTOPILOT_PID" in
+    ''|*[!0-9]*) AUTOPILOT_PID="" ;;
+  esac
+  gbrain autopilot --uninstall
+  gbrain autopilot --status --json  # must report inactive/uninstalled
+
+  # Uninstall removes cron/ephemeral launch hooks but cannot kill a daemon that
+  # already launched. Verify the lock PID belongs to the exact saved repository
+  # before signaling it; a mismatch is an abort, never a broad kill.
+  if [ -n "$AUTOPILOT_PID" ]; then
+    AUTOPILOT_ARGS="$(ps -p "$AUTOPILOT_PID" -o args= 2>/dev/null || true)"
+    case "$AUTOPILOT_ARGS" in
+      *" --repo $AUTOPILOT_REPO"|*" --repo $AUTOPILOT_REPO "*)
+        kill -TERM "$AUTOPILOT_PID" 2>/dev/null || true
+        # The daemon's SIGTERM handler can drain workers for up to 35 seconds;
+        # allow a margin before declaring the lock stuck.
+        for attempt in $(seq 1 45); do
+          kill -0 "$AUTOPILOT_PID" 2>/dev/null || break
+          sleep 1
+        done
+        ;;
+      "")
+        ;;
+      *)
+        echo "autopilot lock PID does not match saved repository — ABORT"
+        exit 1
+        ;;
+    esac
+  fi
+  [ ! -e "$AUTOPILOT_LOCK" ]     || { echo "autopilot lock still held — ABORT"; exit 1; }
+fi
+
+gbrain sync --source "$SOURCE_ID"
+gbrain dream --source "$SOURCE_ID" --phase extract_facts --json
+
+# Restore every schedule that was installed, preserving its original target and
+# repository even if it was not active when reconciliation began. Verify
+# schedule.installed=true and the original target/repository. An originally
+# inactive cron/ephemeral target may legitimately report active=false or null.
+if [ "$AUTOPILOT_WAS_INSTALLED" = "true" ]; then
+  gbrain autopilot --install --target "$AUTOPILOT_TARGET" --repo "$AUTOPILOT_REPO"
+  gbrain autopilot --status --json  # must report installed with original target/repo
+  if [ "$AUTOPILOT_WAS_RUNNING" = "true" ]; then
+    gbrain autopilot --status --json  # must also report active=true
+  fi
+fi
+```
+
+Read the JSON result and resolve any `warn` or `fail` status before
+certifying the brain. Then verify every removed fact text is absent from the
+derived index, including expired rows:
+
+```bash
+REMOVED_FACT_TEXT="<distinct-removed-fact-text>"
+gbrain recall --source "$SOURCE_ID" --grep "$REMOVED_FACT_TEXT" --include-expired --json
+```
+
+That readback must return zero rows. `forget` alone can never certify a brain
+clean.
 
 After edits: on the **staging-copy** path the fact rows are removed by editing
 the copied markdown directly (there is no live DB to re-sync yet — the team DB
 is built fresh when Phase 5 Step 0 turns the export into a source). On the
-**in-place shared-brain** path, `gbrain sync` re-imports the changed pages so
-the DB matches the markdown. Either way, run `gbrain check-backlinks check` to
-catch pages still pointing at removed content.
+**in-place shared-brain** path, run the source-scoped `sync` plus
+`dream --phase extract_facts` sequence above, then the `recall --include-expired`
+readback. Either way, run `gbrain check-backlinks check` to catch pages still
+pointing at removed content.
 
 ### Phase 4: Verify
 
@@ -267,11 +393,18 @@ Re-run the Phase 2 triage — the count of flagged files should drop to
 (near-)zero. Then targeted greps:
 
 ```bash
-# Rating fields remaining in frontmatter
-grep -rn -E '^[a-z_]*(score|rating|skill)[a-z_]*: *[0-9]' people/ --include="*.md"
+# The Markdown checks below cannot certify attachments. Refuse to certify or
+# ship while any non-Markdown file remains in the intended export set.
+find people/ meetings/ daily/ companies/ projects/ analysis/ \
+  -type f ! -name '*.md' -print 2>/dev/null | sort -u > /tmp/brainify-nonmarkdown-after.txt
+[ ! -s /tmp/brainify-nonmarkdown-after.txt ] \
+  || { echo "ABORT: non-Markdown file remains unreviewed" >&2; exit 1; }
 
-# Phone numbers
-grep -rn -E '\+1[0-9]{10}|\([0-9]{3}\) [0-9]{3}-[0-9]{4}' people/ --include="*.md"
+# Rating fields remaining in frontmatter (full scan scope, not just people/)
+grep -rn -E '^[a-z_]*(score|rating|skill)[a-z_]*: *[0-9]' people/ meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null
+
+# Phone numbers (full scan scope, not just people/)
+grep -rn -E '\+1[0-9]{10}|\([0-9]{3}\) [0-9]{3}-[0-9]{4}' people/ meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null
 
 # Comp keywords (full scan scope, not just people/)
 grep -rin -E 'carry|comp change|equity|salary' people/ meetings/ daily/ companies/ projects/ analysis/ --include="*.md" 2>/dev/null
@@ -294,9 +427,24 @@ the sanitized brain/source (scope with `--source <team-source-id>` when the
 shared source is mounted alongside personal content):
 
 ```bash
-gbrain query "what is alice-example's compensation" --limit 10
-gbrain query "who is underperforming or at risk of leaving" --limit 10
-gbrain takes search "weakness" --limit 20
+# A staging directory is not a source merely because the shell is in it. Build
+# an isolated, non-federated source over the exact sanitized tree, then sync it
+# before retrieval; otherwise the commands can read the host/default source.
+VERIFY_SOURCE_ID="$BRAIN_SOURCE_ID"
+if [ -n "${STAGING:-}" ]; then
+  git -C "$STAGING" init -b main
+  git -C "$STAGING" add -A
+  git -C "$STAGING" diff --cached --quiet \
+    || git -C "$STAGING" commit -m "Sanitized verification snapshot"
+  STAGING_SOURCE_ID="<fresh isolated staging source id>"
+  gbrain sources add "$STAGING_SOURCE_ID" --path "$STAGING" --no-federated
+  gbrain sync --source "$STAGING_SOURCE_ID"
+  VERIFY_SOURCE_ID="$STAGING_SOURCE_ID"
+fi
+
+gbrain query "what is alice-example's compensation" --source-id "$VERIFY_SOURCE_ID" --limit 10
+gbrain query "who is underperforming or at risk of leaving" --source-id "$VERIFY_SOURCE_ID" --limit 10
+gbrain call --source "$VERIFY_SOURCE_ID" takes_search '{"query":"weakness","limit":20}'
 ```
 
 Every one of these must come back empty or with only keep-category content.
@@ -328,36 +476,70 @@ cd "$STAGING"
 # the staging tree is what ships, and it is the tree that must certify clean.
 # ... Phase 4 greps against $STAGING ...
 
-git init -b main
-git add -A && git commit -m "Initial import — sanitized team brain"
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init -b main
+git add -A
+git diff --cached --quiet || git commit -m "Initial import — sanitized team brain"
+git branch -M main
 git remote add origin <TEAM_REPO_URL>
-git push -u origin main
+echo "READY TO PUBLISH: use the normal ship path for <TEAM_REPO_URL>"
 ```
+
+Do not publish until the operator gives current-turn publication approval for
+the exact team repo URL and sanitized tree.
 
 Only when a shared repo ALREADY exists with sensitive history in it do you
 need the purge below.
 
-**Step 1 — target the SHARED repo, commit the clean tree, then mirror-clone.**
+**Step 1 — carry the sanitized tree into the SHARED purge clone, then mirror-clone.**
 The purge operates on the SHARED repo, NEVER on `sync.repo_path` (the personal
 brain) — Step 0's guarantee that the personal repo keeps full history depends
-on it. Clone the shared repo to a durable work dir, stay there for every step
-below, and assert the target is not the personal repo before touching anything.
+on it. Freeze an explicit carrier from the sanitized staging tree or the
+in-place shared checkout **before** cloning. This is what prevents the
+in-place path (where `STAGING` is unset) from silently copying nothing into
+the purge checkout. Then clone the shared repo to a durable work dir, stay
+there for every step below, and assert the target is not the personal repo
+before touching anything.
 
 ```bash
 PERSONAL="$(gbrain config get sync.repo_path)"
+PERSONAL_REAL="$(cd "$PERSONAL" && pwd -P)"
 mkdir -p "$HOME/.gbrain/backups" && chmod 700 "$HOME/.gbrain/backups"
 WORK="$HOME/.gbrain/backups/brainify-purge-$(date +%Y%m%d-%H%M%S)"
+
+# Capture the actual sanitized source before changing directories. STAGING is
+# set for a new-team export; for an existing shared-brain re-audit, the
+# sanitized checkout is the current git worktree instead.
+SANITIZED_TREE="${STAGING:-$(git rev-parse --show-toplevel)}"
+[ -d "$SANITIZED_TREE" ] \
+  || { echo "sanitized tree missing — ABORT"; exit 1; }
+SANITIZED_TREE_REAL="$(cd "$SANITIZED_TREE" && pwd -P)"
+[ "$SANITIZED_TREE_REAL" != "$PERSONAL_REAL" ] \
+  || { echo "sanitized tree IS sync.repo_path (personal brain) — ABORT"; exit 1; }
+
+# Durable carrier: the purge clone must consume this exact sanitized tree,
+# including the in-place path's uncommitted edits. Do this before cloning.
+SANITIZED_CARRIER="$WORK/sanitized-tree"
+mkdir -p "$SANITIZED_CARRIER"
+for d in people meetings daily companies projects analysis; do
+  [ -d "$SANITIZED_TREE/$d" ] || continue
+  mkdir -p "$SANITIZED_CARRIER/$d"
+  rsync -a "$SANITIZED_TREE/$d/" "$SANITIZED_CARRIER/$d/"
+done
+
 git clone <SHARED_REPO_URL> "$WORK/shared"
 cd "$WORK/shared"
-[ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
+SHARED_REAL="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
+[ "$SHARED_REAL" != "$PERSONAL_REAL" ] \
   || { echo "target IS sync.repo_path (personal brain) — ABORT"; exit 1; }
 
 # Materialize every remote branch locally before filter-repo. A normal clone
-# checks out only the default branch; the final explicit-ref push must not
-# mistake remote-only branches for intentional deletions.
+# checks out only the default branch; pushing refs/heads/* from that clone would
+# otherwise prune every other remote branch instead of rewriting it.
 git fetch origin \
   '+refs/heads/*:refs/remotes/origin/*' \
   '+refs/tags/*:refs/tags/*'
+REMOTE_REFS_BEFORE="$WORK/remote-refs-before.txt"
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE"
 DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
 [ -n "$DEFAULT_BRANCH" ] \
   || { echo "remote default branch not found — ABORT"; exit 1; }
@@ -366,21 +548,30 @@ while IFS= read -r branch; do
   git show-ref --verify --quiet "refs/heads/$branch" \
     || git branch "$branch" "refs/remotes/origin/$branch"
 done < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/)
+git show-ref --verify --quiet "refs/heads/$DEFAULT_BRANCH" \
+  || { echo "default branch was not materialized — ABORT"; exit 1; }
 
-# Apply the sanitized tree, then COMMIT it BEFORE the mirror clone. A mirror
-# captures COMMITTED state only; if the clean tree lives only in volatile
-# staging during the rewrite window, a crash loses the sanitization work.
-# Committing makes the clean state durable and recoverable.
-# Set SANITIZED_SOURCE to the Phase 3 shared checkout for the in-place path;
-# the staging path is the source for the new-team path. Never rely on an
-# unset/stale STAGING variable to supply the sanitized tree.
-if [ -n "${STAGING:-}" ]; then
-  SANITIZED_SOURCE="${SANITIZED_SOURCE:-$STAGING}"
-else
-  : "${SANITIZED_SOURCE:?Set SANITIZED_SOURCE to the sanitized shared checkout before Step 1}"
-fi
+# This procedure has one sanitized working-tree carrier, so it cannot safely
+# reconstruct branch-specific content under a purged directory. Do not silently
+# replace a feature branch with the default branch's sanitized snapshot: stop
+# before filter-repo and require a separate sanitized carrier for every branch
+# (or a single-branch purge run).
+BRANCHES_BEFORE_FILTER="$WORK/branches-before-filter.txt"
+git for-each-ref --format='%(refname:strip=2)' refs/heads/ > "$BRANCHES_BEFORE_FILTER"
+NONDEFAULT_BRANCH="$(grep -Fxv "$DEFAULT_BRANCH" "$BRANCHES_BEFORE_FILTER" | head -n1 || true)"
+[ -z "$NONDEFAULT_BRANCH" ] \
+  || { echo "ABORT: non-default branch $NONDEFAULT_BRANCH needs its own sanitized carrier; do not purge or force-push"; exit 1; }
+
+# Apply the carried sanitized tree, then COMMIT it BEFORE the mirror clone. A
+# mirror captures COMMITTED state only; the carrier makes this safe for both
+# staging and in-place edits without requiring a live push before the gate.
 for d in people meetings daily companies projects analysis; do
-  [ -d "$SANITIZED_SOURCE/$d" ] && rsync -a "$SANITIZED_SOURCE/$d/" "./$d/"
+  if [ -d "$SANITIZED_CARRIER/$d" ]; then
+    mkdir -p "./$d"
+    rsync -a --delete "$SANITIZED_CARRIER/$d/" "./$d/"
+  else
+    git rm -r --ignore-unmatch -- "$d"
+  fi
 done
 git add -A && git commit -m "Sanitize: strip sensitive content before history purge"
 
@@ -390,11 +581,9 @@ git add -A && git commit -m "Sanitize: strip sensitive content before history pu
 BACKUP_PATH="$HOME/.gbrain/backups/shared-brain-history-backup-$(date +%Y%m%d-%H%M%S).git"
 git clone --mirror "$WORK/shared" "$BACKUP_PATH"
 git -C "$BACKUP_PATH" log -1 >/dev/null || { echo "backup unreadable — ABORT"; exit 1; }
-
-# Capture the exact remote tips before the rewrite. The final push must lease
-# every pre-purge ref so concurrent remote work cannot be overwritten.
-REMOTE_REFS_BEFORE="$WORK/remote-refs-before.txt"
-git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE"
+BACKUP_PATH_FILE="${BACKUP_PATH%.git}.path"
+printf '%s\n' "$BACKUP_PATH" > "$BACKUP_PATH_FILE"
+chmod 600 "$BACKUP_PATH_FILE"
 ```
 
 Verify the mirror exists and reads before presenting the card — it is the
@@ -423,6 +612,7 @@ Why: prior commits contain pre-sanitization versions of pages that were
 Recoverable?
 - [x] Mirror-clone backup at $BACKUP_PATH
       (verified: exists, `git -C "$BACKUP_PATH" log` works)
+      Per-run cleanup pointer: $BACKUP_PATH_FILE
 - [ ] NOT recoverable from the rewritten remote — old SHAs become unreachable
 
 What we'd lose:
@@ -451,8 +641,21 @@ brain's history must stay intact.** The commands below reuse `$WORK` and
 
 ```bash
 cd "$WORK/shared"
-[ "$(git rev-parse --show-toplevel)" != "$PERSONAL" ] \
+TARGET_REAL="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
+[ "$TARGET_REAL" != "$PERSONAL_REAL" ] \
   || { echo "target IS sync.repo_path — ABORT, do not filter-repo"; exit 1; }
+
+# Step 1 may have run in a different shell before the confirmation card. Set
+# this from the exact per-run pointer printed on that card; never fall back to
+# a shared/fixed pointer or an ephemeral BACKUP_PATH variable.
+BACKUP_PATH_FILE="${BACKUP_PATH_FILE:?set the exact per-run pointer path from Step 1's confirmation card}"
+[ -r "$BACKUP_PATH_FILE" ] \
+  || { echo "backup pointer missing — ABORT, do not filter-repo"; exit 1; }
+BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"
+case "$BACKUP_PATH" in
+  "$HOME/.gbrain/backups/"*.git) ;;
+  *) echo "backup pointer escapes ~/.gbrain/backups — ABORT"; exit 1 ;;
+esac
 
 # The purge list derives from the COMPLETE set of sanitized paths — the same
 # directories Phases 1-4 scanned. A filter list narrower than the scan
@@ -476,7 +679,7 @@ git filter-repo --invert-paths $(for d in $PURGE_DIRS; do printf -- '--path %s/ 
 
 # Restore clean files and re-commit on EVERY surviving local branch. A single
 # checkout/commit only repairs the default branch; the other materialized
-# branches would otherwise be pushed with the purged directories absent.
+# branches would otherwise be pushed with the purged directories still absent.
 BRANCHES_AFTER_FILTER="$WORK/branches-after-filter.txt"
 git for-each-ref --format='%(refname:strip=2)' refs/heads/ > "$BRANCHES_AFTER_FILTER"
 CLEAN_READD_COMMITS="$WORK/clean-readd-commits.txt"
@@ -512,13 +715,19 @@ after=$(for d in $PURGE_DIRS; do [ -d "$d" ] && find "$d" -type f; done | wc -l 
 git -C "$BACKUP_PATH" log -1 >/dev/null \
   || { echo "backup missing/unreadable — ABORT, do not force-push"; exit 1; }
 
-# Refuse to erase remote work that landed after Step 1, then use an explicit
-# lease for every pre-purge ref instead of an unguarded force push.
+# Refuse to erase remote work that landed after Step 1. The wildcard force-push
+# below is allowed only when the remote refs still exactly match the pre-purge
+# readback captured before filter-repo.
 REMOTE_REFS_BEFORE_PUSH="$WORK/remote-refs-before-push.txt"
 git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_BEFORE_PUSH"
 diff -u "$REMOTE_REFS_BEFORE" "$REMOTE_REFS_BEFORE_PUSH" \
   || { echo "remote refs changed during purge — ABORT, do not force-push"; exit 1; }
 
+# Update EVERY pre-purge shared branch and tag, and explicitly delete only
+# pre-purge refs that are absent locally. Do not use wildcard --prune: a new
+# collaborator ref created after the final readback must be preserved, not
+# silently deleted. filter-repo removed remote-tracking refs, so derive both
+# explicit leases and explicit refspecs from the pre-purge snapshot.
 PUSH_LEASES=()
 PUSH_REFS=()
 while read -r old_sha ref; do
@@ -533,6 +742,31 @@ done < "$REMOTE_REFS_BEFORE"
 [ "${#PUSH_LEASES[@]}" -gt 0 ] && [ "${#PUSH_REFS[@]}" -gt 0 ] \
   || { echo "no pre-purge refs available — ABORT, do not force-push"; exit 1; }
 git push --atomic "${PUSH_LEASES[@]}" origin "${PUSH_REFS[@]}"
+
+# Verify remote readback matches the rewritten local refs, then inspect every
+# surviving ref (including remote-tracking refs) for purged-path history. Each
+# purged directory may appear only in the single clean re-add commit; any
+# additional commit means a branch or tag still retains old history — ABORT.
+REMOTE_REFS_AFTER="$WORK/remote-refs-after.txt"
+git fetch --prune origin \
+  '+refs/heads/*:refs/remotes/origin/*' \
+  '+refs/tags/*:refs/tags/*'
+git ls-remote --refs origin 'refs/heads/*' 'refs/tags/*' > "$REMOTE_REFS_AFTER"
+while read -r remote_sha ref; do
+  [ -z "$ref" ] && continue
+  local_sha="$(git rev-parse --verify "$ref" 2>/dev/null || true)"
+  [ "$local_sha" = "$remote_sha" ] \
+    || { echo "remote ref mismatch: $ref — ABORT"; exit 1; }
+done < "$REMOTE_REFS_AFTER"
+for d in $PURGE_DIRS; do
+  [ -d "$d" ] || continue
+  path_commits="$(git log --all --format=%H -- "$d" | sort -u)"
+  while IFS= read -r path_commit; do
+    [ -n "$path_commit" ] || continue
+    grep -Fxq "$path_commit" "$CLEAN_READD_COMMITS" \
+      || { echo "purged-path history remains for $d — ABORT"; exit 1; }
+  done <<< "$path_commits"
+done
 ```
 
 **Step 4 — log it (to the PERSONAL brain, NEVER the shared repo).** Per
@@ -542,8 +776,8 @@ log), never into the shared repo. The log names the purged paths AND the
 backup location; in the shared repo those two facts would tell every team
 member exactly which paths held sensitive content and where the
 pre-sanitization backup lives — the audit trail becomes a treasure map.
-Record: timestamp, purged paths, commit counts, and `$BACKUP_PATH` as the
-recovery line.
+Record: timestamp, purged paths, commit counts, `$BACKUP_PATH` as the recovery
+line, and `$BACKUP_PATH_FILE` as this purge's immutable cleanup pointer.
 
 **After the force push:**
 
@@ -560,7 +794,11 @@ recovery line.
   mirror-clone backup in `~/.gbrain/backups/` for a retention window
   (~30 days is a sane default), then delete it — it contains the
   pre-sanitization history and should not accumulate indefinitely:
-  `rm -rf ~/.gbrain/backups/brain-history-backup-<date>.git`
+  read the persisted path from the exact per-run pointer
+  `"<absolute $BACKUP_PATH_FILE path from this purge's confirmation card>"`
+  (do not use a shared/fixed pointer), verify it is an absolute path under
+  `~/.gbrain/backups/`, then run
+  `BACKUP_PATH_FILE="<that exact per-run pointer path>"; BACKUP_PATH="$(<"$BACKUP_PATH_FILE")"; rm -rf -- "$BACKUP_PATH"; rm -f -- "$BACKUP_PATH_FILE"`.
 - If the repo carries push hooks or auto-hardening wiring, re-verify remotes
   and hooks survived the rewrite before handing the repo to the team
 

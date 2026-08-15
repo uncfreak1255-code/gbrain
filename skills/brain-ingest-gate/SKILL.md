@@ -118,8 +118,7 @@ meaning; retrieval attempted by literal generic phrase.
    alias-aware search surfaces before deciding a named thing is new:
 
    ```bash
-   gbrain search "<name>" --limit 10        # exact/alias/title candidates
-   gbrain query "<name>" --limit 3          # semantic fallback for near misses
+   gbrain query "<name>" --limit 10         # exact/alias/title candidates
    ```
 
    If existing pages recently gained `aliases:` frontmatter but alias search has
@@ -162,7 +161,7 @@ first and takes precedence):
 2. **Search for it:**
 
    ```bash
-   gbrain search "<core claim>" --limit 5
+   gbrain query "<core claim>" --limit 5
    ```
 
 3. **OPEN AND READ the top hit** (`gbrain get <slug>`). Never band on the
@@ -186,7 +185,7 @@ New content to write
   ├─ Named thing? → Named-Entity Resolution Gate first
   │    (entity card → alias-expanded search → READ the candidate)
   ├─ Extract core claim (1-2 sentences)
-  ├─ gbrain search "<core claim>" --limit 5
+  ├─ gbrain query "<core claim>" --limit 5
   └─ OPEN AND READ the top hit (gbrain get <slug>)
       ├─ clear-dup     → STOP. Link to existing. Report "duplicate".
       ├─ plausible-dup → Read both. Same insight?
@@ -211,7 +210,7 @@ After the batch, verify the gate's output holds:
 ```bash
 gbrain check-backlinks check            # mentioned entities link back (fix with: check-backlinks fix)
 gbrain backlinks <new-slug>             # each new page has inbound links
-gbrain search "<core claim>" --limit 3  # the insight has exactly ONE home
+gbrain query "<core claim>" --limit 3  # the insight has exactly ONE home
 ```
 
 If `check-backlinks check` reports gaps on pages the gate just admitted, the

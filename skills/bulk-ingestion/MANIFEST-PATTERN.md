@@ -173,16 +173,16 @@ When fanning out processing across chunks/workers/subagents:
    ~20 light workers, and keep CPU below ~75% so lock heartbeats and
    checkpoints keep firing.
 
-### Per-worker progress files
+### Per-worker progress files (for high parallelism)
 
 When many workers run concurrently, having them all write one JSON races.
 Instead each writes `worker-<id>-progress.json` with
 `{"processed_ids": [], "stats": {}}`; a merge step folds them into the
 master manifest. (Proven at 20 workers on an email-takeout ingest.) Use the
-same pattern for low parallelism too unless one explicitly named coordinator
-is the only process allowed to write `manifest.json`. `git pull --rebase`
-before a commit is conflict cleanup, not a lock, and it does not make
-concurrent JSON writes safe.
+same pattern for low parallelism too unless one explicitly named coordinator is
+the only process allowed to write `manifest.json`. `git pull --rebase` before a
+commit is conflict cleanup, not a lock, and it does not make concurrent JSON
+writes safe.
 
 ## Periodic commit during long runs
 
@@ -192,7 +192,7 @@ per [conventions/cron-via-minions.md](../conventions/cron-via-minions.md) —
 a recurring shell job shaped like:
 
 ```bash
-gbrain jobs submit shell --params '{"cmd": "cd <brain-repo> && git add projects/<pipeline-name> <output-dirs> && (git diff --cached --quiet || git commit -m \"<pipeline-name> ingest checkpoint\") && git push"}'
+gbrain jobs submit shell --params '{"cmd": "git add projects/<pipeline-name> <output-dirs> && git commit -m \"<pipeline-name> ingest checkpoint\"", "cwd": "/absolute/path/to/brain-repo"}'
 ```
 
 Shell jobs require `GBRAIN_ALLOW_SHELL_JOBS=1` on the WORKER environment — see
@@ -205,6 +205,10 @@ Pre-commit hooks (privacy/durability) intentionally run on checkpoint
 commits — a checkpoint that bypasses them can bank unlintable content.
 Stage explicit paths, never `git add -A` (sweeps unrelated churn). Remove
 the schedule when the job completes.
+
+Heartbeat jobs are commit-only. Publishing those commits with `git push`
+requires the normal ship path and current operator approval for the exact
+branch/repo.
 
 ## Hard rules
 

@@ -33,8 +33,9 @@ upstream: context-audit@fc834ee
 
 > **Convention:** see [conventions/brain-first.md](../conventions/brain-first.md)
 > — before running a fresh audit, check the brain for prior audit reports
-> (`gbrain recall "context audit report"`) so you can compute token DRIFT since
-> the last run and avoid re-flagging findings the user already declined.
+> (`gbrain query "context audit report" --limit 10`, then `gbrain get <slug>`
+> for the best matching page) so you can compute token DRIFT since the last run
+> and avoid re-flagging findings the user already declined.
 >
 > **Convention:** see [conventions/quality.md](../conventions/quality.md) —
 > every finding cites its file and evidence; no unsourced claims.

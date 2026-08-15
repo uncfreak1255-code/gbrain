@@ -256,9 +256,35 @@ boilerplate. Husks poison recall — a search hit that says nothing.
   or whose body matches subscribe/paywall boilerplate.
 - **Repair pass:** re-fetch each husk slowly (one at a time, full pacing).
   Real content this time → rewrite the page in place.
-- **Gated husk:** if the re-fetch confirms the post is gated, DELETE the husk
-  and record it as `skipped: gated`. Never leave husks in the brain, and never
-  retry a gated post forever.
+- **Gated husk:** if the re-fetch confirms the post is gated, count the
+  candidates and stop before deleting any of them. For a repair sweep (or any
+  scripted deletion), route the complete set through the
+  [data-loss-gate](../data-loss-gate/SKILL.md): present the confirmation and
+  recoverability card with the exact slugs, count, size, location, reason,
+  `gbrain restore <slug>` recovery path, what would be lost, and an alternative;
+  require typed `yes`/`do it`. A database soft-delete is not enough: before
+  `gbrain delete`, resolve each candidate to its exact tracked source file and
+  remove or quarantine that file under the same gate. For a repo-backed page:
+
+  ```bash
+  SOURCE_PATH="<exact repo-relative source path for this slug>"
+  [ -n "$SOURCE_PATH" ] && [ -f "$SOURCE_PATH" ] \
+    || { echo "ABORT: exact husk source path is missing" >&2; exit 1; }
+  git ls-files --error-unmatch -- "$SOURCE_PATH" >/dev/null 2>&1 \
+    || { echo "ABORT: husk source is untracked or unidentified" >&2; exit 1; }
+  git rm -- "$SOURCE_PATH"
+  git diff --cached --name-only -- "$SOURCE_PATH" \
+    | grep -Fxq "$SOURCE_PATH" \
+    || { echo "ABORT: husk source deletion was not staged" >&2; exit 1; }
+  git commit -m "Remove gated husk source"
+  gbrain delete <slug>
+  gbrain sync --no-pull --no-embed
+  ```
+
+  Abort if the exact source path cannot be identified, is untracked, or cannot
+  be committed. Then verify both the soft-deleted row and the removed source
+  file before logging `skipped: gated`.
+  Never leave husks in the brain, and never retry a gated post forever.
 
 ## Output Format
 

@@ -118,9 +118,11 @@ Before including a hosted-remote link in a user-facing message, confirm the
 path exists on the remote. GitHub example (private repos need a token):
 
 ```bash
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+ENCODED_BRANCH="$(printf '%s' "$BRANCH" | jq -sRr @uri)"
 curl -sf -o /dev/null -w '%{http_code}' \
   -H "Authorization: token $GITHUB_TOKEN" \
-  "https://api.github.com/repos/<owner>/<repo>/contents/<repo-relative-path>"
+  "https://api.github.com/repos/<owner>/<repo>/contents/<repo-relative-path>?ref=$ENCODED_BRANCH"
 ```
 
 Only send the link on `200`. If you just pushed and the host API is lagging,

@@ -61,7 +61,7 @@ Substrates, in priority order:
    skill's name, trigger phrases, and output shapes:
 
    ```bash
-   gbrain search "<skill-name>"
+   gbrain query "<skill-name>"
    gbrain query "when did I use <skill-name> and what did I ask for"
    ```
 
