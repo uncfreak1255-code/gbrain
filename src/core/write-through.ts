@@ -28,6 +28,12 @@ import type { BrainEngine } from './engine.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from './markdown.ts';
 import { isWriteTargetContained } from './path-confine.ts';
 import { commitWriteThroughFile, isDurabilityHardened } from './brain-repo-durability.ts';
+import {
+  getRecoveryBackedSourceCheckout,
+  refreshRecoverySourceCheckout,
+  withRecoverySourceWriteBoundary,
+} from './recovery-source-refresh.ts';
+import type { RecoveryBackedSourceCheckout } from './recovery-source-refresh.ts';
 
 /** Minimal logger surface — structurally compatible with operations.ts `Logger`. */
 export interface WriteThroughLogger {
@@ -39,6 +45,13 @@ export interface WriteThroughResult {
   path?: string;
   /** True only when a hardened repo also committed the written artifact. */
   committed?: boolean;
+  /**
+   * True when the file became present through a full recovery-checkout refresh
+   * rather than a single-file atomic write.
+   */
+  refreshed?: boolean;
+  /** Previous active checkout preserved during a recovery refresh. */
+  preserved_path?: string;
   /**
    * Non-error reasons the file was not written:
    *   - no_repo_configured: the resolved target (source `local_path` or, for a
@@ -59,6 +72,7 @@ export interface WriteThroughResult {
 
 export interface WritePageThroughOpts {
   sourceId?: string;
+  recoveryCheckout?: RecoveryBackedSourceCheckout | null;
   /** Merged over the page's own frontmatter at render time (e.g. provenance). */
   frontmatterOverrides?: Record<string, unknown>;
   logger?: WriteThroughLogger;
@@ -151,6 +165,28 @@ export async function writePageThrough(
     if (!writtenPage) {
       warnSkip(opts.logger, slug, 'page_not_found_after_write', `source=${sourceId}`);
       return { written: false, skipped: 'page_not_found_after_write' };
+    }
+
+    const recovery = opts.recoveryCheckout === undefined
+      ? await getRecoveryBackedSourceCheckout(engine, sourceId)
+      : opts.recoveryCheckout;
+    if (recovery) {
+      const refresh = async (checkout: RecoveryBackedSourceCheckout | null) => {
+        if (!checkout) {
+          throw new Error(
+            `recovery checkout for source ${JSON.stringify(sourceId)} changed before refresh; `
+            + 'the checkout was not modified.',
+          );
+        }
+        return refreshRecoverySourceCheckout(engine, sourceId, slug, checkout);
+      };
+      const refreshed = opts.recoveryCheckout === undefined
+        ? await withRecoverySourceWriteBoundary(engine, sourceId, refresh)
+        : await refresh(recovery);
+      if (!refreshed.written && refreshed.error) {
+        opts.logger?.warn(`[write-through] recovery refresh failed for ${slug}: ${refreshed.error}`);
+      }
+      return refreshed;
     }
 
     const tags = await engine.getTags(slug, { sourceId });

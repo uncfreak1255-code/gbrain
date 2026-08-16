@@ -841,3 +841,9 @@ export const __testing = {
   createPrivateScopedExportStaging,
   loadCompleteScopedPages,
 };
+
+export {
+  canonicalJson,
+  createPrivateScopedExportStaging,
+  loadCompleteScopedPages,
+};
