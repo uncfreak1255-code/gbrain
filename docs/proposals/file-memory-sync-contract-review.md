@@ -12,7 +12,7 @@
 | # | Codex finding | Disposition |
 |---|---|---|
 | 1 | **High.** Core finding valid: file-memory is not a registered source, so `brain-sync` cannot make it searchable. The contract is false and can trigger unrelated all-source synchronization. | **Fixed.** sawyer-skills PR #91 |
-| 2 | **High.** Observation 4 incomplete: the recovery repo holds 37 pages against a live source of 38, and the backup preserves the same incomplete snapshot. A manifest-recovery blocker, not a deletion risk. | **Open.** See below |
+| 2 | **High.** Observation 4 incomplete: the recovery repo holds 37 pages against a live source of 38, and the backup preserves the same incomplete snapshot. A manifest-recovery blocker, not a deletion risk. | **Blocker cleared.** See "Finding 2 resolved" |
 | 3 | **Medium.** "One manual sync run" not proven — the timestamps show batch activity; autopilot produces the same pattern. | **Retracted.** Observation 2 downgraded to "batch activity of unknown origin" |
 | 4 | **Medium.** The `file_upload` trust boundary is irrelevant here; normal source sync reads registered `local_path` roots directly. | **Retracted.** Struck from the questions section |
 
@@ -48,6 +48,45 @@ current state. The 38 pages themselves are intact in the database and covered by
 `com.gbrain.postgres-backup`. The disk copy is the broken half.
 
 Anyone picking up finding 2 should start here, not from the filesystem.
+
+### Finding 2 resolved — the 38th page, and a sealed export
+
+`gbrain export --source sawyer-brain --dir <path>` reads the **database**, not
+the clone, so it succeeds despite `clone_state: "corrupted"`. Diffing its
+manifest against the 2026-08-11 snapshot isolates the gap to exactly one slug:
+
+```
++ dream-cycle-summaries/2026-08-11
+```
+
+The page is 196 bytes in full:
+
+> **Children:** 1 completed, 0 not successful.
+> **Pages written:** 0.
+
+An auto-generated null receipt for a nightly dream cycle that produced nothing.
+Codex's phrase "the 38th incident page" was a reasonable guess and is wrong —
+there is no incident, and no retain/discard judgment worth Sawyer's attention.
+
+**Sealed export, verified:** `~/.gbrain/backups/sawyer-brain-export-20260815-complete/`
+
+| Check | Result |
+|---|---|
+| `source_page_count` / `page_count` / pages listed | 38 / 38 / 38 |
+| `markdown_sha256` recomputed and matched | 38 |
+| Mismatched | 0 |
+| Missing on disk | 0 |
+| Manifest sha256 | `e1601f2ea97d490da5215ed02f77fa9c159c1273115683a25f032fc0a768259f` |
+
+Codex's precondition — "build and verify a complete sealed 38-page export before
+changing its registered path or restarting autopilot" — is **satisfied**. Both
+of those remain undone and are deliberately left to Sawyer: they are live
+runtime changes, not review outcomes.
+
+The earlier 37-page backup at `~/.gbrain/backups/sawyer-brain-source-20260815/`
+is now superseded. It is kept, not deleted, because it preserves the original
+`recovery/sawyer-brain-20260811` git history that the fresh export does not
+carry.
 
 ---
 
