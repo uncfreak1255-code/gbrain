@@ -360,30 +360,34 @@ export async function persistSavedIdea(
   args: { slug: string; content: string; sourceId?: string; provenanceVia: string },
 ): Promise<SaveOutcome> {
   const sourceId = args.sourceId ?? 'default';
-  let dbSaved = false;
-  let dbError: string | undefined;
-  try {
-    await importFromContent(engine, args.slug, args.content, {
-      noEmbed: true,
-      sourceId,
-      sourcePath: `${args.slug}.md`,
-      source_kind: args.provenanceVia,
-      ingested_via: args.provenanceVia,
-    });
-    dbSaved = true;
-  } catch (err) {
-    dbError = err instanceof Error ? err.message : String(err);
-  }
-  const writeThrough: WriteThroughResult = dbSaved
-    ? await writePageThrough(engine, args.slug, {
+  const { withRecoverySourceWriteBoundary } = await import('../core/recovery-source-refresh.ts');
+  return withRecoverySourceWriteBoundary(engine, sourceId, async (recovery) => {
+    let dbSaved = false;
+    let dbError: string | undefined;
+    try {
+      await importFromContent(engine, args.slug, args.content, {
+        noEmbed: true,
         sourceId,
-        frontmatterOverrides: {
-          source_kind: args.provenanceVia,
-          ingested_via: args.provenanceVia,
-        },
-      })
-    : { written: false, skipped: 'page_not_found_after_write' };
-  return { dbSaved, dbError, writeThrough };
+        sourcePath: `${args.slug}.md`,
+        source_kind: args.provenanceVia,
+        ingested_via: args.provenanceVia,
+      });
+      dbSaved = true;
+    } catch (err) {
+      dbError = err instanceof Error ? err.message : String(err);
+    }
+    const writeThrough: WriteThroughResult = dbSaved
+      ? await writePageThrough(engine, args.slug, {
+          sourceId,
+          recoveryCheckout: recovery,
+          frontmatterOverrides: {
+            source_kind: args.provenanceVia,
+            ingested_via: args.provenanceVia,
+          },
+        })
+      : { written: false, skipped: 'page_not_found_after_write' };
+    return { dbSaved, dbError, writeThrough };
+  });
 }
 
 /**

@@ -927,25 +927,61 @@ const put_page: Operation = {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;
     }
-    const result = await importFromContent(ctx.engine, slug, content, {
-      noEmbed,
-      // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
-      // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
-      // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
-      remote: untrustedContent,
-      ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
-      // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
-      // inferType behavior when undefined).
-      ...(activePack ? { activePack } : {}),
-      // v0.39.3.0 provenance write-through (WARN-8). Trust-filtered values
-      // computed above; ingested_at is server-stamped at the engine layer.
-      // Null-valued fields signal "no provenance write this call" and the
-      // engine's COALESCE-preserve UPDATE keeps the prior first-write
-      // record intact (CV12 audit-trail survival).
-      source_kind: provenanceKind,
-      source_uri: provenanceUri,
-      ingested_via: provenanceVia,
-    });
+    const sourceId = ctx.sourceId ?? 'default';
+
+    const isSandboxSubagent = ctx.viaSubagent === true
+      && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
+    const writeThroughVia = provenanceVia ?? (ctx.remote === false ? 'put_page' : 'mcp:put_page');
+    const writeThroughKind = provenanceKind ?? writeThroughVia;
+    const frontmatterOverrides: Record<string, unknown> = {
+      ingested_via: writeThroughVia,
+      ingested_at: new Date().toISOString(),
+      source_kind: writeThroughKind,
+    };
+    if (provenanceUri) {
+      frontmatterOverrides.source_uri = provenanceUri;
+    }
+    const { withRecoverySourceWriteBoundary } = await import('./recovery-source-refresh.ts');
+    const { result, writeThrough } = await withRecoverySourceWriteBoundary(
+      ctx.engine,
+      sourceId,
+      async (recovery) => {
+        const imported = await importFromContent(ctx.engine, slug, content, {
+          noEmbed,
+          // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
+          // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
+          // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
+          remote: untrustedContent,
+          sourceId,
+          // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
+          // inferType behavior when undefined).
+          ...(activePack ? { activePack } : {}),
+          // v0.39.3.0 provenance write-through (WARN-8). Trust-filtered values
+          // computed above; ingested_at is server-stamped at the engine layer.
+          // Null-valued fields signal "no provenance write this call" and the
+          // engine's COALESCE-preserve UPDATE keeps the prior first-write
+          // record intact (CV12 audit-trail survival).
+          source_kind: provenanceKind,
+          source_uri: provenanceUri,
+          ingested_via: provenanceVia,
+        });
+
+        let writeThrough: { written: boolean; path?: string; skipped?: string; error?: string } | undefined;
+        if (!ctx.dryRun && imported.status !== 'error' && !isSandboxSubagent) {
+          writeThrough = await writePageThrough(ctx.engine, imported.slug, {
+            sourceId,
+            recoveryCheckout: recovery,
+            frontmatterOverrides,
+            logger: ctx.logger,
+          });
+        } else if (isSandboxSubagent) {
+          writeThrough = { written: false, skipped: 'subagent_sandbox' };
+        } else if (ctx.dryRun) {
+          writeThrough = { written: false, skipped: 'dry_run' };
+        }
+        return { result: imported, writeThrough };
+      },
+    );
 
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
@@ -981,44 +1017,6 @@ const put_page: Operation = {
       } catch {
         // best-effort; never block put_page
       }
-    }
-
-    // v0.38 put_page write-through (ingestion cathedral):
-    // After importFromContent succeeds, if `sync.repo_path` resolves to a
-    // real directory, persist the markdown file to disk alongside the DB
-    // row. Failures non-fatal — DB write is durable; subsequent sync
-    // reconciles drift.
-    //
-    // Trust gating:
-    //   - Subagent sandbox (viaSubagent without allowedSlugPrefixes) → DB-only.
-    //   - All other writes → write-through.
-    let writeThrough: { written: boolean; path?: string; skipped?: string; error?: string } | undefined;
-    const isSandboxSubagent = ctx.viaSubagent === true
-      && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
-    if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
-      const sourceId = ctx.sourceId ?? 'default';
-      const writeThroughVia = provenanceVia ?? (ctx.remote === false ? 'put_page' : 'mcp:put_page');
-      const writeThroughKind = provenanceKind ?? writeThroughVia;
-      const frontmatterOverrides: Record<string, unknown> = {
-        ingested_via: writeThroughVia,
-        ingested_at: new Date().toISOString(),
-        source_kind: writeThroughKind,
-      };
-      if (provenanceUri) {
-        frontmatterOverrides.source_uri = provenanceUri;
-      }
-      // Shared canonical write-through (also used by `gbrain brainstorm/lsd
-      // --save`). Renders the file from the saved DB row and writes it
-      // atomically; never throws (failures land in skipped/error).
-      writeThrough = await writePageThrough(ctx.engine, result.slug, {
-        sourceId,
-        frontmatterOverrides,
-        logger: ctx.logger,
-      });
-    } else if (isSandboxSubagent) {
-      writeThrough = { written: false, skipped: 'subagent_sandbox' };
-    } else if (ctx.dryRun) {
-      writeThrough = { written: false, skipped: 'dry_run' };
     }
 
     // Auto-link post-hook: runs AFTER importFromContent (which is its own
