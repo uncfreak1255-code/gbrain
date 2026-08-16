@@ -16,6 +16,7 @@ BEGIN;
 DROP INDEX IF EXISTS idx_links_source;
 DROP INDEX IF EXISTS idx_links_origin;
 ALTER TABLE links DROP CONSTRAINT IF EXISTS links_from_to_type_source_origin_unique;
+DROP TRIGGER IF EXISTS source_active_page_rehome_f22216da1e39c629 ON links;
 ALTER TABLE links DROP COLUMN IF EXISTS link_source;
 ALTER TABLE links DROP COLUMN IF EXISTS origin_page_id;
 
