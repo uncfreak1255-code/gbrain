@@ -413,6 +413,12 @@ export interface CycleReport {
 export interface CycleOpts {
   /** If true, no writes to filesystem or DB. All phases honor this. */
   dryRun?: boolean;
+  /**
+   * Whether lint may rewrite files. Defaults to true for explicit/manual
+   * cycles; unattended callers such as autopilot set this false so lint is
+   * audit-only while the remaining cycle can still perform its normal work.
+   */
+  fixLint?: boolean;
   /** Defaults to ALL_PHASES. Pass a subset for --phase lint etc. */
   phases?: CyclePhase[];
   /**
@@ -749,7 +755,13 @@ function checkAborted(signal?: AbortSignal): void {
 // keyword is the minimal seam that lets behavioral tests drive the
 // wrapper's result-mapping (counter → status enum + summary) without
 // going through runCycle's full setup cost.
-export async function runPhaseLint(brainDir: string, dryRun: boolean, engine?: BrainEngine | null, signal?: AbortSignal): Promise<PhaseResult> {
+export async function runPhaseLint(
+  brainDir: string,
+  dryRun: boolean,
+  engine?: BrainEngine | null,
+  signal?: AbortSignal,
+  fixLint = true,
+): Promise<PhaseResult> {
   try {
     const { runLintCore } = await import('../commands/lint.ts');
     // issue #1678: pass the cycle's live engine so lint's content-sanity
@@ -757,7 +769,7 @@ export async function runPhaseLint(brainDir: string, dryRun: boolean, engine?: B
     // competing module-style engine that nulls the shared db singleton
     // mid-cycle (which broke every phase after lint with a misleading
     // "connect() has not been called").
-    const result = await runLintCore({ target: brainDir, fix: true, dryRun, engine: engine ?? undefined, signal });
+    const result = await runLintCore({ target: brainDir, fix: fixLint, dryRun, engine: engine ?? undefined, signal });
     const issues = result.total_issues ?? 0;
     const fixed = result.total_fixed ?? 0;
     const remaining = Math.max(0, issues - fixed);
@@ -766,15 +778,15 @@ export async function runPhaseLint(brainDir: string, dryRun: boolean, engine?: B
     //   - non-dry-run and everything fixable was fixed.
     // 'warn' when issues remain after the run.
     const status: PhaseStatus =
-      issues === 0 || (!dryRun && remaining === 0) ? 'ok' : 'warn';
+      issues === 0 || (!dryRun && fixLint && remaining === 0) ? 'ok' : 'warn';
     return {
       phase: 'lint',
       status,
       duration_ms: 0, // set by caller
-      summary: dryRun
-        ? `${issues} issue(s) found (dry-run, no writes)`
+      summary: dryRun || !fixLint
+        ? `${issues} issue(s) found (${dryRun ? 'dry-run' : 'audit-only'}, no writes)`
         : `${fixed} fix(es) applied, ${remaining} remaining`,
-      details: { issues, fixed, pages_scanned: result.pages_scanned, dryRun },
+      details: { issues, fixed, pages_scanned: result.pages_scanned, dryRun, fix: fixLint },
     };
   } catch (e) {
     return {
@@ -1603,7 +1615,13 @@ export async function runCycle(
         phaseResults.push(skipNoBrainDir('lint'));
       } else {
         progress.start('cycle.lint');
-        const { result, duration_ms } = await timePhase(() => runPhaseLint(brainDir, dryRun, engine, opts.signal));
+        const { result, duration_ms } = await timePhase(() => runPhaseLint(
+          brainDir,
+          dryRun,
+          engine,
+          opts.signal,
+          opts.fixLint !== false,
+        ));
         result.duration_ms = duration_ms;
         phaseResults.push(result);
         progress.finish();

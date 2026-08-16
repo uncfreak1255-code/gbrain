@@ -26,7 +26,7 @@ let orphansCalls: number = 0;
 mock.module('../../src/commands/lint.ts', () => ({
   runLintCore: async (opts: any) => {
     lintCalls.push({ target: opts.target, fix: opts.fix, dryRun: opts.dryRun });
-    return { total_issues: 2, total_fixed: opts.dryRun ? 0 : 2, pages_scanned: 5 };
+    return { total_issues: 2, total_fixed: opts.dryRun || !opts.fix ? 0 : 2, pages_scanned: 5 };
   },
 }));
 
@@ -171,6 +171,7 @@ describe('runCycle — dryRun propagates to every phase', () => {
     await runCycle(sharedEngine,{ brainDir: '/tmp/brain', dryRun: false });
 
     expect(lintCalls.at(-1)?.dryRun).toBe(false);
+    expect(lintCalls.at(-1)?.fix).toBe(true);
     // Maintenance should audit backlink gaps but not run the legacy fixer that
     // appends "Referenced in" timeline entries into entity pages. The graph
     // extractor/auto-link path is the canonical link store; filesystem backlink
@@ -180,6 +181,23 @@ describe('runCycle — dryRun propagates to every phase', () => {
     expect(backlinksCalls.at(-1)?.dryRun).toBe(false);
     expect(syncCalls.at(-1)?.dryRun).toBe(false);
     expect(embedCalls.at(-1)?.dryRun).toBe(false);
+  });
+
+  test('fixLint:false makes lint audit-only without making the whole cycle a dry run', async () => {
+    const report = await runCycle(sharedEngine,{
+      brainDir: '/tmp/brain',
+      phases: ['lint'],
+      fixLint: false,
+    });
+
+    expect(lintCalls.at(-1)).toEqual({
+      target: '/tmp/brain',
+      fix: false,
+      dryRun: false,
+    });
+    expect(report.phases[0]?.status).toBe('warn');
+    expect(report.phases[0]?.summary).toContain('audit-only, no writes');
+    expect(report.phases[0]?.details.fix).toBe(false);
   });
 
   test('dryRun skips extract phase (no dry-run support)', async () => {

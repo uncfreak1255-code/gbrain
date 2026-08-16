@@ -122,6 +122,46 @@ describe('autopilot-cycle handler — partial failure does NOT throw', () => {
 });
 
 describe('autopilot-cycle handler — phase passthrough', () => {
+  test('autopilot lint audits a code checkout without modifying tracked markdown', async () => {
+    const fs = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+    const dir = fs.mkdtempSync(join(tmpdir(), 'gbrain-autopilot-lint-readonly-'));
+    const skillDir = join(dir, 'skills', 'example');
+    const skillPath = join(skillDir, 'SKILL.md');
+    const content = `---
+title: Example
+type: note
+created: 2026-08-16
+---
+
+# Example
+
+\`\`\`markdown
+This is a fenced example at the end of an otherwise normal page.
+\`\`\`
+`;
+
+    try {
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(skillPath, content);
+
+      const handler = (worker as any).handlers.get('autopilot-cycle');
+      const result = await handler({
+        data: { repoPath: dir, phases: ['lint'] },
+        signal: { aborted: false } as any,
+        job: { id: 9, name: 'autopilot-cycle' } as any,
+      });
+
+      expect(fs.readFileSync(skillPath, 'utf8')).toBe(content);
+      const lint = (result as any).report.phases.find((phase: any) => phase.phase === 'lint');
+      expect(lint.details.fixed).toBe(0);
+      expect(lint.details.fix).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('job.data.phases restricts which phases run', async () => {
     const fs = await import('fs');
     const { execSync } = await import('child_process');
