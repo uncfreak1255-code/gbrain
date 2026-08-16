@@ -178,7 +178,7 @@ describe('#1972 — complete cooperative-abort coverage', () => {
     expect(body).toContain('runPhaseExtract(engine, brainDir, dryRun, syncPagesAffected, opts.signal)');
     expect(body).toMatch(/runPhaseExtractFacts\([^)]*opts\.signal\)/);
     expect(body).toContain('signal: opts.signal'); // consolidate opts
-    expect(body).toContain('runPhaseLint(brainDir, dryRun, engine, opts.signal)');
+    expect(body).toMatch(/runPhaseLint\(\s*brainDir,\s*dryRun,\s*engine,\s*opts\.signal,/);
     // Reaper runs at cycle start.
     expect(body).toContain('reapDeadHolderLocks(engine)');
     // Terminal guard: the success stamp is gated on !aborted, and the report

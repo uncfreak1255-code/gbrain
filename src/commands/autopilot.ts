@@ -1208,6 +1208,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
             // pre-v0.17 autopilot behavior). CLI dream defaults false
             // for cron safety; that choice is scoped to dream only.
             pull: true,
+            fixLint: false,
             yieldBetweenPhases: async () => {
               await new Promise(r => setImmediate(r));
             },

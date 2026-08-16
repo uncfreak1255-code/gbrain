@@ -2048,6 +2048,7 @@ export async function registerBuiltinHandlers(
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull,
+      fixLint: false,
       signal: job.signal, // propagate abort so cycle bails on timeout/cancel
       ...(sourceId ? { sourceId } : {}),
       ...(requestedPhases && requestedPhases.length > 0 ? { phases: requestedPhases as any } : {}),
@@ -2100,6 +2101,7 @@ export async function registerBuiltinHandlers(
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls
+      fixLint: false,
       signal: job.signal,
       phases,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
