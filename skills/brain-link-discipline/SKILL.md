@@ -21,10 +21,6 @@ triggers:
 mutating: true
 writes_pages: false
 upstream: brain-link-on-commit@fc834ee + brain-link-report@fc834ee
-# brain_first: exempt — this skill governs outbound-message link formatting
-# and performs no entity/fact lookups. Its only network call is an HTTP
-# existence check against the user's own hosted git remote (link
-# verification, not data retrieval). Declarative opt-out.
 brain_first: exempt
 ---
 
