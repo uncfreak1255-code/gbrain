@@ -2,6 +2,14 @@ import { PGlite } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite/vector';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
+import {
+  drainBackgroundWorkBeforeDisconnect,
+  backgroundWorkSinkCount,
+  pgliteCloseTimeoutMs,
+  SINK_DRAIN_TIMEOUT_MS,
+  MAX_TIMER_DELAY_MS,
+} from './background-work.ts';
+import { installProcessWatchdog } from './process-watchdog.ts';
 import type {
   BrainEngine,
   BatchOpts,
@@ -60,6 +68,63 @@ import {
 } from './search/embedding-column.ts';
 import { hasCJK, escapeLikePattern } from './cjk.ts';
 import { purgeDeletedPagesSafely } from './purge-deleted-pages.ts';
+
+/**
+ * #4284 — opt-in out-of-band watchdog for a PGLite disconnect with a live
+ * handle. OFF by default: a DIAGNOSTIC/INCIDENT instrument (CI lanes, heavy
+ * tests, wedge hunts), not ambient production protection. When armed it is
+ * the ONLY layer that can fire while the event loop is wedged (worker_threads
+ * — its timers live on a separate OS thread): stderr line + SIGTERM at the
+ * deadline, SIGKILL at deadline+grace, converting a silent 600s CI kill into
+ * a fast, loud, attributed death.
+ *
+ * Resolve ordering is OFF-check FIRST: unset/0/non-finite/negative → inert
+ * (deadline 0). Only a positive value proceeds to the lethal-knob floor
+ *   max(5000, backgroundWorkSinkCount()*2000 + closeTimeout + 2000)
+ * which budgets the serial pre-close drain (each registered sink is bounded
+ * at 2000ms) plus the in-loop close bound, so a units typo (`=30`, thinking
+ * seconds) clamps UP with a warn instead of SIGKILLing a HEALTHY slow
+ * teardown — `jobs work` daemons reconnect() through disconnect(). Mirrors
+ * the computed-deadline pattern in cli-force-exit.ts.
+ */
+function pgliteCloseWatchdogMs(): { deadlineMs: number; graceMs: number } {
+  const rawStr = process.env.GBRAIN_PGLITE_CLOSE_WATCHDOG_MS;
+  if (rawStr === undefined || rawStr === '') return { deadlineMs: 0, graceMs: 0 };
+  const raw = Number(rawStr);
+  if (!Number.isFinite(raw)) {
+    warnOncePerProcess(
+      'pglite-close-watchdog-env-invalid',
+      `[pglite] GBRAIN_PGLITE_CLOSE_WATCHDOG_MS=${rawStr} is not a number — the disconnect watchdog is OFF, not armed. Use milliseconds (e.g. 30000).`,
+    );
+    return { deadlineMs: 0, graceMs: 0 };
+  }
+  if (raw <= 0) return { deadlineMs: 0, graceMs: 0 };
+  const floor = Math.min(
+    MAX_TIMER_DELAY_MS,
+    Math.max(5000, backgroundWorkSinkCount() * SINK_DRAIN_TIMEOUT_MS + pgliteCloseTimeoutMs() + 2000),
+  );
+  const deadlineMs = Math.min(MAX_TIMER_DELAY_MS, Math.max(floor, Math.floor(raw)));
+  if (deadlineMs > raw) {
+    warnOncePerProcess(
+      `pglite-close-watchdog-floor:${deadlineMs}`,
+      `[pglite] GBRAIN_PGLITE_CLOSE_WATCHDOG_MS=${raw} is below this process's safe floor (drain budget + close timeout) — clamped up to ${deadlineMs}ms so a healthy slow teardown is never killed.`,
+    );
+  }
+  let graceMs = 30_000;
+  const rawGraceStr = process.env.GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS;
+  if (rawGraceStr !== undefined && rawGraceStr !== '') {
+    const parsedGrace = Number(rawGraceStr);
+    if (Number.isFinite(parsedGrace) && parsedGrace >= 0) {
+      graceMs = Math.min(MAX_TIMER_DELAY_MS, Math.floor(parsedGrace));
+    } else {
+      warnOncePerProcess(
+        'pglite-close-watchdog-grace-env-invalid',
+        `[pglite] Ignoring invalid GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS=${rawGraceStr}; using default 30000ms.`,
+      );
+    }
+  }
+  return { deadlineMs, graceMs };
+}
 
 type PGLiteDB = PGlite;
 
@@ -338,7 +403,31 @@ export class PGLiteEngine implements BrainEngine {
     this._db = null;
     const lock = this._lock;
     this._lock = null;
+    if (!db && !lock) return; // already disconnected — nothing to drain or close
+
+    // #4284 — out-of-band watchdog (opt-in; see pgliteCloseWatchdogMs). Armed
+    // ONLY when a live handle exists (a lock-only teardown has no close to
+    // wedge) and BEFORE the drain so a drain-side wedge is covered too.
+    // Scope: a PGLite disconnect with a live handle — nothing else. Disposed
+    // in the outer finally below, even when releaseLock throws.
+    let watchdog: { dispose(): void } | null = null;
+    if (db) {
+      const { deadlineMs, graceMs } = pgliteCloseWatchdogMs();
+      if (deadlineMs > 0) {
+        watchdog = installProcessWatchdog({
+          deadlineMs,
+          graceMs,
+          label: 'pglite-disconnect-watchdog',
+        });
+        warnOncePerProcess(
+          `pglite-close-watchdog-armed:${deadlineMs}:${graceMs}`,
+          `[pglite] disconnect watchdog armed: SIGTERM at ${deadlineMs}ms, SIGKILL at ${deadlineMs + graceMs}ms (out-of-band worker thread — fires even if the event loop wedges; #4284).`,
+        );
+      }
+    }
+
     try {
+      await drainBackgroundWorkBeforeDisconnect();
       if (db) {
         // Deliberately NOT wrapped in preservingProcessExitCode: close's
         // status write (0) is long-standing baseline behavior that test-runner
@@ -346,11 +435,57 @@ export class PGLiteEngine implements BrainEngine {
         // #2084 implementation note), and the CLI's exit verdict doesn't read
         // process.exitCode at all — it lives in the gbrain-owned channel
         // (setCliExitVerdict/currentExitCode in cli-force-exit.ts).
-        await db.close();
+        //
+        // #4143/#4284 in-loop bound — HONEST SCOPE: catches a close that
+        // still YIELDS (slow, or promise-deadlocked with an idle loop). It
+        // can NEVER fire against a close that wedges the event loop (#4284):
+        // the timers phase doesn't run, so no same-loop timer wins this
+        // race. That class is prevented by the drain above; the opt-in
+        // watchdog is the only observer. The timer is armed BEFORE close()
+        // is called so close's pre-first-yield work runs with the bound
+        // already ticking, and it is deliberately REF'D (no unref): in the
+        // one case this bound can catch, an unref'd timer would let Bun exit
+        // before the warn and the lock release fire (precedent:
+        // cli-force-exit.ts adversarial F3, db-pacer.ts). Deliberately NOT
+        // timeout.ts:withTimeout — it unrefs its timer and rejects; this
+        // site needs a ref'd race that resolves a flag. A close-throw still
+        // propagates (lock releases in finally, same as before). Note for
+        // reconnect(): a timed-out close leaves a zombie instance briefly
+        // coexisting with a re-opened dataDir — the WAL-repair path covers
+        // the consequence on next open.
+        const timeoutMs = pgliteCloseTimeoutMs();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const timedOutPromise = new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(true), timeoutMs);
+          });
+          const closePromise = db.close();
+          const timedOut = await Promise.race([
+            closePromise.then(() => false),
+            timedOutPromise,
+          ]);
+          if (timedOut) {
+            warnOncePerProcess(
+              'pglite-close-timeout',
+              `[pglite] db.close() did not settle within ${timeoutMs}ms — proceeding with teardown (a statement may still be in flight; #4143). Override with GBRAIN_PGLITE_CLOSE_TIMEOUT_MS. A close that WEDGES the event loop cannot be caught by this in-loop bound — arm GBRAIN_PGLITE_CLOSE_WATCHDOG_MS for the out-of-band watchdog (#4284).`,
+            );
+            // Abandoned close may reject later — never let it become an
+            // unhandled rejection.
+            closePromise.catch(() => { /* abandoned after timeout */ });
+          }
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       }
     } finally {
-      if (lock?.acquired) {
-        await releaseLock(lock);
+      try {
+        if (lock?.acquired) {
+          await releaseLock(lock);
+        }
+      } finally {
+        // #4284: dispose even when releaseLock throws — a leaked armed worker
+        // would SIGTERM/SIGKILL a process whose close already completed.
+        watchdog?.dispose();
       }
     }
   }

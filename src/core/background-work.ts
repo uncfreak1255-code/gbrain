@@ -38,6 +38,18 @@
  * double-register).
  */
 
+export type BackgroundWorkDrainMode = 'exit' | 'disconnect';
+
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+export const SINK_DRAIN_TIMEOUT_MS = 2000;
+
+export function pgliteCloseTimeoutMs(): number {
+  return Math.min(
+    MAX_TIMER_DELAY_MS,
+    Math.max(1000, Number(process.env.GBRAIN_PGLITE_CLOSE_TIMEOUT_MS ?? '') || 5000),
+  );
+}
+
 export interface BackgroundWorkDrainer {
   /** Stable identity; also the Map key (idempotent registration). */
   name: string;
@@ -48,7 +60,7 @@ export interface BackgroundWorkDrainer {
    */
   order: number;
   /** Resolve when in-flight work settles OR the bound elapses; report leftovers. */
-  drain(timeoutMs: number): Promise<{ unfinished: number }>;
+  drain(timeoutMs: number, mode: BackgroundWorkDrainMode): Promise<{ unfinished: number }>;
   /**
    * Optional hard-stop for stragglers (facts-queue: `shutdown()`). AWAITED by
    * the registry so the aborted job's DB write settles against a live engine
@@ -101,18 +113,36 @@ export function __listDrainerNamesForTest(): string[] {
  * the subsequent disconnect.
  */
 export async function drainAllBackgroundWorkForCliExit(opts?: { timeoutMs?: number }): Promise<void> {
-  const timeoutMs = opts?.timeoutMs ?? 2000;
+  await runDrainers(opts?.timeoutMs ?? SINK_DRAIN_TIMEOUT_MS, { allowAbort: true, mode: 'exit' });
+}
+
+export async function drainBackgroundWorkBeforeDisconnect(opts?: { timeoutMs?: number }): Promise<void> {
+  await runDrainers(opts?.timeoutMs ?? SINK_DRAIN_TIMEOUT_MS, { allowAbort: false, mode: 'disconnect' });
+}
+
+const warnedOnce = new Set<string>();
+
+async function runDrainers(
+  timeoutMs: number,
+  opts: { allowAbort: boolean; mode: BackgroundWorkDrainMode },
+): Promise<void> {
   const ordered = [...drainers.values()].sort(
     (a, b) => a.order - b.order || a.name.localeCompare(b.name),
   );
   for (const d of ordered) {
     try {
-      const { unfinished } = await d.drain(timeoutMs);
-      if (unfinished > 0 && d.abort) {
+      const { unfinished } = await d.drain(timeoutMs, opts.mode);
+      if (unfinished > 0 && d.abort && opts.allowAbort) {
         // codex #9: AWAIT — the facts:absorb job writes its absorb-log to the
         // DB on settle; the abort must finish against a live engine before the
         // caller disconnects.
         await d.abort();
+      } else if (unfinished > 0 && !opts.allowAbort) {
+        const key = `drain-unfinished:${d.name}`;
+        if (!warnedOnce.has(key)) {
+          warnedOnce.add(key);
+          console.error(`[background-work] sink '${d.name}' still had ${unfinished} unfinished item(s) after the ${timeoutMs}ms disconnect drain`);
+        }
       }
     } catch {
       /* best-effort; never block disconnect on one sink's failure */
