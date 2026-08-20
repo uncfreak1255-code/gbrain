@@ -52,7 +52,13 @@
  * every path directly (cli.ts is a script entrypoint).
  */
 
-import { drainAllBackgroundWorkForCliExit, backgroundWorkSinkCount } from './background-work.ts';
+import {
+  drainAllBackgroundWorkForCliExit,
+  backgroundWorkSinkCount,
+  pgliteCloseTimeoutMs,
+  SINK_DRAIN_TIMEOUT_MS,
+  MAX_TIMER_DELAY_MS,
+} from './background-work.ts';
 import { POOL_END_TIMEOUT_SECONDS } from './db.ts';
 import { parseGlobalFlags } from './cli-options.ts';
 
@@ -131,12 +137,19 @@ export function computeTeardownDeadlineMs(opts: {
   // +500 mirrors endPoolBounded's slack over the postgres.js hint (db.ts);
   // ×2 budgets the worst case of two sequential pool ends (direct + read).
   const poolEndBoundMs = POOL_END_TIMEOUT_SECONDS * 1000 + 500;
+  // Engine disconnect adds its own per-sink drain and bounded PGLite close.
+  // Budget the resolved close timeout so an operator override cannot make the
+  // CLI backstop fire while each component is still inside its valid bound.
+  const disconnectDrainBoundMs = opts.sinkCount * SINK_DRAIN_TIMEOUT_MS;
+  const pgliteCloseBoundMs = pgliteCloseTimeoutMs();
   const computed =
     opts.sinkCount * opts.drainTimeoutMs +
+    disconnectDrainBoundMs +
+    pgliteCloseBoundMs +
     FACTS_ABORT_GRACE_MS +
     2 * poolEndBoundMs +
     TEARDOWN_SLACK_MS;
-  return Math.max(TEARDOWN_DEADLINE_FLOOR_MS, computed);
+  return Math.min(MAX_TIMER_DELAY_MS, Math.max(TEARDOWN_DEADLINE_FLOOR_MS, computed));
 }
 
 /**
