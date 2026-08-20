@@ -59,7 +59,12 @@ async function runFixture(
   let killedByTest = false;
   let armedAt = 0;
   let markerCap: ReturnType<typeof setTimeout> | undefined;
-  const failsafe = setTimeout(() => { killedByTest = true; proc.kill('SIGKILL'); }, 60_000);
+  const killIfAlive = () => {
+    if (proc.exitCode !== null) return;
+    killedByTest = true;
+    proc.kill('SIGKILL');
+  };
+  const failsafe = setTimeout(killIfAlive, 60_000);
   let stdout = '';
   const stdoutReader = (async () => {
     const dec = new TextDecoder();
@@ -67,15 +72,15 @@ async function runFixture(
       stdout += dec.decode(chunk);
       if (!armedAt && stdout.includes('ARMED')) {
         armedAt = Date.now();
-        markerCap = setTimeout(() => { killedByTest = true; proc.kill('SIGKILL'); }, capAfterArmedMs);
+        markerCap = setTimeout(killIfAlive, capAfterArmedMs);
       }
     }
   })();
   await proc.exited;
   const exitAt = Date.now();
   clearTimeout(failsafe);
-  if (markerCap) clearTimeout(markerCap);
   await stdoutReader;
+  if (markerCap) clearTimeout(markerCap);
   const stderr = await new Response(proc.stderr).text();
   return {
     exitCode: proc.exitCode,
@@ -106,6 +111,7 @@ describe('pglite disconnect watchdog vs a wedged event loop (#4284, Bun-pinned)'
     // The watchdog — not this test — must be the killer.
     expect(r.killedByTest).toBe(false);
     expect(r.exitCode === 0).toBe(false);
+    expect(r.signalCode).toBe('SIGKILL');
     expect(r.stdout).not.toContain('DISCONNECTED'); // the wedge never resolves
 
     // Death lands near deadline+grace, measured from the child's ARMED marker
@@ -134,6 +140,7 @@ describe('pglite disconnect watchdog vs a wedged event loop (#4284, Bun-pinned)'
       GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: undefined,
     }, 5_000);
 
+    expect(r.stdout).toContain('ARMED');
     // Only the test's cap ends it: the wedge holds past 5x the in-loop bound.
     expect(r.killedByTest).toBe(true);
     expect(r.stdout).not.toContain('DISCONNECTED');

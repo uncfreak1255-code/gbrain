@@ -409,6 +409,48 @@ describe('PGLiteEngine.disconnect() — v0.41.8.0 lifecycle invariants', () => {
     });
   }, 30_000);
 
+  test('#12 WATCHDOG ENV MATRIX (#4284): off variants stay off, garbage warns, grace 0 is honored', async () => {
+    const { backgroundWorkSinkCount } = await import('../src/core/background-work.ts');
+    const floor = Math.max(5000, backgroundWorkSinkCount() * 2000 + 1000 + 2000);
+    const deadline = String(floor + 1000);
+
+    async function healthyDisconnect(env: Record<string, string | undefined>): Promise<string[]> {
+      return withEnv({ GBRAIN_PGLITE_CLOSE_TIMEOUT_MS: '1000', ...env }, async () => {
+        _resetWarnOnceForTests();
+        const engine = new PGLiteEngine();
+        await engine.connect({ engine: 'pglite' });
+        const { warns } = await captureWarns(() => engine.disconnect());
+        return warns;
+      });
+    }
+
+    for (const off of ['0', '-5']) {
+      const warns = await healthyDisconnect({ GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: off });
+      expect(warns.filter((w) => w.includes('watchdog')).length).toBe(0);
+    }
+
+    const invalidDeadlineWarns = await healthyDisconnect({ GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: '30s' });
+    expect(invalidDeadlineWarns.filter((w) => w.includes('is not a number')).length).toBe(1);
+    expect(invalidDeadlineWarns.filter((w) => w.includes('watchdog armed')).length).toBe(0);
+
+    const zeroGraceWarns = await healthyDisconnect({
+      GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: deadline,
+      GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: '0',
+    });
+    const zeroGraceArmed = zeroGraceWarns.filter((w) => w.includes('watchdog armed'));
+    expect(zeroGraceArmed.length).toBe(1);
+    expect(zeroGraceArmed[0]).toContain(`SIGTERM at ${deadline}ms, SIGKILL at ${deadline}ms`);
+
+    const invalidGraceWarns = await healthyDisconnect({
+      GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: deadline,
+      GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: 'oops',
+    });
+    expect(invalidGraceWarns.filter((w) => w.includes('Ignoring invalid GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS')).length).toBe(1);
+    const invalidGraceArmed = invalidGraceWarns.filter((w) => w.includes('watchdog armed'));
+    expect(invalidGraceArmed.length).toBe(1);
+    expect(invalidGraceArmed[0]).toContain(`SIGKILL at ${Number(deadline) + 30_000}ms`);
+  }, 60_000);
+
   test('#11 FLOOR BRANCH (#4284): env below the 1000ms floor is floored, not applied literally', async () => {
     await withEnv({ GBRAIN_PGLITE_CLOSE_TIMEOUT_MS: '10' }, async () => {
       _resetWarnOnceForTests(); // burned by earlier tests — without this the assert is vacuous

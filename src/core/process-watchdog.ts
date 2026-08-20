@@ -35,6 +35,7 @@
  */
 
 import { Worker } from 'node:worker_threads';
+import { MAX_TIMER_DELAY_MS } from './background-work.ts';
 
 export type WatchdogAction = 'wait' | 'sigterm' | 'sigkill';
 
@@ -78,7 +79,7 @@ const DEFAULT_GRACE_MS = 30_000;
  * ~1ms, which for the deadline+grace SUM timer would mean SIGKILLing a healthy
  * process almost immediately (#4284 hardening).
  */
-export const MAX_WATCHDOG_TIMER_MS = 2 ** 31 - 1;
+export const MAX_WATCHDOG_TIMER_MS = MAX_TIMER_DELAY_MS;
 
 /**
  * Pure clamp for the two worker timers (#4284). The worker arms
@@ -92,7 +93,8 @@ export const MAX_WATCHDOG_TIMER_MS = 2 ** 31 - 1;
  */
 export function clampWatchdogTimers(deadlineMs: number, graceMs: number): { deadlineMs: number; graceMs: number } {
   const d = Math.min(MAX_WATCHDOG_TIMER_MS, Math.floor(deadlineMs));
-  const g = Math.min(MAX_WATCHDOG_TIMER_MS - (Number.isFinite(d) ? Math.max(0, d) : 0), Math.max(0, Math.floor(graceMs)));
+  const safeGrace = Number.isFinite(graceMs) ? Math.max(0, Math.floor(graceMs)) : 0;
+  const g = Math.min(MAX_WATCHDOG_TIMER_MS - (Number.isFinite(d) ? Math.max(0, d) : 0), safeGrace);
   return { deadlineMs: d, graceMs: g };
 }
 

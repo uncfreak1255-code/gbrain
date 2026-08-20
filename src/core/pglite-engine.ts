@@ -409,7 +409,7 @@ export class PGLiteEngine implements BrainEngine {
     // ONLY when a live handle exists (a lock-only teardown has no close to
     // wedge) and BEFORE the drain so a drain-side wedge is covered too.
     // Scope: a PGLite disconnect with a live handle — nothing else. Disposed
-    // in the outer finally below, even when releaseLock throws.
+    // in the outer finally below, even when the drain or releaseLock throws.
     let watchdog: { dispose(): void } | null = null;
     if (db) {
       const { deadlineMs, graceMs } = pgliteCloseWatchdogMs();
