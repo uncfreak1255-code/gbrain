@@ -177,6 +177,72 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
     expect((result.details?.failures as unknown[]).length).toBe(1);
   });
 
+  test('writes a failure receipt when no atoms were extracted', async () => {
+    const result = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath: '/private/example.txt', content: 'content', contentHash: 'failure-hash' }],
+      _pages: [],
+      _chat: async () => { throw new Error('password=hunter2 provider timeout'); },
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.details?.atoms_extracted).toBe(0);
+    expect(result.details?.failure_count).toBe(1);
+
+    const receipts = await engine.executeRaw<{
+      status: string;
+      deadline_elapsed: string;
+      failure_count: string;
+      compiled_truth: string;
+    }>(
+      `SELECT frontmatter->>'status' AS status,
+              frontmatter->>'deadline_elapsed' AS deadline_elapsed,
+              frontmatter->>'failure_count' AS failure_count,
+              compiled_truth
+         FROM pages
+        WHERE type = 'extract_receipt'`,
+    );
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].status).toBe('warn');
+    expect(receipts[0].deadline_elapsed).toBe('false');
+    expect(receipts[0].failure_count).toBe('1');
+    expect(receipts[0].compiled_truth).toContain('Failures: **1**');
+    expect(receipts[0].compiled_truth).not.toContain('hunter2');
+  });
+
+  test('writes a deadline receipt when no atoms were committed', async () => {
+    const result = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath: '/private/deadline.txt', content: 'content', contentHash: 'deadline-hash' }],
+      _pages: [],
+      deadlineMs: 100,
+      _now: () => 100,
+      _chat: async () => { throw new Error('chat should not run after the deadline'); },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.details?.atoms_extracted).toBe(0);
+    expect(result.details?.failure_count).toBe(0);
+    expect(result.details?.deadline_elapsed).toBe(true);
+
+    const receipts = await engine.executeRaw<{
+      status: string;
+      deadline_elapsed: string;
+      failure_count: string;
+      compiled_truth: string;
+    }>(
+      `SELECT frontmatter->>'status' AS status,
+              frontmatter->>'deadline_elapsed' AS deadline_elapsed,
+              frontmatter->>'failure_count' AS failure_count,
+              compiled_truth
+         FROM pages
+        WHERE type = 'extract_receipt'`,
+    );
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].status).toBe('ok');
+    expect(receipts[0].deadline_elapsed).toBe('true');
+    expect(receipts[0].failure_count).toBe('0');
+    expect(receipts[0].compiled_truth).toContain('Deadline: **elapsed**');
+  });
+
   // v0.41.2.1 regression case (D9 #14 wording): with _pages:[] and same
   // _transcripts, all PRE-EXISTING PhaseResult.details fields match
   // pre-fix values byte-for-byte. The new fields (pages_processed,

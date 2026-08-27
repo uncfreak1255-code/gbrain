@@ -23,6 +23,41 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
+
+const MAX_FAILURE_SAMPLES = 20;
+const MAX_FAILURE_ERROR_LENGTH = 200;
+
+export interface ExtractAtomsDrainFailure {
+  source: string;
+  error: string;
+  error_class?: string;
+  error_code?: string;
+}
+
+export interface ExtractAtomsDrainBatchResult {
+  extracted: number;
+  skipped: number;
+  /** Phase status from the inner extractor. */
+  status?: 'ok' | 'warn' | 'fail' | 'skipped';
+  /** Failure samples from the inner extractor. */
+  failures?: ReadonlyArray<ExtractAtomsDrainFailure>;
+  /** Total failures when the supplied samples are bounded. */
+  failure_count?: number;
+  /** True when the supplied failure samples are incomplete. */
+  failures_truncated?: boolean;
+  /** True when the inner phase stopped at its caller deadline. */
+  deadline_elapsed?: boolean;
+}
+
+function normalizeFailure(failure: ExtractAtomsDrainFailure): ExtractAtomsDrainFailure {
+  return {
+    source: failure.source,
+    error: redactConnectionInfo(failure.error).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_ERROR_LENGTH),
+    ...(failure.error_class ? { error_class: failure.error_class.slice(0, 80) } : {}),
+    ...(failure.error_code ? { error_code: failure.error_code.slice(0, 80) } : {}),
+  };
+}
 
 export interface ExtractAtomsDrainDeps {
   /**
@@ -33,8 +68,8 @@ export interface ExtractAtomsDrainDeps {
    * routine cycle's skip contract.
    */
   withLock: <T>(work: () => Promise<T>) => Promise<T>;
-  /** Process one bounded batch (rediscovers eligibility). Returns counts. */
-  runBatch: (info: { deadlineMs: number }) => Promise<{ extracted: number; skipped: number }>;
+  /** Process one bounded batch (rediscovers eligibility). Returns its outcome. */
+  runBatch: (info: { deadlineMs: number }) => Promise<ExtractAtomsDrainBatchResult>;
   /** Count remaining eligible-but-unextracted pages, or null on query error. */
   countRemaining: () => Promise<number | null>;
   /** Injectable clock. Production: Date.now. */
@@ -52,9 +87,17 @@ export interface ExtractAtomsDrainOpts {
 
 export interface ExtractAtomsDrainResult {
   phase: 'extract_atoms';
-  status: 'ok';
+  status: 'ok' | 'warn';
   extracted: number;
   skipped: number;
+  /** Total inner extraction failures across all processed batches. */
+  failure_count: number;
+  /** Bounded, redacted samples of inner extraction failures. */
+  failures: ExtractAtomsDrainFailure[];
+  /** True when failure samples were omitted from the result. */
+  failures_truncated: boolean;
+  /** True when a batch or the drain window ended at its deadline. */
+  deadline_elapsed: boolean;
   /** Eligible pages still pending after the window. null if the count errored. */
   remaining: number | null;
   /** Batches actually processed. */
@@ -73,6 +116,11 @@ export async function runExtractAtomsDrain(
     let extracted = 0;
     let skipped = 0;
     let batches = 0;
+    let failureCount = 0;
+    const failures: ExtractAtomsDrainFailure[] = [];
+    let failuresTruncated = false;
+    let status: ExtractAtomsDrainResult['status'] = 'ok';
+    let deadlineElapsed = false;
     let stopped: ExtractAtomsDrainResult['stopped'] = 'window';
 
     while (deps.now() < deadline) {
@@ -85,9 +133,27 @@ export async function runExtractAtomsDrain(
       extracted += r.extracted;
       skipped += r.skipped;
       batches++;
+      const batchFailures = r.failures ?? [];
+      const declaredFailureCount = typeof r.failure_count === 'number'
+        && Number.isFinite(r.failure_count)
+        && r.failure_count >= 0
+        ? Math.floor(r.failure_count)
+        : 0;
+      failureCount += Math.max(declaredFailureCount, batchFailures.length);
+      if (r.status === 'warn' || r.status === 'fail' || batchFailures.length > 0) status = 'warn';
+      if (r.failures_truncated === true) failuresTruncated = true;
+      for (const failure of batchFailures) {
+        if (failures.length < MAX_FAILURE_SAMPLES) failures.push(normalizeFailure(failure));
+        else failuresTruncated = true;
+      }
+      deadlineElapsed ||= r.deadline_elapsed === true;
       deps.onBatch?.({ batch: batches, extracted: r.extracted, remaining: before });
 
-      if (deps.now() >= deadline) { stopped = 'window'; break; }
+      if (deps.now() >= deadline) {
+        stopped = 'window';
+        deadlineElapsed = true;
+        break;
+      }
 
       // Stop if a batch made zero forward progress — extraction is failing or
       // everything left is ineligible (e.g. all skipped). Prevents a hot loop
@@ -96,8 +162,21 @@ export async function runExtractAtomsDrain(
     }
 
     const remaining = await deps.countRemaining();
+    if (stopped === 'window') deadlineElapsed = true;
     if (remaining === 0) stopped = 'drained';
-    return { phase: 'extract_atoms', status: 'ok', extracted, skipped, remaining, batches, stopped };
+    return {
+      phase: 'extract_atoms',
+      status,
+      extracted,
+      skipped,
+      failure_count: failureCount,
+      failures,
+      failures_truncated: failuresTruncated || failureCount > failures.length,
+      deadline_elapsed: deadlineElapsed,
+      remaining,
+      batches,
+      stopped,
+    };
   });
 }
 
@@ -170,9 +249,35 @@ export async function runExtractAtomsDrainForSource(
           deadlineMs,
         });
         const d = (r.details ?? {}) as Record<string, unknown>;
+        const failures = Array.isArray(d.failures)
+          ? d.failures.filter((failure): failure is ExtractAtomsDrainFailure => {
+              if (!failure || typeof failure !== 'object') return false;
+              const value = failure as Record<string, unknown>;
+              return typeof value.source === 'string' && typeof value.error === 'string';
+            })
+          : [];
+        const phaseFailure = r.status === 'fail' && r.error
+          ? [{
+              source: extractionSourceId,
+              error: r.error.message,
+              error_class: r.error.class,
+              error_code: r.error.code,
+            }]
+          : [];
+        const allFailures = [...failures, ...phaseFailure];
+        const declaredFailureCount = typeof d.failure_count === 'number'
+          && Number.isFinite(d.failure_count)
+          && d.failure_count >= 0
+          ? Math.floor(d.failure_count)
+          : 0;
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
+          status: r.status,
+          failures: allFailures,
+          failure_count: Math.max(declaredFailureCount, allFailures.length),
+          failures_truncated: d.failures_truncated === true || declaredFailureCount > allFailures.length,
+          deadline_elapsed: d.deadline_elapsed === true,
         };
       },
       countRemaining: () => countExtractAtomsBacklog(engine, extractionSourceId),

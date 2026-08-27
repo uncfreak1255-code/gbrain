@@ -109,6 +109,48 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     expect(result.stopped).toBe('max_batches');
     expect(batches).toBe(4);
   });
+
+  it('propagates inner failures without treating deadline completion as a halt', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: seq([2, 1, 0]),
+        runBatch: async () => {
+          batches++;
+          if (batches === 1) {
+            return {
+              extracted: 1,
+              skipped: 0,
+              status: 'warn' as const,
+              failures: [{ source: 'pages/example', error: 'provider timeout', error_class: 'AITransientError' }],
+              deadline_elapsed: false,
+            };
+          }
+          return {
+            extracted: 1,
+            skipped: 0,
+            status: 'ok' as const,
+            failures: [],
+            deadline_elapsed: true,
+          };
+        },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+
+    expect(result.status).toBe('warn');
+    expect(result.failure_count).toBe(1);
+    expect(result.failures).toEqual([{
+      source: 'pages/example',
+      error: 'provider timeout',
+      error_class: 'AITransientError',
+    }]);
+    expect(result.failures_truncated).toBe(false);
+    expect(result.deadline_elapsed).toBe(true);
+    expect(result.stopped).toBe('drained');
+  });
 });
 
 // #1685 GAP D (CODEX #1) — the auto-drain Minion job burns Haiku, so it must be

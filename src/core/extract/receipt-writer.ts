@@ -37,6 +37,7 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
+import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 
 /**
  * Round identifier. Matches the progressive-batch primitive's Stage
@@ -49,6 +50,17 @@ export type ExtractReceiptRound =
   | 'ramp_500'
   | 'full'
   | 'single';
+
+export interface ExtractReceiptFailure {
+  /** Page or file label that failed. Never contains source content. */
+  source: string;
+  /** Redacted, single-line error summary. */
+  error: string;
+  /** Optional provider/application error class. */
+  error_class?: string;
+  /** Optional provider/application error code. */
+  error_code?: string;
+}
 
 /**
  * Input to writeReceipt. Optional fields are recorded in frontmatter
@@ -78,9 +90,61 @@ export interface ExtractReceiptInput {
   eval_score?: number;
   /** Human-readable summary line (1-2 sentences). */
   summary?: string;
+  /** Outcome status for partial or failed runs. */
+  status?: 'ok' | 'warn' | 'fail' | 'skipped';
+  /** True when the caller stopped at its wallclock deadline. */
+  deadline_elapsed?: boolean;
+  /** Total failures in the run, including samples omitted from the receipt. */
+  failure_count?: number;
+  /** Bounded, redacted failure samples for operator diagnosis. */
+  failures?: ReadonlyArray<ExtractReceiptFailure>;
+  /** True when the caller omitted failure samples from the input. */
+  failures_truncated?: boolean;
 }
 
 const RUN_ID_SHORT_LEN = 8;
+const MAX_FAILURE_SAMPLES = 20;
+const MAX_FAILURE_SOURCE_LENGTH = 500;
+const MAX_FAILURE_ERROR_LENGTH = 200;
+
+interface ReceiptFailureState {
+  count: number;
+  samples: ExtractReceiptFailure[];
+  truncated: boolean;
+}
+
+function summarizeFailureError(error: string): string {
+  return redactConnectionInfo(error).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_ERROR_LENGTH);
+}
+
+function normalizeFailure(failure: ExtractReceiptFailure): ExtractReceiptFailure {
+  return {
+    source: failure.source.slice(0, MAX_FAILURE_SOURCE_LENGTH),
+    error: summarizeFailureError(failure.error),
+    ...(failure.error_class
+      ? { error_class: failure.error_class.slice(0, 80) }
+      : {}),
+    ...(failure.error_code
+      ? { error_code: failure.error_code.slice(0, 80) }
+      : {}),
+  };
+}
+
+function receiptFailureState(input: ExtractReceiptInput): ReceiptFailureState {
+  const inputSamples = input.failures ?? [];
+  const declaredCount = typeof input.failure_count === 'number'
+    && Number.isFinite(input.failure_count)
+    && input.failure_count >= 0
+    ? Math.floor(input.failure_count)
+    : 0;
+  const count = Math.max(declaredCount, inputSamples.length);
+  const samples = inputSamples.slice(0, MAX_FAILURE_SAMPLES).map(normalizeFailure);
+  return {
+    count,
+    samples,
+    truncated: input.failures_truncated === true || count > samples.length,
+  };
+}
 
 /**
  * Truncate a run id to the standard 8-char short form used in slug
@@ -120,6 +184,7 @@ export function receiptSlug(input: ExtractReceiptInput): string {
  */
 function buildReceiptBody(input: ExtractReceiptInput): string {
   const lines: string[] = [];
+  const failureState = receiptFailureState(input);
   lines.push(`# ${input.kind} — round ${input.round}`);
   lines.push('');
   if (input.summary) {
@@ -145,6 +210,27 @@ function buildReceiptBody(input: ExtractReceiptInput): string {
       : '';
     lines.push(`Eval gate: **${verdict}**${score}`);
   }
+  if (input.status) {
+    lines.push(`Status: **${input.status}**`);
+  }
+  if (input.deadline_elapsed === true) {
+    lines.push('Deadline: **elapsed**');
+  }
+  if (failureState.count > 0) {
+    lines.push(`Failures: **${failureState.count}**`);
+    for (const failure of failureState.samples) {
+      const metadata = [failure.error_class, failure.error_code]
+        .filter(Boolean)
+        .join('/');
+      lines.push(
+        `- \`${failure.source.replace(/`/g, "'")}\`: ${failure.error}` +
+        (metadata ? ` (${metadata})` : ''),
+      );
+    }
+    if (failureState.truncated) {
+      lines.push(`- ${failureState.count - failureState.samples.length} additional failure(s) omitted`);
+    }
+  }
   return lines.join('\n') + '\n';
 }
 
@@ -154,6 +240,7 @@ function buildReceiptBody(input: ExtractReceiptInput): string {
  * writeReceipt call regardless of caller. Per D-EXTRACT-19.
  */
 function buildReceiptFrontmatter(input: ExtractReceiptInput): Record<string, unknown> {
+  const failureState = receiptFailureState(input);
   const fm: Record<string, unknown> = {
     type: 'extract_receipt',
     dream_generated: true,
@@ -168,6 +255,13 @@ function buildReceiptFrontmatter(input: ExtractReceiptInput): Record<string, unk
   if (input.model_id) fm.model_id = input.model_id;
   if (typeof input.eval_pass === 'boolean') fm.eval_pass = input.eval_pass;
   if (typeof input.eval_score === 'number') fm.eval_score = input.eval_score;
+  if (input.status) fm.status = input.status;
+  if (typeof input.deadline_elapsed === 'boolean') fm.deadline_elapsed = input.deadline_elapsed;
+  if (input.failure_count !== undefined || failureState.count > 0) {
+    fm.failure_count = failureState.count;
+  }
+  if (failureState.samples.length > 0) fm.failures = failureState.samples;
+  if (failureState.truncated) fm.failures_truncated = true;
   return fm;
 }
 

@@ -176,4 +176,31 @@ describe('writeReceipt — frontmatter D-EXTRACT-19 belt+suspenders', () => {
     expect(page.compiled_truth).toContain('claude-haiku-4-5');
     expect(page.compiled_truth).toMatch(/PASS/);
   });
+
+  test('records partial status, deadline, and bounded redacted failure samples', async () => {
+    const { page } = await writeReceipt(engine, {
+      ...BASE_INPUT,
+      run_id: 'failure-receipt-run',
+      status: 'warn',
+      deadline_elapsed: true,
+      failure_count: 2,
+      failures: [{
+        source: 'pages/example',
+        error: 'password=hunter2 provider timeout',
+        error_class: 'AITransientError',
+        error_code: 'ETIMEDOUT',
+      }],
+    });
+    expect(page.frontmatter?.status).toBe('warn');
+    expect(page.frontmatter?.deadline_elapsed).toBe(true);
+    expect(page.frontmatter?.failure_count).toBe(2);
+    expect(page.frontmatter?.failures_truncated).toBe(true);
+    const failures = page.frontmatter?.failures as Array<Record<string, unknown>>;
+    expect(failures[0]?.error).toContain('<REDACTED:password>');
+    expect(failures[0]?.error).not.toContain('hunter2');
+    expect(page.compiled_truth).toContain('Status: **warn**');
+    expect(page.compiled_truth).toContain('Deadline: **elapsed**');
+    expect(page.compiled_truth).toContain('Failures: **2**');
+    expect(page.compiled_truth).toContain('1 additional failure(s) omitted');
+  });
 });
