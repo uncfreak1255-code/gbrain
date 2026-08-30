@@ -37,8 +37,14 @@ export interface SourceMetrics {
   embed_coverage_pct: number;
   last_sync_at: Date | null;
   lag_seconds: number | null;
-  /** Failed jobs (sync OR embed-backfill) for this source in last 24h. */
+  /** Failed jobs (sync OR embed-backfill) for this source in last 24h.
+   *  Counts BOTH the 'failed' and 'dead' statuses; see the split fields below
+   *  before naming a `gbrain jobs list --status` command in an operator hint. */
   failed_jobs_24h: number;
+  /** The 'dead' half of failed_jobs_24h (retries exhausted). */
+  dead_jobs_24h: number;
+  /** The 'failed' half of failed_jobs_24h (still retryable). */
+  failed_only_jobs_24h: number;
   /** Waiting + active + delayed jobs (sync OR embed-backfill) for this source. */
   queue_depth: number;
   /** v0.41.31: embed-backfill jobs specifically active right now. */
@@ -225,7 +231,7 @@ export async function computeAllSourceMetrics(
     const cfg = parseSourceConfig(src.config);
     const pages = pageCounts.get(src.id) ?? 0;
     const chunkStats = chunkCounts.get(src.id) ?? { total: 0, embedded: 0 };
-    const jobStats = jobCounts.get(src.id) ?? { failed_24h: 0, queue_depth: 0, backfill_active: 0, backfill_queued: 0 };
+    const jobStats = jobCounts.get(src.id) ?? { failed_24h: 0, dead_24h: 0, failed_only_24h: 0, queue_depth: 0, backfill_active: 0, backfill_queued: 0 };
 
     const embedCoverage = chunkStats.total === 0
       ? 100
@@ -266,6 +272,8 @@ export async function computeAllSourceMetrics(
       last_sync_at: src.last_sync_at,
       lag_seconds: lagSeconds,
       failed_jobs_24h: jobStats.failed_24h,
+      dead_jobs_24h: jobStats.dead_24h,
+      failed_only_jobs_24h: jobStats.failed_only_24h,
       queue_depth: jobStats.queue_depth,
       backfill_active: jobStats.backfill_active,
       backfill_queued: jobStats.backfill_queued,
@@ -303,14 +311,48 @@ async function chunkCountsBySource(engine: BrainEngine): Promise<Map<string, { t
   return m;
 }
 
-type JobStats = { failed_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number };
+/**
+ * Operator hint for the failed-jobs warning.
+ *
+ * `failed_jobs_24h` counts BOTH 'failed' and 'dead', but `gbrain jobs list
+ * --status <S>` accepts a single status. Naming the wrong half prints
+ * "No jobs found" and reads as a false alarm: that is exactly how a
+ * five-minute sync death loop stayed invisible for three days. Name the
+ * status that actually holds the counted rows, and show the split whenever
+ * both halves are non-zero so the other command is still discoverable.
+ */
+export function failedJobsHint(metric: {
+  failed_jobs_24h: number;
+  dead_jobs_24h: number;
+  failed_only_jobs_24h: number;
+}): string {
+  const { failed_jobs_24h: total, dead_jobs_24h: dead, failed_only_jobs_24h: failed } = metric;
+  if (dead > 0 && failed > 0) {
+    return `${total} failed/dead jobs in 24h (dead ${dead}, failed ${failed}) — check ` +
+      '`gbrain jobs list --status dead` and `gbrain jobs list --status failed`';
+  }
+  if (dead > 0) {
+    return `${total} dead jobs in 24h (retries exhausted) — check \`gbrain jobs list --status dead\``;
+  }
+  if (failed > 0) {
+    return `${total} failed jobs in 24h — check \`gbrain jobs list --status failed\``;
+  }
+  // Split unavailable (legacy metric or pre-v0.11 brain): name both rather
+  // than guess, so the hint can never point at an empty list.
+  return `${total} failed/dead jobs in 24h — check ` +
+    '`gbrain jobs list --status dead` and `gbrain jobs list --status failed`';
+}
+
+type JobStats = { failed_24h: number; dead_24h: number; failed_only_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number };
 
 async function jobCountsBySource(engine: BrainEngine): Promise<Map<string, JobStats>> {
   // Pre-v0.11 brains don't have minion_jobs; return empty map.
   try {
-    const rows = await engine.executeRaw<{ source_id: string; failed_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number }>(
+    const rows = await engine.executeRaw<{ source_id: string; failed_24h: number; dead_24h: number; failed_only_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number }>(
       `SELECT data->>'sourceId' AS source_id,
               COUNT(*) FILTER (WHERE status IN ('failed','dead') AND created_at > NOW() - INTERVAL '24 hours')::int AS failed_24h,
+              COUNT(*) FILTER (WHERE status = 'dead' AND created_at > NOW() - INTERVAL '24 hours')::int AS dead_24h,
+              COUNT(*) FILTER (WHERE status = 'failed' AND created_at > NOW() - INTERVAL '24 hours')::int AS failed_only_24h,
               COUNT(*) FILTER (WHERE status IN ('waiting','active','delayed'))::int AS queue_depth,
               COUNT(*) FILTER (WHERE name = 'embed-backfill' AND status = 'active')::int AS backfill_active,
               COUNT(*) FILTER (WHERE name = 'embed-backfill' AND status IN ('waiting','delayed','waiting-children'))::int AS backfill_queued
@@ -323,6 +365,8 @@ async function jobCountsBySource(engine: BrainEngine): Promise<Map<string, JobSt
     for (const r of rows) {
       m.set(r.source_id, {
         failed_24h: Number(r.failed_24h),
+        dead_24h: Number(r.dead_24h),
+        failed_only_24h: Number(r.failed_only_24h),
         queue_depth: Number(r.queue_depth),
         backfill_active: Number(r.backfill_active),
         backfill_queued: Number(r.backfill_queued),

@@ -52,7 +52,7 @@ import {
 import { isSourceUnchangedSinceSync } from '../core/git-head.ts';
 // v0.41.32.0: remote staleness reads the stored newest_content_at column via
 // this pure comparator (no git subprocess on the HTTP MCP doctor path).
-import { lagFromContentMs } from '../core/source-health.ts';
+import { lagFromContentMs, failedJobsHint } from '../core/source-health.ts';
 import { CHUNKER_VERSION } from '../core/chunkers/code.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from '../core/link-extraction.ts';
 import { isUndefinedColumnError } from '../core/utils.ts';
@@ -2596,7 +2596,7 @@ export async function checkFederationHealth(engine: BrainEngine): Promise<Check>
         warns.push(`${m.source_id}: ${m.embed_coverage_pct.toFixed(1)}% embed coverage — run \`gbrain jobs submit embed-backfill --params '{"sourceId":"${m.source_id}"}'\``);
       }
       if (m.failed_jobs_24h >= 3) {
-        warns.push(`${m.source_id}: ${m.failed_jobs_24h} failures in 24h — check \`gbrain jobs list --status failed\``);
+        warns.push(`${m.source_id}: ${failedJobsHint(m)}`);
       }
     }
 

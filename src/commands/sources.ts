@@ -882,7 +882,7 @@ async function runFederate(engine: BrainEngine, args: string[], value: boolean):
     if (!(await isFederatedV2Enabled(engine))) return;
 
     const { loadAllSources } = await import('../core/sources-load.ts');
-    const { computeAllSourceMetrics } = await import('../core/source-health.ts');
+    const { computeAllSourceMetrics, failedJobsHint } = await import('../core/source-health.ts');
     const sources = await loadAllSources(engine, { includeArchived: false });
     const metrics = await computeAllSourceMetrics(engine, sources);
     const m = metrics.find((x) => x.source_id === id);
@@ -908,7 +908,7 @@ async function runFederate(engine: BrainEngine, args: string[], value: boolean):
 async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
   const json = args.includes('--json');
   const { loadAllSources } = await import('../core/sources-load.ts');
-  const { computeAllSourceMetrics } = await import('../core/source-health.ts');
+  const { computeAllSourceMetrics, failedJobsHint } = await import('../core/source-health.ts');
   const sources = await loadAllSources(engine, { includeArchived: false });
   if (sources.length === 0) {
     if (json) {
@@ -985,7 +985,7 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
       warns.push(`${(100 - m.embed_coverage_pct).toFixed(1)}% un-embedded — run \`gbrain embed --stale --source ${m.source_id}\``);
     }
     if (m.failed_jobs_24h >= 3) {
-      warns.push(`${m.failed_jobs_24h} failures in 24h — check \`gbrain jobs list --status failed\``);
+      warns.push(failedJobsHint(m));
     }
     if (warns.length > 0) {
       console.log(`  ⚠ ${m.source_id}: ${warns.join('; ')}`);
