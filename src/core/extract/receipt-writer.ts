@@ -152,6 +152,24 @@ function receiptFailureState(input: ExtractReceiptInput): ReceiptFailureState {
  * Non-hex / non-alphanumeric chars survive (op-checkpoint ids may
  * include dashes or other separators).
  */
+/**
+ * Build a run id whose entropy survives `shortRunId`.
+ *
+ * `receiptSlug` keeps only the first 8 characters, so a run id that LEADS with
+ * a kind label spends the window on a constant — `atoms-` left 2 distinguishing
+ * characters, `efacts-` 1, `concepts-` none. Same kind + same source + same day
+ * then rendered the identical slug, and writeReceipt upserts, so the later
+ * receipt overwrote the earlier one. Put the base36 millisecond stamp FIRST so
+ * it fills the whole window; the label stays for readability after it.
+ */
+export function buildExtractRunId(
+  label: string,
+  sourceId: string,
+  nowMs: number = Date.now(),
+): string {
+  return `${nowMs.toString(36)}-${label}-${sourceId.slice(0, 4)}`;
+}
+
 export function shortRunId(runId: string): string {
   return runId.slice(0, RUN_ID_SHORT_LEN);
 }

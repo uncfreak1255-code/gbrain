@@ -38,7 +38,7 @@ import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
 import { chat as gatewayChat } from '../ai/gateway.ts';
-import { writeReceipt, type ExtractReceiptFailure } from '../extract/receipt-writer.ts';
+import { writeReceipt, type ExtractReceiptFailure, buildExtractRunId } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 import { createHash } from 'crypto';
@@ -676,7 +676,7 @@ export async function runPhaseExtractAtoms(
   // best-effort per F-OUT-19 — audit-trail / search-visibility surfaces don't
   // block the phase result.
   if (!opts.dryRun && (totalAtomsExtracted > 0 || failures.length > 0 || deadlineElapsed)) {
-    const runId = `atoms-${Date.now().toString(36)}-${sourceId.slice(0, 4)}`;
+    const runId = buildExtractRunId('atoms', sourceId);
     try {
       await writeReceipt(engine, {
         kind: 'atoms',
