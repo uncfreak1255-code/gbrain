@@ -822,6 +822,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           if (await isFederatedV2Enabled(engine)) {
             const { loadAllSources } = await import('../core/sources-load.ts');
             const { isAutopilotSyncableSource } = await import('./autopilot-fanout.ts');
+            const { decideFreshnessDispatch } = await import('../core/source-recovery-block.ts');
+            const { newestTerminalSyncJob } = await import('../core/source-sync-history.ts');
             const sources = await loadAllSources(engine);
             const intervalMs = baseInterval * 1000;
             const now = Date.now();
@@ -842,6 +844,31 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
               const lastSyncMs = src.last_sync_at ? new Date(src.last_sync_at).getTime() : 0;
               const ageMs = now - lastSyncMs;
               if (ageMs < intervalMs) continue; // fresh enough
+              // A recovery-manifest mismatch is DETERMINISTIC: it cannot clear
+              // without an operator re-export. Without this block each interval
+              // mints a fresh idempotency key and resubmits, so the source dies
+              // on the same unchangeable condition forever (observed: 166 dead
+              // sync jobs in 24h on one source). Blocking removes attempts to
+              // import an unproven checkout, so it strengthens the guard rather
+              // than weakening it. Any newer terminal outcome resumes dispatch.
+              const blockDecision = decideFreshnessDispatch(
+                await newestTerminalSyncJob(engine, src.id),
+              );
+              if (blockDecision.skip) {
+                if (jsonMode) {
+                  process.stderr.write(JSON.stringify({
+                    event: 'freshness_blocked',
+                    source_id: src.id,
+                    reason: blockDecision.reason,
+                    remedy: blockDecision.remedy,
+                  }) + '\n');
+                } else {
+                  console.log(
+                    `[dispatch] BLOCKED sync source=${src.id} (${blockDecision.reason}): ${blockDecision.remedy}`,
+                  );
+                }
+                continue;
+              }
               try {
                 const job = await queue.add(
                   'sync',
