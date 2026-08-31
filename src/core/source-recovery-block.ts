@@ -29,7 +29,8 @@
  * Blocking dispatch preserves that invariant strictly — it removes attempts to
  * import an unproven checkout. It never imports anything the guard would have
  * rejected, and it cannot mask a different failure: only the recovery-manifest
- * signature blocks, and any newer terminal outcome supersedes the block.
+ * signature blocks. A newer terminal job OR a later `sources.last_sync_at`
+ * (an in-process `gbrain sync` never writes a minion_jobs row) supersedes it.
  */
 
 /**
@@ -48,6 +49,8 @@ export interface TerminalSyncJobLike {
   status?: string | null;
   /** Newest failure text for the job (error column or last history entry). */
   error?: string | null;
+  /** When the job reached a terminal state (or last update if unfinished). */
+  finishedAt?: Date | string | null;
 }
 
 /** True when this text is the deterministic recovery-manifest failure. */
@@ -75,20 +78,29 @@ const DISPATCH_ALLOWED: FreshnessDispatchDecision = {
  * Decide whether autopilot may dispatch a freshness sync for a source.
  *
  * Blocks ONLY when the newest TERMINAL sync job for the source died on the
- * recovery-manifest signature. Consequences of that narrowness, all deliberate:
+ * recovery-manifest signature AND no later successful in-process sync is
+ * proven. Consequences of that narrowness, all deliberate:
  *
  *   - A newer terminal job of any other kind (including a success) supersedes
- *     the block, so a completed re-export resumes dispatch automatically with
- *     no state to clear by hand.
+ *     the block, so a completed queued sync resumes dispatch automatically
+ *     with no state to clear by hand.
+ *   - A `sources.last_sync_at` later than that blocking job also clears:
+ *     `gbrain sync` stamps last_sync_at in-process and never writes a
+ *     minion_jobs row, so job history alone would leave the source wedged
+ *     after the operator followed the printed remedy.
+ *   - A last_sync_at older than the blocking job does not clear: that stamp
+ *     is the pre-failure sync, not proof the condition changed.
  *   - A non-terminal newest job (waiting/active) does not block: nothing is
  *     proven while a job is still in flight.
  *   - No job history at all does not block: a source that has never synced
  *     must be allowed to try.
  *
  * @param newestTerminalSyncJob The newest sync job for the source, or null.
+ * @param lastSyncAt `sources.last_sync_at` for the same source, if known.
  */
 export function decideFreshnessDispatch(
   newestTerminalSyncJob: TerminalSyncJobLike | null | undefined,
+  lastSyncAt?: Date | string | null,
 ): FreshnessDispatchDecision {
   const job = newestTerminalSyncJob;
   if (!job) return DISPATCH_ALLOWED;
@@ -102,14 +114,35 @@ export function decideFreshnessDispatch(
 
   if (!isRecoveryRequiredError(job.error)) return DISPATCH_ALLOWED;
 
+  // In-process `gbrain sync` is the documented remedy and never enqueues a
+  // job. A later last_sync_at is the same proof as a completed job row.
+  if (isLaterTimestamp(lastSyncAt, job.finishedAt)) return DISPATCH_ALLOWED;
+
   return {
     skip: true,
     reason: 'recovery_required',
     remedy:
       'Recovery checkout does not match the trusted source. Re-export it with ' +
       '`gbrain export --source <id> --dir <new-private-dir>` and sync once by ' +
-      'hand; freshness dispatch resumes on the next terminal outcome.',
+      'hand; freshness dispatch resumes after that successful sync.',
   };
+}
+
+/** True when `later` is a real timestamp strictly after `earlier`. */
+function isLaterTimestamp(
+  later: Date | string | null | undefined,
+  earlier: Date | string | null | undefined,
+): boolean {
+  const laterMs = timestampMs(later);
+  const earlierMs = timestampMs(earlier);
+  if (laterMs == null || earlierMs == null) return false;
+  return laterMs > earlierMs;
+}
+
+function timestampMs(value: Date | string | null | undefined): number | null {
+  if (value == null) return null;
+  const ms = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : null;
 }
 
 export const _internal = { RECOVERY_REQUIRED_SIGNATURE, TERMINAL_STATUSES };

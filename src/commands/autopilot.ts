@@ -850,9 +850,11 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
               // on the same unchangeable condition forever (observed: 166 dead
               // sync jobs in 24h on one source). Blocking removes attempts to
               // import an unproven checkout, so it strengthens the guard rather
-              // than weakening it. Any newer terminal outcome resumes dispatch.
+              // than weakening it. A newer terminal job OR a later last_sync_at
+              // (hand `gbrain sync` never writes a minion_jobs row) resumes.
               const blockDecision = decideFreshnessDispatch(
                 await newestTerminalSyncJob(engine, src.id),
+                src.last_sync_at,
               );
               if (blockDecision.skip) {
                 if (jsonMode) {

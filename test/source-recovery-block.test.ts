@@ -6,7 +6,8 @@
  * "Invalid source-scoped recovery manifest" guard, which cannot resolve without
  * an operator re-export. These lock the block narrow: it must stop THAT storm
  * and nothing else, and it must never keep a source blocked after the condition
- * actually changes.
+ * actually changes — including a successful in-process `gbrain sync` that
+ * stamps `last_sync_at` without writing a newer `minion_jobs` row.
  */
 import { describe, test, expect } from 'bun:test';
 import {
@@ -93,5 +94,57 @@ describe('decideFreshnessDispatch', () => {
 
   test('a terminal job with no error text does not block', () => {
     expect(decideFreshnessDispatch({ status: 'dead', error: null }).skip).toBe(false);
+  });
+
+  test('a later last_sync_at (hand gbrain sync) lifts the block', () => {
+    // `gbrain sync` stamps last_sync_at and never writes a minion_jobs row.
+    // After the age gate expires, the old dead recovery job is still newest
+    // — without this compare, freshness stays wedged after the printed remedy.
+    const d = decideFreshnessDispatch(
+      {
+        status: 'dead',
+        error: REAL_ERROR,
+        finishedAt: '2026-08-30T10:00:00.000Z',
+      },
+      '2026-08-30T11:00:00.000Z',
+    );
+    expect(d.skip).toBe(false);
+    expect(d.reason).toBe(null);
+  });
+
+  test('an older last_sync_at does not lift the block', () => {
+    // That stamp is the pre-failure sync, not proof the condition changed.
+    const d = decideFreshnessDispatch(
+      {
+        status: 'dead',
+        error: REAL_ERROR,
+        finishedAt: '2026-08-30T11:00:00.000Z',
+      },
+      '2026-08-30T10:00:00.000Z',
+    );
+    expect(d.skip).toBe(true);
+    expect(d.reason).toBe('recovery_required');
+  });
+
+  test('last_sync_at cannot lift when the blocking job has no timestamp', () => {
+    expect(
+      decideFreshnessDispatch(
+        { status: 'dead', error: REAL_ERROR },
+        '2026-08-30T11:00:00.000Z',
+      ).skip,
+    ).toBe(true);
+  });
+
+  test('Date last_sync_at later than Date finishedAt lifts the block', () => {
+    expect(
+      decideFreshnessDispatch(
+        {
+          status: 'dead',
+          error: REAL_ERROR,
+          finishedAt: new Date('2026-08-30T10:00:00.000Z'),
+        },
+        new Date('2026-08-30T11:00:00.000Z'),
+      ).skip,
+    ).toBe(false);
   });
 });
