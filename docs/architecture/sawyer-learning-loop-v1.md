@@ -24,104 +24,109 @@ objective outcome or user correction
 updated knowledge and canary evidence
 ```
 
-V1 runs for **ten eligible Codex sessions** and finalizes itself with one verdict:
+V1 runs for **ten eligible Codex sessions within one canary run** and finalizes that run with one verdict:
 
 - **keep** — safe and useful, but not yet proven enough to broaden;
-- **repair** — one bounded component must be corrected before further use;
+- **repair** — one bounded component must be corrected before another run starts;
 - **broaden** — reliable enough to add Claude ingestion through the same provider-neutral contract.
 
 The user must not maintain a Markdown promotion flow, remember an end date, inspect a queue, advance a counter, or revisit the experiment manually.
 
-V1 is the single active personal-agent self-improvement initiative. It does not include research ingestion, automatic skill edits, Seascape canon promotion, deployment, scheduling, or live activation.
+V1 is the single active personal-agent self-improvement initiative. It excludes research ingestion, automatic skill edits, Seascape canon promotion, deployment, scheduling, and live activation.
 
 ## 2. Definition of done
 
-V1 is complete only when all of the following are true:
+V1 is complete when:
 
-1. Ten eligible Codex sessions are counted automatically and exactly once.
+1. Ten eligible Codex sessions are counted automatically and exactly once within one `run_id`.
 2. Each eligible completion is captured without blocking normal Codex work.
-3. Qualified direct preferences, goals, corrections, proven lessons, and repeated friction can update private canonical GBrain knowledge.
-4. Single-session agent inference cannot silently become an active belief.
-5. A processed direct correction supersedes the conflicting belief in canonical Markdown and survives rebuild.
+3. Direct preferences, goals, corrections, proven lessons, and repeated friction may update private canonical GBrain knowledge.
+4. Single-session agent inference cannot silently become active truth.
+5. Direct correction supersedes the conflicting canonical row and survives rebuild.
 6. A later session receives at most five relevant learned items under an 800-token budget.
-7. Every supplied memory is identified by a **brain-qualified rebuild-stable pointer**.
-8. Outcomes and later corrections are linked to those exact pointers.
-9. The canary finalizes itself once and emits `keep`, `repair`, or `broaden` with traceable evidence.
-10. Injection can be disabled independently of capture.
-11. Nothing writes Seascape canon or performs an external action.
-12. Sawyer performs no recurring maintenance action to keep the loop running.
+7. Every supplied memory uses a **brain-qualified rebuild-stable pointer**.
+8. Outcomes and corrections link to those exact pointers and the active `run_id`.
+9. Each canary run finalizes exactly once with `keep`, `repair`, or `broaden`.
+10. A later bounded rerun can start without deleting prior evidence.
+11. Injection can be disabled independently of capture.
+12. Nothing writes Seascape canon or performs an external action.
+13. Sawyer performs no recurring maintenance action.
 
-Storage, extraction, or a generated summary alone does not satisfy this definition.
+Storage or summarization alone does not satisfy V1.
 
-## 3. Non-negotiable invariants
+## 3. Core invariants
 
 ### 3.1 Filesystem-canonical personal knowledge
 
 Durable personal knowledge follows the existing GBrain system-of-record contract:
 
-- canonical personal beliefs live in Markdown under a user-owned GBrain source;
-- fact fences are the durable representation;
+- canonical beliefs live in Markdown under a user-owned GBrain source;
+- fact fences are durable;
 - database fact rows are rebuildable indexes;
 - database-only memory is not authoritative;
-- corrections must survive rebuild by changing the canonical fence.
+- corrections change canonical fences and survive rebuild.
 
-V1 does not introduce a new authoritative memory database.
+No new authoritative memory database is introduced.
 
 ### 3.2 Brain identity is part of memory identity
 
-GBrain has two independent routing axes: **brain** and **source**. `source_id`, slug, and row number identify a fact only inside one brain.
+GBrain routes independently by **brain** and **source**. Source ID, slug, and row number are only unique inside a brain.
 
-Therefore every durable personal-memory pointer and configured canonical destination must include the resolved brain identity. Learning Loop operations must route explicitly to that brain and must never inherit an unrelated `.gbrain-mount`, `GBRAIN_BRAIN_ID`, working-directory mount, or other ambient checkout routing.
+Therefore every durable personal-memory pointer and configured personal destination includes `brain_id`. After the destination is armed, every Learning Loop activation, retrieval, correction, rebuild check, and outcome operation routes explicitly to that brain and source. Ambient `.gbrain-mount`, `GBRAIN_BRAIN_ID`, cwd-based mount resolution, or another checkout cannot silently redirect the operation.
 
-This prevents a later Codex session running from a team/mounted checkout from resolving or mutating the same source/slug coordinates in the wrong database.
+### 3.3 Canary terminal state is run-scoped
 
-### 3.3 Operational evidence is not personal truth
+The event ledger is historical and append-only. It may contain multiple canary attempts over time.
 
-Session, injection, outcome, and canary events are operational evidence. They may live in one append-only local JSONL ledger under `$GBRAIN_HOME`. The ledger may nominate or support a canonical belief, but it is not the active personal operating model.
+Every `canary_armed` creates a unique `run_id`. All run-specific events carry that `run_id`. Counting, hard failures, baselines, beneficial-use evidence, and `canary_finalized` are reduced **within one run only**.
 
-### 3.4 Personal and Seascape authority remain separate
+A terminal event from an older run must never block a later explicitly armed rerun. Historical evidence remains preserved; it is not deleted or rewritten to restart the experiment.
 
-- Personal operating preferences and cross-vendor lessons belong to the configured personal brain/source.
+Only one run may be `armed` or `running` at a time in V1.
+
+### 3.4 Operational evidence is not personal truth
+
+Session, injection, outcome, and canary events are operational evidence in one append-only local ledger. They may nominate or support canonical knowledge, but they are not the active operating model.
+
+### 3.5 Personal and Seascape authority remain separate
+
+- Personal operating knowledge belongs to the configured personal brain/source.
 - Seascape business claims remain controlled business knowledge.
-- A personal session may produce an existing candidate-only Seascape writeback evaluation.
+- Existing candidate-only Seascape writeback evaluation may surface a candidate.
 - V1 cannot promote, rewrite, merge, deploy, send, or otherwise mutate Seascape canon or an external system.
 
-### 3.5 Clients remain thin
+### 3.6 Thin clients; fail open for work, fail closed for learning
 
-Provider-specific clients submit normalized events and request context through the GBrain operation layer. They do not own distillation, thresholds, memory selection, correction semantics, routing policy, or canary scoring.
+Provider clients submit normalized events and request context. They do not own thresholds, routing, correction semantics, or canary scoring.
 
-### 3.6 Fail open for work, fail closed for learning
-
-Capture, retrieval, telemetry, and canary-accounting failures must never prevent ordinary Codex work. Failure returns no injected context and records a local diagnostic when possible.
-
-Uncertain learning remains inactive. A routing ambiguity, session-identity conflict, or contradictory observation must not silently become truth.
+Capture/retrieval/telemetry failure must not block ordinary Codex work. Routing ambiguity, session-identity conflict, contradictory learning, or unavailable canonical brain fails closed for learning and returns no injected context when appropriate.
 
 ### 3.7 No supervision layer
 
-V1 creates no dashboard, work queue, standing approval step, agent hierarchy, notification channel, or receipt-review obligation. The terminal user surface is one plain-English conclusion with enough evidence to trust it.
+No dashboard, queue, standing approval step, agent hierarchy, notification channel, or receipt-review obligation is created. The user sees one plain-English conclusion and real exceptions.
 
 ## 4. Existing GBrain primitives to reuse
 
 | Need | Existing seam | V1 treatment |
 |---|---|---|
-| Transcript enumeration/hashing | `src/core/cycle/transcript-discovery.ts` | Reuse; no second corpus walker |
+| Transcript discovery/hashing | `src/core/cycle/transcript-discovery.ts` | Reuse; no second corpus walker |
 | Recent local transcripts | `src/core/transcripts.ts` | Reuse local-only boundary |
 | Conversation parsing | `src/core/conversation-parser/*` | Reuse |
-| Durable facts | fact fences + `src/core/cycle/extract-facts.ts` | Keep Markdown canonical |
-| Duplicate/supersede classification | `src/core/facts/classify.ts` | Supporting evidence only; user correction outranks it |
-| Durable correction | `src/core/facts/forget.ts` + fence renderer | Reuse fence-rewrite semantics |
-| Brain/source routing | existing brain + source resolver | Resolve once, persist brain identity, then route explicitly |
-| Proactive context discovery | `src/core/context/volunteer.ts` | Reuse precision-biased discovery |
-| Context telemetry | `src/core/context/volunteer-events.ts` | Reuse/compose; add exact memory-pointer linkage |
-| Friction evidence | `src/core/friction.ts` | Evidence source, not truth |
+| Durable facts | fact fences + `src/core/cycle/extract-facts.ts` | Markdown remains canonical |
+| Duplicate/supersede classification | `src/core/facts/classify.ts` | Supporting evidence; user correction outranks it |
+| Durable correction | `src/core/facts/forget.ts` + fence renderer | Reuse fence rewrite |
+| Brain/source routing | existing resolver | Resolve at arming, persist identity, route explicitly thereafter |
+| Context discovery | `src/core/context/volunteer.ts` | Reuse precision-biased discovery |
+| Context telemetry | `src/core/context/volunteer-events.ts` | Reuse/compose; add exact pointer/run linkage |
+| Friction evidence | `src/core/friction.ts` | Evidence, not truth |
 | Search telemetry | `src/core/eval-capture.ts` | Reuse privacy/operation-layer precedent |
-| Seascape boundary | `src/core/writeback-candidate.ts` | Preserve candidate-only / `writes:false` |
-| Kill switch | config-backed feature-flag pattern | One central Learning Loop mode resolver |
-| Skill optimization | `src/core/skillopt/*`, `src/core/skillify/*` | Explicitly out of V1 |
+| Seascape boundary | `src/core/writeback-candidate.ts` | Preserve candidate-only `writes:false` |
+| Feature flag | config-backed pattern | One central Learning Loop mode resolver |
+| Skill optimization | `src/core/skillopt/*`, `src/core/skillify/*` | Out of V1 |
 
 ## 5. Provider-neutral contracts
 
-### 5.1 Completed session envelope
+### 5.1 Completed session
 
 ```ts
 interface CompletedSessionV1 {
@@ -151,19 +156,15 @@ interface CompletedSessionV1 {
 }
 ```
 
-### 5.2 Session uniqueness and replay handling
+### 5.2 Session uniqueness and replay
 
-The uniqueness boundary is **`(provider, provider_session_id)`**.
+The uniqueness boundary is **`(provider, provider_session_id)`** across the ledger.
 
-On capture:
+1. First completion for the pair: persist it with `content_hash`.
+2. Same pair + same hash: idempotent retry; append no second completion and advance no run.
+3. Same pair + different hash: diagnostic identity conflict; append no second completion, perform no learning/counting from the conflicting delivery, and advance no run.
 
-1. If no prior completion exists for that pair, accept the event and persist its `content_hash`.
-2. If the pair already exists with the **same** `content_hash`, treat delivery as an idempotent retry. Append no second `session_completed` event and do not advance the canary.
-3. If the pair already exists with a **different** `content_hash`, fail closed for learning: append a diagnostic conflict, append no second completion, perform no distillation/injection accounting from the conflicting delivery, and do not advance the canary.
-
-A changing transcript cannot turn one provider session into two eligible sessions.
-
-Raw transcript paths are accepted only from trusted local callers. Remote MCP callers cannot use a path parameter to read arbitrary local files.
+A changing transcript cannot turn one provider session into multiple eligible sessions.
 
 ### 5.3 Session eligibility
 
@@ -178,24 +179,16 @@ interface SessionEligibilityV1 {
     | 'empty_or_too_short'
     | 'no_material_decision_or_outcome'
     | 'unsupported_provider'
-    | 'canary_already_terminal';
+    | 'run_already_terminal';
   signals: string[];
 }
 ```
 
-Eligibility is deterministic and pure after uniqueness has been established. A completed session qualifies when it contains at least one material signal:
+Eligibility runs only after uniqueness is established. Material signals include substantive implementation/repair outcome, PR/review disposition, explicit correction, meaningful strategy decision, repeated friction, verified reusable lesson, or a machine-owned open loop with an observable completion trigger.
 
-- substantive implementation or repair outcome;
-- pull-request or code-review disposition;
-- explicit user correction;
-- meaningful strategy decision;
-- repeated operating friction;
-- reusable lesson backed by objective evidence;
-- a machine-owned open loop with a real completion trigger.
+Simple lookups, empty/login-only/abandoned sessions, generated housekeeping, retries, conflicts, and terminal-run deliveries do not count.
 
-Simple lookups, empty starts, login-only failures, abandoned sessions, generated housekeeping, duplicate deliveries, and session-identity conflicts do not count.
-
-### 5.4 Canonical personal destination
+### 5.4 Personal destination
 
 ```ts
 interface PersonalMemoryDestinationV1 {
@@ -205,7 +198,7 @@ interface PersonalMemoryDestinationV1 {
 }
 ```
 
-Arming resolves and freezes this destination. Every later activation, correction, retrieval, rebuild check, and outcome operation must route explicitly to `brain_id` and `source_id` from the frozen destination.
+Arming resolves and freezes this destination. Later memory operations never re-resolve the destination from ambient checkout state.
 
 ### 5.5 Canonical memory pointer
 
@@ -224,13 +217,29 @@ Stable rendering:
 <brain_id>:<source_id>:<source_markdown_slug>#<row_num>
 ```
 
-The brain/source/page/row coordinate is rebuild-stable. Runtime database fact IDs must not be exposed as durable memory IDs.
+Runtime database fact IDs are not durable memory IDs.
 
-### 5.6 Context bundle
+### 5.6 Canary run
+
+```ts
+interface CanaryRunV1 {
+  run_id: string;
+  armed_at: string;
+  provider_allowlist: ['codex'];
+  target_eligible_sessions: 10;
+  destination: PersonalMemoryDestinationV1;
+  contract_version: 1;
+}
+```
+
+`run_id` is generated once at explicit arming and is immutable. All run-scoped events reference it.
+
+### 5.7 Context bundle
 
 ```ts
 interface LearningContextBundleV1 {
   schema_version: 1;
+  run_id: string;
   session_id: string;
   generated_at: string;
   request_hash: string;
@@ -247,13 +256,12 @@ interface LearningContextBundleV1 {
 }
 ```
 
-The agent receives readable statements. Exact brain-qualified pointers are retained for outcome linkage and explicit routing.
-
-### 5.7 Session outcome
+### 5.8 Session outcome
 
 ```ts
 interface SessionOutcomeV1 {
   schema_version: 1;
+  run_id: string;
   provider_session_id: string;
   observed_at: string;
   supplied: MemoryPointerV1[];
@@ -274,17 +282,15 @@ interface SessionOutcomeV1 {
 }
 ```
 
-`agent_report` may supplement evidence but cannot establish a beneficial use or override a user correction by itself.
+Agent self-report cannot establish a beneficial use or override a user correction by itself.
 
 ## 6. Local event ledger
-
-V1 uses one append-only versioned local event stream:
 
 ```text
 $GBRAIN_HOME/learning-loop/events-v1.jsonl
 ```
 
-Allowed event types:
+Event types:
 
 - `canary_armed`
 - `session_completed`
@@ -297,104 +303,87 @@ Allowed event types:
 - `canary_finalized`
 - `diagnostic`
 
-Requirements:
+Rules:
 
-1. Every line carries `schema_version`, timestamp, event ID, and relevant provider session ID.
-2. Writes are append-only and malformed-line tolerant like the friction ledger.
-3. Canary state is reduced from events; no mutable integer is the sole source of truth.
-4. The reducer enforces uniqueness by `(provider, provider_session_id)` before counting or distillation.
-5. Same-hash replay is idempotent; different-hash replay is a diagnostic conflict.
-6. Finalization is idempotent. Once `canary_finalized` exists, later events cannot refinalize it.
-7. The ledger stores hashes, brain-qualified pointers, classifications, and bounded references rather than duplicating full transcripts.
-8. Candidate observations may remain ledger-only because they are not active truth.
+1. Every line carries schema version, timestamp, event ID, and provider session ID when relevant.
+2. Every event from `canary_armed` through `canary_finalized` that affects run state carries `run_id`.
+3. Session uniqueness is global by `(provider, provider_session_id)` before run counting.
+4. Canary state is reduced from events filtered by `run_id`.
+5. A `canary_finalized(run_id=A)` makes only run A terminal.
+6. A later explicitly armed run B may start without deleting run A evidence.
+7. At most one nonterminal run exists in V1; arming another while one is active fails closed.
+8. Same-hash replay is idempotent; different-hash replay is diagnostic conflict.
+9. The ledger stores hashes, brain-qualified pointers, classifications, run IDs, and bounded references—not full transcripts.
+
+Candidate observations may remain ledger-only because they are not active truth.
 
 ## 7. Distillation and authority
 
-V1 may learn:
-
-- **constraint** — a hard way agents should or should not operate;
-- **preference** — a durable user preference;
-- **goal** — a current objective with a completion/expiry condition when practical;
-- **lesson** — an approach proven to work or fail;
-- **friction** — a repeated supervision problem that may later become a lesson;
-- **open loop** — unfinished work only when it has a machine-observable completion trigger;
-- **business candidate** — quarantined observation relevant to Seascape but not business truth.
-
-Activation rules:
+Learnable classes: constraint, preference, goal, lesson, friction, open loop, and quarantined business candidate.
 
 | Evidence | Treatment |
 |---|---|
 | Direct user correction | Activate immediately and supersede conflict |
-| Explicit durable user preference | May activate immediately |
+| Explicit durable preference | May activate immediately |
 | Explicit current goal | May activate immediately |
-| Verified operational outcome | May activate/strengthen a lesson |
+| Verified operational outcome | May activate/strengthen lesson |
 | Same friction in two independent eligible sessions | May activate scoped lesson |
-| Same self-improvement opportunity in three independent sessions | Future candidate only; V1 edits nothing |
+| Same self-improvement opportunity in three independent sessions | Future candidate only |
 | Single agent inference | Candidate only |
 | External research | Out of V1 |
-| Seascape business claim | Quarantine / existing candidate-only boundary |
+| Seascape business claim | Quarantine/candidate-only boundary |
 
-A session is independent only when its `(provider, provider_session_id)` differs from all earlier counted sessions. Content hashes help detect replay and corruption; they do not create a second session identity.
+A session is independent only when its `(provider, provider_session_id)` differs from every earlier counted session. Content hashes detect retries/conflicts; they do not define a second session identity.
 
-### Canonical placement
-
-V1 writes active personal learning only to the frozen `PersonalMemoryDestinationV1`. Ambient brain/source resolution may be used during explicit arming to choose the destination, but after arming all operations route by the frozen `brain_id` and `source_id`.
-
-All activated rows are private. Existing fact kinds and fence schema are reused; do not widen the fact fence solely for V1.
+Active personal learning writes only to the frozen destination. Ambient routing may choose the destination at explicit arming, never afterward.
 
 ### Correction algorithm
 
 A direct correction must:
 
-1. route explicitly to the pointer's `brain_id` and `source_id`;
+1. route to the pointer's `brain_id` and `source_id`;
 2. identify the active conflicting canonical row;
 3. append the corrected row;
-4. strike the old row and add `superseded by #N` through the existing renderer;
-5. reconcile the derived fact index in that same brain/source;
-6. append `memory_superseded` with old and new brain-qualified pointers;
-7. prevent the old pointer from selection immediately;
-8. pass a rebuild regression proving the old belief remains inactive.
+4. strike the old row with `superseded by #N` through the existing renderer;
+5. reconcile the derived index in that same brain/source;
+6. append `memory_superseded` with brain-qualified old/new pointers and current `run_id` if a run is active;
+7. exclude the old pointer immediately;
+8. survive full rebuild.
 
-Appending a second contradictory active row is a failure.
+Two contradictory active rows are a failure.
 
 ## 8. Retrieval and injection
 
-Selection order:
+Ranking order:
 
 1. Directly applicable hard constraints.
-2. Directly applicable explicit current goals.
+2. Explicit current goals.
 3. Proven repository/project lessons.
 4. Relevant durable preferences.
 5. At most one machine-owned open loop.
 
-Never inject inactive, forgotten, superseded, candidate-only, stale PR, completed/triggerless, unrelated business, raw transcript, or merely recent items.
+Never inject inactive/superseded/forgotten rows, candidate-only inference, stale PR state, completed/triggerless work, unrelated business facts, raw transcripts, or items merely because they are recent.
 
-Every retrieval starts from the frozen personal destination and routes explicitly to its `brain_id`. A current checkout's mounted brain must not change the lookup target.
+Every retrieval starts from the active run's frozen personal destination and routes explicitly to its `brain_id` and `source_id`.
 
-A `context_supplied` event is appended before substantive agent work and contains provider session ID, request hash, exact brain-qualified pointers, ranking rationale, token estimate, and mode.
+Before substantive agent work, append `context_supplied` with `run_id`, provider session ID, request hash, exact brain-qualified pointers, ranking rationale, token estimate, and mode.
 
 ## 9. Outcome measurement
 
-Strong evidence includes:
-
-- explicit user correction;
-- user repeating an instruction already supplied in the bundle;
-- agent asking for information contained in a supplied memory;
-- objective test/build/review/merge/deploy evidence;
-- a known recurrent failure being avoided in a comparable successful task;
-- a machine-owned completion trigger firing;
-- a supplied item demonstrably causing a wrong action.
+Strong evidence includes explicit correction, repeated known instruction, re-asked known answer, objective test/build/review/merge/deploy evidence, avoidance of a known recurrent failure in a comparable task, machine-owned trigger completion, or a supplied item causing a wrong action.
 
 Agent self-report is weak evidence only.
 
-Outcome processing must use the `brain_id` carried by each supplied pointer. It may strengthen, narrow, supersede, or mark an item irrelevant for a scope, but must not delete an active canonical belief merely because it was unused.
+Outcome processing routes by each pointer's `brain_id` and is reduced within the relevant `run_id`. Non-use alone cannot delete canonical belief.
 
-## 10. Canary state machine
+## 10. Canary lifecycle
 
 ```text
-off ──explicit arm──> armed ──first eligible completion──> running
-                                              │
-                                              └──10th eligible completion──> terminal
+off
+  └─ explicit arm → run A: armed → running → terminal
+                               │
+                               └─ repair verdict → bounded fix
+                                                    └─ explicit re-arm → run B
 ```
 
 Configuration:
@@ -403,71 +392,67 @@ Configuration:
 learning_loop.mode = off | capture | canary
 ```
 
-- `off`: no Learning Loop capture or injection;
-- `capture`: capture/distill/outcome evidence; inject nothing; advance no canary;
-- `canary`: capture, inject, measure, and count eligible Codex sessions.
+- `off`: no V1 capture or injection;
+- `capture`: capture/distill/outcome evidence, inject nothing, advance no canary;
+- `canary`: run-scoped capture, injection, measurement, and counting.
 
-Default is `off`. Repository merge does not activate V1.
+Default is `off`. Merge never activates V1.
 
 ### Arming
 
-`canary_armed` freezes:
+Explicit arming:
 
-- contract version;
-- activation timestamp;
-- provider allow-list (`codex` only);
-- target count (`10`);
-- thresholds;
-- full `PersonalMemoryDestinationV1` including `brain_id`;
-- current GBrain version;
-- optional automatic baseline references.
+1. refuses if a nonterminal run already exists;
+2. creates a new immutable `run_id`;
+3. freezes contract version, activation time, provider allow-list, target count, thresholds, full personal destination including `brain_id`, GBrain version, and optional baseline references;
+4. appends `canary_armed` for that run.
 
-If enough prior transcripts exist, arming may freeze up to ten prior eligible sessions as comparison evidence. Missing baseline data prevents `broaden` but does not force `repair`.
+A later rerun after `repair` creates a **new** `run_id`; prior run evidence remains historical and immutable.
 
 ### Counting
 
-- Only unique `eligible=true` Codex completions after `canary_armed` count.
-- `(provider, provider_session_id)` is the uniqueness boundary.
-- Same-hash duplicate delivery is ignored for counting.
-- Different-hash delivery for an existing session ID is diagnostic conflict and never counts.
-- Unsupported providers do not count.
-- Session ten triggers one fail-closed finalization reduction.
-- Once terminal, later sessions do not alter the verdict.
+- only unique eligible Codex completions assigned to the active run count;
+- same-session same-hash retry does not count twice;
+- same-session different-hash conflict never counts;
+- unsupported providers do not count;
+- session ten finalizes that `run_id` once;
+- events from prior terminal runs do not affect the new run's count or verdict.
 
-### Hard failure conditions
+### Hard failures
 
-Any of these forces `repair`:
+Any of these forces `repair` for the current run:
 
-- a processed corrected belief is supplied again;
-- a memory operation resolves against a different brain than its frozen destination/pointer;
-- an unsupported high-impact belief causes an action;
-- a Seascape canon or external write occurs through V1;
-- duplicate/conflicting completion advances the counter;
-- the canary requires Sawyer to remember or manually advance it;
-- injection materially blocks ordinary Codex work;
-- finalization is non-deterministic or occurs more than once.
+- corrected belief supplied again;
+- memory operation targets a brain other than its frozen destination/pointer;
+- unsupported high-impact belief causes action;
+- Seascape canon/external write occurs through V1;
+- duplicate/conflicting completion advances count;
+- active-run state leaks across `run_id`s;
+- rerun requires deletion of historical ledger evidence;
+- Sawyer must remember/manually advance the canary;
+- injection materially blocks ordinary work;
+- finalization for one `run_id` occurs more than once or is non-deterministic.
 
 ### Verdict
 
-**Broaden** only when all hard gates pass, at least three beneficial uses have strong traceable evidence, no more than two materially irrelevant injections occur, direct correction propagation passes, baseline comparison improves when available, and no recurring maintenance is assigned to Sawyer.
+**Broaden** only when all hard gates pass, at least three beneficial uses have strong evidence, no more than two materially irrelevant injections occur, correction propagation passes, baseline improves when available, and no recurring maintenance is assigned to Sawyer.
 
-The only V1-authorized broadening is adding a Claude adapter to these same contracts.
+Only authorized broadening: add Claude through the same contracts.
 
-**Keep** when hard gates pass and the system is low-maintenance but evidence is insufficient for `broaden`.
+**Keep** when hard gates pass but evidence is insufficient for broaden.
 
-**Repair** when capture, identity/routing, relevance, correction, or measurement is not trustworthy. Name exactly one smallest component to repair before rerunning a bounded canary.
+**Repair** when capture, run scoping, identity/routing, relevance, correction, or measurement is not trustworthy. Name one smallest component to repair; a later bounded rerun uses a fresh `run_id`.
 
 ## 11. Privacy and security
 
-1. Raw transcript access remains local-only.
-2. Transcript paths resolve only under configured corpus roots.
-3. No raw transcript is exposed through remote MCP.
-4. Model-assisted distillation uses existing AI-gateway privacy/provider controls.
-5. Active Learning Loop facts are `visibility=private`.
-6. Operational events store hashes, brain-qualified pointers, classifications, and bounded references rather than conversation bodies.
-7. Existing self-consumption guards remain in force.
-8. Generated Learning Loop output must not be rediscovered as a new raw session.
-9. Seascape writeback remains fail-closed on ambiguous ownership/proof.
+1. Raw transcript access remains local-only and under configured corpus roots.
+2. No raw transcript is exposed through remote MCP.
+3. Model-assisted distillation uses existing AI-gateway privacy/provider controls.
+4. Active Learning Loop facts are private.
+5. Events store hashes, run IDs, brain-qualified pointers, classifications, and bounded references rather than conversation bodies.
+6. Existing self-consumption guards remain active.
+7. Generated Loop output is not rediscovered as a raw session.
+8. Seascape writeback remains fail-closed on ambiguous ownership/proof.
 
 ## 12. Delivery sequence
 
@@ -475,171 +460,177 @@ Only one implementation PR may be actively mutated at a time.
 
 ### PR 0 — this contract
 
-Freeze architecture, identity/routing, replay semantics, state machine, gates, and delivery order. Runtime behavior remains unchanged.
+Freeze architecture, brain-qualified identity, session replay semantics, run-scoped lifecycle, acceptance gates, and delivery order. No runtime/config activation.
 
-### PR 1 — event contract, eligibility, idempotent capture
+### PR 1 — events, run identity, eligibility, idempotent capture
 
 Owned by GBrain.
 
-- Add provider-neutral event/types modules.
-- Add append-only ledger writer/reader/reducer with hermetic tests.
-- Enforce `(provider, provider_session_id)` uniqueness.
-- Same hash = idempotent retry; different hash = diagnostic conflict.
-- Add deterministic session eligibility.
-- Reuse transcript discovery/parser.
-- Add local-only completed-session operation/CLI seam.
-- Add `learning_loop.mode` resolver, default `off`.
-- Define/persist brain-qualified personal destination and pointer types needed by later PRs; do not retrieve or write memories yet.
-- Do not distill or inject.
+- provider-neutral event/types modules;
+- `PersonalMemoryDestinationV1`, `MemoryPointerV1`, `CanaryRunV1` types;
+- append-only ledger writer/reader/reducer;
+- `run_id` generation and one-active-run invariant;
+- global `(provider, provider_session_id)` uniqueness;
+- same hash retry = idempotent; different hash = diagnostic conflict;
+- deterministic session eligibility;
+- transcript discovery/parser reuse;
+- trusted-local completed-session operation/CLI seam;
+- `learning_loop.mode`, default off;
+- no distillation or injection.
 
 ### PR 2 — canonical activation and correction
 
-- Add observation classification and activation thresholds.
-- Route all writes explicitly to frozen `brain_id` + `source_id`.
-- Reuse facts classifier and fence renderer.
-- Add direct-correction supersession and rebuild proof.
-- Preserve Seascape boundary.
-- Do not inject.
+- observation classification/thresholds;
+- explicit frozen brain/source routing;
+- existing facts classifier/fence renderer;
+- direct correction supersession and rebuild proof;
+- Seascape boundary preserved;
+- no injection.
 
-### PR 3 — context bundle and exact injection telemetry
+### PR 3 — context bundle and exact telemetry
 
-- Reuse volunteer/retrieval discovery.
-- Start from frozen personal `brain_id` + `source_id`.
-- Select active facts by authority/scope/relevance.
-- Enforce five-item/800-token caps.
-- Append exact brain-qualified pointer ledger.
-- Expose one provider-neutral local operation.
-- Fail open to an empty bundle.
+- existing volunteer/retrieval discovery;
+- frozen personal destination routing;
+- authority/scope/relevance filtering;
+- five-item/800-token caps;
+- exact brain-qualified pointer + `run_id` ledger;
+- provider-neutral local operation;
+- fail open to empty context.
 
 ### PR 4 — thin Codex adapter
 
-Owned by the repository that already controls active Codex close/bootstrap hooks. Do not install equivalent hooks in both `agent-config` and `codex-config`.
+Owned by the existing active Codex hook owner only.
 
-- Bootstrap requests one Learning Context Bundle.
-- Close submits one Completed Session envelope and local objective evidence.
-- Retries preserve provider session ID.
-- Adapter does not own memory/routing logic.
-- No live activation in the PR.
+- bootstrap requests one context bundle;
+- close submits one Completed Session + local objective evidence;
+- retries preserve provider session ID;
+- no memory/routing/scoring logic in adapter;
+- no live activation in PR.
 
-### PR 5 — outcome reducer and finalization
+### PR 5 — outcome reducer and run finalization
 
-- Link exact supplied pointers to corrections, repetition, relevance, and objective outcomes.
-- Route feedback by pointer `brain_id`.
-- Add baseline comparison when available.
-- Implement deterministic ten-session verdict and plain-English result.
+- link supplied pointers to corrections/repetition/relevance/outcomes;
+- route feedback by pointer brain;
+- reduce evidence by `run_id`;
+- baseline comparison;
+- deterministic ten-session verdict and plain-English result;
+- support later explicit re-arm with new run ID after repair.
 
 ### PR 6 — successful-canary cleanup only
 
-Created only after `keep` or `broaden`.
+Only after `keep` or `broaden`:
 
-- Remove displaced manual personal-memory promotion.
-- Remove session summaries no runtime consumer uses.
-- Remove reminder-based canary tracking.
-- Remove duplicate context bootstrap paths.
-- Do not add Claude, research, skills, or business automation here.
+- remove displaced manual memory promotion;
+- remove unused session summaries;
+- remove reminder-based canary tracking;
+- remove duplicate context bootstrap paths;
+- no Claude/research/skills/business expansion here.
 
 ## 13. Minimum test matrix
 
-### Capture and state
+### Capture/run state
 
 - same `(provider, provider_session_id, content_hash)` retry is idempotent;
-- same `(provider, provider_session_id)` with different hash fails closed as diagnostic conflict;
-- neither replay case advances the canary twice;
-- interrupted, abandoned, empty, and lookup-only sessions do not count;
-- eligible session ten finalizes exactly once;
-- terminal canary ignores later completions;
+- same session identity with different hash is diagnostic conflict;
+- neither replay case advances count twice;
+- interrupted/abandoned/empty/lookup-only sessions do not count;
+- every run-scoped state event carries `run_id`;
+- session ten finalizes exactly once for that run;
+- old `canary_finalized` does not make a fresh run terminal;
+- a new run after `repair` starts without deleting old events;
+- arming while a run is nonterminal fails closed;
+- events from two run IDs never contaminate each other's counts/verdicts;
 - malformed event lines do not corrupt valid state;
-- `off`, `capture`, and `canary` differ as specified.
+- off/capture/canary modes differ as specified.
 
-### Brain routing and canonical memory
+### Brain routing/canonical memory
 
-- personal destination freezes a concrete `brain_id` + `source_id`;
+- arming freezes concrete `brain_id` + `source_id`;
 - memory pointer includes `brain_id`;
-- retrieval from a checkout pinned to a different `.gbrain-mount` still routes to the pointer/destination brain;
-- correction against a pointer cannot mutate the same coordinates in another brain;
-- unknown/unavailable brain fails closed for learning and fails open for ordinary agent work;
+- ambient different `.gbrain-mount` cannot redirect retrieval;
+- correction cannot mutate same coordinates in another brain;
+- unavailable/unknown brain fails closed for learning and open for ordinary work;
 - direct preference can activate;
-- single agent inference remains candidate-only;
-- repeated friction activates only at threshold;
+- single inference remains candidate-only;
+- friction activates only at threshold;
 - correction supersedes old row and survives rebuild;
-- unrelated fact-fence rows round-trip unchanged;
-- all active Learning Loop facts are private;
-- Seascape business candidate cannot enter the personal writer path.
+- unrelated fence rows round-trip unchanged;
+- active Loop facts are private;
+- Seascape candidate cannot enter personal writer.
 
-### Retrieval
+### Retrieval/outcome
 
-- inactive/superseded/forgotten rows are excluded;
-- authority and narrow scope outrank recency;
-- resolved open work is excluded;
-- at most one open loop is selected;
-- item/token caps are deterministic;
-- bundle pointers exactly match `context_supplied`;
-- retrieval failure returns empty bundle without blocking caller.
-
-### Outcome and verdict
-
-- agent self-report alone cannot count as beneficial use;
-- correction forces old pointer out of later bundles;
-- outcome routing uses pointer `brain_id`, not ambient mount;
-- re-asking known answer links to supplied pointer;
-- irrelevant injection counts once per session/pointer;
-- hard failures deterministically return `repair`;
-- `broaden` requires three strong beneficial uses;
-- missing baseline prevents `broaden` but not `keep`;
-- terminal rendering names evidence and one next action without exposing the ledger.
+- inactive/superseded/forgotten rows excluded;
+- authority/narrow scope outrank recency;
+- resolved work excluded;
+- at most one open loop;
+- item/token caps deterministic;
+- bundle pointers and `run_id` match `context_supplied`;
+- retrieval failure returns empty bundle without blocking;
+- self-report alone is not beneficial use;
+- correction removes old pointer from later bundles;
+- outcome routing uses pointer brain, not ambient mount;
+- irrelevant injection counts once per run/session/pointer;
+- broaden requires three strong beneficial uses;
+- missing baseline prevents broaden but not keep;
+- terminal rendering names evidence and one next action without exposing ledger.
 
 ## 14. Activation and rollback
 
 Merging implementation code does not activate V1.
 
-Activation is a separate explicit local action after implementation PRs are merged and exact-head proof is green:
+Activation after all implementation PRs are green:
 
-1. resolve and configure the existing user-owned personal `brain_id`, `source_id`, and operating-model slug;
-2. set `learning_loop.mode=capture` for one bounded smoke check;
-3. verify one completion is captured and no context is injected;
-4. explicitly set `learning_loop.mode=canary` to arm the ten-session run.
+1. resolve/configure personal `brain_id`, `source_id`, operating-model slug;
+2. set mode `capture` for one smoke check;
+3. verify completion capture with no injection;
+4. explicitly set `canary` and arm run A.
 
 Rollback:
 
-- `canary → capture` stops injection while preserving evidence;
-- `→ off` stops the full path;
-- rebuild derived indexes from canonical Markdown if needed;
-- Seascape remains untouched because V1 has no Seascape writer.
+- `canary → capture` stops injection while preserving events;
+- `→ off` stops V1;
+- derived indexes may rebuild from canonical Markdown;
+- Seascape stays untouched.
+
+After a `repair`, fix the named component, verify it, and explicitly arm a new run with a fresh `run_id`. Do not delete the prior run.
 
 ## 15. Long-term expansion order
 
-No expansion before the V1 verdict:
+After V1 only:
 
 1. Claude adapter using the same contracts.
-2. Research ingestion as sourced, freshness-bounded hypotheses.
+2. Research ingestion as sourced freshness-bounded hypotheses.
 3. General machine-owned experiment completion triggers.
 4. One-at-a-time skill/config proposals after repeated or severe verified evidence.
 5. Seascape proposal bridge through existing evidence/ownership checks, never direct personal-loop canon promotion.
 
 ## 16. Explicit non-goals
 
-V1 does not create a standalone memory product, new repository/database, AI employee org chart, Sawyer Hub runtime dependency, dashboard, queue, second transcript corpus, generic knowledge-graph rewrite, automatic Claude/ChatGPT ingestion, automatic research promotion, automatic skill/config changes, automatic PR/merge/deploy/install/send behavior, automatic Seascape canon changes, or a requirement for Sawyer to inspect Markdown/receipts/telemetry.
+No standalone memory product, new repository/database, AI employee org chart, Sawyer Hub runtime dependency, dashboard, queue, second transcript corpus, generic knowledge-graph rewrite, automatic Claude/ChatGPT ingestion, research promotion, skill/config edits, PR/merge/deploy/install/send behavior, automatic Seascape canon change, or requirement for Sawyer to inspect Markdown/receipts/telemetry.
 
 ## 17. PR 1 implementation handoff
 
-After this contract lands, the next agent should execute only PR 1:
-
 ```text
 Implement Sawyer Learning Loop V1 PR 1 in uncfreak1255-code/gbrain from the
-exact merged version of docs/architecture/sawyer-learning-loop-v1.md.
+exact merged docs/architecture/sawyer-learning-loop-v1.md.
 
 Scope only:
-- provider-neutral event and pointer/destination types;
-- PersonalMemoryDestinationV1 with explicit brain_id + source_id;
-- MemoryPointerV1 with explicit brain_id;
-- append-only local events-v1.jsonl writer/reader/reducer;
+- provider-neutral event/types modules;
+- PersonalMemoryDestinationV1 with brain_id + source_id;
+- MemoryPointerV1 with brain_id;
+- CanaryRunV1 and immutable run_id;
+- append-only events-v1.jsonl writer/reader/reducer;
+- one-active-nonterminal-run invariant;
 - deterministic CompletedSession eligibility;
-- uniqueness boundary `(provider, provider_session_id)`;
+- global uniqueness `(provider, provider_session_id)`;
 - same-hash retry = idempotent no-op;
 - different-hash retry = diagnostic conflict, no second completion/count;
-- learning_loop.mode resolver with default off;
-- one trusted-local operation/CLI capture seam;
-- hermetic tests, including ambient mounted-brain routing regressions;
+- state/count/finalization reduced by run_id;
+- old terminal run must not block a new explicitly armed rerun;
+- learning_loop.mode resolver, default off;
+- one trusted-local capture operation/CLI seam;
+- hermetic replay, cross-run, and ambient mounted-brain regression tests;
 - repository proof.
 
 Reuse transcript discovery, brain/source routing, and the operation layer.
@@ -650,4 +641,4 @@ a second memory store. Report exact head SHA, proof, remaining review blocker,
 and one next action.
 ```
 
-The implementation must remain smaller than the system it replaces. Reuse an existing GBrain primitive whenever one already owns the behavior.
+The implementation must remain smaller than the system it replaces. Reuse existing GBrain primitives whenever they already own the behavior.
