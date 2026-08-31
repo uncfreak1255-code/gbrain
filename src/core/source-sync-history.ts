@@ -19,7 +19,9 @@ import type { TerminalSyncJobLike } from './source-recovery-block.ts';
  * a failure to read history can never wedge a source that is actually fine.
  * `finishedAt` is `COALESCE(finished_at, updated_at, created_at)` so the
  * caller can tell a later in-process `gbrain sync` (`sources.last_sync_at`)
- * from the blocking job.
+ * from the blocking job. The source filter matches both `data.sourceId`
+ * and `data.source_id` — same dual-key contract as hygiene / queue / the
+ * schema trigger — so a `source_id` sync cannot hide from the block.
  */
 export async function newestTerminalSyncJob(
   engine: BrainEngine,
@@ -35,7 +37,7 @@ export async function newestTerminalSyncJob(
               COALESCE(finished_at, updated_at, created_at) AS finished_at
          FROM minion_jobs
         WHERE name = 'sync'
-          AND data->>'sourceId' = $1
+          AND (data->>'sourceId' = $1 OR data->>'source_id' = $1)
         ORDER BY id DESC
         LIMIT 1`,
       [sourceId],

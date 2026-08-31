@@ -14,6 +14,8 @@ import {
   decideFreshnessDispatch,
   isRecoveryRequiredError,
 } from '../src/core/source-recovery-block.ts';
+import { newestTerminalSyncJob } from '../src/core/source-sync-history.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 
 // The real error text observed on 2026-08-30.
 const REAL_ERROR =
@@ -146,5 +148,66 @@ describe('decideFreshnessDispatch', () => {
         new Date('2026-08-30T11:00:00.000Z'),
       ).skip,
     ).toBe(false);
+  });
+});
+
+function mockEngine(
+  impl: (sql: string, params: unknown[]) => unknown[] | Promise<unknown[]>,
+): BrainEngine {
+  return {
+    executeRaw: async (sql: string, params: unknown[] = []) => impl(sql, params),
+  } as BrainEngine;
+}
+
+describe('newestTerminalSyncJob', () => {
+  test('SQL locks error_text, COALESCE finishedAt, and both source keys', async () => {
+    let seenSql = '';
+    let seenParams: unknown[] = [];
+    await newestTerminalSyncJob(
+      mockEngine((sql, params) => {
+        seenSql = sql;
+        seenParams = params;
+        return [];
+      }),
+      'default',
+    );
+    expect(seenSql).toContain('error_text');
+    expect(seenSql).not.toMatch(/\berror\b/);
+    expect(seenSql).toContain('COALESCE(finished_at, updated_at, created_at)');
+    expect(seenSql).toContain("data->>'sourceId'");
+    expect(seenSql).toContain("data->>'source_id'");
+    expect(seenParams).toEqual(['default']);
+  });
+
+  test('maps error_text → error and finished_at → finishedAt', async () => {
+    const finished = '2026-08-30T10:00:00.000Z';
+    const job = await newestTerminalSyncJob(
+      mockEngine(() => [{
+        status: 'dead',
+        error_text: REAL_ERROR,
+        finished_at: finished,
+      }]),
+      'default',
+    );
+    expect(job).toEqual({
+      status: 'dead',
+      error: REAL_ERROR,
+      finishedAt: finished,
+    });
+  });
+
+  test('empty history is null (dispatch-allowed)', async () => {
+    expect(await newestTerminalSyncJob(mockEngine(() => []), 'default')).toBeNull();
+  });
+
+  test('query throw is null — failing to read history cannot wedge a source', async () => {
+    const job = await newestTerminalSyncJob(
+      mockEngine(() => {
+        throw new Error('relation "minion_jobs" does not exist');
+      }),
+      'default',
+    );
+    expect(job).toBeNull();
+    expect(decideFreshnessDispatch(job).skip).toBe(false);
   });
 });
