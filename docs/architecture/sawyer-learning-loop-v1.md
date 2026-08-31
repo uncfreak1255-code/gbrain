@@ -45,12 +45,14 @@ V1 is complete when:
 5. Direct correction supersedes the conflicting canonical row and survives rebuild.
 6. A later session receives at most five relevant learned items under an 800-token budget.
 7. Every supplied memory uses a brain-qualified rebuild-stable pointer.
-8. Outcomes and corrections link to those exact pointers and the active `run_id`.
-9. Every canary run freezes all verdict inputs at arming and finalizes exactly once with `keep`, `repair`, or `broaden`.
-10. A later bounded rerun can start without deleting prior evidence.
-11. Injection can be disabled independently of capture.
-12. Nothing writes Seascape canon or performs an external action.
-13. Sawyer performs no recurring maintenance action.
+8. Repository/project-scoped memories retain a rebuild-stable scope target and can be injected only into that exact target.
+9. Open loops retain a rebuild-stable machine-owned completion trigger identity/state and are injectable only while that trigger is pending.
+10. Outcomes and corrections link to those exact pointers and the active `run_id`.
+11. Every canary run freezes all verdict inputs at arming and finalizes exactly once with `keep`, `repair`, or `broaden`.
+12. A later bounded rerun can start without deleting prior evidence.
+13. Injection can be disabled independently of capture.
+14. Nothing writes Seascape canon or performs an external action.
+15. Sawyer performs no recurring maintenance action.
 
 Storage or summarization alone does not satisfy V1.
 
@@ -115,7 +117,7 @@ Session, injection, outcome, and canary events are operational evidence in one a
 
 Provider clients submit normalized events and request context. They do not own thresholds, routing, correction semantics, or canary scoring.
 
-Capture/retrieval/telemetry failure must not block ordinary work. Routing ambiguity, session-identity conflict, contradictory learning, unavailable canonical brain, or malformed frozen run state fails closed for learning and returns no injected context when appropriate.
+Capture/retrieval/telemetry failure must not block ordinary work. Routing ambiguity, session-identity conflict, contradictory learning, unavailable canonical brain, malformed frozen run state, missing/mismatched scope targets, or invalid open-loop trigger metadata fails closed for learning and returns no injected context when appropriate.
 
 ### 3.8 No supervision layer
 
@@ -296,11 +298,18 @@ interface LearningContextBundleV1 {
     statement: string;
     type: 'constraint' | 'preference' | 'goal' | 'lesson' | 'open_loop';
     scope: 'global' | 'repository' | 'project';
+    scope_target: string | null;
+    trigger: null | {
+      id: string;
+      state: 'pending';
+    };
     rationale: string;
     authority: 'user_correction' | 'user_statement' | 'verified_outcome' | 'repeated_pattern';
   }>;
 }
 ```
+
+`scope_target` is `null` only for `scope='global'`; repository/project items carry the exact decoded stable target. `trigger` is non-null only for injectable `open_loop` items and therefore can only expose the canonical `pending` state.
 
 ### 5.9 Session outcome
 
@@ -393,23 +402,42 @@ Canonical active personal rows map as follows:
 | `goal` | `commitment` | eligible while current |
 | `lesson` | `belief` | eligible when evidence threshold is met |
 | `friction` | `event` | never injected directly; evidence for a later lesson/constraint |
-| `open_loop` | `commitment` | eligible only with a machine-owned completion trigger |
+| `open_loop` | `commitment` | eligible only with a pending machine-owned completion trigger |
 | `business_candidate` | none | never written to the personal facts fence |
 
-Because several Learning Loop classes share an existing fact kind, every active Learning Loop row uses a machine-readable discriminator in the existing free-form `context` column:
+Because several Learning Loop classes share an existing fact kind, every active Learning Loop row uses one machine-readable discriminator in the existing free-form `context` column. The key order is canonical:
 
 ```text
-sll:v1;class=<LearningClassV1>;scope=<global|repository|project>;authority=<user_correction|user_statement|verified_outcome|repeated_pattern>
+sll:v1;class=<LearningClassV1>;scope=<global|repository|project>;scope_target=<encoded-target-or->;authority=<user_correction|user_statement|verified_outcome|repeated_pattern>;trigger_id=<encoded-id-or->;trigger_state=<none|pending|completed|cancelled>
 ```
+
+`scope_target` and `trigger_id` use percent-encoded UTF-8 so delimiter characters cannot alter parsing. `-` is the explicit null sentinel.
+
+Scope target rules:
+
+- `scope=global` requires `scope_target=-`.
+- `scope=repository` requires a non-empty stable repository key. For Git work this is the normalized repository full name `owner/name`, not cwd, branch, or PR number.
+- `scope=project` requires a non-empty stable project key owned by the caller/domain contract.
+- A repository/project row with a missing, malformed, or undecodable target is invalid for injection.
+
+Open-loop trigger rules:
+
+- Non-`open_loop` classes require `trigger_id=-;trigger_state=none`.
+- `open_loop` requires a non-empty stable machine-owned `trigger_id` and `trigger_state` of `pending`, `completed`, or `cancelled`.
+- Only `trigger_state=pending` is injectable.
+- `completed`, `cancelled`, missing, malformed, undecodable, or triggerless open loops are non-injectable after rebuild.
+- A trigger-state transition writes a new canonical row with the same stable trigger ID and the new state, then supersedes the prior row through the existing renderer; the event ledger may retain richer trigger evidence but is not required to reconstruct injectability.
 
 Rules:
 
-1. For an active Learning Loop row, the `context` field must parse exactly to the discriminator grammar above; the human-readable claim remains unmodified in `claim`.
-2. Retrieval reconstructs `LearningClassV1`, scope, and authority from this discriminator; it never infers the class from `kind` alone.
-3. Existing non-Learning-Loop rows without the discriminator remain valid and unchanged.
-4. When a row is superseded, the existing renderer may replace its context with `superseded by #N`; the new active row carries the discriminator, so active retrieval remains lossless.
-5. `business_candidate` stays in candidate/evidence machinery and cannot enter the personal facts writer.
-6. Raw `friction` may be canonically retained as a private event when useful for provenance, but retrieval never supplies it directly. Thresholded friction must activate a distinct `lesson` or `constraint` row if it is to affect future behavior.
+1. For an active Learning Loop row, the `context` field must parse exactly to the canonical discriminator grammar above; the human-readable claim remains unmodified in `claim`.
+2. Retrieval reconstructs `LearningClassV1`, scope, decoded scope target, authority, trigger ID, and trigger state from this discriminator; it never infers them from `kind` alone or from ambient repository/project state.
+3. Repository/project injection requires exact equality between the decoded canonical `scope_target` and the normalized current work target. Missing current target, missing canonical target, or mismatch fails closed for that item.
+4. Existing non-Learning-Loop rows without the discriminator remain valid and unchanged.
+5. When a row is superseded, the existing renderer may replace its context with `superseded by #N`; the new active row carries the complete discriminator, so active retrieval remains lossless.
+6. `business_candidate` stays in candidate/evidence machinery and cannot enter the personal facts writer.
+7. Raw `friction` may be canonically retained as a private event when useful for provenance, but retrieval never supplies it directly. Thresholded friction must activate a distinct `lesson` or `constraint` row if it is to affect future behavior.
+8. Canonical Markdown alone is sufficient after a full index rebuild to determine whether a scoped item belongs to the current target and whether an open loop is still pending.
 
 ### 7.2 Authority
 
@@ -435,7 +463,7 @@ A direct correction must:
 
 1. route to the pointer's `brain_id` and `source_id`;
 2. identify the active conflicting canonical row;
-3. append the corrected row with a valid Learning Loop discriminator;
+3. append the corrected row with a valid complete Learning Loop discriminator, preserving or deliberately replacing the scoped target/trigger metadata as required by the correction;
 4. strike the old row with `superseded by #N` through the existing renderer;
 5. reconcile the derived index in that same brain/source;
 6. append `memory_superseded` with brain-qualified old/new pointers and current `run_id` if a run is active;
@@ -450,15 +478,15 @@ Ranking order:
 
 1. Directly applicable hard constraints.
 2. Explicit current goals.
-3. Proven repository/project lessons.
+3. Proven repository/project lessons whose canonical scope target exactly matches the current work target.
 4. Relevant durable preferences.
-5. At most one machine-owned open loop.
+5. At most one machine-owned open loop whose canonical trigger is still `pending`.
 
-Never inject raw friction events, inactive/superseded/forgotten rows, candidate-only inference, stale PR state, completed/triggerless work, unrelated business facts, raw transcripts, or items merely because they are recent.
+Never inject raw friction events, inactive/superseded/forgotten rows, candidate-only inference, stale PR state, scoped rows with absent/mismatched targets, completed/cancelled/triggerless open loops, unrelated business facts, raw transcripts, or items merely because they are recent.
 
-Every retrieval starts from the active run's frozen personal destination and routes explicitly to its `brain_id` and `source_id`.
+Every retrieval starts from the active run's frozen personal destination and routes explicitly to its `brain_id` and `source_id`. It reconstructs scope target and trigger state from canonical Markdown before relevance ranking. Ambiguity fails closed for the affected item while ordinary work proceeds.
 
-Before substantive agent work, append `context_supplied` with `run_id`, provider session ID, request hash, exact brain-qualified pointers, reconstructed Learning Loop types, ranking rationale, token estimate, and mode.
+Before substantive agent work, append `context_supplied` with `run_id`, provider session ID, request hash, exact brain-qualified pointers, reconstructed Learning Loop types, scope targets, pending open-loop trigger IDs when applicable, ranking rationale, token estimate, and mode.
 
 ## 9. Outcome measurement
 
@@ -466,7 +494,7 @@ Strong evidence includes explicit correction, repeated known instruction, re-ask
 
 Agent self-report is weak evidence only.
 
-Outcome processing routes by each pointer's `brain_id` and is reduced within the relevant `run_id`. Non-use alone cannot delete canonical belief.
+Outcome processing routes by each pointer's `brain_id` and is reduced within the relevant `run_id`. Non-use alone cannot delete canonical belief. When objective evidence proves an open-loop trigger completed or was cancelled, canonical state must transition before that loop can participate in any later bundle.
 
 ## 10. Canary lifecycle
 
@@ -519,6 +547,8 @@ Any of these forces `repair` for the current run:
 
 - corrected belief supplied again;
 - memory operation targets a brain other than its frozen destination/pointer;
+- repository/project-scoped memory is injected without an exact canonical scope-target match;
+- completed/cancelled/triggerless open loop is injected;
 - unsupported high-impact belief causes action;
 - Seascape canon/external write occurs through V1;
 - duplicate/conflicting completion advances count;
@@ -546,7 +576,7 @@ The only authorized broadening is a Claude adapter using the same provider-neutr
 
 **Keep** applies when there is no hard failure but any broaden-only requirement is not met. In particular, a run with `baseline: null` **cannot broaden** and returns `keep` if otherwise healthy.
 
-**Repair** applies when capture, run scoping, frozen inputs, identity/routing, relevance, correction, canonical class encoding, or measurement is not trustworthy. Name one smallest component to repair; a later bounded rerun uses a fresh `run_id`.
+**Repair** applies when capture, run scoping, frozen inputs, identity/routing, relevance, correction, canonical class/scope/trigger encoding, or measurement is not trustworthy. Name one smallest component to repair; a later bounded rerun uses a fresh `run_id`.
 
 This precedence is deterministic: `repair` overrides `broaden`; `broaden` requires every broaden gate; otherwise the result is `keep`.
 
@@ -567,7 +597,7 @@ Only one implementation PR may be actively mutated at a time.
 
 ### PR 0 — this contract
 
-Freeze architecture, provider representation, brain-qualified identity, session replay semantics, canonical learning-class encoding, frozen run inputs, deterministic verdict rules, run-scoped lifecycle, acceptance gates, and delivery order. No runtime/config activation.
+Freeze architecture, provider representation, brain-qualified identity, session replay semantics, canonical learning-class/scope/trigger encoding, frozen run inputs, deterministic verdict rules, run-scoped lifecycle, acceptance gates, and delivery order. No runtime/config activation.
 
 ### PR 1 — events, run identity, eligibility, idempotent capture
 
@@ -590,9 +620,11 @@ Owned by GBrain.
 
 - observation classification/thresholds;
 - explicit frozen brain/source routing;
-- lossless `LearningClassV1` → existing fact-kind/context-discriminator mapping;
+- lossless `LearningClassV1` → existing fact-kind/context-discriminator mapping, including canonical `scope_target` and open-loop trigger ID/state;
+- normalized repository full-name target and stable project-key encoding;
+- open-loop trigger state transition by append-new-row + supersede-old-row;
 - existing facts classifier/fence renderer;
-- direct correction supersession and rebuild proof;
+- direct correction supersession and full rebuild proof;
 - Seascape boundary preserved;
 - no injection.
 
@@ -600,7 +632,9 @@ Owned by GBrain.
 
 - existing volunteer/retrieval discovery;
 - frozen personal destination routing;
-- reconstruct Learning Loop class/scope/authority from discriminator;
+- reconstruct Learning Loop class/scope/scope-target/authority/trigger metadata from discriminator;
+- exact scope-target matching with fail-closed mismatch/absence;
+- open-loop injection only when canonical trigger state is pending;
 - authority/scope/relevance filtering;
 - five-item/800-token caps;
 - exact brain-qualified pointer + `run_id` ledger;
@@ -621,6 +655,7 @@ Owned by the existing active Codex hook owner only.
 
 - link supplied pointers to corrections/repetition/relevance/outcomes;
 - route feedback by pointer brain;
+- persist objective open-loop trigger completion/cancellation into canonical state before later retrieval;
 - reduce evidence by `run_id` using frozen run thresholds/version/baseline;
 - deterministic baseline comparison and no-baseline `keep` rule;
 - deterministic ten-session verdict and plain-English result;
@@ -664,7 +699,12 @@ Only after `keep` or `broaden`:
 - ambient different `.gbrain-mount` cannot redirect retrieval;
 - correction cannot mutate same coordinates in another brain;
 - unavailable/unknown brain fails closed for learning and open for ordinary work;
-- every active Learning Loop class round-trips losslessly through existing fact kind + context discriminator;
+- every active Learning Loop class round-trips losslessly through existing fact kind + complete context discriminator;
+- global rows round-trip with `scope_target=-`; repository/project rows round-trip exact decoded stable targets;
+- malformed/missing scope target is non-injectable;
+- open-loop rows round-trip stable trigger ID and pending/completed/cancelled state;
+- triggerless open loop is non-injectable;
+- pending→completed/cancelled transition survives rebuild and supersedes the prior active row;
 - existing non-Loop fence rows round-trip unchanged;
 - raw friction is not injected; thresholded friction becomes a distinct lesson/constraint if activated;
 - business candidate cannot enter personal writer;
@@ -677,10 +717,15 @@ Only after `keep` or `broaden`:
 
 - inactive/superseded/forgotten rows excluded;
 - authority/narrow scope outrank recency;
+- repository lesson for repo A is excluded from repo B and from unknown-repo work;
+- project lesson for project A is excluded from project B and from unknown-project work;
+- global rows do not require a scope target;
+- completed/cancelled/triggerless open loops are excluded after full rebuild;
+- only pending machine-owned open loop can enter a bundle;
 - resolved work excluded;
 - at most one open loop;
 - item/token caps deterministic;
-- bundle pointers and `run_id` match `context_supplied`;
+- bundle pointers, scope targets, pending trigger IDs, and `run_id` match `context_supplied`;
 - retrieval failure returns empty bundle without blocking;
 - self-report alone is not beneficial use;
 - correction removes old pointer from later bundles;
@@ -755,11 +800,11 @@ Scope only:
 - repository proof.
 
 Reuse transcript discovery, brain/source routing, and the operation layer.
-Do not implement canonical distillation/class mapping, context injection,
-Codex hooks, outcome scoring, Claude ingestion, skills, research, Sawyer Hub
-changes, Seascape writes, activation, scheduling, merge, or deployment. Do not
-create a second memory store. Report exact head SHA, proof, remaining review
-blocker, and one next action.
+Do not implement canonical distillation/class/scope/trigger mapping, context
+injection, Codex hooks, outcome scoring, Claude ingestion, skills, research,
+Sawyer Hub changes, Seascape writes, activation, scheduling, merge, or
+deployment. Do not create a second memory store. Report exact head SHA, proof,
+remaining review blocker, and one next action.
 ```
 
 ## 18. Provenance
