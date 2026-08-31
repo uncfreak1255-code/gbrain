@@ -762,4 +762,11 @@ create a second memory store. Report exact head SHA, proof, remaining review
 blocker, and one next action.
 ```
 
+## 18. Provenance
+
+- Base branch at PR creation: `master`
+- Base SHA at PR creation: `cfc90a15cbbb50058be79b414be3e57a353552f8`
+- This document is contract-only and enables no runtime behavior.
+- Merge, deploy, install, schedule, and canary activation remain separate actions.
+
 The implementation must remain smaller than the system it replaces. Reuse existing GBrain primitives whenever they already own the behavior.
