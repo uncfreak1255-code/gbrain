@@ -5354,9 +5354,43 @@ const learning_loop_resolve_transcript: Operation = {
   },
 };
 
+const learning_loop_bind_session: Operation = {
+  name: 'learning_loop_bind_session',
+  description: 'Bind one completed Codex provider session to its adapter identity through a trusted-local owner control.',
+  params: {
+    command_id: { type: 'string', required: true },
+    client_id: { type: 'string', required: true },
+    provider_session_id: { type: 'string', required: true },
+    source_id: { type: 'string', required: true },
+  },
+  mutating: true,
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_bind_session');
+    return learningLoopCall(async (mod) => {
+      const sourceId = p.source_id as string;
+      const providerSessionId = p.provider_session_id as string;
+      await mod.resolveAuthoritativeTranscript({
+        engine: ctx.engine,
+        config: ctx.config,
+        provider: 'codex',
+        provider_session_id: providerSessionId,
+        source_id: sourceId,
+      });
+      return mod.bindLearningLoopSession(
+        ctx.engine,
+        p.command_id as string,
+        { client_id: p.client_id as string, source_id: sourceId, provider: 'codex' },
+        providerSessionId,
+      );
+    });
+  },
+};
+
 const learning_loop_submit_session_v1: Operation = {
   name: 'learning_loop_submit_session_v1',
-  description: 'Submit bounded Codex session metadata from an authenticated, source-bound adapter. GBrain resolves and hashes local transcript bytes.',
+  description: 'Submit bounded Codex session metadata from an authenticated, source- and session-bound adapter. GBrain resolves and hashes local transcript bytes.',
   params: {
     provider: { type: 'string', required: true, enum: ['codex'] },
     provider_session_id: { type: 'string', required: true },
@@ -5482,9 +5516,9 @@ export const operations: Operation[] = [
   // can submit; CLI bypass via ctx.remote === false.
   run_skillopt,
   // Personal Learning Loop V1 PR 1: controls remain localOnly; only the
-  // authenticated source-bound session submission is agent-facing.
+  // authenticated source- and session-bound submission is agent-facing.
   learning_loop_get_mode, learning_loop_set_mode, learning_loop_inspect,
-  learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript,
+  learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript, learning_loop_bind_session,
   learning_loop_submit_session_v1,
 ];
 

@@ -11,6 +11,7 @@ import {
   LearningLoopError,
   abortLearningLoop,
   armLearningLoop,
+  bindLearningLoopSession,
   classifyTranscript,
   learningLoopLedgerPath,
   orderBaselineCandidates,
@@ -88,15 +89,27 @@ function receipt(id: string, overrides: Partial<TranscriptReceipt> = {}): Transc
   };
 }
 
-function codexTranscript(sessionId: string, padding = 'x'.repeat(90), completedAt = '2026-08-01T00:00:00.000Z'): string {
-  const rows = [
+function codexTranscript(
+  sessionId: string,
+  padding = 'x'.repeat(90),
+  completedAt = '2026-08-01T00:00:00.000Z',
+  completed = true,
+): string {
+  const rows: Array<Record<string, unknown>> = [
     { timestamp: completedAt, type: 'session_meta', payload: { id: sessionId, timestamp: completedAt } },
     { timestamp: completedAt, type: 'response_item', payload: { role: 'user', content: [{ type: 'input_text', text: `first user ${padding}` }] } },
     { timestamp: completedAt, type: 'response_item', payload: { role: 'assistant', content: [{ type: 'output_text', text: 'first assistant' }] } },
     { timestamp: completedAt, type: 'response_item', payload: { role: 'user', content: [{ type: 'input_text', text: 'second user' }] } },
     { timestamp: completedAt, type: 'response_item', payload: { role: 'assistant', content: [{ type: 'output_text', text: 'second assistant' }] } },
   ];
+  if (completed) {
+    rows.push({ timestamp: completedAt, type: 'event_msg', payload: { type: 'task_complete', completed_at: completedAt } });
+  }
   return rows.map((row) => JSON.stringify(row)).join('\n') + '\n';
+}
+
+function bindSession(root: string, sessionId: string, owner = adapter) {
+  return bindLearningLoopSession(testEngine, `bind:${sessionId}`, owner, sessionId, ledger(root));
 }
 
 describe('mode and authoritative transcript boundary', () => {
@@ -139,6 +152,15 @@ describe('mode and authoritative transcript boundary', () => {
     await expect(resolveAuthoritativeTranscript({
       engine, provider: 'codex', provider_session_id: id, source_id: 'personal', asserted_completed_at: '2026-08-02T00:00:00.000Z',
     })).rejects.toMatchObject({ code: 'assertion_mismatch' });
+  });
+
+  test('an interrupted transcript without a final task_complete record is rejected', async () => {
+    const root = tempRoot('learning-loop-incomplete-');
+    const id = 'session-incomplete';
+    writeFileSync(join(root, `${id}.jsonl`), codexTranscript(id, undefined, undefined, false));
+    await expect(resolveAuthoritativeTranscript({
+      engine: corpusEngine(root), provider: 'codex', provider_session_id: id, source_id: 'personal',
+    })).rejects.toMatchObject({ code: 'transcript_conflict' });
   });
 
   test('the configured corpus is source-owned', async () => {
@@ -218,6 +240,8 @@ describe('append-only run, replay, and cohort reducer', () => {
     await engine.setConfig('learning_loop.corpus.codex.root', corpus);
     await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
     const ledgerRoot = tempRoot('learning-loop-real-ledger-lock-');
+      await bindLearningLoopSession(engine, 'bind:real-lock-first', adapter, 'real-lock-first', { root: ledgerRoot });
+      await bindLearningLoopSession(engine, 'bind:real-lock-second', adapter, 'real-lock-second', { root: ledgerRoot });
       let releaseLedger!: () => void;
       let enteredLedger!: () => void;
       const ledgerHeld = new Promise<void>((resolve) => { enteredLedger = resolve; });
@@ -234,7 +258,7 @@ describe('append-only run, replay, and cohort reducer', () => {
       }, { root: ledgerRoot })).rejects.toMatchObject({ code: 'ledger_busy' });
       releaseLedger();
       await first;
-      expect(readLearningLoopLedger({ root: ledgerRoot })).toHaveLength(1);
+      expect(readLearningLoopLedger({ root: ledgerRoot })).toHaveLength(3);
 
       const lifecycleRoot = tempRoot('learning-loop-real-lifecycle-lock-');
       let releaseArm!: () => void;
@@ -265,15 +289,45 @@ describe('append-only run, replay, and cohort reducer', () => {
 
   test('same session/hash is idempotent and a changed hash fails closed', async () => {
     const root = tempRoot('learning-loop-idem-');
+    await bindSession(root, 'same');
     const first = await recordSessionEvaluation({ engine: testEngine, mode: 'capture', adapter, completed_at: '2026-08-01T00:00:00Z', receipt: receipt('same') }, ledger(root));
     const retry = await recordSessionEvaluation({ engine: testEngine, mode: 'capture', adapter, completed_at: '2026-08-01T00:00:00Z', receipt: receipt('same') }, ledger(root));
     expect(first.status).toBe('recorded');
     expect(retry.status).toBe('idempotent');
-    expect(readLearningLoopLedger({ root })).toHaveLength(1);
+    expect(readLearningLoopLedger({ root })).toHaveLength(2);
     await expect(recordSessionEvaluation({
       engine: testEngine, mode: 'capture', adapter, completed_at: '2026-08-01T00:00:00Z',
       receipt: receipt('same', { content_hash: 'f'.repeat(64) }),
     }, ledger(root))).rejects.toThrow(new LearningLoopError('transcript_conflict', 'Session transcript hash changed'));
+  });
+
+  test('trusted-local adapter bindings are immutable and reject cross-session submission', async () => {
+    const root = tempRoot('learning-loop-binding-');
+    const bound = await bindSession(root, 'owned-session');
+    expect((await bindSession(root, 'owned-session')).event_id).toBe(bound.event_id);
+    await expect(bindLearningLoopSession(
+      testEngine,
+      'bind:owned-session:impostor',
+      { ...adapter, client_id: 'impostor' },
+      'owned-session',
+      ledger(root),
+    )).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(bindLearningLoopSession(
+      testEngine,
+      'bind:owned-session',
+      adapter,
+      'different-session',
+      ledger(root),
+    )).rejects.toMatchObject({ code: 'command_conflict' });
+    await expect(recordSessionEvaluation({
+      engine: testEngine, mode: 'capture', adapter, receipt: receipt('unbound-session'),
+    }, ledger(root))).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(recordSessionEvaluation({
+      engine: testEngine, mode: 'capture', adapter: { ...adapter, client_id: 'impostor' }, receipt: receipt('owned-session'),
+    }, ledger(root))).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(recordSessionEvaluation({
+      engine: testEngine, mode: 'capture', adapter, receipt: receipt('owned-session'),
+    }, ledger(root))).resolves.toMatchObject({ status: 'recorded' });
   });
 
   test('only one run is active, ineligible sessions do not enter, and cohort seals at exactly ten', async () => {
@@ -281,11 +335,13 @@ describe('append-only run, replay, and cohort reducer', () => {
     const corpus = tempRoot('learning-loop-cohort-corpus-');
     const armed = await armLearningLoop(armInput(corpus, 'arm-cohort-1'), { ...ledger(root), now: () => new Date('2026-08-10T00:00:00Z') });
     await expect(armLearningLoop(armInput(corpus, 'arm-cohort-2'), ledger(root))).rejects.toThrow(/already active/);
+    await bindSession(root, 'ineligible');
     await recordSessionEvaluation({
       engine: testEngine, mode: 'canary', adapter, completed_at: '2026-08-10T01:00:00Z',
       receipt: receipt('ineligible', { size_bytes: 10 }),
     }, ledger(root));
     for (let i = 1; i <= 11; i += 1) {
+      await bindSession(root, `eligible-${i}`);
       await recordSessionEvaluation({
         engine: testEngine, mode: 'canary', adapter, completed_at: `2026-08-10T${String(i + 1).padStart(2, '0')}:00:00Z`, receipt: receipt(`eligible-${i}`),
       }, ledger(root));
@@ -304,6 +360,8 @@ describe('append-only run, replay, and cohort reducer', () => {
   test('wrong adapter cannot admit, abort permits a fresh run, and old events stay isolated', async () => {
     const root = tempRoot('learning-loop-abort-');
     const corpus = tempRoot('learning-loop-abort-corpus-');
+    await bindSession(root, 'already-recorded');
+    await bindSession(root, 'blocked');
     await recordSessionEvaluation({ engine: testEngine, mode: 'capture', adapter, receipt: receipt('already-recorded') }, ledger(root));
     const first = await armLearningLoop(armInput(corpus, 'arm-abort-1'), ledger(root));
     await expect(recordSessionEvaluation({
@@ -394,6 +452,7 @@ describe('append-only run, replay, and cohort reducer', () => {
     const root = tempRoot('learning-loop-replay-');
     const corpus = tempRoot('learning-loop-replay-corpus-');
     await armLearningLoop(armInput(corpus, 'arm-replay-1'), ledger(root));
+    await bindSession(root, 'one');
     await recordSessionEvaluation({ engine: testEngine, mode: 'canary', adapter, completed_at: '2026-08-20T00:00:00Z', receipt: receipt('one') }, ledger(root));
     const events = readLearningLoopLedger({ root });
     const a = replayLearningLoop(events);

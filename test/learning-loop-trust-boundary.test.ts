@@ -14,6 +14,7 @@ const PRIVILEGED = [
   'learning_loop_arm',
   'learning_loop_abort',
   'learning_loop_resolve_transcript',
+  'learning_loop_bind_session',
 ];
 
 function unsafeContext(remote: unknown): OperationContext {

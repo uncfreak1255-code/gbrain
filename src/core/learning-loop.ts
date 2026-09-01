@@ -101,6 +101,14 @@ export interface RunAbortedEvent extends EventBase {
   reason: 'owner_abort' | 'mode_changed';
 }
 
+export interface AdapterSessionBoundEvent extends EventBase {
+  event_type: 'adapter_session_bound';
+  command_id: string;
+  command_payload_hash: string;
+  adapter: AdapterIdentity;
+  provider_session_id: string;
+}
+
 export interface SessionEvaluatedEvent extends EventBase {
   event_type: 'session_evaluated';
   run_id: string | null;
@@ -118,7 +126,7 @@ export interface SessionEvaluatedEvent extends EventBase {
   cohort_sealed: boolean;
 }
 
-export type LearningLoopEvent = RunArmedEvent | RunAbortedEvent | SessionEvaluatedEvent;
+export type LearningLoopEvent = RunArmedEvent | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent;
 export type EligibilityReason =
   | 'eligible'
   | 'transcript_too_small'
@@ -139,6 +147,7 @@ export interface LearningLoopProjection {
   runs: Map<string, RunProjection>;
   session_hashes: Map<string, string>;
   session_events: Map<string, SessionEvaluatedEvent>;
+  session_bindings: Map<string, AdapterSessionBoundEvent>;
 }
 
 export class LearningLoopError extends Error {
@@ -310,21 +319,34 @@ function codexSessionIds(text: string): Set<string> {
 
 function codexSessionMetadata(text: string): { ids: Set<string>; completed_at: string | null } {
   const ids = new Set<string>();
-  let completedMs = Number.NEGATIVE_INFINITY;
+  let terminalCompletedAt: string | null = null;
+  let terminalCount = 0;
+  let terminalIsFinalRow = false;
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
+    terminalIsFinalRow = false;
     try {
       const row = JSON.parse(line) as Record<string, unknown>;
-      const timestamp = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : Number.NaN;
-      if (Number.isFinite(timestamp)) completedMs = Math.max(completedMs, timestamp);
-      if (row.type !== 'session_meta' || !row.payload || typeof row.payload !== 'object') continue;
       const payload = row.payload as Record<string, unknown>;
-      if (typeof payload.id === 'string' && payload.id.length > 0) ids.add(payload.id);
-      const metaTimestamp = typeof payload.timestamp === 'string' ? Date.parse(payload.timestamp) : Number.NaN;
-      if (Number.isFinite(metaTimestamp)) completedMs = Math.max(completedMs, metaTimestamp);
-    } catch { /* malformed rows do not contribute authoritative metadata */ }
+      if (row.type === 'session_meta' && payload && typeof payload === 'object') {
+        if (typeof payload.id === 'string' && payload.id.length > 0) ids.add(payload.id);
+      }
+      if (row.type === 'event_msg' && payload && typeof payload === 'object' && payload.type === 'task_complete') {
+        terminalCount += 1;
+        const completedAt = typeof payload.completed_at === 'string' ? payload.completed_at : null;
+        terminalCompletedAt = completedAt !== null && Number.isFinite(Date.parse(completedAt))
+          ? new Date(completedAt).toISOString()
+          : null;
+        terminalIsFinalRow = true;
+      }
+    } catch {
+      return { ids, completed_at: null };
+    }
   }
-  return { ids, completed_at: Number.isFinite(completedMs) ? new Date(completedMs).toISOString() : null };
+  return {
+    ids,
+    completed_at: terminalCount === 1 && terminalIsFinalRow ? terminalCompletedAt : null,
+  };
 }
 
 function countTextRoles(text: string): { user: number; assistant: number } {
@@ -577,6 +599,17 @@ function assertEventShape(event: LearningLoopEvent): void {
     }
     return;
   }
+  if (event.event_type === 'adapter_session_bound') {
+    if (
+      !COMMAND_ID_RE.test(event.command_id)
+      || !/^[a-f0-9]{64}$/.test(event.command_payload_hash)
+      || !validAdapter(event.adapter)
+      || !SESSION_ID_RE.test(event.provider_session_id)
+    ) {
+      throw new LearningLoopError('ledger_corrupt', 'Learning Loop adapter_session_bound event has an invalid shape');
+    }
+    return;
+  }
   if (event.event_type === 'session_evaluated') {
     const receipt = event.authoritative;
     const validReason = ['eligible', 'transcript_too_small', 'insufficient_user_turns', 'insufficient_assistant_turns'].includes(event.reason);
@@ -624,7 +657,7 @@ function verifyEvent(event: LearningLoopEvent): void {
 
 export function replayLearningLoop(events: LearningLoopEvent[]): LearningLoopProjection {
   const projection: LearningLoopProjection = {
-    events: [], active_run_id: null, runs: new Map(), session_hashes: new Map(), session_events: new Map(),
+    events: [], active_run_id: null, runs: new Map(), session_hashes: new Map(), session_events: new Map(), session_bindings: new Map(),
   };
   const ids = new Map<string, string>();
   const commands = new Set<string>();
@@ -637,7 +670,7 @@ export function replayLearningLoop(events: LearningLoopEvent[]): LearningLoopPro
       continue;
     }
     ids.set(event.event_id, canonical);
-    if (event.event_type === 'run_armed' || event.event_type === 'run_aborted') {
+    if (event.event_type === 'run_armed' || event.event_type === 'run_aborted' || event.event_type === 'adapter_session_bound') {
       const commandKey = `${event.event_type}\u0000${event.command_id}`;
       if (commands.has(commandKey)) throw new LearningLoopError('ledger_corrupt', 'A command identity has more than one ledger event');
       commands.add(commandKey);
@@ -654,8 +687,23 @@ export function replayLearningLoop(events: LearningLoopEvent[]): LearningLoopPro
       }
       run.terminal = true;
       projection.active_run_id = null;
+    } else if (event.event_type === 'adapter_session_bound') {
+      const key = `${event.adapter.provider}\u0000${event.provider_session_id}`;
+      if (projection.session_bindings.has(key)) {
+        throw new LearningLoopError('ledger_corrupt', 'A provider session has more than one adapter binding');
+      }
+      projection.session_bindings.set(key, event);
     } else {
       const key = `${event.provider}\u0000${event.provider_session_id}`;
+      const binding = projection.session_bindings.get(key);
+      if (
+        !binding
+        || binding.adapter.client_id !== event.adapter.client_id
+        || binding.adapter.source_id !== event.adapter.source_id
+        || binding.adapter.provider !== event.adapter.provider
+      ) {
+        throw new LearningLoopError('ledger_corrupt', 'Session evaluation does not match its trusted-local adapter binding');
+      }
       const priorHash = projection.session_hashes.get(key);
       if (priorHash !== undefined && priorHash !== event.authoritative.content_hash) {
         throw new LearningLoopError('ledger_corrupt', 'A session identity has conflicting authoritative hashes');
@@ -793,6 +841,53 @@ export interface ArmLearningLoopInput {
   destination: { brain_id: string; source_id: string; canonical_slug: string };
 }
 
+export function bindLearningLoopSession(
+  engine: BrainEngine,
+  commandId: string,
+  adapter: AdapterIdentity,
+  providerSessionId: string,
+  opts: LedgerOptions = {},
+): Promise<AdapterSessionBoundEvent> {
+  if (!COMMAND_ID_RE.test(commandId) || !validAdapter(adapter) || !SESSION_ID_RE.test(providerSessionId)) {
+    throw new LearningLoopError('invalid_input', 'Invalid adapter session binding');
+  }
+  const payloadHash = commandPayloadHash({ adapter, provider_session_id: providerSessionId });
+  return withLedgerMutation<AdapterSessionBoundEvent>(engine, opts, (state) => {
+    const priorCommand = state.events.find(
+      (event): event is AdapterSessionBoundEvent => event.event_type === 'adapter_session_bound' && event.command_id === commandId,
+    );
+    if (priorCommand) {
+      if (priorCommand.command_payload_hash !== payloadHash) {
+        throw new LearningLoopError('command_conflict', 'Session binding command id was reused with a different payload');
+      }
+      return { value: priorCommand };
+    }
+    const key = `${adapter.provider}\u0000${providerSessionId}`;
+    const existing = state.session_bindings.get(key);
+    if (existing) {
+      if (
+        existing.adapter.client_id !== adapter.client_id
+        || existing.adapter.source_id !== adapter.source_id
+        || existing.adapter.provider !== adapter.provider
+      ) {
+        throw new LearningLoopError('forbidden', 'Provider session is already bound to a different adapter');
+      }
+      return { value: existing };
+    }
+    const body = {
+      schema_version: LEARNING_LOOP_SCHEMA_VERSION,
+      event_type: 'adapter_session_bound' as const,
+      command_id: commandId,
+      command_payload_hash: payloadHash,
+      occurred_at: (opts.now ?? (() => new Date()))().toISOString(),
+      adapter,
+      provider_session_id: providerSessionId,
+    };
+    const event = completeEvent(body) as AdapterSessionBoundEvent;
+    return { value: event, event };
+  });
+}
+
 async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOptions): Promise<RunArmedEvent> {
   if (!COMMAND_ID_RE.test(input.command_id)) throw new LearningLoopError('invalid_input', 'Invalid arm command id');
   if (
@@ -908,6 +1003,15 @@ export function recordSessionEvaluation(input: {
       }
     }
     const key = `${input.receipt.provider}\u0000${input.receipt.provider_session_id}`;
+    const binding = state.session_bindings.get(key);
+    if (
+      !binding
+      || binding.adapter.client_id !== input.adapter.client_id
+      || binding.adapter.source_id !== input.adapter.source_id
+      || binding.adapter.provider !== input.adapter.provider
+    ) {
+      throw new LearningLoopError('forbidden', 'Adapter is not bound to the submitted provider session');
+    }
     const priorHash = state.session_hashes.get(key);
     if (priorHash !== undefined) {
       if (priorHash !== input.receipt.content_hash) throw new LearningLoopError('transcript_conflict', 'Session transcript hash changed');
