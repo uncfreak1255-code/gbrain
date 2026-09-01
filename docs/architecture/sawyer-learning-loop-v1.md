@@ -1,833 +1,584 @@
-# Sawyer Learning Loop V1 — canonical contract
+# Sawyer Learning Loop V1 — architecture decision and implementation plan
 
-**Status:** implementation contract only; merge does not activate runtime behavior  
-**Owner:** GBrain core plus one thin adapter in the existing owner of Codex session hooks  
-**Decision:** reuse GBrain primitives; do not create a parallel memory product or supervision layer
+**Status:** approved design direction; implementation remains staged and disabled by default  
+**Owner:** GBrain core, plus one thin adapter in the existing owner of active Codex session hooks  
+**Decision:** close one measurable learning loop by composing existing GBrain primitives; do not create a parallel memory product, agent hierarchy, dashboard, queue, or supervision layer
 
-## 1. Purpose and success condition
+## 1. Decision and intended outcome
 
-Sawyer Learning Loop V1 closes one bounded loop:
-
-```text
-completed Codex session
-  -> deterministic local eligibility/capture
-  -> qualified personal learning/correction
-  -> canonical private GBrain fact
-  -> thin relevant context on a later session
-  -> typed objective outcome/user correction
-  -> deterministic canary disposition
-```
-
-V1 evaluates exactly **10 eligible Codex sessions** in one explicitly armed `run_id` and ends with exactly one terminal disposition:
-
-- `keep`: healthy/useful but not proven enough to broaden;
-- `repair`: a trust-critical invariant failed; represented by terminal `canary_aborted`;
-- `broaden`: every broaden gate passed; only then may a later change add a Claude adapter using these same contracts.
-
-The user must not maintain a queue, advance counters, inspect Markdown receipts, remember an end date, or supervise routine progress.
-
-## 2. Non-goals and authority boundaries
-
-V1 does **not** add a dashboard, queue, agent hierarchy, new repository/database, generic knowledge graph, research ingestion, skill/config self-editing, PR/merge/deploy/install/send automation, scheduling, Claude ingestion, ChatGPT ingestion, or Seascape canon promotion.
-
-Personal operating knowledge belongs only to the configured private GBrain destination. Seascape business knowledge remains a separate authority boundary. V1 may surface existing candidate-only business evidence but cannot write, promote, deploy, send, or mutate Seascape canon or any external system.
-
-Raw transcripts remain local-only. Operational telemetry stores hashes, bounded authoritative metadata references, IDs, and exact pointers—not conversation bodies, transcript excerpts, or verbatim user corrections.
-
-## 3. Reused GBrain seams
-
-V1 reuses existing transcript discovery/parsing, fact fences and fact extraction, classifier/supersession logic, brain/source routing, `context/volunteer` retrieval, context telemetry, friction evidence, AI-gateway privacy controls, and candidate-only Seascape writeback boundaries.
-
-Markdown fact fences remain canonical. Database rows are rebuildable indexes, never the authoritative memory store.
-
-## 4. Core invariants
-
-1. **Brain-qualified identity.** Every durable personal destination and memory pointer includes `brain_id` and `source_id`. After arming, learning/retrieval/correction/outcome operations route explicitly to those identities; ambient mounts, cwd, or environment variables cannot redirect them.
-2. **Run-scoped state.** Every canary has an immutable `run_id`. Run-affecting events carry it. Historical terminal runs never contaminate or block a later explicitly armed run.
-3. **One active run.** At most one nonterminal run exists. A run is terminal after exactly one `canary_finalized` or `canary_aborted`.
-4. **Frozen inputs.** Arming freezes contract version, GBrain version/commit, provider allow-list, target cohort size, thresholds, personal destination, eligibility-classifier version, and baseline object-or-null. Reducers never substitute mutable current config.
-5. **Fail open for work, fail closed for learning.** Capture/retrieval/telemetry faults cannot block ordinary Codex work. Ambiguous routing, malformed state, replay conflicts, unverifiable scope, invalid trigger state, incomplete settlement, or contradictory canonical knowledge suppress learning/injection or terminate the active run as `repair`.
-6. **No silent inference promotion.** Direct user correction outranks all other evidence. Single-session agent inference is candidate-only.
-7. **Canonical rebuildability.** Any active scoped/open-loop fact retains enough information in canonical Markdown to remain correctly injectable or non-injectable after a full index rebuild.
-8. **Hard failure is immediately terminal.** Any hard failure defined by this contract immediately appends `canary_aborted` with `disposition='repair'`, disables further injection/counting for that run, and leaves historical evidence append-only. There is no second repair-finalization path.
-9. **No recurring user-maintenance gate.** The architecture itself guarantees no routine Sawyer maintenance. Any runtime condition that requires Sawyer to inspect a queue/receipt, advance a counter, or perform recurring canary upkeep is a hard failure and immediately aborts as `repair`; there is no subjective broaden-time maintenance judgment.
-
-## 5. Provider, session, deterministic eligibility, and cohort contracts
-
-```ts
-type LearningProviderV1 = 'codex' | 'claude';
-
-type TaskClassV1 =
-  | 'implementation'
-  | 'review'
-  | 'research'
-  | 'strategy'
-  | 'operations'
-  | 'other';
-
-interface CompletedSessionV1 {
-  schema_version: 1;
-  provider: LearningProviderV1;
-  provider_session_id: string;
-  content_hash: string; // adapter assertion; GBrain re-computes authoritatively
-  started_at: string | null;
-  completed_at: string;
-  completion: 'completed' | 'interrupted' | 'abandoned';
-  transcript_ref: {
-    local_path: string;
-    byte_length: number; // adapter assertion; GBrain re-computes authoritatively
-  };
-  work_context: {
-    repository_target: string | null;
-    project_target: string | null;
-    branch: string | null;
-    pull_request: string | null;
-    task_class: TaskClassV1;
-  };
-}
-```
-
-`LearningProviderV1` is representational. V1 arming accepts only `['codex']`.
-
-### 5.1 Authoritative transcript bytes and session uniqueness
-
-The adapter-supplied `local_path`, `byte_length`, and `content_hash` are discovery assertions, not eligibility authority. On ingestion GBrain must:
-
-1. resolve `local_path` through the existing configured local transcript-discovery boundary; paths outside the configured corpus roots are rejected for learning;
-2. read the exact local transcript file bytes that the existing conversation parser will consume;
-3. compute `authoritative_byte_length = byte_length(exact_transcript_bytes)`;
-4. compute `authoritative_content_hash = lowercase_hex(SHA-256(exact_transcript_bytes))`;
-5. require the submitted `byte_length` and `content_hash` to match those authoritative values; mismatch rejects the delivery for learning/counting and emits a diagnostic;
-6. persist/use the authoritative values for uniqueness, replay, eligibility, and ledger state.
-
-Thus an adapter cannot move a session across an eligibility boundary by changing metadata, and the bytes used for parsing are bound to the same hash used for replay identity.
-
-Global session uniqueness is `(provider, provider_session_id)`:
-
-- first pair: accept with its GBrain-computed authoritative content hash;
-- same pair + same authoritative hash: idempotent retry, no second completion/count;
-- same pair + different authoritative hash: diagnostic identity conflict, no learning/counting.
-
-### 5.2 GBrain-owned eligibility classifier
-
-Eligibility is owned exclusively by **GBrain core**, never by an adapter. The run freezes `eligibility_classifier='sll-v1-structural'`.
-
-GBrain applies this exact classifier after authoritative transcript verification, existing parser reuse, and session uniqueness:
-
-```ts
-interface SessionEligibilityDecisionV1 {
-  classifier: 'sll-v1-structural';
-  eligible: boolean;
-  reason:
-    | 'eligible'
-    | 'unsupported_provider'
-    | 'not_completed'
-    | 'transcript_too_small'
-    | 'insufficient_conversation_turns';
-  normalized_user_turns: number;
-  normalized_assistant_turns: number;
-  transcript_byte_length: number;
-  transcript_content_hash: string;
-}
-```
-
-Deterministic algorithm:
-
-1. If provider is not in the frozen active-run allow-list: ineligible `unsupported_provider`.
-2. If `completion !== 'completed'`: ineligible `not_completed`.
-3. If GBrain-computed `authoritative_byte_length < 256`: ineligible `transcript_too_small`.
-4. Parse the exact bytes bound to `authoritative_content_hash` using the existing conversation parser. For counting only, normalize each parsed user/assistant message to NFC, normalize CRLF/CR to LF, trim Unicode whitespace at both ends, and ignore a message whose normalized UTF-8 text is empty.
-5. Count normalized messages by role. Require at least **2 user turns and 2 assistant turns**. Otherwise ineligible `insufficient_conversation_turns`.
-6. Otherwise eligible.
-
-No lexical concepts such as “simple lookup,” “housekeeping,” “material,” or “substantive” participate in V1 admission. `task_class` is telemetry/retrieval input only and cannot change eligibility. The exact `SessionEligibilityDecisionV1` is appended to the ledger before cohort admission.
-
-### 5.3 Frozen cohort admission
-
-Once the active run has accepted its frozen `target_eligible_sessions` (10), the cohort is sealed. Later unique eligible sessions are non-counting diagnostics/capture evidence until the run becomes terminal; they cannot increase or replace cohort membership. The original 10 remain allowed to submit their required outcome envelopes and settle.
-
-## 6. Canonical scope identities
-
-Repository identity is forge-qualified:
+Sawyer Learning Loop V1 will connect four steps that are currently separate:
 
 ```text
-repo:<canonical-forge-host>/<canonical-repository-path>
+capture completed work
+  -> distill a qualified lesson or correction
+  -> supply a thin relevant slice to a later agent
+  -> measure whether the supplied context helped or was corrected
 ```
 
-For GitHub the canonical form is `repo:github.com/<lowercase-owner>/<lowercase-repo>`. Scheme, userinfo, trailing `.git`, cwd, branch, and PR number are excluded. Same `owner/name` on another forge is a different target. If canonical remote identity is unavailable, repository target is `null` and repository-scoped memories are non-injectable.
+The first proof is a self-completing canary covering exactly **10 eligible Codex sessions**. The canary ends automatically with one result:
 
-Project scope uses a caller-owned stable project key or `null` when unavailable.
+- **keep** — safe and useful, but not yet proven enough to expand;
+- **repair** — one bounded trust, relevance, or reliability defect must be corrected before another run;
+- **broaden** — all gates passed, permitting a later Claude ingestion adapter that uses the same GBrain contracts.
 
-## 7. Frozen canary contract
+This pull request is an architecture decision and implementation plan. It does not freeze every wire field or serialization byte before code exists. Each implementation pull request must introduce the versioned schema, canonical encoding, golden vectors, and adversarial tests for the surface it adds. No implementation may weaken the behavioral requirements in this document.
 
-```ts
-interface CanaryThresholdsV1 {
-  min_strong_beneficial_uses: 3;
-  max_materially_irrelevant_injections: 2;
-  require_correction_propagation: true;
-  require_baseline_for_broaden: true;
-}
+Merging this document activates nothing.
 
-interface CanaryBaselineV1 {
-  reference: BaselineReferenceV1;
-  eligible_sessions: number; // integer >= 1
-  repeated_known_instruction_count: number;
-  reasked_known_answer_count: number;
-  user_correction_count: number;
-}
+## 2. Why this is the right agent strategy
 
-interface CanaryRunV1 {
-  run_id: string;
-  armed_at: string;
-  provider_allowlist: LearningProviderV1[]; // exactly ['codex'] in V1
-  target_eligible_sessions: 10;
-  destination: {
-    brain_id: string;
-    source_id: string;
-    operating_model_slug: string;
-  };
-  contract_version: 1;
-  gbrain_version: string;
-  eligibility_classifier: 'sll-v1-structural';
-  thresholds: CanaryThresholdsV1;
-  baseline: CanaryBaselineV1 | null;
-}
-```
+The scarce asset is not another permanent agent persona. It is the vendor-neutral history connecting:
 
-A baseline with `eligible_sessions < 1` is invalid. If no valid baseline exists, arm with `baseline: null`; that run may `keep` or `repair` but cannot `broaden`.
+- what an agent was told;
+- what it did;
+- what Sawyer corrected;
+- what objective outcome followed; and
+- whether the correction improved later work.
 
-## 8. Durable memory identity, activation predicates, and canonical encoding
+Codex, Claude, ChatGPT, and future providers should remain replaceable clients. GBrain owns the durable learning substrate. Agents receive only the context relevant to the current task.
 
-```ts
-interface MemoryPointerV1 {
-  brain_id: string;
-  source_id: string;
-  source_markdown_slug: string;
-  row_num: number;
-}
+The system is valuable only when all four steps work. Capture without later use is storage. Summarization without outcome measurement is self-reinforcing folklore.
 
-type LearningClassV1 =
-  | 'constraint'
-  | 'preference'
-  | 'goal'
-  | 'lesson'
-  | 'friction'
-  | 'open_loop'
-  | 'business_candidate';
+## 3. System roles and authority
 
-type LearningAuthorityV1 =
-  | 'user_correction'
-  | 'user_statement'
-  | 'verified_outcome'
-  | 'repeated_pattern';
-
-interface LearningObservationV1 {
-  observation_id: string;
-  run_id: string;
-  provider: LearningProviderV1;
-  provider_session_id: string;
-  class: LearningClassV1;
-  authority: LearningAuthorityV1;
-  claim_fingerprint: string; // sha256 of normalized private claim; claim text is not in ledger
-  scope: 'global' | 'repository' | 'project';
-  scope_target: string | null;
-  trigger_id: string | null;
-  trigger_state: 'none' | 'pending' | 'completed' | 'cancelled';
-  evidence_event_id: string;
-}
-```
-
-`claim_fingerprint = lowercase_hex(SHA-256(utf8(NFC(normalize_newlines(trim_private_claim)))))`. The private claim itself is written only to the canonical private Markdown row when activation is authorized; it is never stored in the operational ledger.
-
-For `authority='user_statement'`, `evidence_event_id` must resolve to an accepted `user_signal_recorded` event created by GBrain from a parsed **user-role** message in that exact provider session. Assistant/model-originated text cannot obtain `user_statement` authority. For `verified_outcome`, the evidence event must resolve to an accepted `objective_evidence_recorded` event. For `repeated_pattern`, the reducer itself derives the authority only after the repeated-session predicate below; adapters cannot assert it directly. `user_correction` authority comes only from the correction operation in section 12.
-
-### 8.1 Exact V1 activation predicates
-
-These are the only canonical personal-fact activation paths in V1:
-
-- **constraint:** activate from one accepted `user_statement` observation or an authoritative `user_correction`. A repeated/model-inferred constraint without direct user authority remains candidate-only.
-- **preference:** activate from one accepted `user_statement` observation or an authoritative `user_correction`. Repeated/model-inferred preference remains candidate-only.
-- **goal:** activate from one accepted `user_statement` observation or authoritative `user_correction`. Goal rows are current commitments; supersession/correction retires the old goal.
-- **lesson:** activate if either (a) one accepted `verified_outcome` observation objectively supports the exact `claim_fingerprint`, or (b) the same `claim_fingerprint`, scope, and scope target appears in accepted candidate observations from **at least two distinct `(provider, provider_session_id)` pairs**; only GBrain then emits the derived `repeated_pattern` activation. A single agent inference cannot activate a lesson.
-- **friction:** never becomes injectable canonical guidance directly. It may remain operational evidence/candidate input only; two-session repetition may support a separately stated `lesson` fingerprint but does not silently coerce the friction text into a lesson.
-- **open_loop:** activate only from one accepted `user_statement` or `verified_outcome` observation **and** a non-empty machine-owned `trigger_id` with `trigger_state='pending'`. Triggerless/model-only open loops stay candidate-only.
-- **business_candidate:** never enters the personal fact writer.
-
-No other evidence count, confidence score, recency rule, or model self-report may activate a canonical V1 personal fact. Duplicate observations with the same observation/session/fingerprint are idempotent and do not satisfy a multi-session predicate twice.
-
-### 8.2 Canonical fact-fence mapping
-
-Stable pointer rendering:
-
-```text
-<brain_id>:<source_id>:<source_markdown_slug>#<row_num>
-```
-
-Active Learning Loop facts reuse existing fact kinds and store one machine-readable discriminator in the existing free-form `context` column:
-
-```text
-sll:v1;class=<class>;scope=<global|repository|project>;scope_target=<opaque-or-~>;authority=<authority>;trigger_id=<opaque-or-~>;trigger_state=<none|pending|completed|cancelled>
-```
-
-Opaque `scope_target` and `trigger_id` values use canonical **unpadded base64url of UTF-8 bytes**. `~` is the sole null sentinel and is outside the base64url alphabet. Padded, malformed, non-canonical, or undecodable encodings fail closed for injection.
-
-| Loop class | Existing fact kind | Injection rule |
+| Surface | Responsibility | Authority boundary |
 |---|---|---|
-| constraint | preference | hard constraint when applicable |
-| preference | preference | durable preference |
-| goal | commitment | while current |
-| lesson | belief | only after section 8.1 activation predicate |
-| friction | event | never directly injected |
-| open_loop | commitment | only while exact trigger is `pending` |
-| business_candidate | none | never personal-fact write |
-
-For `scope=global`, `scope_target=~`. Repository/project scope requires a valid decoded exact target. Missing/mismatched target is non-injectable.
-
-For non-open-loop classes: `trigger_id=~;trigger_state=none`. Open loops require a stable machine-owned trigger ID and `pending|completed|cancelled`. Only `pending` is injectable. A terminal trigger writes a new canonical row with the same trigger ID and terminal state and supersedes the prior row; rebuild must preserve non-injectability.
-
-Direct correction is performed through the authoritative GBrain correction operation defined in section 12; the ledger stores pointers/event IDs, not the corrected conversational text.
-
-## 9. Authoritative metadata references
-
-Outcome evidence never accepts a caller-invented free-form identifier as authority.
-
-```ts
-type EvidenceReferenceV1 = {
-  kind: 'event_id';
-  value: string;
-};
-
-interface BaselineReferenceV1 {
-  kind: 'local_sha256';
-  value: string; // exactly 64 lowercase hex
-}
-```
-
-### 9.1 Evidence-reference validation
-
-For every verdict-affecting `SessionEvidenceV1` item:
-
-1. `reference.kind` must be exactly `event_id`.
-2. `reference.value` must resolve **before outcome acceptance** to an already accepted append-only local GBrain ledger event.
-3. That referenced event must be in the same `run_id`; if session-scoped, its provider/session must match the outcome.
-4. The referenced event type must be one explicitly capable of supporting that evidence variant:
-   - `beneficial_use`, `materially_irrelevant`, `user_repeated_known_instruction`, `agent_reasked_known_answer`, or `contradicted`: `objective_evidence_recorded` or `user_signal_recorded` as allowed by the evidence strength;
-   - `user_correction`: the matching `memory_superseded` correction event from section 12;
-   - `open_loop_trigger_transition`: `trigger_observed` plus the matching canonical transition requirement.
-5. The referenced event contains metadata only: hashes, pointers, typed status/strength, outcome class, and bounded external/local IDs. It never contains transcript excerpts, prompts, user quotes, correction wording, or conversation bodies.
-6. Missing, mismatched, future, wrong-type, or unresolved event references reject the evidence item for learning/verdict use and emit a diagnostic. An attempt to persist conversational body text in a ledger evidence event is a privacy hard failure.
-
-Thus strings such as `private-api-token` cannot become evidence merely by fitting an ID regex; the identifier must resolve to an authoritative accepted event with matching typed metadata.
-
-### 9.2 Baseline reference
-
-A frozen baseline may reference a local pre-run evidence artifact only by `BaselineReferenceV1.local_sha256`. GBrain computes the hash from the local baseline artifact bytes at arming and freezes the 64-lowercase-hex value together with the baseline metrics. The artifact body is not copied into the Learning Loop ledger.
-
-## 10. Context request and exact request-hash bytes
-
-```ts
-interface LearningContextRequestV1 {
-  schema_version: 1;
-  run_id: string;
-  provider: LearningProviderV1;
-  provider_session_id: string;
-  task_class: TaskClassV1;
-  current_scope: {
-    repository_target: string | null;
-    project_target: string | null;
-  };
-  relevance_window: Array<{ role: 'user' | 'assistant'; text: string }>;
-}
-```
-
-Before hashing/retrieval, the producer applies one canonical normalization algorithm:
-
-1. preserve only the most recent four turns, keeping chronological order;
-2. normalize each `text` to Unicode NFC;
-3. normalize CRLF and lone CR to LF;
-4. build the exact byte encoding defined below;
-5. reject the request if the retained normalized texts total more than **2,000 UTF-8 bytes**; never truncate;
-6. compute `request_hash = lowercase_hex(SHA-256(exact_request_bytes))`.
-
-### 10.1 Exact binary encoding
-
-All integers are unsigned 32-bit big-endian. `utf8(s)` means UTF-8 bytes after normalization. `lp(s)` means `uint32be(byte_length(utf8(s))) || utf8(s)`. Nullable strings encode as `0xffffffff` for null, otherwise `lp(s)`; null and empty string are distinct.
-
-`exact_request_bytes` is the concatenation, with no separators other than the defined length prefixes:
-
-```text
-ASCII("SLLREQ1\0")
-lp(run_id)
-lp(provider)
-lp(provider_session_id)
-lp(task_class)
-nullable(repository_target)
-nullable(project_target)
-uint32be(turn_count)
-for each normalized turn in chronological order:
-  one byte 0x01 for user or 0x02 for assistant
-  lp(text)
-```
-
-The 2,000-byte relevance limit is the sum of `byte_length(utf8(text))` across retained turns after normalization and before prefix overhead. Every adapter/test uses this exact encoding; JSON serialization, alternate delimiters, field reordering, and platform-native encodings are forbidden.
-
-An empty window is valid and may return only globally or otherwise unambiguously applicable context. Retrieval must not recover missing semantic/scope input from raw transcripts, cwd, mounts, ambient Git config, or another checkout.
-
-Telemetry stores the request hash, task class, exact scope targets, turn/byte counts, selected pointers, rationales, and token estimate—never relevance-window text.
-
-## 11. Context bundle and telemetry authority
-
-```ts
-interface LearningContextBundleV1 {
-  schema_version: 1;
-  run_id: string;
-  provider_session_id: string;
-  request_hash: string;
-  max_items: 5;
-  max_tokens: 800;
-  items: Array<{
-    pointer: MemoryPointerV1;
-    statement: string;
-    type: 'constraint' | 'preference' | 'goal' | 'lesson' | 'open_loop';
-    scope: 'global' | 'repository' | 'project';
-    scope_target: string | null;
-    trigger: null | { id: string; state: 'pending' };
-    rationale: string;
-    authority: 'user_correction' | 'user_statement' | 'verified_outcome' | 'repeated_pattern';
-  }>;
-}
-```
-
-Ranking: applicable constraints, current goals, exact-scope proven lessons, relevant preferences, then at most one pending open loop. Maximum five items / 800 tokens.
-
-The accepted `context_supplied` event is the authority for what was actually injected. It records `(run_id, provider, provider_session_id, request_hash)` plus exact brain-qualified pointers and reconstructed scope/trigger metadata. Outcome payloads cannot self-authorize a pointer as supplied.
-
-## 12. Authoritative correction operation
-
-A direct user correction never carries corrected prose inside `session_outcome`. Instead, GBrain core owns one correction operation that writes canonical knowledge first and returns an authoritative event linkage:
-
-```ts
-interface CorrectionResultV1 {
-  correction_event_id: string;
-  run_id: string;
-  old_pointer: MemoryPointerV1;
-  replacement_pointer: MemoryPointerV1;
-}
-```
-
-The correction operation must, atomically for learning purposes:
-
-1. route using `old_pointer.brain_id/source_id` and the frozen personal destination;
-2. append the corrected canonical fact row in Markdown using the complete Loop discriminator;
-3. supersede the old canonical row through the existing renderer;
-4. reconcile the same brain/source derived index;
-5. append `memory_superseded` containing `correction_event_id`, old pointer, replacement pointer, and active `run_id`;
-6. return `CorrectionResultV1`.
-
-The actual corrected claim exists only in canonical private Markdown, not in the event ledger/outcome payload.
-
-`user_correction` outcome evidence must carry the exact `correction_event_id`, `old_pointer`, and `replacement_pointer`. The reducer accepts it only if a matching authoritative `memory_superseded` event already exists for the same run and exact pointers. Otherwise the evidence cannot settle and the mismatch is a hard failure.
-
-## 13. Complete typed outcome contract
-
-Every **counted cohort session requires exactly one outcome envelope**, even when its `evidence` array is empty. Outcome completeness is never inferred from adapter silence.
-
-The GBrain-owned deterministic outcome ID is:
-
-```text
-outcome_id = lowercase_hex(SHA-256(
-  ASCII("SLLOUT1\0") ||
-  lp(run_id) ||
-  lp(provider) ||
-  lp(provider_session_id)
-))
-```
-
-where `lp` is section 10.1's length-prefix function.
-
-```ts
-type SessionEvidenceV1 =
-  | {
-      kind: 'beneficial_use';
-      evidence_id: string;
-      pointer: MemoryPointerV1;
-      request_hash: string;
-      strength: 'objective' | 'explicit_user';
-      benefit:
-        | 'avoided_known_failure'
-        | 'avoided_repeated_instruction'
-        | 'answered_without_reasking'
-        | 'improved_task_execution';
-      reference: EvidenceReferenceV1;
-    }
-  | {
-      kind: 'materially_irrelevant';
-      evidence_id: string;
-      pointer: MemoryPointerV1;
-      request_hash: string;
-      strength: 'objective' | 'explicit_user';
-      reference: EvidenceReferenceV1;
-    }
-  | {
-      kind: 'user_repeated_known_instruction';
-      evidence_id: string;
-      pointer: MemoryPointerV1;
-      request_hash: string;
-      strength: 'explicit_user';
-      reference: EvidenceReferenceV1;
-    }
-  | {
-      kind: 'agent_reasked_known_answer';
-      evidence_id: string;
-      pointer: MemoryPointerV1;
-      request_hash: string;
-      strength: 'objective' | 'explicit_user';
-      reference: EvidenceReferenceV1;
-    }
-  | {
-      kind: 'user_correction';
-      evidence_id: string;
-      correction_event_id: string;
-      old_pointer: MemoryPointerV1;
-      replacement_pointer: MemoryPointerV1;
-      strength: 'explicit_user';
-      reference: EvidenceReferenceV1;
-    }
-  | {
-      kind: 'contradicted';
-      evidence_id: string;
-      pointer: MemoryPointerV1;
-      request_hash: string | null;
-      strength: 'objective' | 'explicit_user';
-      reference: EvidenceReferenceV1;
-    }
-  | {
-      kind: 'open_loop_trigger_transition';
-      evidence_id: string;
-      pointer: MemoryPointerV1;
-      trigger_id: string;
-      terminal_state: 'completed' | 'cancelled';
-      strength: 'objective' | 'explicit_user';
-      reference: EvidenceReferenceV1;
-    };
-
-interface SessionOutcomeV1 {
-  schema_version: 1;
-  run_id: string;
-  provider: LearningProviderV1;
-  provider_session_id: string;
-  outcome_id: string;
-  content_hash: string;
-  observed_at: string;
-  evidence: SessionEvidenceV1[];
-}
-```
-
-### 13.1 Outcome canonicalization, identity, and replay
-
-Before hashing, NFC-normalize every string and normalize CRLF/CR to LF. Serialize the outcome **excluding `content_hash`** using **RFC 8785 JSON Canonicalization Scheme (JCS)** exactly. `content_hash = lowercase_hex(SHA-256(JCS_UTF8_bytes))`.
-
-V1 payloads contain only JSON-safe integers within the exact-safe integer range, booleans/null when defined, strings, arrays, and objects. No non-finite number is permitted. RFC 8785 is the sole serializer: implementations must not invent alternate escape spellings, key order, whitespace, or numeric rendering.
-
-Identity/replay boundaries:
-
-- outcome uniqueness: `(run_id, provider, provider_session_id, outcome_id)`;
-- `outcome_id` must equal the deterministic value in section 13; mismatch is rejected;
-- same outcome key + same `content_hash`: idempotent retry;
-- same outcome key + different hash: diagnostic replay conflict; changed payload contributes nothing;
-- evidence uniqueness: `(run_id, provider, provider_session_id, evidence_id)`;
-- duplicate evidence ID + identical RFC-8785 canonical evidence bytes: idempotent;
-- duplicate evidence ID + changed canonical evidence bytes: diagnostic conflict and contributes nothing.
-
-Agent-report evidence is not accepted for any verdict-affecting evidence variant in V1.
-
-### 13.2 Telemetry/reference binding and semantic deduplication
-
-Every evidence item must first pass section 9's authoritative-reference resolution.
-
-`beneficial_use`, `materially_irrelevant`, `user_repeated_known_instruction`, and `agent_reasked_known_answer` additionally require their pointer to appear in the accepted `context_supplied` event for the same `(run_id, provider, provider_session_id, request_hash)`. If no such telemetry exists, that evidence is rejected for verdict purposes.
-
-A beneficial use counts at most once per `(run_id, provider, provider_session_id, pointer)`. Generic task success, corrections, contradiction, trigger transitions, or agent self-report never increment beneficial-use count.
-
-Material irrelevance counts at most once per `(run_id, provider, provider_session_id, pointer)`, regardless of distinct evidence IDs describing the same injection.
-
-Repeated-known-instruction and re-asked-known-answer are supervision errors, never benefits.
-
-`user_correction` is accepted only through the authoritative correction linkage in section 12 and its reference must resolve to that same `memory_superseded` event.
-
-Open-loop transition evidence requires exact pointer and exact trigger ID, with its reference resolving to the matching accepted `trigger_observed` event. Agent self-report cannot transition a trigger. Pointer/trigger mismatch fails closed without canonical mutation.
-
-## 14. Deterministic close manifest and settlement barrier
-
-Every counted cohort session requires exactly one deterministic `SessionOutcomeV1`, so GBrain derives the obligation at admission without relying on a future producer declaration.
-
-When a session is admitted, GBrain appends:
-
-```ts
-interface SessionCloseManifestV1 {
-  schema_version: 1;
-  run_id: string;
-  provider: LearningProviderV1;
-  provider_session_id: string;
-  expected_outcome_id: string;
-}
-```
-
-There is no `outcome_required=false` state for counted sessions.
-
-Settlement is reducer-owned, not adapter-declared. A cohort session becomes settled only after:
-
-1. its exact expected outcome ID has been accepted and reduced (empty evidence is still an explicit outcome);
-2. every accepted correction/trigger-transition evidence has its required authoritative canonical mutation event completed successfully, otherwise the run has already aborted;
-3. all session replay/identity/reference conflicts have been reduced to their fail-closed result.
-
-Only then may GBrain append `session_settled`. A delayed/omitted outcome cannot be bypassed because adapters do not declare settlement.
-
-Normal finalization requires exactly 10 sealed cohort sessions and all 10 settlements. Session 10 completion alone never finalizes. Hard failure follows immediate abort and does not wait for settlement.
-
-## 15. Correction-propagation gate
-
-If `require_correction_propagation=false`, this gate is ignored.
-
-If true:
-
-- no accepted direct user correction in the run: passes vacuously;
-- one or more accepted corrections: every correction's `memory_superseded` linkage must exist, every old pointer must be absent from every later accepted `context_supplied`, and a full rebuild verification for the corrected brain/source must resolve only the replacement active row. Any failure is a hard failure and immediately aborts as `repair`.
-
-## 16. Event ledger
-
-Local append-only ledger:
-
-```text
-$GBRAIN_HOME/learning-loop/events-v1.jsonl
-```
-
-Run/state event types include at least:
-
-- `canary_armed`
-- `session_completed`
-- `session_eligibility_decided`
-- `session_rejected`
-- `session_close_manifest`
-- `user_signal_recorded`
-- `objective_evidence_recorded`
-- `trigger_observed`
-- `observation_recorded`
-- `memory_activated`
-- `memory_superseded`
-- `context_supplied`
-- `session_outcome`
-- `session_settled`
-- `rebuild_verified`
-- `canary_finalized`
-- `canary_aborted`
-- `diagnostic`
-
-Every state-affecting line carries schema version, timestamp, event ID, and `run_id`; provider/session identity is included when relevant. The complete immutable `CanaryRunV1` is persisted on `canary_armed`.
-
-The authoritative evidence events (`user_signal_recorded`, `objective_evidence_recorded`, `trigger_observed`) contain only typed metadata, hashes/pointers/status, and bounded IDs; never raw conversation text. Malformed lines do not corrupt valid prior state. Same-session replay conflicts, outcome/evidence replay conflicts, unresolved evidence references, and cohort-overflow deliveries cannot advance the run.
-
-## 17. Deterministic terminal reduction
-
-For the sealed cohort:
-
-```text
-canary_error_count =
-  repeated_known_instruction_count +
-  reasked_known_answer_count +
-  user_correction_count
-
-canary_error_rate = canary_error_count / 10
-```
-
-For non-null baseline:
-
-```text
-baseline_error_count =
-  baseline.repeated_known_instruction_count +
-  baseline.reasked_known_answer_count +
-  baseline.user_correction_count
-
-baseline_error_rate = baseline_error_count / baseline.eligible_sessions
-```
-
-`broaden` requires all of:
-
-1. cohort is exactly 10 and all 10 sessions are settled;
-2. no `canary_aborted`/hard failure;
-3. at least frozen `min_strong_beneficial_uses` accepted beneficial uses;
-4. no more than frozen `max_materially_irrelevant_injections` semantic irrelevant injections;
-5. correction-propagation gate passes;
-6. frozen baseline is non-null;
-7. `canary_error_rate < baseline_error_rate`.
-
-If all normal-finalization prerequisites are met, no hard failure occurred, but any broaden-only requirement is unmet, append `canary_finalized(disposition='keep')`.
-
-If every broaden requirement passes, append `canary_finalized(disposition='broaden')`.
-
-**There is no `canary_finalized(disposition='repair')`.** Every trust-critical defect, including one first discovered during final reduction, is a hard failure and appends `canary_aborted(disposition='repair')` exactly once. Thus identical ledgers cannot choose between two repair terminal event types.
-
-A healthy no-baseline run returns `keep`, never `broaden`.
-
-## 18. Hard failures and immediate terminal transition
-
-Hard failures include:
-
-- corrected old memory supplied again;
-- memory operation routes to a brain/source other than its frozen destination/pointer;
-- scoped memory injected without exact request-target match;
-- completed/cancelled/triggerless/malformed open loop injected;
-- unsupported high-impact inference causes action;
-- Seascape canon or external write occurs through V1;
-- duplicate/conflicting session, outcome, or evidence advances metrics;
-- cohort exceeds 10 or a post-seal session changes cohort membership;
-- settlement is appended before deterministic outcome/mutations are fully reduced;
-- run state leaks across `run_id`s;
-- reducer substitutes mutable current version/thresholds/classifier;
-- historical evidence must be deleted to rerun;
-- runtime requires Sawyer to inspect a queue/receipt, advance a counter, remember an end date, or perform recurring canary upkeep;
-- injection materially blocks ordinary work;
-- finalization happens before all 10 settlements or occurs more than once;
-- correction-propagation gate fails when required;
-- privacy-critical evidence attempts to persist conversation body/verbatim text;
-- trust/privacy-critical event state is malformed or contradictory such that safe reduction is impossible.
-
-On first hard failure, GBrain atomically appends:
-
-```text
-canary_aborted {
-  run_id,
-  disposition: "repair",
-  reason_code,
-  triggering_event_id
-}
-```
-
-After this is durable, that run accepts no further injection, cohort admission, counting, verdict evidence, canonical activation, or settlement mutation. Later deliveries are diagnostics only. Ordinary Codex work continues. A fresh run may be armed after the bounded fix without deleting prior evidence.
-
-## 19. Learning-loop mode semantics
+| **GBrain raw session source** | Local transcript discovery and parsing | Private evidence; not directly injected as durable truth |
+| **GBrain operational ledger** | Append-only session, eligibility, context, correction, outcome, settlement, and canary events | Operational evidence only; rebuildable and non-authoritative for personal claims |
+| **GBrain canonical personal source** | Current preferences, constraints, goals, proven lessons, and bounded open loops | Authoritative personal operating model |
+| **Sawyer Hub** | Optional generated human-readable projection | Never required for activation, retrieval, promotion, or canary completion |
+| **Seascape Hub** | Controlled durable business knowledge | Separate business authority; no automatic promotion from this personal loop |
+| **Codex / later Claude adapter** | Submit normalized events, request context, perform work, return outcomes | Thin client; cannot define thresholds, authority, or verdicts |
+| **Sawyer** | Strategy, business judgment, irreversible or external-action exceptions | No routine memory maintenance, counter advancement, receipt review, or promotion work |
+
+## 4. Sources of truth
+
+### 4.1 Raw sessions
+
+Raw transcripts stay local. They are evidence inputs, not the personal operating model. Transcript text is not copied into routine operational telemetry.
+
+### 4.2 Operational evidence
+
+One append-only local ledger records machine-readable events such as:
+
+- session discovered and completed;
+- authoritative transcript hash and size;
+- GBrain-owned eligibility decision;
+- context requested and supplied;
+- candidate learning observed;
+- canonical memory activated or superseded;
+- objective outcome or explicit user signal recorded;
+- open-loop trigger transitioned;
+- session settled;
+- canary armed, finalized, or aborted.
+
+The ledger may be replayed to rebuild derived run state. It does not itself make an inferred personal claim true.
+
+### 4.3 Canonical personal knowledge
+
+Durable active personal knowledge remains in the existing GBrain filesystem-canonical Markdown/fact-fence model. Database rows remain rebuildable indexes.
+
+A memory is active only when a permitted activation rule writes it to the configured canonical personal source. Candidate observations, session summaries, model confidence, and operational events alone are not active memory.
+
+### 4.4 Business knowledge
+
+A possible Seascape fact may be surfaced only as an evidence-backed candidate through the existing business boundary. V1 cannot promote, rewrite, merge, deploy, send, or otherwise mutate Seascape canon or any external system.
+
+## 5. V1 scope
+
+V1 includes only:
+
+1. Codex session-close capture.
+2. GBrain-owned deterministic eligibility.
+3. Candidate learning and direct correction handling.
+4. Canonical personal-memory activation under explicit rules.
+5. Thin task-relevant context retrieval.
+6. Exact context-supply telemetry.
+7. Typed outcome evidence and session settlement.
+8. A 10-eligible-session canary with automatic `keep`, `repair`, or `broaden` disposition.
+9. Cleanup of displaced manual personal-memory machinery only after successful proof.
+
+V1 explicitly excludes:
+
+- Claude or ChatGPT ingestion;
+- research ingestion;
+- automatic skill or configuration edits;
+- live `~/.codex` changes;
+- automatic PR, merge, deploy, install, send, or schedule actions;
+- a new memory database, repository, knowledge graph, dashboard, inbox, queue, or notification channel;
+- autonomous Seascape canon promotion;
+- more than one active self-improvement change.
+
+## 6. Operating modes and activation
+
+One central mode resolver exposes:
 
 ```text
 learning_loop.mode = off | capture | canary
 ```
 
-Default is `off`. Merge never changes live mode.
+- **off** — no Learning Loop capture, distillation, injection, counting, or canonical activation.
+- **capture** — local session/evidence capture and candidate distillation may run; no context injection, no canary counting, and no automatic canonical activation.
+- **canary** — capture, qualified activation/correction, context injection, outcome measurement, and counting operate only for one explicitly armed run.
 
-- **`off`**: no Learning Loop session capture, distillation/activation, context retrieval/injection, outcome reduction, or canary counting. Existing unrelated GBrain behavior is unchanged.
-- **`capture`**: accept local completed-session/evidence capture and may perform candidate distillation/diagnostics, but **no context injection**, **no active canary cohort admission/counting**, **no canary verdict advancement**, and no automatic canonical activation that depends on canary authority. Smoke/rollback observation only.
-- **`canary`**: only an explicitly armed nonterminal run may admit/count its sealed cohort, retrieve/inject bounded context, activate/correct under this contract, reduce typed outcomes, settle sessions, and finalize/abort.
+Default is `off`. A merge cannot arm or activate a run.
 
-Changing `canary -> capture|off` while a run is nonterminal first appends `canary_aborted(disposition='repair', reason_code='operator_rollback')`, then changes mode. Mode change alone never silently abandons a run.
+Changing out of `canary` first appends a terminal abort for the active run, then changes mode. Capture and injection are independently disableable so ordinary Codex work continues if the loop is rolled back.
 
-## 20. Lifecycle and activation
+## 7. Canary lifecycle
+
+### 7.1 Arming
+
+An explicit arm operation creates an immutable `run_id`. Only one run may be nonterminal at once.
+
+Arming freezes at least:
+
+- contract/schema version;
+- GBrain implementation commit/version;
+- provider allow-list, exactly `codex` for V1;
+- target cohort size, exactly 10;
+- eligibility-classifier version and thresholds;
+- personal destination including `brain_id`, `source_id`, and canonical page/slug;
+- verdict thresholds;
+- baseline object or explicit no-baseline state.
+
+Reducers use the frozen run inputs, never mutable current defaults.
+
+### 7.2 Session identity and authoritative transcript data
+
+Global session uniqueness is `(provider, provider_session_id)`.
+
+GBrain—not the adapter—must resolve the transcript through configured local corpus boundaries, read the exact bytes consumed by the parser, and compute the authoritative size and content hash.
+
+- Same session identity plus same authoritative hash is an idempotent retry.
+- Same session identity plus a different authoritative hash is a conflict and cannot learn, count, or replace the prior completion.
+- Adapter-supplied path, size, or hash is only an assertion and must match GBrain’s computation.
+
+### 7.3 GBrain-owned eligibility
+
+For the V1 canary, eligibility is deliberately structural and deterministic. A session is eligible only when all are true:
+
+- provider is in the frozen allow-list;
+- completion state is completed;
+- the GBrain-read transcript is at least 256 UTF-8 bytes;
+- the existing parser yields at least two non-empty normalized user turns and two non-empty normalized assistant turns.
+
+Normalization and role counting are implemented once in GBrain and covered by golden tests. Adapter labels and task class cannot override eligibility.
+
+Every decision is appended with its classifier version, authoritative transcript hash, counts, and reason before cohort admission.
+
+### 7.4 Sealed cohort
+
+The first 10 accepted eligible sessions form the immutable cohort. Once full, the cohort is sealed.
+
+Later sessions may be captured as diagnostics but cannot count, replace a cohort member, or prevent the original 10 from settling.
+
+### 7.5 Settlement
+
+Every cohort session requires one GBrain-owned close manifest and exactly one expected outcome envelope, even when the outcome contains no positive or negative evidence.
+
+The expected outcome identity is derived by GBrain from the run and session identity. A session settles only after:
+
+- the expected outcome is accepted or an idempotent duplicate is recognized;
+- every referenced authoritative event exists and matches the evidence item;
+- all required canonical mutations or trigger transitions complete; and
+- no replay conflict or unresolved trust failure remains.
+
+The run cannot finalize until all 10 cohort sessions are settled. Session 10 completion alone is never enough.
+
+### 7.6 Terminal state
+
+A run ends exactly once with either:
+
+- `canary_finalized(keep|broaden)`; or
+- `canary_aborted(repair)`.
+
+A hard failure aborts immediately, disables further injection/counting/activation for that run, and preserves history. A later bounded rerun receives a new `run_id`; old terminal events cannot contaminate it.
+
+## 8. Identity, scope, provenance, and replay invariants
+
+### 8.1 Brain-qualified memory identity
+
+Every durable memory pointer includes:
 
 ```text
-off
-  -> capture smoke (optional)
-  -> explicit canary arm -> run A: armed/running
-                         -> finalized(keep|broaden)
-                         -> aborted(repair)
-
-repair/abort -> bounded fix -> explicit fresh arm -> run B
+brain_id + source_id + canonical source page/slug + fact row
 ```
 
-Arming refuses while a nonterminal run exists, resolves/freezes brain/source destination, freezes the complete run payload including classifier version, validates V1 provider allow-list is exactly `['codex']`, and appends one `canary_armed`.
+After arming, all retrieval, activation, correction, outcome, and rebuild checks route explicitly to the frozen brain/source. Ambient mounts, cwd, or environment variables cannot redirect an operation.
 
-Historical finalized/aborted runs remain immutable and do not make a fresh run terminal.
+### 8.2 Exact scope identity
 
-## 21. Delivery sequence
+- Global memories carry no target.
+- Repository memories use a forge-qualified canonical target such as `repo:github.com/owner/repo`.
+- Project memories use one stable project key owned by the caller/domain contract.
+- Missing, malformed, or mismatched targets make the item non-injectable.
+- The same owner/repository path on another forge is a different target.
 
-Only one implementation PR may be actively mutated at a time.
+Opaque scope/trigger values must use one unambiguous canonical encoding with a reserved null representation. The implementation PR introducing the encoding must include round-trip and malformed-input vectors.
 
-### PR 0 — this contract
+### 8.3 Claim-bound authority
 
-Documentation only. Freeze architecture/contracts. No runtime/config activation.
+An event cannot authorize an unrelated claim merely because it occurred in the same session.
 
-### PR 1 — run/session/event foundation
+Every authority-bearing GBrain event used for activation must bind the exact:
 
-GBrain-owned provider/session types, authoritative transcript byte/hash verification, frozen run payload/classifier, append-only ledger, one-active-run invariant, session uniqueness, deterministic structural eligibility, sealed 10-session cohort admission, deterministic expected outcome ID and immutable close manifest, exact mode resolver defaulting off, and trusted-local capture seam. PR 1 may define/store outcome envelope type/expected ID but does not interpret verdict evidence.
+- normalized claim fingerprint;
+- learning class;
+- authority class;
+- provider and provider session;
+- scope and exact scope target;
+- trigger identity/state when applicable; and
+- source-role/provenance class.
 
-### PR 2 — canonical activation/correction
+A learning observation may reference that event only when all relevant fields match exactly. User-statement authority must originate from a parsed user-role message, never assistant/model text.
 
-Learning observation/provenance types, exact class-by-class activation predicates from section 8.1, canonical discriminator encoding, forge-qualified scope targets, trigger state, explicit brain/source routing, authoritative correction operation + supersession linkage, rebuild verification, and Seascape boundary. No injection.
+### 8.4 Evidence-event equality
 
-### PR 3 — context request/bundle/telemetry
+Outcome evidence uses an accepted GBrain ledger event ID, not a caller-invented string or transcript excerpt.
 
-Exact request-byte codec, canonical relevance normalization/rejection, explicit scope request, precision-biased retrieval, class/scope/trigger reconstruction, exact scope matching, five-item/800-token caps, accepted `context_supplied` telemetry, empty-context fail-open.
+Before accepting each evidence item, the reducer must validate both event type and variant-specific equality. Depending on the evidence type, matching includes the exact run, provider session, request hash, supplied memory pointer, claim fingerprint, benefit/error class, evidence strength, trigger ID/state, and correction linkage.
+
+For example, an objective event about pointer A cannot authorize a beneficial-use claim for pointer B, even in the same session.
+
+Each implementation PR that introduces an event type must define its versioned payload and exact equality checks beside tests. There is no generic “same session is close enough” rule.
+
+### 8.5 Idempotency and replay
+
+Every appendable command/event family that can affect learning or verdict state has:
+
+- a stable identity;
+- a canonical payload hash;
+- same-ID/same-payload idempotency; and
+- same-ID/changed-payload conflict behavior that fails closed for learning.
+
+Retries cannot double-count sessions, beneficial uses, errors, irrelevant injections, corrections, trigger transitions, settlement, or terminal state.
+
+The implementation PR introducing a hashed payload must select one canonical encoding and ship golden test vectors before merge. No behavior may depend on an unspecified serializer.
+
+## 9. Memory classes and activation rules
+
+| Class | Canonical activation rule | Injection behavior |
+|---|---|---|
+| **constraint** | One exact claim-bound direct user statement or authoritative user correction | Highest priority when applicable |
+| **preference** | One exact claim-bound direct user statement or authoritative user correction | Inject when relevant |
+| **goal** | One exact claim-bound direct user statement or authoritative user correction | Inject while current and unsuperseded |
+| **lesson** | One exact claim-bound verified outcome, or the same claim/scope fingerprint observed in at least two distinct accepted **eligible** sessions | Inject when relevant and in exact scope |
+| **friction** | Operational/candidate evidence only | Never directly injected |
+| **open loop** | Exact claim-bound user statement or verified outcome plus a machine-owned pending trigger | At most one; inject only while exact trigger remains pending |
+| **business candidate** | Existing candidate-only business path | Never written as personal memory |
+
+Additional rules:
+
+- Single-session model inference remains candidate-only.
+- Adapters cannot assert `repeated_pattern`; GBrain derives it.
+- Repetition requires distinct session identities whose accepted GBrain eligibility decisions are eligible.
+- Duplicate observations from one session cannot satisfy the threshold twice.
+- Friction may support a separately stated lesson, but friction text is not silently coerced into guidance.
+- Open-loop completion or cancellation appends a typed terminal transition, writes/supersedes canonical state, and makes the old pending row non-injectable after rebuild.
+
+## 10. Direct correction
+
+Direct user correction is a first-class GBrain operation, not another unstructured outcome note.
+
+For one learning transaction it must:
+
+1. route to the exact brain/source of the obsolete memory;
+2. write the corrected canonical fact;
+3. mark the obsolete row superseded/struck using the existing correction machinery;
+4. return an authoritative correction event ID plus exact old and replacement pointers;
+5. refresh/reconcile the derived index;
+6. verify that the obsolete pointer is immediately non-injectable; and
+7. pass a full rebuild check showing only the replacement remains active.
+
+Corrected prose remains in private canonical knowledge, not routine operational telemetry.
+
+Correction propagation passes vacuously when no direct correction occurs during a run. When one does occur, every obsolete pointer must be absent from all later accepted context-supply telemetry and remain absent after rebuild.
+
+## 11. Thin context request and bundle
+
+The adapter submits an explicit context request containing at least:
+
+- run and provider session identity;
+- task class;
+- forge-qualified repository target or null;
+- stable project target or null; and
+- a transient bounded relevance window derived from the current request.
+
+The implementation must normalize and hash this request deterministically using one specified canonical codec and golden vectors. The relevance window is limited to the most recent four turns and 2,000 normalized UTF-8 text bytes. Overflow is rejected for Learning Loop retrieval; it is not silently truncated differently by clients.
+
+Retrieval may not infer missing scope or task text from cwd, ambient Git state, mounts, a different checkout, or a raw transcript outside the submitted request.
+
+The returned bundle is ephemeral and contains:
+
+- no more than five items;
+- no more than an 800-token estimate;
+- applicable constraints first;
+- current goals;
+- exact-scope proven lessons;
+- relevant preferences; and
+- at most one pending open loop.
+
+It excludes raw transcripts, stale PR facts, completed work, unsupported inference, unrelated business facts, malformed scope/trigger rows, and superseded memories.
+
+An accepted `context_supplied` event is the sole authority for what the agent actually received. It binds the run, session, request hash, exact brain-qualified pointers, and reconstructed scope/trigger metadata. An outcome payload cannot self-authorize a memory as supplied.
+
+## 12. Outcome evidence and measurement
+
+The implementation PR for outcomes must introduce a complete discriminated evidence union and matching authoritative GBrain event schemas. At minimum, V1 must represent:
+
+- beneficial use of an actually supplied pointer;
+- materially irrelevant supplied context;
+- repeated known instruction;
+- re-asked known answer;
+- direct user correction via authoritative correction linkage;
+- open-loop trigger completion/cancellation;
+- objective task outcome or blocker; and
+- trust/privacy/replay failure.
+
+Every variant is pointer-, request-, claim-, trigger-, or correction-bound as applicable. Free-form references, transcript excerpts, prompts, secrets, or verbatim user corrections are rejected before ledger persistence.
+
+### 12.1 Beneficial use
+
+A strong beneficial use counts only when:
+
+- the memory pointer appears in accepted `context_supplied` telemetry for the same run/session/request;
+- an accepted authoritative event matches that exact pointer and allowed benefit class;
+- strength is objective system evidence or an explicit user signal bound to the same claim; and
+- the semantic tuple `(run, session, pointer)` has not already counted.
+
+Allowed benefit classes are limited to:
+
+- prevented a repeated known instruction;
+- prevented a re-asked known answer;
+- avoided a previously evidenced workflow failure; or
+- materially improved first-pass execution according to an objective or exact user-bound event.
+
+Agent self-report, generic task success, mere injection, or “context was applied” never counts by itself.
+
+### 12.2 Negative evidence
+
+Errors and materially irrelevant injections are reduced from typed, exact-match authoritative events. One actual irrelevant pointer counts at most once per `(run, session, pointer)`, regardless of duplicate evidence IDs.
+
+A correction, wrong action caused by memory, cross-scope injection, private-body persistence attempt, conflicting replay, or invalid authority linkage cannot be reclassified as a beneficial use.
+
+## 13. Deterministic verdict
+
+Final reduction occurs only after the sealed cohort has 10 eligible sessions and all 10 are settled.
+
+### 13.1 Hard failures
+
+Any of the following immediately aborts the run as `repair`:
+
+- an incorrect high-impact memory causes action;
+- a superseded memory is later supplied;
+- brain/source or repository/project scope crosses boundaries;
+- Seascape canon or an external system is mutated;
+- a transcript body, prompt, secret, or verbatim correction is persisted in operational telemetry;
+- session/outcome/evidence identity conflict affects learning state;
+- required settlement cannot be proven;
+- terminal state becomes ambiguous or duplicated;
+- routine canary progress requires Sawyer to inspect a queue/receipt, advance a counter, remember an end date, or perform recurring upkeep.
+
+There is one repair path: `canary_aborted(repair)`. A trust defect discovered during final reduction does not use a competing finalization event.
+
+### 13.2 Broaden
+
+`broaden` requires all of:
+
+- no hard failure;
+- exactly 10 eligible, settled cohort sessions;
+- at least three strong beneficial uses;
+- no more than two materially irrelevant injected pointers;
+- correction propagation passes;
+- no wrong high-impact active belief survives;
+- a valid frozen baseline exists; and
+- the canary’s normalized supervision-error rate is strictly lower than the baseline rate.
+
+The supervision-error rate is:
+
+```text
+(repeated-known-instruction + re-asked-known-answer + user-correction events)
+/ eligible sessions
+```
+
+Raw totals across unequal cohorts are never compared.
+
+### 13.3 Keep
+
+Return `keep` when the run is healthy and low-maintenance but one or more broaden gates are unmet. A run without a valid baseline can return `keep`, never `broaden`.
+
+## 14. Implementation sequence
+
+Only one implementation pull request may be actively mutated at a time.
+
+### PR 0 — architecture decision and plan
+
+This document.
+
+Exit condition:
+
+- boundaries, authority, lifecycle, staged ownership, and canary gates are accepted;
+- no runtime behavior is enabled.
+
+### PR 1 — session capture, run state, mode resolver, and eligibility
+
+Implement only:
+
+- versioned session/run/eligibility events;
+- authoritative local transcript hashing and parser-bound size/counts;
+- session replay semantics;
+- `off|capture|canary` mode resolver, default `off`;
+- explicit arm/abort lifecycle;
+- deterministic cohort admission and sealing;
+- append-only ledger primitives.
+
+Must not implement context injection, canonical learning writes, outcome scoring, Claude, research, skills, or live activation.
+
+Exit proof includes golden transcript vectors, cross-path rejection, same-ID replay/conflict tests, mode tests, one-active-run tests, cohort-cap tests, and deterministic rebuild/replay.
+
+### PR 2 — candidate learning, exact authority binding, activation, and correction
+
+Implement only:
+
+- versioned candidate/authority event schemas;
+- exact claim fingerprinting;
+- claim/class/scope/trigger equality validation;
+- class-by-class activation predicates from section 9;
+- canonical fact-fence mapping and rebuild tests;
+- GBrain-owned repeated-pattern derivation from two eligible sessions;
+- authoritative correction transaction and supersession verification.
+
+Exit proof includes model-text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, cross-scope rows cannot inject, pending/terminal open-loop rebuild behavior, and correction survival after full rebuild.
+
+### PR 3 — context request, thin bundle, and supply telemetry
+
+Implement only:
+
+- versioned context request and canonical request hashing;
+- explicit current scope and bounded relevance input;
+- precision-biased retrieval from canonical personal facts;
+- five-item/800-token budget;
+- at-most-one pending open loop;
+- exact `context_supplied` telemetry without request text.
+
+Exit proof includes canonical hash golden vectors, Unicode/newline behavior, overflow rejection, no ambient scope inference, wrong-brain/wrong-forge/wrong-project exclusions, superseded/terminal-loop exclusions, and exact pointer telemetry.
 
 ### PR 4 — thin Codex adapter
 
-Bootstrap submits explicit normalized request. Close submits `CompletedSessionV1` plus the one deterministic `SessionOutcomeV1` for every counted session, including explicit empty evidence when needed. Adapter owns no eligibility decision, transcript byte/hash authority, routing, memory, scoring, settlement, or verdict logic. No live activation.
+Modify only the existing owner of active Codex hooks.
 
-### PR 5 — outcome/settlement/finalization
+The adapter:
 
-Typed evidence/reference validation and authoritative-event resolution, RFC-8785 outcome hashing/replay, context-telemetry binding, semantic benefit/irrelevance dedupe, correction/trigger linkage, reducer-owned settlement, correction propagation, normalized baseline rates, immediate abort, deterministic keep/broaden finalization, plain-English terminal output.
+- gathers provider/session identifiers and explicit work scope;
+- submits bounded context requests;
+- injects returned context;
+- submits session-close metadata and outcomes;
+- fails open for ordinary work when GBrain is unavailable.
 
-### PR 6 — cleanup only after successful canary
+No second transcript walker, scheduler, daemon, receipt format, dashboard, or review policy.
 
-After `keep` or `broaden`, remove displaced manual memory-promotion/session-summary/reminder/bootstrap machinery. No research/skills/business expansion.
+### PR 5 — authoritative outcome events, settlement, and verdict reducer
 
-## 22. Required regression matrix
+Implement only:
 
-Implementation must prove at minimum:
+- complete typed evidence/event union;
+- variant-specific event equality;
+- canonical payload encodings and golden vectors;
+- outcome/evidence replay semantics;
+- GBrain-owned close manifests and expected outcome identity;
+- typed trigger transitions;
+- session settlement;
+- semantic deduplication;
+- normalized baseline comparison;
+- terminal `keep|broaden|repair` behavior.
 
-- Codex/Claude representable, V1 arming Codex-only;
-- GBrain recomputes transcript byte length/hash from exact local parser bytes; adapter mismatch cannot change eligibility;
-- session same-hash retry idempotent; changed authoritative-hash conflict fail-closed;
-- eligibility classifier is GBrain-owned, frozen by version, and identical transcript/parser results yield identical decisions;
-- exact structural eligibility boundaries at 255/256 authoritative bytes and 1/2 user/assistant normalized turns;
-- task class/adapters cannot override eligibility;
-- exactly 10 admitted cohort sessions; session 11 cannot change cohort while settlement pending;
-- old terminal run cannot contaminate fresh run;
-- hard failure before session 10 immediately aborts/stops injection/counting and permits fresh arm after repair;
-- final-reduction trust failure uses the same `canary_aborted(repair)` path, never a second repair event type;
-- rollback abort permits fresh run without history deletion;
-- frozen config/version/baseline/classifier remain unchanged during reduction;
-- ambient mount cannot redirect brain/source operations;
-- constraint/preference/goal activate only from accepted direct user authority/correction;
-- lesson activates only from one verified outcome or same fingerprint across two distinct eligible sessions;
-- open loop activates only with direct user/verified authority plus pending machine-owned trigger;
-- friction is never directly injectable and business candidate never enters personal writer;
-- single-session agent inference remains candidate-only for every class;
-- every active Loop class round-trips through fact fence/discriminator;
-- base64url/null sentinel round-trips literal `-`, `~`, Unicode, delimiters;
-- repository identity distinguishes same path on different forges;
-- missing/mismatched scope fails closed;
-- pending open loop injects; terminal/triggerless/malformed loop does not after rebuild;
-- request codec is NFC + LF, most-recent-four-turns, exact binary format, stable SHA-256, reject >2,000 normalized text UTF-8 bytes, never truncate;
-- canonical-equivalent request input yields identical hash;
-- retrieval never reconstructs missing request scope/window from ambient state;
-- verdict-affecting evidence references must resolve to existing matching authoritative ledger events; arbitrary ID-shaped strings are rejected;
-- baseline reference is a GBrain-computed local SHA-256, not body text;
-- correction evidence requires exact authoritative correction event + old/replacement pointers, and corrected prose is absent from ledger;
-- every counted session deterministically requires exactly one outcome ID; omitted outcome cannot settle;
-- explicit empty outcome can settle when no mutation obligations exist;
-- outcome hash is RFC 8785 JCS and cross-implementation control-character strings hash identically;
-- outcome/evidence same-payload replay idempotent; changed-payload collision fail-closed;
-- every negative evidence variant round-trips exact pointer/request/strength/authoritative-reference semantics;
-- beneficial use requires matching accepted context run/provider/session/request/pointer;
-- beneficial and irrelevant metrics count at most once per run/provider/session/pointer;
-- trigger transition requires exact pointer+trigger ID and matching authoritative trigger event;
-- session 10 cannot finalize before every cohort session settles;
-- no-correction propagation passes vacuously; correction case requires authoritative supersession + later exclusion + rebuild verification;
-- normalized baseline rate rejects false improvement from unequal cohort sizes;
-- no baseline cannot broaden;
-- `off`, `capture`, `canary` are mutually distinct exactly as section 19 defines;
-- any discovered need for recurring Sawyer canary maintenance is a hard failure, not a subjective broaden gate;
-- hard failure always terminates as repair/abort even if broaden evidence otherwise passes;
-- capture/retrieval failure does not block ordinary work;
-- Seascape business candidate cannot enter personal writer;
-- merge alone never activates V1.
+Exit proof includes delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, conflicting retries abort, extra session 11 cannot change the cohort, hard failures terminate immediately, and replay produces the same verdict.
 
-## 23. PR 1 handoff
+### Canary activation
 
-Implement PR 1 from this exact merged document only. Scope: provider/session/run/event contracts, authoritative transcript byte/hash verification, frozen run payload/classifier, global session uniqueness, GBrain-owned structural eligibility, sealed 10-session cohort, deterministic outcome-ID derivation and immutable close manifest, one-active-run invariant, append-only ledger/reducer, exact mode resolver defaulting off, and trusted-local capture seam with hermetic replay/cross-run tests. Reuse existing GBrain transcript discovery/parser and brain/source routing. Do not implement canonical distillation/activation predicates, context injection, hooks, evidence scoring, settlement reduction, Claude ingestion, skills, research, Sawyer Hub runtime dependency, Seascape writes, activation, scheduling, merge, or deployment.
+After PRs 1–5 land and are independently reviewed:
 
-## 24. Provenance
+1. Freeze the baseline automatically from prior eligible Codex sessions when valid; otherwise record no baseline.
+2. Explicitly arm one run.
+3. Work normally.
+4. The system counts, settles, and finalizes automatically.
+5. Sawyer receives one plain-English conclusion and only genuine exceptions.
 
-- Base branch: `master`
-- Base SHA at PR creation: `cfc90a15cbbb50058be79b414be3e57a353552f8`
-- This contract is documentation-only.
-- Merge, install, schedule, and runtime activation remain separate actions.
+No manufactured sessions and no date Sawyer must remember.
 
-The implementation must remain smaller than the system it replaces.
+### PR 6 — delete displaced machinery
+
+Only after a successful `keep` or `broaden` result, remove personal-memory mechanisms that the proven loop replaces, such as manual promotion, unread session-summary Markdown, reminder-based canary tracking, duplicate context stores, and instructions requiring agents to inspect multiple Hub files.
+
+Do not delete rollback capability or raw evidence needed to rebuild.
+
+## 15. Required adversarial proof matrix
+
+Across the implementation sequence, tests must cover at least:
+
+- same session/same hash retry;
+- same session/changed transcript conflict;
+- adapter size/hash disagreement with GBrain bytes;
+- path outside configured transcript roots;
+- interrupted and structurally ineligible sessions;
+- ineligible sessions attempting repeated-pattern activation;
+- session 11 arriving while the first 10 settle;
+- stale run terminal event contaminating a rerun;
+- wrong brain/source pointer;
+- same repository name on different forges;
+- missing/mismatched project target;
+- literal sentinel-like scope/trigger values;
+- assistant text posing as a user statement;
+- a user event authorizing a different claim in the same session;
+- objective event for pointer A authorizing pointer B;
+- fabricated “supplied” pointer absent from context telemetry;
+- completed/cancelled/triggerless open loop after rebuild;
+- direct correction followed by retrieval and full rebuild;
+- duplicate beneficial or irrelevant evidence under different IDs;
+- outcome omitted, delayed, duplicated, or changed on retry;
+- trigger ID/state mismatch;
+- Unicode/newline/request-hash golden vectors;
+- request overflow behavior;
+- raw text, prompt, quote, or secret attempted in telemetry;
+- final reduction replay under changed current config;
+- hard failure before and during final reduction;
+- rollback followed by a clean new arm;
+- no baseline preventing `broaden`;
+- unequal-size baseline comparison using rates, not totals;
+- GBrain outage not blocking ordinary Codex work;
+- no Seascape/external write path.
+
+## 16. Definition of done
+
+V1 is complete only when:
+
+- PRs 1–5 are merged under their owning repository gates;
+- the loop is explicitly armed, not enabled by merge;
+- exactly 10 eligible Codex sessions count and settle automatically;
+- relevant context is actually supplied and measured;
+- direct correction removes obsolete beliefs immediately and after rebuild;
+- no incorrect high-impact belief survives;
+- no Seascape or external write occurs;
+- no dashboard, queue, reminder, manual promotion, or recurring Sawyer maintenance is introduced;
+- the system produces one automatic `keep`, `repair`, or `broaden` result; and
+- successful proof is followed by deletion of displaced manual machinery.
+
+The first permitted broadening is a Claude adapter using the same GBrain authority and evidence model. Research ingestion, self-editing skills/config, and Seascape proposal promotion remain separate later decisions.
+
+## 17. Implementation handoff
+
+The next coding task is **PR 1 only**.
+
+The implementing agent must:
+
+- read this ADR and current repository instructions;
+- inspect and reuse existing transcript discovery/parser and configuration patterns;
+- define versioned schemas and canonical encodings beside code and golden tests;
+- preserve ordinary Codex work when Learning Loop operations fail;
+- keep the default mode `off`;
+- avoid context retrieval, memory activation, outcome scoring, Claude, research, skills, Sawyer Hub automation, Seascape writes, and live/global configuration;
+- run the repository’s normal proof;
+- obtain an independent exact-head review before landing.
+
+A discovered need outside PR 1 becomes a note for the later named increment; it does not expand the active implementation.
