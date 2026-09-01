@@ -220,7 +220,7 @@ The expected outcome identity is derived by GBrain from the run and session iden
 
 - the expected outcome is accepted or an idempotent duplicate is recognized;
 - every referenced authoritative event exists and matches the evidence item;
-- all required canonical mutations, blocked-claim transitions, pre-lift replacement-retirement rebuild proof, or trigger transitions complete; and
+- all required canonical mutations, blocked-claim transitions, pre-lift replacement-retirement rebuild proof bound to the expected lineage pointer/generation, or trigger transitions complete; and
 - no replay conflict or unresolved trust failure remains.
 
 The run cannot finalize until all 10 cohort sessions are settled. Session 10 completion alone is never enough.
@@ -294,7 +294,7 @@ normalized claim fingerprint + learning class + scope + exact scope target
 
 Trigger identity is also part of the key for an open-loop claim. The blocked state is represented in canonical/rebuildable personal knowledge plus an authoritative ledger event, so deleting or rebuilding a database index cannot remove it.
 
-The blocked record also retains the originating correction event and one current active replacement pointer. If that replacement is later directly corrected within the same correction lineage, the blocked record’s current replacement pointer is advanced atomically to the new active replacement. Ambiguous, missing, or multiple active linked replacements fail closed for reversal.
+The blocked record also retains the originating correction event, one current active replacement pointer, and a monotonically increasing `lineage_generation`. Every direct correction of the linked replacement must atomically advance the current pointer and increment `lineage_generation`; otherwise it leaves the prior pointer/generation unchanged and fails closed. Ambiguous, missing, or multiple active linked replacements fail closed for reversal.
 
 While a claim identity is blocked:
 
@@ -303,7 +303,7 @@ While a claim identity is blocked:
 - a new fact row or pointer with the same blocked identity remains non-injectable; and
 - absence of the original pointer alone is not considered correction propagation.
 
-Only a later **explicit direct user reversal**, processed through a trusted-local authoritative operation, may supersede the blocked state, and only when that direct user authority explicitly reinstates the exact blocked claim identity. While the block remains active, the reversal first places the linked replacement into a durable pending-retirement state, supersedes/strikes it, reconciles the derived index, and performs a full rebuild proving that the replacement remains retired and non-injectable. **Only after that pre-lift rebuild proof succeeds** may the transaction lift the block and activate the reinstated claim. Any failure before that commit point leaves the block active, the replacement non-authoritatively pending/rolled back according to the implementation transaction, and the reinstated claim inactive. Equality of normalized claim fingerprint, class, scope, exact target, and trigger identity when applicable is required before the pre-lift proof begins. If the user authorizes a different claim, the old identity remains blocked and the different claim is handled as a separate correction or new claim; it cannot implicitly reverse the old correction. Model inference, repetition, an objective outcome alone, or an adapter assertion cannot reverse a correction.
+Only a later **explicit direct user reversal**, processed through a trusted-local authoritative operation, may supersede the blocked state, and only when that direct user authority explicitly reinstates the exact blocked claim identity. The reversal snapshots the block’s current replacement pointer and `lineage_generation`. While the block remains active, it places that exact replacement into a durable pending-retirement state, supersedes/strikes it, reconciles the derived index, and performs a full rebuild proving that the snapshotted replacement remains retired and non-injectable. **Only after that pre-lift rebuild proof succeeds** may the final commit compare-and-swap the block from the exact snapshotted pointer/generation to the lifted state and activate the reinstated claim. A pointer or generation mismatch means the lineage changed after proof: the staged result is discarded, the block remains active, and the reversal must restart from the new current pointer/generation. Readers must never observe a lifted block based on proof for an older replacement. Any other failure before commit leaves the block active and the reinstated claim inactive. Equality of normalized claim fingerprint, class, scope, exact target, and trigger identity when applicable is required before the pre-lift proof begins. If the user authorizes a different claim, the old identity remains blocked and the different claim is handled as a separate correction or new claim; it cannot implicitly reverse the old correction. Model inference, repetition, an objective outcome alone, or an adapter assertion cannot reverse a correction.
 
 ### 8.6 Idempotency and replay
 
@@ -314,7 +314,7 @@ Every appendable command/event family that can affect learning or verdict state 
 - same-ID/same-payload idempotency; and
 - same-ID/changed-payload conflict behavior that fails closed for learning.
 
-Retries cannot double-count sessions, beneficial uses, errors, irrelevant injections, corrections, reversals, replacement transitions, pre-lift rebuild proof, trigger transitions, settlement, or terminal state.
+Retries cannot double-count sessions, beneficial uses, errors, irrelevant injections, corrections, reversals, replacement or lineage-generation transitions, pre-lift rebuild proof, trigger transitions, settlement, or terminal state.
 
 The implementation PR introducing a hashed payload must select one canonical encoding and ship golden test vectors before merge. No behavior may depend on an unspecified serializer.
 
@@ -336,7 +336,7 @@ Additional rules:
 - Adapters cannot assert `repeated_pattern`; GBrain derives it.
 - Repetition requires distinct session identities whose accepted GBrain eligibility decisions are eligible.
 - Duplicate observations from one session cannot satisfy the threshold twice.
-- A blocked claim identity cannot be reactivated by repetition or verified outcome; only an exact direct user reversal that retires and full-rebuild-verifies the current linked replacement while the block remains active may supersede the block.
+- A blocked claim identity cannot be reactivated by repetition or verified outcome; only an exact direct user reversal that retires and full-rebuild-verifies the current linked replacement while the block remains active and then passes the lineage compare-and-swap may supersede the block.
 - Friction may support a separately stated lesson, but friction text is not silently coerced into guidance.
 - Open-loop completion or cancellation appends a typed terminal transition, writes/supersedes canonical state, and makes the old pending row non-injectable after rebuild.
 
@@ -350,29 +350,29 @@ For one learning transaction it must:
 2. write the corrected canonical fact;
 3. mark the obsolete row superseded/struck using the existing correction machinery;
 4. create the durable blocked-claim identity for the obsolete claim/class/scope/target/trigger;
-5. bind the block to the originating correction event and current active replacement pointer;
+5. bind the block to the originating correction event, current active replacement pointer, and initial `lineage_generation`;
 6. return an authoritative correction event ID plus exact old and replacement pointers and blocked identity;
 7. refresh/reconcile the derived index;
 8. verify that every row matching the blocked identity is immediately non-injectable; and
 9. pass a full rebuild check showing the replacement active and blocked identity still enforced.
 
-A later direct correction of the linked replacement must either atomically advance the block’s current replacement pointer or leave the prior pointer/state unchanged and fail closed. It may not orphan the block from the active replacement lineage.
+A later direct correction of the linked replacement must atomically advance the block’s current replacement pointer and increment `lineage_generation`, or leave the prior pointer/generation unchanged and fail closed. It may not orphan the block from the active replacement lineage.
 
 Corrected prose remains in private canonical knowledge, not routine operational telemetry.
 
 Correction propagation passes vacuously when no direct correction occurs during a run. When one does occur, the obsolete claim identity—not merely its original pointer—must be absent from all later accepted context-supply telemetry and remain blocked after rebuild.
 
-A later explicit user reversal is a separate trusted-local transaction with a pre-lift verification barrier. It must:
+A later explicit user reversal is a separate trusted-local transaction with a pre-lift verification barrier and lineage compare-and-swap. It must:
 
 1. bind and explicitly reinstate the exact blocked identity—including the same normalized claim fingerprint, class, scope, exact target, and trigger identity when applicable;
-2. resolve exactly one current active replacement pointer linked to that block;
-3. keep the blocked state active while placing that replacement in a durable pending-retirement state and superseding/striking it;
-4. reconcile the derived index and perform a full rebuild while the block remains active;
-5. prove from that rebuild that the linked replacement is retired/non-injectable and that the blocked identity is still enforced;
-6. only after the proof succeeds, atomically lift the blocked state, activate the reinstated authoritative claim, and emit the committed reversal event; and
+2. resolve exactly one current active replacement pointer linked to that block and snapshot both that pointer and the block’s current `lineage_generation`;
+3. keep the blocked state active while placing that exact replacement in a durable pending-retirement state and superseding/striking it;
+4. reconcile the derived index and perform a full rebuild while the block remains active, with the proof bound to the snapshotted pointer/generation;
+5. prove from that rebuild that the snapshotted replacement is retired/non-injectable and that the blocked identity is still enforced;
+6. compare-and-swap the block at commit: only when its current replacement pointer and `lineage_generation` still equal the snapshot may the transaction atomically lift the block, activate the reinstated authoritative claim, and emit the committed reversal event; and
 7. perform post-commit verification proving the replacement remains retired, the block is lifted, and only the reinstated state is active within that correction lineage.
 
-If any pre-lift step or rebuild proof fails, the block stays active and the reinstated claim is not written or injectable. If the new user-authorized claim differs on any identity field, or the linked active replacement is absent/ambiguous, the old block remains and the request is processed separately or fails closed. No inferred or provider-originated event can perform either transition.
+If the compare-and-swap mismatches because the linked replacement changed during staging or proof, the transaction must not lift the block, activate the claim, or emit a committed reversal; it discards the stale staged result and restarts from step 2 using the new pointer/generation. If any other pre-lift step or rebuild proof fails, the block stays active and the reinstated claim is not written or injectable. If the new user-authorized claim differs on any identity field, or the linked active replacement is absent/ambiguous, the old block remains and the request is processed separately or fails closed. No inferred or provider-originated event can perform either transition.
 
 ## 11. Thin context request and bundle
 
@@ -411,12 +411,12 @@ The implementation PR for outcomes must introduce a complete discriminated evide
 - repeated known instruction;
 - re-asked known answer;
 - direct user correction or reversal via authoritative linkage;
-- linked replacement transition/retirement and pre-lift rebuild proof;
+- linked replacement transition/retirement, lineage-generation snapshot/CAS result, and pre-lift rebuild proof;
 - open-loop trigger completion/cancellation;
 - objective task outcome or blocker; and
 - trust/privacy/authorization/replay failure.
 
-Every variant is pointer-, request-, claim-, trigger-, correction-, reversal-, replacement-, proof-, and source-bound as applicable. Free-form references, transcript excerpts, prompts, secrets, or verbatim user corrections are rejected before ledger persistence.
+Every variant is pointer-, request-, claim-, trigger-, correction-, reversal-, replacement-, lineage-, proof-, and source-bound as applicable. Free-form references, transcript excerpts, prompts, secrets, or verbatim user corrections are rejected before ledger persistence.
 
 ### 12.1 Beneficial use
 
@@ -440,7 +440,7 @@ Agent self-report, generic task success, mere injection, or “context was appli
 
 Errors and materially irrelevant injections are reduced from typed, exact-match authoritative events. One actual irrelevant pointer counts at most once per `(run, session, pointer)`, regardless of duplicate evidence IDs.
 
-A correction, blocked-claim reappearance, unretired or not-rebuild-verified correction replacement, wrong action caused by memory, caller-authorization failure, cross-scope injection, private-body persistence attempt, conflicting replay, or invalid authority linkage cannot be reclassified as a beneficial use.
+A correction, blocked-claim reappearance, unretired or not-rebuild-verified correction replacement, stale-lineage reversal proof, wrong action caused by memory, caller-authorization failure, cross-scope injection, private-body persistence attempt, conflicting replay, or invalid authority linkage cannot be reclassified as a beneficial use.
 
 ## 13. Deterministic verdict
 
@@ -453,6 +453,7 @@ Any of the following immediately aborts the run as `repair`:
 - an incorrect high-impact memory causes action;
 - a superseded or correction-blocked claim is later supplied without an exact explicit user reversal;
 - a reversal lifts a block or activates the reinstated claim before full rebuild proves its current linked replacement retired and non-injectable;
+- a reversal commits when the block’s current replacement pointer or `lineage_generation` differs from the pre-lift proof snapshot;
 - brain/source or repository/project scope crosses boundaries;
 - an untrusted/unauthorized caller arms, aborts, changes mode, accesses a local transcript, appends authority, or mutates canonical state;
 - any privileged handler accepts a call where `ctx.remote !== false`, or any agent-facing dispatcher advertises or permits invocation of a `localOnly` owner operation;
@@ -473,7 +474,7 @@ There is one repair path: `canary_aborted(repair)`. A trust defect discovered du
 - exactly 10 eligible, settled cohort sessions;
 - at least three strong beneficial uses;
 - no more than two materially irrelevant injected pointers;
-- correction propagation, pre-lift replacement-retirement rebuild proof, and durable blocked-claim enforcement pass;
+- correction propagation, current-lineage pre-lift replacement-retirement rebuild proof, successful lineage compare-and-swap, and durable blocked-claim enforcement pass;
 - no wrong high-impact active belief survives;
 - a valid frozen baseline selected by section 7.1 exists; and
 - the canary’s normalized supervision-error rate is strictly lower than the frozen baseline rate.
@@ -535,9 +536,9 @@ Implement only:
 - class-by-class activation predicates from section 9;
 - canonical fact-fence mapping and rebuild tests;
 - GBrain-owned repeated-pattern derivation from two eligible sessions;
-- authoritative correction transaction, durable blocked-claim identity, current replacement tracking, exact-identity direct user reversal, pre-lift replacement retirement/rebuild proof, and supersession verification.
+- authoritative correction transaction, durable blocked-claim identity, current replacement tracking with monotonic lineage generation, exact-identity direct user reversal, current-lineage pre-lift replacement retirement/rebuild proof, commit-time compare-and-swap, and supersession verification.
 
-Exit proof includes model text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, corrected claims cannot reactivate through repetition/verified outcome/new pointer, a reversal naming blocked identity A but authorizing different claim C leaves A blocked, A→B followed by an exact reversal to A rebuild-verifies B retired before A is unblocked, a later linked B→C update advances the block and reversal rebuild-verifies C retired before A is unblocked, failed pre-lift rebuild leaves A blocked and the reinstated A inactive, absent/ambiguous linked replacement fails closed, only an exact direct user reinstatement can lift a block, cross-scope rows cannot inject, pending/terminal open-loop rebuild behavior, and correction/block/replacement state survives full rebuild.
+Exit proof includes model text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, corrected claims cannot reactivate through repetition/verified outcome/new pointer, a reversal naming blocked identity A but authorizing different claim C leaves A blocked, A→B followed by an exact reversal to A rebuild-verifies B retired before A is unblocked, a later linked B→C update advances the block and lineage generation and reversal rebuild-verifies C retired before A is unblocked, B→C occurring after proof but before commit makes the compare-and-swap fail and forces a fresh proof for C, failed pre-lift rebuild leaves A blocked and the reinstated A inactive, absent/ambiguous linked replacement fails closed, only an exact direct user reinstatement can lift a block, cross-scope rows cannot inject, pending/terminal open-loop rebuild behavior, and correction/block/replacement state survives full rebuild.
 
 ### PR 3 — context request, thin bundle, and supply telemetry
 
@@ -579,13 +580,13 @@ Implement only:
 - outcome/evidence replay semantics;
 - frozen baseline-evaluator version, complete per-session evaluation records, and section 7.1 validity reduction;
 - GBrain-owned close manifests and expected outcome identity;
-- typed correction/reversal/replacement/proof and trigger transitions;
+- typed correction/reversal/replacement/lineage/proof and trigger transitions;
 - session settlement;
 - semantic deduplication;
 - frozen normalized baseline comparison;
 - terminal `keep|broaden|repair` behavior.
 
-Exit proof includes deterministic baseline selection from competing historical windows, tie-break ordering, fewer-than-10 and missing/conflicted evaluation yielding `baseline:null`, later transcript discovery not changing the frozen baseline, delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, unauthorized source events are rejected, conflicting retries abort, extra session 11 cannot change the cohort, blocked claims remain blocked, failed pre-lift rebuild cannot lift a block, hard failures terminate immediately, and replay produces the same verdict.
+Exit proof includes deterministic baseline selection from competing historical windows, tie-break ordering, fewer-than-10 and missing/conflicted evaluation yielding `baseline:null`, later transcript discovery not changing the frozen baseline, delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, unauthorized source events are rejected, conflicting retries abort, extra session 11 cannot change the cohort, blocked claims remain blocked, failed pre-lift rebuild cannot lift a block, stale-lineage proof cannot satisfy reversal settlement, hard failures terminate immediately, and replay produces the same verdict.
 
 ### Canary activation
 
@@ -603,7 +604,7 @@ No manufactured sessions and no date Sawyer must remember.
 
 Only after a successful `keep` or `broaden` result, remove personal-memory mechanisms that the proven loop replaces, such as manual promotion, unread session-summary Markdown, reminder-based canary tracking, duplicate context stores, and instructions requiring agents to inspect multiple Hub files.
 
-Do not delete rollback capability, correction blocks/history, replacement lineage, pre-lift proof state, or raw evidence needed to rebuild.
+Do not delete rollback capability, correction blocks/history, replacement lineage/generation, pre-lift proof state, or raw evidence needed to rebuild.
 
 ## 15. Required adversarial proof matrix
 
@@ -639,6 +640,7 @@ Across the implementation sequence, tests must cover at least:
 - a reversal naming blocked identity A while authorizing different claim C;
 - A→B correction followed by exact A reinstatement, with B rebuild-verified retired before A can unblock;
 - linked B→C correction followed by A reinstatement, with C rebuild-verified retired before A can unblock;
+- B→C advancing the replacement pointer/generation after a proof for B but before commit, causing CAS failure and a restarted proof for C;
 - pre-lift rebuild failure leaving A blocked and reinstated A inactive;
 - absent or multiple active linked replacements during reversal;
 - completed/cancelled/triggerless open loop after rebuild;
@@ -668,7 +670,7 @@ V1 is complete only when:
 - exactly 10 eligible Codex sessions count and settle automatically;
 - relevant context is actually supplied and measured;
 - direct correction removes obsolete beliefs and durably blocks their claim identities immediately and after rebuild;
-- only an exact direct user reinstatement can lift a correction block, and only after a full rebuild while the block remains active proves the current linked replacement retired and non-injectable;
+- only an exact direct user reinstatement can lift a correction block, and only after a full rebuild while the block remains active proves the snapshotted current linked replacement retired and a commit-time pointer/generation compare-and-swap confirms that proof is still current;
 - no incorrect high-impact belief or contradictory linked replacement survives;
 - no Seascape or external write occurs;
 - no dashboard, queue, reminder, manual promotion, or recurring Sawyer maintenance is introduced;
