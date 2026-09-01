@@ -5249,12 +5249,14 @@ const learning_loop_set_mode: Operation = {
         const current = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
         const next = p.mode as import('./learning-loop.ts').LearningLoopMode;
         if (current === 'canary' && next !== 'canary') {
-          const state = mod.replayLearningLoop(mod.readLearningLoopLedger());
-          if (state.active_run_id !== null) await mod.abortLearningLoop(ctx.engine, `mode-change:${state.active_run_id}`, 'mode_changed');
+          const state = mod.replayLearningLoop(mod.readLearningLoopLedger({ config: ctx.config }));
+          if (state.active_run_id !== null) {
+            await mod.abortLearningLoop(ctx.engine, `mode-change:${state.active_run_id}`, 'mode_changed', { config: ctx.config });
+          }
         }
         await ctx.engine.setConfig('learning_loop.mode', next);
         return { previous_mode: current, mode: next };
-      }));
+      }, { config: ctx.config }));
   },
 };
 
@@ -5267,7 +5269,7 @@ const learning_loop_inspect: Operation = {
   handler: async (ctx) => {
     assertTrustedLocal(ctx, 'learning_loop_inspect');
     return learningLoopCall((mod) => {
-      const state = mod.replayLearningLoop(mod.readLearningLoopLedger());
+      const state = mod.replayLearningLoop(mod.readLearningLoopLedger({ config: ctx.config }));
       return {
         active_run_id: state.active_run_id,
         event_count: state.events.length,
@@ -5328,7 +5330,12 @@ const learning_loop_abort: Operation = {
   localOnly: true,
   handler: async (ctx, p) => {
     assertTrustedLocal(ctx, 'learning_loop_abort');
-    return learningLoopCall((mod) => mod.abortLearningLoop(ctx.engine, p.command_id as string, 'owner_abort'));
+    return learningLoopCall((mod) => mod.abortLearningLoop(
+      ctx.engine,
+      p.command_id as string,
+      'owner_abort',
+      { config: ctx.config },
+    ));
   },
 };
 
@@ -5382,6 +5389,7 @@ const learning_loop_bind_session: Operation = {
         p.command_id as string,
         { client_id: p.client_id as string, source_id: sourceId, provider: 'codex' },
         providerSessionId,
+        { config: ctx.config },
       );
     });
   },
@@ -5429,7 +5437,7 @@ const learning_loop_submit_session_v1: Operation = {
       mode,
       adapter: { client_id: ctx.auth.clientId, source_id: sourceId, provider: 'codex' },
       receipt,
-    });
+    }, { config: ctx.config });
   }),
 };
 

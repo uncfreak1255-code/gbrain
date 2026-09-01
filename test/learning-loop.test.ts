@@ -26,6 +26,7 @@ import {
 } from '../src/core/learning-loop.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const roots: string[] = [];
 let engine: PGLiteEngine;
@@ -280,12 +281,32 @@ describe('append-only run, replay, and cohort reducer', () => {
       await armHeld;
       await expect(withLearningLoopLifecycleLock(engine, async () => {
         await engine.setConfig('learning_loop.mode', 'off');
-      })).rejects.toMatchObject({ code: 'ledger_busy' });
+      }, { root: lifecycleRoot })).rejects.toMatchObject({ code: 'ledger_busy' });
       releaseArm();
       const armed = await arming;
       expect(await engine.getConfig('learning_loop.mode')).toBe('canary');
     expect(replayLearningLoop(readLearningLoopLedger({ root: lifecycleRoot })).active_run_id).toBe(armed.run_id);
   }, 30000);
+
+  test('production ledger and lock scopes isolate brains that share GBRAIN_HOME', async () => {
+    const home = tempRoot('learning-loop-shared-home-');
+    const brainAPath = tempRoot('learning-loop-brain-a-');
+    const brainBPath = tempRoot('learning-loop-brain-b-');
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      const optsA = { config: { database_path: brainAPath }, mutationLock: testMutationLock };
+      const optsB = { config: { database_path: brainBPath }, mutationLock: testMutationLock };
+      await bindLearningLoopSession(testEngine, 'bind:brain-a', adapter, 'brain-a-session', optsA);
+      await bindLearningLoopSession(testEngine, 'bind:brain-b', adapter, 'brain-b-session', optsB);
+
+      expect(learningLoopLedgerPath(optsA)).not.toBe(learningLoopLedgerPath(optsB));
+      expect(_testing.ledgerScopeId(optsA)).not.toBe(_testing.ledgerScopeId(optsB));
+      expect(readLearningLoopLedger(optsA).map((event) => event.event_type)).toEqual(['adapter_session_bound']);
+      expect(readLearningLoopLedger(optsB).map((event) => event.event_type)).toEqual(['adapter_session_bound']);
+      expect(readLearningLoopLedger(optsA)[0]).toMatchObject({ provider_session_id: 'brain-a-session' });
+      expect(readLearningLoopLedger(optsB)[0]).toMatchObject({ provider_session_id: 'brain-b-session' });
+      expect(() => learningLoopLedgerPath()).toThrow(/explicit active-brain configuration/);
+    });
+  });
 
   test('same session/hash is idempotent and a changed hash fails closed', async () => {
     const root = tempRoot('learning-loop-idem-');

@@ -23,7 +23,7 @@ import {
   statSync,
 } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, dirname, extname, join, relative } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import type { BrainEngine } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import { gbrainPath } from './config.ts';
@@ -32,6 +32,7 @@ import { parseConversation } from './conversation-parser/parse.ts';
 import { pruneDir } from './sync.ts';
 import { VERSION } from '../version.ts';
 import { LockUnavailableError, withRefreshingLock } from './db-lock.ts';
+import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
 
 export type LearningLoopMode = 'off' | 'capture' | 'canary';
 export const LEARNING_LOOP_SCHEMA_VERSION = 1 as const;
@@ -174,6 +175,8 @@ export class LearningLoopError extends Error {
 
 export interface LedgerOptions {
   root?: string;
+  /** Explicit active-brain identity input. Required outside the test-only root seam. */
+  config?: Pick<GBrainConfig, 'database_url' | 'database_path'>;
   now?: () => Date;
   /** Test seam only. Production mutations use GBrain's refreshing database lock. */
   mutationLock?: <T>(work: () => Promise<T>) => Promise<T>;
@@ -183,8 +186,24 @@ export interface LedgerOptions {
   beforeMutation?: () => Promise<void>;
 }
 
+function ledgerScopeId(opts: LedgerOptions): string {
+  if (opts.root) {
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = realpathSync(opts.root);
+    } catch {
+      canonicalRoot = resolve(opts.root);
+    }
+    return createHash('sha256').update(`root:${canonicalRoot}`).digest('hex').slice(0, 16);
+  }
+  if (!opts.config) {
+    throw new LearningLoopError('invalid_input', 'Learning Loop ledger access requires explicit active-brain configuration');
+  }
+  return computeBrainIdFromConfig(opts.config);
+}
+
 function ledgerRoot(opts: LedgerOptions = {}): string {
-  return opts.root ?? gbrainPath('learning-loop');
+  return opts.root ?? gbrainPath('learning-loop', ledgerScopeId(opts));
 }
 
 export function learningLoopLedgerPath(opts: LedgerOptions = {}): string {
@@ -795,7 +814,7 @@ async function withLedgerMutation<T>(
   };
   if (opts.mutationLock) return opts.mutationLock(work);
   try {
-    return await withRefreshingLock(engine, 'learning-loop:ledger-v1', work, { ttlMinutes: 5 });
+    return await withRefreshingLock(engine, `learning-loop:ledger-v1:${ledgerScopeId(opts)}`, work, { ttlMinutes: 5 });
   } catch (error) {
     if (error instanceof LockUnavailableError) throw new LearningLoopError('ledger_busy', 'Learning Loop ledger is locked');
     throw error;
@@ -809,7 +828,7 @@ export async function withLearningLoopLifecycleLock<T>(
 ): Promise<T> {
   if (opts.lifecycleLock) return opts.lifecycleLock(work);
   try {
-    return await withRefreshingLock(engine, 'learning-loop:lifecycle-v1', work, { ttlMinutes: 5 });
+    return await withRefreshingLock(engine, `learning-loop:lifecycle-v1:${ledgerScopeId(opts)}`, work, { ttlMinutes: 5 });
   } catch (error) {
     if (error instanceof LockUnavailableError) throw new LearningLoopError('ledger_busy', 'Learning Loop lifecycle is locked');
     throw error;
@@ -947,11 +966,12 @@ export async function armLearningLoop(
   input: ArmLearningLoopInput,
   opts: LedgerOptions = {},
 ): Promise<RunArmedEvent> {
+  const scopedOpts = opts.root || opts.config ? opts : { ...opts, config: input.config };
   return withLearningLoopLifecycleLock(input.engine, async () => {
     const mode = await resolveLearningLoopMode(input.engine, input.config);
     if (mode !== 'canary') throw new LearningLoopError('mode_off', 'Set mode to canary before arming');
-    return armLearningLoopLocked(input, opts);
-  }, opts);
+    return armLearningLoopLocked(input, scopedOpts);
+  }, scopedOpts);
 }
 
 export function abortLearningLoop(
@@ -1050,5 +1070,6 @@ export const _testing = {
   codexSessionIds,
   commandPayloadHash,
   eventId,
+  ledgerScopeId,
   readConfinedFileOnce,
 };
