@@ -1,12 +1,14 @@
-# Sawyer Learning Loop V1 — architecture decision and implementation plan
+# Personal Learning Loop V1 — architecture decision and implementation plan
 
-**Status:** approved design direction; implementation remains staged and disabled by default  
-**Owner:** GBrain core, plus one thin adapter in the existing owner of active Codex session hooks  
+**Status:** approved design direction; implementation remains staged and disabled by default
+
+**Owner:** GBrain core, plus one thin adapter in the existing owner of active Codex session hooks
+
 **Decision:** close one measurable learning loop by composing existing GBrain primitives; do not create a parallel memory product, agent hierarchy, dashboard, queue, or supervision layer
 
 ## 1. Decision and intended outcome
 
-Sawyer Learning Loop V1 will connect four steps that are currently separate:
+Personal Learning Loop V1 will connect four steps that are currently separate:
 
 ```text
 capture completed work
@@ -31,7 +33,7 @@ The scarce asset is not another permanent agent persona. It is the vendor-neutra
 
 - what an agent was told;
 - what it did;
-- what Sawyer corrected;
+- what the user corrected;
 - what objective outcome followed; and
 - whether the correction improved later work.
 
@@ -46,10 +48,10 @@ The system is valuable only when all four steps work. Capture without later use 
 | **GBrain raw session source** | Local transcript discovery and parsing | Private evidence; not directly injected as durable truth |
 | **GBrain operational ledger** | Append-only session, eligibility, context, correction, outcome, settlement, and canary events | Operational evidence only; rebuildable and non-authoritative for personal claims |
 | **GBrain canonical personal source** | Current preferences, constraints, goals, proven lessons, and bounded open loops | Authoritative personal operating model |
-| **Sawyer Hub** | Optional generated human-readable projection | Never required for activation, retrieval, promotion, or canary completion |
-| **Seascape Hub** | Controlled durable business knowledge | Separate business authority; no automatic promotion from this personal loop |
+| **Personal orchestration projection** | Optional generated human-readable projection | Never required for activation, retrieval, promotion, or canary completion |
+| **Business knowledge owner** | Controlled durable business knowledge | Separate business authority; no automatic promotion from this personal loop |
 | **Codex / later Claude adapter** | Submit normalized events, request context, perform work, return outcomes | Thin authorized client; cannot define thresholds, inspect arbitrary local paths, control the run, or mutate canonical truth directly |
-| **Sawyer** | Strategy, business judgment, irreversible or external-action exceptions | No routine memory maintenance, counter advancement, receipt review, or promotion work |
+| **User** | Strategy, business judgment, irreversible or external-action exceptions | No routine memory maintenance, counter advancement, receipt review, or promotion work |
 
 ## 4. Sources of truth
 
@@ -84,7 +86,7 @@ A direct correction also creates durable blocked-claim state keyed to the correc
 
 ### 4.4 Business knowledge
 
-A possible Seascape fact may be surfaced only as an evidence-backed candidate through the existing business boundary. V1 cannot promote, rewrite, merge, deploy, send, or otherwise mutate Seascape canon or any external system.
+A possible business fact may be surfaced only as an evidence-backed candidate through the existing business boundary. V1 cannot promote, rewrite, merge, deploy, send, or otherwise mutate business canon or any external system.
 
 ## 5. V1 scope
 
@@ -109,7 +111,7 @@ V1 explicitly excludes:
 - live `~/.codex` changes;
 - automatic PR, merge, deploy, install, send, or schedule actions;
 - a new memory database, repository, knowledge graph, dashboard, inbox, queue, or notification channel;
-- autonomous Seascape canon promotion;
+- autonomous business-canon promotion;
 - more than one active self-improvement change;
 - exposing owner controls or server-local transcript access to untrusted MCP or remote callers.
 
@@ -330,10 +332,11 @@ Rules:
    - `rebuild_verified`: revalidate the persisted proof and proceed to commit intent/CAS.
    - `commit_intent`: apply the deterministic recovery cases in rule 5.
 4. **Checkpoint drift creates a successor atomically.** If accepted guarded lineage mutation makes an attempt’s checkpoint stale, one atomic ledger/lineage transaction must: mark the predecessor `superseded`; allocate and append the successor’s `started` state; bind predecessor and successor IDs in both directions; persist the successor’s complete inherited-obligation set; and bind the current lineage generation/fingerprint used as the successor precondition. Until that entire transaction commits, the predecessor remains nonterminal and recoverable. The successor’s required-retirement set is the union of every still-unverified predecessor obligation and the newly computed complete active linked-replacement set. An empty current set is valid when inherited predecessor obligations remain. A crash cannot expose a terminal superseded predecessor without the successor that carries its obligations.
-5. **Final commit is crash-recoverable and recognized drift is resumable.** Before mutating final live state, GBrain persists `commit_intent` containing the verified proof identity, expected post-retirement checkpoint, expected final canonical state hash, and proposed reinstated pointer. The guarded commit atomically applies the final canonical state and stores the same `root_reversal_id/attempt_no` commit marker in the correction-lineage record. If the process exits before `committed` is appended, startup compares live state with the intent:
-   - matching final state and commit marker completes `committed` idempotently;
+5. **Final commit is crash-recoverable and recognized drift is resumable.** Before mutating final live state, GBrain persists `commit_intent` containing the verified proof identity, expected post-retirement checkpoint, expected final canonical state hash, and proposed reinstated pointer. The guarded commit atomically applies the final canonical state and stores the same `root_reversal_id/attempt_no` commit marker in the correction-lineage record. That per-attempt marker is immutable and remains available after later accepted lineage mutations. If the process exits before `committed` is appended, startup checks the durable commit marker before classifying current live state:
+   - a marker matching the intent proves that the final commit already occurred; recovery appends `committed` idempotently, then replays any accepted guarded lineage mutations ordered after the marker as later state changes, without creating a successor for the completed attempt;
+   - with no matching marker, a matching final state alone is not sufficient and fails closed;
    - matching the verified post-retirement checkpoint retries the guarded commit;
-   - a different generation/fingerprint/set that is fully explained by one or more accepted guarded lineage-mutation events after the intent is ordinary checkpoint drift, so rule 4 atomically supersedes the attempt and starts a successor inheriting all prior obligations plus the new active set;
+   - with no matching marker, a different generation/fingerprint/set that is fully explained by one or more accepted guarded lineage-mutation events after the intent but before the final commit is ordinary checkpoint drift, so rule 4 atomically supersedes the attempt and starts a successor inheriting all prior obligations plus the new active set;
    - any live state that cannot be derived from the accepted guarded lineage history is an unexplained third state, a hard failure, and leaves the block enforced.
 6. **No user maintenance.** Recovery runs automatically from ledger/canonical state. It does not create a queue, reminder, or manual promotion step.
 
@@ -496,12 +499,12 @@ Any of the following immediately aborts the run as `repair`:
 - brain/source or repository/project scope crosses boundaries;
 - an untrusted/unauthorized caller arms, aborts, changes mode, accesses a local transcript, appends authority, or mutates canonical state;
 - any privileged handler accepts a call where `ctx.remote !== false`, or any agent-facing dispatcher advertises or permits invocation of a `localOnly` owner operation;
-- Seascape canon or an external system is mutated;
+- business canon or an external system is mutated;
 - a transcript body, prompt, secret, or verbatim correction is persisted in operational telemetry;
 - session/outcome/evidence identity conflict affects learning state;
 - required settlement cannot be proven;
 - terminal state becomes ambiguous or duplicated;
-- routine canary progress requires Sawyer to inspect a queue/receipt, advance a counter, remember an end date, or perform recurring upkeep.
+- routine canary progress requires the user to inspect a queue/receipt, advance a counter, remember an end date, or perform recurring upkeep.
 
 There is one repair path: `canary_aborted(repair)`. A trust defect discovered during final reduction does not use a competing finalization event.
 
@@ -629,7 +632,7 @@ Implement only:
 - frozen normalized baseline comparison;
 - terminal `keep|broaden|repair` behavior, including vacuous reversal-gate semantics when no reversal exists.
 
-Exit proof includes deterministic baseline selection from competing historical windows, tie-break ordering, fewer-than-10 and missing/conflicted evaluation yielding `baseline:null`, later transcript discovery not changing the frozen baseline, delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, unauthorized source events are rejected, conflicting retries abort, extra session 11 cannot change the cohort, blocked claims remain blocked, a crash after retirement resumes from the durable checkpoint rather than treating the empty set as a new failure, predecessor supersession and successor creation/inheritance are atomic, accepted guarded drift after `commit_intent` creates a successor rather than corruption, unexplained third-state drift aborts, no-reversal runs do not fail the reversal-specific gate, hard failures terminate immediately, and replay produces the same verdict.
+Exit proof includes deterministic baseline selection from competing historical windows, tie-break ordering, fewer-than-10 and missing/conflicted evaluation yielding `baseline:null`, later transcript discovery not changing the frozen baseline, delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, unauthorized source events are rejected, conflicting retries abort, extra session 11 cannot change the cohort, blocked claims remain blocked, a crash after retirement resumes from the durable checkpoint rather than treating the empty set as a new failure, predecessor supersession and successor creation/inheritance are atomic, accepted guarded drift after `commit_intent` but before the final commit creates a successor rather than corruption, a later accepted mutation after the durable final commit marker recovers the attempt as committed and replays the later mutation without a successor, unexplained third-state drift aborts, no-reversal runs do not fail the reversal-specific gate, hard failures terminate immediately, and replay produces the same verdict.
 
 ### Canary activation
 
@@ -639,9 +642,9 @@ After PRs 1–5 land and are independently reviewed:
 2. Explicitly arm one run through the trusted-local control.
 3. Work normally.
 4. The system counts, settles, and finalizes automatically.
-5. Sawyer receives one plain-English conclusion and only genuine exceptions.
+5. The user receives one plain-English conclusion and only genuine exceptions.
 
-No manufactured sessions and no date Sawyer must remember.
+No manufactured sessions and no date the user must remember.
 
 ### PR 6 — delete displaced machinery
 
@@ -691,6 +694,7 @@ Across the implementation sequence, tests must cover at least:
 - process exit after replacements retire but before rebuild, followed by automatic resume from `retired_checkpointed` despite an empty current active set;
 - process exit after rebuild verification and after commit intent;
 - final canonical state present with missing committed ledger event, completed idempotently from the durable commit marker;
+- a later accepted lineage mutation after the durable final commit marker, recovering the marked attempt as committed before replaying that later mutation;
 - checkpoint state still present after commit intent, retried safely;
 - explainable guarded lineage drift after commit intent, routed to an inherited-obligation successor;
 - a third unexpected live state not derivable from accepted guarded mutation history, aborting as repair while preserving the block;
@@ -711,7 +715,7 @@ Across the implementation sequence, tests must cover at least:
 - no baseline preventing `broaden`;
 - baseline/canary comparison using frozen rates and identical cohort sizes;
 - GBrain outage not blocking ordinary Codex work;
-- no Seascape/external write path.
+- no business-canon or external write path.
 
 ## 16. Definition of done
 
@@ -728,12 +732,12 @@ V1 is complete only when:
 - interruption at any reversal phase resumes or reconciles automatically, predecessor supersession cannot lose successor obligations, and accepted guarded drift after commit intent creates a successor rather than a manual incident;
 - every canonical mutation capable of changing a correction lineage is serialized through the common guard and advances the complete set fingerprint/generation;
 - no incorrect high-impact belief or contradictory linked replacement survives;
-- no Seascape or external write occurs;
-- no dashboard, queue, reminder, manual promotion, or recurring Sawyer maintenance is introduced;
+- no business-canon or external write occurs;
+- no dashboard, queue, reminder, manual promotion, or recurring user maintenance is introduced;
 - the system produces one automatic `keep`, `repair`, or `broaden` result; and
 - successful proof is followed by deletion of displaced manual machinery.
 
-The first permitted broadening is a Claude adapter using the same GBrain authority, authorization, correction, recovery, and evidence model. Research ingestion, self-editing skills/config, and Seascape proposal promotion remain separate later decisions.
+The first permitted broadening is a Claude adapter using the same GBrain authority, authorization, correction, recovery, and evidence model. Research ingestion, self-editing skills/config, and business-canon proposal promotion remain separate later decisions.
 
 ## 17. Implementation handoff
 
@@ -751,7 +755,7 @@ The implementing agent must:
 - preserve ordinary Codex work when Learning Loop operations fail;
 - keep the default mode `off`;
 - implement only the deterministic baseline discovery inputs assigned to PR 1, leaving baseline evaluation/verdict logic to PR 5;
-- avoid context retrieval, memory activation, outcome scoring, Claude, research, skills, Sawyer Hub automation, Seascape writes, and live/global configuration;
+- avoid context retrieval, memory activation, outcome scoring, Claude, research, skills, personal-projection automation, business-canon writes, and live/global configuration;
 - run the repository’s normal proof;
 - obtain an independent exact-head review before landing.
 
