@@ -140,6 +140,8 @@ The following are owner-control operations and must be registered as trusted-loc
 - mutate canonical personal knowledge; and
 - perform ledger administration or rebuild verification.
 
+Registration metadata is necessary but not sufficient. Every privileged handler must independently reject the operation unless `ctx.remote === false`. Every agent-facing dispatcher—including HTTP and stdio MCP—must also omit `localOnly` operations from discovery and deny their invocation. Handler-level rejection and dispatcher filtering are both required, so one missed or regressed filter cannot expose an owner control.
+
 They are not exposed to an untrusted MCP client, browser caller, remote model, or ordinary provider adapter.
 
 A provider adapter may call only explicitly authorized, versioned submission/request operations for its own source identity: submit bounded session metadata, request bounded context for its own session, submit a typed outcome envelope, and receive the resulting bundle/status. Every such operation authenticates/authorizes the source and binds the caller to the submitted provider/session. The adapter cannot select arbitrary local paths, impersonate another provider/session, change modes, arm/abort a run, append authoritative events, or write canonical memory.
@@ -285,7 +287,7 @@ While a claim identity is blocked:
 - a new fact row or pointer with the same blocked identity remains non-injectable; and
 - absence of the original pointer alone is not considered correction propagation.
 
-Only a later **explicit direct user reversal**, processed through a trusted-local authoritative operation, may supersede the blocked state. The reversal event binds the exact blocked identity and replacement/reinstated claim, writes the new canonical row, and preserves the full correction history. Model inference, repetition, an objective outcome alone, or an adapter assertion cannot reverse a correction.
+Only a later **explicit direct user reversal**, processed through a trusted-local authoritative operation, may supersede the blocked state, and only when that direct user authority explicitly reinstates the exact blocked claim identity. The reversal event must prove equality of the normalized claim fingerprint, class, scope, exact target, and trigger identity when applicable before lifting the block. If the user authorizes a different claim, the old identity remains blocked and the different claim is handled as a separate correction or new claim; it cannot implicitly reverse the old correction. A valid reversal writes the reinstated canonical row and preserves the full correction history. Model inference, repetition, an objective outcome alone, or an adapter assertion cannot reverse a correction.
 
 ### 8.6 Idempotency and replay
 
@@ -318,7 +320,7 @@ Additional rules:
 - Adapters cannot assert `repeated_pattern`; GBrain derives it.
 - Repetition requires distinct session identities whose accepted GBrain eligibility decisions are eligible.
 - Duplicate observations from one session cannot satisfy the threshold twice.
-- A blocked claim identity cannot be reactivated by repetition or verified outcome; only an explicit user reversal may supersede the block.
+- A blocked claim identity cannot be reactivated by repetition or verified outcome; only an explicit direct user reversal that reinstates that exact identity may supersede the block.
 - Friction may support a separately stated lesson, but friction text is not silently coerced into guidance.
 - Open-loop completion or cancellation appends a typed terminal transition, writes/supersedes canonical state, and makes the old pending row non-injectable after rebuild.
 
@@ -341,7 +343,7 @@ Corrected prose remains in private canonical knowledge, not routine operational 
 
 Correction propagation passes vacuously when no direct correction occurs during a run. When one does occur, the obsolete claim identity—not merely its original pointer—must be absent from all later accepted context-supply telemetry and remain blocked after rebuild.
 
-A later explicit user reversal is a separate trusted-local operation. It must bind the exact blocked identity, supersede the blocked state, write the newly authoritative claim, and emit an authoritative reversal event. No inferred or provider-originated event can perform this transition.
+A later explicit user reversal is a separate trusted-local operation. It must bind and explicitly reinstate the exact blocked identity—including the same normalized claim fingerprint, class, scope, exact target, and trigger identity when applicable—before superseding the blocked state, writing the reinstated authoritative claim, and emitting a reversal event. If the new user-authorized claim differs on any identity field, the old block remains and the new claim is processed separately. No inferred or provider-originated event can perform either transition.
 
 ## 11. Thin context request and bundle
 
@@ -419,9 +421,10 @@ Final reduction occurs only after the sealed cohort has 10 eligible sessions and
 Any of the following immediately aborts the run as `repair`:
 
 - an incorrect high-impact memory causes action;
-- a superseded or correction-blocked claim is later supplied without an explicit user reversal;
+- a superseded or correction-blocked claim is later supplied without an exact explicit user reversal;
 - brain/source or repository/project scope crosses boundaries;
 - an untrusted/unauthorized caller arms, aborts, changes mode, accesses a local transcript, appends authority, or mutates canonical state;
+- any privileged handler accepts a call where `ctx.remote !== false`, or any agent-facing dispatcher advertises or permits invocation of a `localOnly` owner operation;
 - Seascape canon or an external system is mutated;
 - a transcript body, prompt, secret, or verbatim correction is persisted in operational telemetry;
 - session/outcome/evidence identity conflict affects learning state;
@@ -474,7 +477,10 @@ Exit condition:
 
 Implement only:
 
-- trusted-local/local-only owner-control operations and source-authorized thin adapter submissions;
+- trusted-local/local-only owner-control operations;
+- handler-level `ctx.remote === false` enforcement for every privileged operation;
+- `localOnly` discovery/invocation filtering in every agent-facing dispatcher, including HTTP and stdio MCP;
+- source-authorized thin adapter submissions;
 - versioned session/run/eligibility events;
 - authoritative local transcript hashing and parser-bound size/counts;
 - session replay semantics;
@@ -485,7 +491,7 @@ Implement only:
 
 Must not implement context injection, canonical learning writes, outcome scoring, Claude, research, skills, or live activation.
 
-Exit proof includes untrusted MCP/remote control rejection, source-impersonation rejection, arbitrary-path rejection, golden transcript vectors, cross-path rejection, same-ID replay/conflict tests, mode tests, one-active-run tests, cohort-cap tests, and deterministic rebuild/replay.
+Exit proof includes HTTP and stdio discovery/invocation rejection for `localOnly` operations, direct privileged-handler rejection when `ctx.remote !== false`, untrusted MCP/remote control rejection, source-impersonation rejection, arbitrary-path rejection, golden transcript vectors, cross-path rejection, same-ID replay/conflict tests, mode tests, one-active-run tests, cohort-cap tests, and deterministic rebuild/replay.
 
 ### PR 2 — candidate learning, exact authority binding, activation, correction blocking, and reversal
 
@@ -497,9 +503,9 @@ Implement only:
 - class-by-class activation predicates from section 9;
 - canonical fact-fence mapping and rebuild tests;
 - GBrain-owned repeated-pattern derivation from two eligible sessions;
-- authoritative correction transaction, durable blocked-claim identity, explicit user reversal, and supersession verification.
+- authoritative correction transaction, durable blocked-claim identity, exact-identity direct user reversal, and supersession verification.
 
-Exit proof includes model text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, corrected claims cannot reactivate through repetition/verified outcome/new pointer, only exact user reversal can lift a block, cross-scope rows cannot inject, pending/terminal open-loop rebuild behavior, and correction/block survival after full rebuild.
+Exit proof includes model text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, corrected claims cannot reactivate through repetition/verified outcome/new pointer, a reversal naming blocked identity A but authorizing different claim C leaves A blocked, only an exact direct user reinstatement can lift a block, cross-scope rows cannot inject, pending/terminal open-loop rebuild behavior, and correction/block survival after full rebuild.
 
 ### PR 3 — context request, thin bundle, and supply telemetry
 
@@ -570,6 +576,8 @@ Do not delete rollback capability, correction blocks/history, or raw evidence ne
 
 Across the implementation sequence, tests must cover at least:
 
+- untrusted HTTP and stdio MCP attempts to discover or invoke `localOnly` owner operations;
+- privileged handler invocation with `ctx.remote !== false`;
 - untrusted MCP/remote attempts to arm, abort, change mode, or inspect local transcripts;
 - adapter source impersonation and cross-session submission;
 - same session/same hash retry;
@@ -590,7 +598,8 @@ Across the implementation sequence, tests must cover at least:
 - fabricated “supplied” pointer absent from context telemetry;
 - corrected claim reappearing under a new pointer after two eligible observations;
 - verified outcome attempting to reactivate a correction-blocked claim;
-- explicit user reversal of the exact blocked identity;
+- a reversal naming blocked identity A while authorizing different claim C;
+- explicit direct user reinstatement of the exact blocked identity;
 - completed/cancelled/triggerless open loop after rebuild;
 - direct correction followed by retrieval and full rebuild;
 - duplicate beneficial or irrelevant evidence under different IDs;
@@ -612,11 +621,12 @@ Across the implementation sequence, tests must cover at least:
 V1 is complete only when:
 
 - PRs 1–5 are merged under their owning repository gates;
+- every owner-control handler independently enforces `ctx.remote === false`, and every agent-facing dispatcher hides and rejects `localOnly` owner operations;
 - the loop is explicitly armed by a trusted-local owner control, not enabled by merge or an untrusted caller;
 - exactly 10 eligible Codex sessions count and settle automatically;
 - relevant context is actually supplied and measured;
 - direct correction removes obsolete beliefs and durably blocks their claim identities immediately and after rebuild;
-- only an explicit user reversal can lift a correction block;
+- only an explicit direct user reinstatement of the exact blocked identity can lift a correction block;
 - no incorrect high-impact belief survives;
 - no Seascape or external write occurs;
 - no dashboard, queue, reminder, manual promotion, or recurring Sawyer maintenance is introduced;
@@ -635,6 +645,8 @@ The implementing agent must:
 - inspect and reuse existing transcript discovery/parser, operation authorization, and configuration patterns;
 - define versioned schemas and canonical encodings beside code and golden tests;
 - mark owner controls and server-local transcript operations trusted-local/local-only;
+- independently enforce `ctx.remote === false` inside every privileged handler;
+- filter `localOnly` operations from discovery and deny invocation in every agent-facing dispatcher, including stdio MCP and HTTP;
 - authorize thin adapter submissions to one exact source/provider session;
 - preserve ordinary Codex work when Learning Loop operations fail;
 - keep the default mode `off`;
