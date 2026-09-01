@@ -48,7 +48,7 @@ The system is valuable only when all four steps work. Capture without later use 
 | **GBrain canonical personal source** | Current preferences, constraints, goals, proven lessons, and bounded open loops | Authoritative personal operating model |
 | **Sawyer Hub** | Optional generated human-readable projection | Never required for activation, retrieval, promotion, or canary completion |
 | **Seascape Hub** | Controlled durable business knowledge | Separate business authority; no automatic promotion from this personal loop |
-| **Codex / later Claude adapter** | Submit normalized events, request context, perform work, return outcomes | Thin client; cannot define thresholds, authority, or verdicts |
+| **Codex / later Claude adapter** | Submit normalized events, request context, perform work, return outcomes | Thin authorized client; cannot define thresholds, inspect arbitrary local paths, control the run, or mutate canonical truth directly |
 | **Sawyer** | Strategy, business judgment, irreversible or external-action exceptions | No routine memory maintenance, counter advancement, receipt review, or promotion work |
 
 ## 4. Sources of truth
@@ -66,7 +66,7 @@ One append-only local ledger records machine-readable events such as:
 - GBrain-owned eligibility decision;
 - context requested and supplied;
 - candidate learning observed;
-- canonical memory activated or superseded;
+- canonical memory activated, blocked, reversed, or superseded;
 - objective outcome or explicit user signal recorded;
 - open-loop trigger transitioned;
 - session settled;
@@ -80,6 +80,8 @@ Durable active personal knowledge remains in the existing GBrain filesystem-cano
 
 A memory is active only when a permitted activation rule writes it to the configured canonical personal source. Candidate observations, session summaries, model confidence, and operational events alone are not active memory.
 
+A direct correction also creates durable blocked-claim state keyed to the corrected claim identity. That state survives rebuild and prevents later model inference or repeated-pattern evidence from silently reactivating the obsolete belief.
+
 ### 4.4 Business knowledge
 
 A possible Seascape fact may be surfaced only as an evidence-backed candidate through the existing business boundary. V1 cannot promote, rewrite, merge, deploy, send, or otherwise mutate Seascape canon or any external system.
@@ -92,11 +94,12 @@ V1 includes only:
 2. GBrain-owned deterministic eligibility.
 3. Candidate learning and direct correction handling.
 4. Canonical personal-memory activation under explicit rules.
-5. Thin task-relevant context retrieval.
-6. Exact context-supply telemetry.
-7. Typed outcome evidence and session settlement.
-8. A 10-eligible-session canary with automatic `keep`, `repair`, or `broaden` disposition.
-9. Cleanup of displaced manual personal-memory machinery only after successful proof.
+5. Durable correction blocking and explicit user reversal.
+6. Thin task-relevant context retrieval.
+7. Exact context-supply telemetry.
+8. Typed outcome evidence and session settlement.
+9. A 10-eligible-session canary with automatic `keep`, `repair`, or `broaden` disposition.
+10. Cleanup of displaced manual personal-memory machinery only after successful proof.
 
 V1 explicitly excludes:
 
@@ -107,9 +110,10 @@ V1 explicitly excludes:
 - automatic PR, merge, deploy, install, send, or schedule actions;
 - a new memory database, repository, knowledge graph, dashboard, inbox, queue, or notification channel;
 - autonomous Seascape canon promotion;
-- more than one active self-improvement change.
+- more than one active self-improvement change;
+- exposing owner controls or server-local transcript access to untrusted MCP or remote callers.
 
-## 6. Operating modes and activation
+## 6. Operating modes, trusted controls, and activation
 
 One central mode resolver exposes:
 
@@ -125,11 +129,28 @@ Default is `off`. A merge cannot arm or activate a run.
 
 Changing out of `canary` first appends a terminal abort for the active run, then changes mode. Capture and injection are independently disableable so ordinary Codex work continues if the loop is rolled back.
 
+### 6.1 Trusted-local control boundary
+
+The following are owner-control operations and must be registered as trusted-local/local-only in GBrain’s contract-first operations layer:
+
+- read or change `learning_loop.mode`;
+- arm, abort, reset, or inspect privileged canary state;
+- resolve or read a server-local transcript path;
+- create authoritative eligibility, authority, correction, activation, blocked-claim, settlement, or terminal events;
+- mutate canonical personal knowledge; and
+- perform ledger administration or rebuild verification.
+
+They are not exposed to an untrusted MCP client, browser caller, remote model, or ordinary provider adapter.
+
+A provider adapter may call only explicitly authorized, versioned submission/request operations for its own source identity: submit bounded session metadata, request bounded context for its own session, submit a typed outcome envelope, and receive the resulting bundle/status. Every such operation authenticates/authorizes the source and binds the caller to the submitted provider/session. The adapter cannot select arbitrary local paths, impersonate another provider/session, change modes, arm/abort a run, append authoritative events, or write canonical memory.
+
+Any uncertainty about caller trust, source authorization, or local-path ownership fails closed for Learning Loop behavior while ordinary agent work proceeds.
+
 ## 7. Canary lifecycle
 
 ### 7.1 Arming
 
-An explicit arm operation creates an immutable `run_id`. Only one run may be nonterminal at once.
+An explicit trusted-local arm operation creates an immutable `run_id`. Only one run may be nonterminal at once.
 
 Arming freezes at least:
 
@@ -140,7 +161,8 @@ Arming freezes at least:
 - eligibility-classifier version and thresholds;
 - personal destination including `brain_id`, `source_id`, and canonical page/slug;
 - verdict thresholds;
-- baseline object or explicit no-baseline state.
+- baseline object or explicit no-baseline state; and
+- the authorized adapter/source identity allowed to submit for the run.
 
 Reducers use the frozen run inputs, never mutable current defaults.
 
@@ -153,12 +175,13 @@ GBrain—not the adapter—must resolve the transcript through configured local 
 - Same session identity plus same authoritative hash is an idempotent retry.
 - Same session identity plus a different authoritative hash is a conflict and cannot learn, count, or replace the prior completion.
 - Adapter-supplied path, size, or hash is only an assertion and must match GBrain’s computation.
+- A submitted path is usable only after trusted-local resolution proves it belongs to the authorized provider/session and an allowed corpus root.
 
 ### 7.3 GBrain-owned eligibility
 
 For the V1 canary, eligibility is deliberately structural and deterministic. A session is eligible only when all are true:
 
-- provider is in the frozen allow-list;
+- provider is in the frozen allow-list and matches the authorized source identity;
 - completion state is completed;
 - the GBrain-read transcript is at least 256 UTF-8 bytes;
 - the existing parser yields at least two non-empty normalized user turns and two non-empty normalized assistant turns.
@@ -181,7 +204,7 @@ The expected outcome identity is derived by GBrain from the run and session iden
 
 - the expected outcome is accepted or an idempotent duplicate is recognized;
 - every referenced authoritative event exists and matches the evidence item;
-- all required canonical mutations or trigger transitions complete; and
+- all required canonical mutations, blocked-claim transitions, or trigger transitions complete; and
 - no replay conflict or unresolved trust failure remains.
 
 The run cannot finalize until all 10 cohort sessions are settled. Session 10 completion alone is never enough.
@@ -195,7 +218,7 @@ A run ends exactly once with either:
 
 A hard failure aborts immediately, disables further injection/counting/activation for that run, and preserves history. A later bounded rerun receives a new `run_id`; old terminal events cannot contaminate it.
 
-## 8. Identity, scope, provenance, and replay invariants
+## 8. Identity, scope, provenance, correction, and replay invariants
 
 ### 8.1 Brain-qualified memory identity
 
@@ -243,7 +266,28 @@ For example, an objective event about pointer A cannot authorize a beneficial-us
 
 Each implementation PR that introduces an event type must define its versioned payload and exact equality checks beside tests. There is no generic “same session is close enough” rule.
 
-### 8.5 Idempotency and replay
+### 8.5 Durable correction block and explicit reversal
+
+A correction applies to claim identity, not only one historical pointer.
+
+The authoritative correction transaction creates a durable blocked-claim record keyed by at least:
+
+```text
+normalized claim fingerprint + learning class + scope + exact scope target
+```
+
+Trigger identity is also part of the key for an open-loop claim. The blocked state is represented in canonical/rebuildable personal knowledge plus an authoritative ledger event, so deleting or rebuilding a database index cannot remove it.
+
+While a claim identity is blocked:
+
+- candidate observations may be recorded for diagnostics;
+- repeated-pattern or verified-outcome evidence cannot reactivate it;
+- a new fact row or pointer with the same blocked identity remains non-injectable; and
+- absence of the original pointer alone is not considered correction propagation.
+
+Only a later **explicit direct user reversal**, processed through a trusted-local authoritative operation, may supersede the blocked state. The reversal event binds the exact blocked identity and replacement/reinstated claim, writes the new canonical row, and preserves the full correction history. Model inference, repetition, an objective outcome alone, or an adapter assertion cannot reverse a correction.
+
+### 8.6 Idempotency and replay
 
 Every appendable command/event family that can affect learning or verdict state has:
 
@@ -252,7 +296,7 @@ Every appendable command/event family that can affect learning or verdict state 
 - same-ID/same-payload idempotency; and
 - same-ID/changed-payload conflict behavior that fails closed for learning.
 
-Retries cannot double-count sessions, beneficial uses, errors, irrelevant injections, corrections, trigger transitions, settlement, or terminal state.
+Retries cannot double-count sessions, beneficial uses, errors, irrelevant injections, corrections, reversals, trigger transitions, settlement, or terminal state.
 
 The implementation PR introducing a hashed payload must select one canonical encoding and ship golden test vectors before merge. No behavior may depend on an unspecified serializer.
 
@@ -260,12 +304,12 @@ The implementation PR introducing a hashed payload must select one canonical enc
 
 | Class | Canonical activation rule | Injection behavior |
 |---|---|---|
-| **constraint** | One exact claim-bound direct user statement or authoritative user correction | Highest priority when applicable |
-| **preference** | One exact claim-bound direct user statement or authoritative user correction | Inject when relevant |
-| **goal** | One exact claim-bound direct user statement or authoritative user correction | Inject while current and unsuperseded |
-| **lesson** | One exact claim-bound verified outcome, or the same claim/scope fingerprint observed in at least two distinct accepted **eligible** sessions | Inject when relevant and in exact scope |
+| **constraint** | One exact claim-bound direct user statement or authoritative user correction/reversal | Highest priority when applicable |
+| **preference** | One exact claim-bound direct user statement or authoritative user correction/reversal | Inject when relevant |
+| **goal** | One exact claim-bound direct user statement or authoritative user correction/reversal | Inject while current and unsuperseded |
+| **lesson** | One exact claim-bound verified outcome, or the same claim/scope fingerprint observed in at least two distinct accepted **eligible** sessions, provided that identity is not correction-blocked | Inject when relevant and in exact scope |
 | **friction** | Operational/candidate evidence only | Never directly injected |
-| **open loop** | Exact claim-bound user statement or verified outcome plus a machine-owned pending trigger | At most one; inject only while exact trigger remains pending |
+| **open loop** | Exact claim-bound user statement or verified outcome plus a machine-owned pending trigger, provided that identity is not correction-blocked | At most one; inject only while exact trigger remains pending |
 | **business candidate** | Existing candidate-only business path | Never written as personal memory |
 
 Additional rules:
@@ -274,30 +318,34 @@ Additional rules:
 - Adapters cannot assert `repeated_pattern`; GBrain derives it.
 - Repetition requires distinct session identities whose accepted GBrain eligibility decisions are eligible.
 - Duplicate observations from one session cannot satisfy the threshold twice.
+- A blocked claim identity cannot be reactivated by repetition or verified outcome; only an explicit user reversal may supersede the block.
 - Friction may support a separately stated lesson, but friction text is not silently coerced into guidance.
 - Open-loop completion or cancellation appends a typed terminal transition, writes/supersedes canonical state, and makes the old pending row non-injectable after rebuild.
 
-## 10. Direct correction
+## 10. Direct correction and reversal
 
-Direct user correction is a first-class GBrain operation, not another unstructured outcome note.
+Direct user correction is a first-class trusted-local GBrain operation, not another unstructured outcome note.
 
 For one learning transaction it must:
 
 1. route to the exact brain/source of the obsolete memory;
 2. write the corrected canonical fact;
 3. mark the obsolete row superseded/struck using the existing correction machinery;
-4. return an authoritative correction event ID plus exact old and replacement pointers;
-5. refresh/reconcile the derived index;
-6. verify that the obsolete pointer is immediately non-injectable; and
-7. pass a full rebuild check showing only the replacement remains active.
+4. create the durable blocked-claim identity for the obsolete claim/class/scope/target/trigger;
+5. return an authoritative correction event ID plus exact old and replacement pointers and blocked identity;
+6. refresh/reconcile the derived index;
+7. verify that every row matching the blocked identity is immediately non-injectable; and
+8. pass a full rebuild check showing the replacement active and blocked identity still enforced.
 
 Corrected prose remains in private canonical knowledge, not routine operational telemetry.
 
-Correction propagation passes vacuously when no direct correction occurs during a run. When one does occur, every obsolete pointer must be absent from all later accepted context-supply telemetry and remain absent after rebuild.
+Correction propagation passes vacuously when no direct correction occurs during a run. When one does occur, the obsolete claim identity—not merely its original pointer—must be absent from all later accepted context-supply telemetry and remain blocked after rebuild.
+
+A later explicit user reversal is a separate trusted-local operation. It must bind the exact blocked identity, supersede the blocked state, write the newly authoritative claim, and emit an authoritative reversal event. No inferred or provider-originated event can perform this transition.
 
 ## 11. Thin context request and bundle
 
-The adapter submits an explicit context request containing at least:
+The authorized adapter submits an explicit context request containing at least:
 
 - run and provider session identity;
 - task class;
@@ -319,9 +367,9 @@ The returned bundle is ephemeral and contains:
 - relevant preferences; and
 - at most one pending open loop.
 
-It excludes raw transcripts, stale PR facts, completed work, unsupported inference, unrelated business facts, malformed scope/trigger rows, and superseded memories.
+It excludes raw transcripts, stale PR facts, completed work, unsupported inference, unrelated business facts, malformed scope/trigger rows, blocked claims, and superseded memories.
 
-An accepted `context_supplied` event is the sole authority for what the agent actually received. It binds the run, session, request hash, exact brain-qualified pointers, and reconstructed scope/trigger metadata. An outcome payload cannot self-authorize a memory as supplied.
+An accepted `context_supplied` event is the sole authority for what the agent actually received. It binds the run, authorized source/session, request hash, exact brain-qualified pointers, and reconstructed scope/trigger/claim identity. An outcome payload cannot self-authorize a memory as supplied.
 
 ## 12. Outcome evidence and measurement
 
@@ -331,19 +379,19 @@ The implementation PR for outcomes must introduce a complete discriminated evide
 - materially irrelevant supplied context;
 - repeated known instruction;
 - re-asked known answer;
-- direct user correction via authoritative correction linkage;
+- direct user correction or reversal via authoritative linkage;
 - open-loop trigger completion/cancellation;
 - objective task outcome or blocker; and
-- trust/privacy/replay failure.
+- trust/privacy/authorization/replay failure.
 
-Every variant is pointer-, request-, claim-, trigger-, or correction-bound as applicable. Free-form references, transcript excerpts, prompts, secrets, or verbatim user corrections are rejected before ledger persistence.
+Every variant is pointer-, request-, claim-, trigger-, correction-, reversal-, and source-bound as applicable. Free-form references, transcript excerpts, prompts, secrets, or verbatim user corrections are rejected before ledger persistence.
 
 ### 12.1 Beneficial use
 
 A strong beneficial use counts only when:
 
-- the memory pointer appears in accepted `context_supplied` telemetry for the same run/session/request;
-- an accepted authoritative event matches that exact pointer and allowed benefit class;
+- the memory pointer appears in accepted `context_supplied` telemetry for the same run/authorized session/request;
+- an accepted authoritative event matches that exact pointer, claim identity, and allowed benefit class;
 - strength is objective system evidence or an explicit user signal bound to the same claim; and
 - the semantic tuple `(run, session, pointer)` has not already counted.
 
@@ -360,7 +408,7 @@ Agent self-report, generic task success, mere injection, or “context was appli
 
 Errors and materially irrelevant injections are reduced from typed, exact-match authoritative events. One actual irrelevant pointer counts at most once per `(run, session, pointer)`, regardless of duplicate evidence IDs.
 
-A correction, wrong action caused by memory, cross-scope injection, private-body persistence attempt, conflicting replay, or invalid authority linkage cannot be reclassified as a beneficial use.
+A correction, blocked-claim reappearance, wrong action caused by memory, caller-authorization failure, cross-scope injection, private-body persistence attempt, conflicting replay, or invalid authority linkage cannot be reclassified as a beneficial use.
 
 ## 13. Deterministic verdict
 
@@ -371,8 +419,9 @@ Final reduction occurs only after the sealed cohort has 10 eligible sessions and
 Any of the following immediately aborts the run as `repair`:
 
 - an incorrect high-impact memory causes action;
-- a superseded memory is later supplied;
+- a superseded or correction-blocked claim is later supplied without an explicit user reversal;
 - brain/source or repository/project scope crosses boundaries;
+- an untrusted/unauthorized caller arms, aborts, changes mode, accesses a local transcript, appends authority, or mutates canonical state;
 - Seascape canon or an external system is mutated;
 - a transcript body, prompt, secret, or verbatim correction is persisted in operational telemetry;
 - session/outcome/evidence identity conflict affects learning state;
@@ -390,7 +439,7 @@ There is one repair path: `canary_aborted(repair)`. A trust defect discovered du
 - exactly 10 eligible, settled cohort sessions;
 - at least three strong beneficial uses;
 - no more than two materially irrelevant injected pointers;
-- correction propagation passes;
+- correction propagation and durable blocked-claim enforcement pass;
 - no wrong high-impact active belief survives;
 - a valid frozen baseline exists; and
 - the canary’s normalized supervision-error rate is strictly lower than the baseline rate.
@@ -421,35 +470,36 @@ Exit condition:
 - boundaries, authority, lifecycle, staged ownership, and canary gates are accepted;
 - no runtime behavior is enabled.
 
-### PR 1 — session capture, run state, mode resolver, and eligibility
+### PR 1 — trusted controls, session capture, run state, mode resolver, and eligibility
 
 Implement only:
 
+- trusted-local/local-only owner-control operations and source-authorized thin adapter submissions;
 - versioned session/run/eligibility events;
 - authoritative local transcript hashing and parser-bound size/counts;
 - session replay semantics;
 - `off|capture|canary` mode resolver, default `off`;
-- explicit arm/abort lifecycle;
+- explicit trusted-local arm/abort lifecycle;
 - deterministic cohort admission and sealing;
 - append-only ledger primitives.
 
 Must not implement context injection, canonical learning writes, outcome scoring, Claude, research, skills, or live activation.
 
-Exit proof includes golden transcript vectors, cross-path rejection, same-ID replay/conflict tests, mode tests, one-active-run tests, cohort-cap tests, and deterministic rebuild/replay.
+Exit proof includes untrusted MCP/remote control rejection, source-impersonation rejection, arbitrary-path rejection, golden transcript vectors, cross-path rejection, same-ID replay/conflict tests, mode tests, one-active-run tests, cohort-cap tests, and deterministic rebuild/replay.
 
-### PR 2 — candidate learning, exact authority binding, activation, and correction
+### PR 2 — candidate learning, exact authority binding, activation, correction blocking, and reversal
 
 Implement only:
 
 - versioned candidate/authority event schemas;
 - exact claim fingerprinting;
-- claim/class/scope/trigger equality validation;
+- claim/class/scope/trigger/source-role equality validation;
 - class-by-class activation predicates from section 9;
 - canonical fact-fence mapping and rebuild tests;
 - GBrain-owned repeated-pattern derivation from two eligible sessions;
-- authoritative correction transaction and supersession verification.
+- authoritative correction transaction, durable blocked-claim identity, explicit user reversal, and supersession verification.
 
-Exit proof includes model-text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, cross-scope rows cannot inject, pending/terminal open-loop rebuild behavior, and correction survival after full rebuild.
+Exit proof includes model text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, corrected claims cannot reactivate through repetition/verified outcome/new pointer, only exact user reversal can lift a block, cross-scope rows cannot inject, pending/terminal open-loop rebuild behavior, and correction/block survival after full rebuild.
 
 ### PR 3 — context request, thin bundle, and supply telemetry
 
@@ -462,7 +512,7 @@ Implement only:
 - at-most-one pending open loop;
 - exact `context_supplied` telemetry without request text.
 
-Exit proof includes canonical hash golden vectors, Unicode/newline behavior, overflow rejection, no ambient scope inference, wrong-brain/wrong-forge/wrong-project exclusions, superseded/terminal-loop exclusions, and exact pointer telemetry.
+Exit proof includes canonical hash golden vectors, Unicode/newline behavior, overflow rejection, no ambient scope inference, wrong-brain/wrong-forge/wrong-project exclusions, blocked/superseded/terminal-loop exclusions, source authorization, and exact pointer/claim telemetry.
 
 ### PR 4 — thin Codex adapter
 
@@ -470,11 +520,14 @@ Modify only the existing owner of active Codex hooks.
 
 The adapter:
 
-- gathers provider/session identifiers and explicit work scope;
+- authenticates/identifies its source and provider session;
+- gathers explicit work scope without selecting arbitrary server-local paths;
 - submits bounded context requests;
 - injects returned context;
-- submits session-close metadata and outcomes;
+- submits session-close metadata and outcomes; and
 - fails open for ordinary work when GBrain is unavailable.
+
+It cannot change loop mode, arm/abort runs, append authoritative events, inspect unrelated transcripts, or mutate canonical memory.
 
 No second transcript walker, scheduler, daemon, receipt format, dashboard, or review policy.
 
@@ -483,24 +536,24 @@ No second transcript walker, scheduler, daemon, receipt format, dashboard, or re
 Implement only:
 
 - complete typed evidence/event union;
-- variant-specific event equality;
+- variant-specific event and authorized-source equality;
 - canonical payload encodings and golden vectors;
 - outcome/evidence replay semantics;
 - GBrain-owned close manifests and expected outcome identity;
-- typed trigger transitions;
+- typed correction/reversal and trigger transitions;
 - session settlement;
 - semantic deduplication;
 - normalized baseline comparison;
 - terminal `keep|broaden|repair` behavior.
 
-Exit proof includes delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, conflicting retries abort, extra session 11 cannot change the cohort, hard failures terminate immediately, and replay produces the same verdict.
+Exit proof includes delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, unauthorized source events are rejected, conflicting retries abort, extra session 11 cannot change the cohort, blocked claims remain blocked, hard failures terminate immediately, and replay produces the same verdict.
 
 ### Canary activation
 
 After PRs 1–5 land and are independently reviewed:
 
 1. Freeze the baseline automatically from prior eligible Codex sessions when valid; otherwise record no baseline.
-2. Explicitly arm one run.
+2. Explicitly arm one run through the trusted-local control.
 3. Work normally.
 4. The system counts, settles, and finalizes automatically.
 5. Sawyer receives one plain-English conclusion and only genuine exceptions.
@@ -511,16 +564,18 @@ No manufactured sessions and no date Sawyer must remember.
 
 Only after a successful `keep` or `broaden` result, remove personal-memory mechanisms that the proven loop replaces, such as manual promotion, unread session-summary Markdown, reminder-based canary tracking, duplicate context stores, and instructions requiring agents to inspect multiple Hub files.
 
-Do not delete rollback capability or raw evidence needed to rebuild.
+Do not delete rollback capability, correction blocks/history, or raw evidence needed to rebuild.
 
 ## 15. Required adversarial proof matrix
 
 Across the implementation sequence, tests must cover at least:
 
+- untrusted MCP/remote attempts to arm, abort, change mode, or inspect local transcripts;
+- adapter source impersonation and cross-session submission;
 - same session/same hash retry;
 - same session/changed transcript conflict;
 - adapter size/hash disagreement with GBrain bytes;
-- path outside configured transcript roots;
+- path outside configured transcript roots or unrelated to the authorized source session;
 - interrupted and structurally ineligible sessions;
 - ineligible sessions attempting repeated-pattern activation;
 - session 11 arriving while the first 10 settle;
@@ -533,6 +588,9 @@ Across the implementation sequence, tests must cover at least:
 - a user event authorizing a different claim in the same session;
 - objective event for pointer A authorizing pointer B;
 - fabricated “supplied” pointer absent from context telemetry;
+- corrected claim reappearing under a new pointer after two eligible observations;
+- verified outcome attempting to reactivate a correction-blocked claim;
+- explicit user reversal of the exact blocked identity;
 - completed/cancelled/triggerless open loop after rebuild;
 - direct correction followed by retrieval and full rebuild;
 - duplicate beneficial or irrelevant evidence under different IDs;
@@ -554,17 +612,18 @@ Across the implementation sequence, tests must cover at least:
 V1 is complete only when:
 
 - PRs 1–5 are merged under their owning repository gates;
-- the loop is explicitly armed, not enabled by merge;
+- the loop is explicitly armed by a trusted-local owner control, not enabled by merge or an untrusted caller;
 - exactly 10 eligible Codex sessions count and settle automatically;
 - relevant context is actually supplied and measured;
-- direct correction removes obsolete beliefs immediately and after rebuild;
+- direct correction removes obsolete beliefs and durably blocks their claim identities immediately and after rebuild;
+- only an explicit user reversal can lift a correction block;
 - no incorrect high-impact belief survives;
 - no Seascape or external write occurs;
 - no dashboard, queue, reminder, manual promotion, or recurring Sawyer maintenance is introduced;
 - the system produces one automatic `keep`, `repair`, or `broaden` result; and
 - successful proof is followed by deletion of displaced manual machinery.
 
-The first permitted broadening is a Claude adapter using the same GBrain authority and evidence model. Research ingestion, self-editing skills/config, and Seascape proposal promotion remain separate later decisions.
+The first permitted broadening is a Claude adapter using the same GBrain authority, authorization, correction, and evidence model. Research ingestion, self-editing skills/config, and Seascape proposal promotion remain separate later decisions.
 
 ## 17. Implementation handoff
 
@@ -573,8 +632,10 @@ The next coding task is **PR 1 only**.
 The implementing agent must:
 
 - read this ADR and current repository instructions;
-- inspect and reuse existing transcript discovery/parser and configuration patterns;
+- inspect and reuse existing transcript discovery/parser, operation authorization, and configuration patterns;
 - define versioned schemas and canonical encodings beside code and golden tests;
+- mark owner controls and server-local transcript operations trusted-local/local-only;
+- authorize thin adapter submissions to one exact source/provider session;
 - preserve ordinary Codex work when Learning Loop operations fail;
 - keep the default mode `off`;
 - avoid context retrieval, memory activation, outcome scoring, Claude, research, skills, Sawyer Hub automation, Seascape writes, and live/global configuration;
