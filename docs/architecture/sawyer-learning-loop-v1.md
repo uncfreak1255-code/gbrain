@@ -318,22 +318,26 @@ started
   -> committed
 ```
 
-An attempt may instead become `superseded` by a named successor attempt or `failed` by a hard failure. Phase transitions are append-only, idempotent, and bound to the exact blocked identity, authority event, pre-retirement set, lineage generation/fingerprint, and post-retirement checkpoint as applicable.
+An attempt may instead become `superseded` by a named successor attempt or `failed` by a hard failure. `superseded` is terminal for that attempt but never terminal for the root reversal because its successor is created in the same atomic transition. Phase transitions are append-only, idempotent, and bound to the exact blocked identity, authority event, pre-retirement set, lineage generation/fingerprint, and post-retirement checkpoint as applicable.
 
 Rules:
 
 1. **Retirement and checkpoint are one durable transaction.** The guarded canonical retirement mutation and `retired_checkpointed` state commit atomically. A crash cannot leave live replacements retired without a durable attempt/checkpoint that identifies how to resume.
-2. **Recovery precedes fresh classification.** On startup, command retry, or a second invocation for the same blocked identity, GBrain reduces the latest nonterminal reversal attempt before resolving a new active replacement set. It never restarts at section 10 step 2 merely because the current set is empty.
+2. **Recovery precedes fresh classification.** On startup, command retry, or a second invocation for the same blocked identity, GBrain reduces the root reversal’s latest phase and follows successor linkage before resolving a new active replacement set. It never restarts at section 10 step 2 merely because the current set is empty. A `superseded` predecessor without its linked successor is not a valid committed state because rule 4 makes those records atomic.
 3. **Resume by phase.**
    - `started`: retry or supersede the guarded retirement transaction using its persisted precondition.
    - `retired_checkpointed`: resume index reconciliation and full rebuild from the persisted pre-retirement requirement set and post-retirement checkpoint, even when the current active replacement set is empty.
    - `rebuild_verified`: revalidate the persisted proof and proceed to commit intent/CAS.
-   - `commit_intent`: finish or reconcile the guarded final commit idempotently.
-4. **Checkpoint drift creates a successor, not a stranded lineage.** If the lineage changes after `retired_checkpointed`, the old attempt becomes `superseded`; under the same root reversal authority, GBrain creates a successor whose required-retirement set is the union of all still-unverified predecessor obligations and the newly computed complete active linked-replacement set. The successor retires any current members, records a new post-retirement checkpoint, and proves the full accumulated requirement. An empty current set is valid when inherited predecessor obligations remain.
-5. **Final commit is crash-recoverable.** Before mutating final live state, GBrain persists `commit_intent` containing the verified proof identity, expected post-retirement checkpoint, expected final canonical state hash, and proposed reinstated pointer. The guarded commit atomically applies the final canonical state and stores the same `root_reversal_id/attempt_no` commit marker in the correction-lineage record. If the process exits before `committed` is appended, startup compares live state with the intent: matching final state/marker completes `committed` idempotently; matching the verified post-retirement checkpoint retries the guarded commit; any third state is a hard failure and leaves the block enforced.
+   - `commit_intent`: apply the deterministic recovery cases in rule 5.
+4. **Checkpoint drift creates a successor atomically.** If accepted guarded lineage mutation makes an attempt’s checkpoint stale, one atomic ledger/lineage transaction must: mark the predecessor `superseded`; allocate and append the successor’s `started` state; bind predecessor and successor IDs in both directions; persist the successor’s complete inherited-obligation set; and bind the current lineage generation/fingerprint used as the successor precondition. Until that entire transaction commits, the predecessor remains nonterminal and recoverable. The successor’s required-retirement set is the union of every still-unverified predecessor obligation and the newly computed complete active linked-replacement set. An empty current set is valid when inherited predecessor obligations remain. A crash cannot expose a terminal superseded predecessor without the successor that carries its obligations.
+5. **Final commit is crash-recoverable and recognized drift is resumable.** Before mutating final live state, GBrain persists `commit_intent` containing the verified proof identity, expected post-retirement checkpoint, expected final canonical state hash, and proposed reinstated pointer. The guarded commit atomically applies the final canonical state and stores the same `root_reversal_id/attempt_no` commit marker in the correction-lineage record. If the process exits before `committed` is appended, startup compares live state with the intent:
+   - matching final state and commit marker completes `committed` idempotently;
+   - matching the verified post-retirement checkpoint retries the guarded commit;
+   - a different generation/fingerprint/set that is fully explained by one or more accepted guarded lineage-mutation events after the intent is ordinary checkpoint drift, so rule 4 atomically supersedes the attempt and starts a successor inheriting all prior obligations plus the new active set;
+   - any live state that cannot be derived from the accepted guarded lineage history is an unexplained third state, a hard failure, and leaves the block enforced.
 6. **No user maintenance.** Recovery runs automatically from ledger/canonical state. It does not create a queue, reminder, or manual promotion step.
 
-A process exit at any phase therefore leaves either the prior blocked state, a durable checkpoint that can resume, or the fully committed reinstatement. It cannot permanently strand settlement solely because retirement made the current active set empty.
+A process exit at any phase therefore leaves either the prior blocked state, a durable checkpoint that can resume, a predecessor/successor pair committed atomically, or the fully committed reinstatement. It cannot permanently strand settlement solely because retirement made the current active set empty or because recognized guarded drift occurred after commit intent.
 
 ### 8.7 Idempotency and replay
 
@@ -344,7 +348,7 @@ Every appendable command/event family that can affect learning or verdict state 
 - same-ID/same-payload idempotency; and
 - same-ID/changed-payload conflict behavior that fails closed for learning.
 
-Retries cannot double-count sessions, beneficial uses, errors, irrelevant injections, corrections, root reversals, successor attempts, pre-retirement snapshots, post-retirement checkpoints, replacement-set/fingerprint/generation transitions, rebuild proofs, commit intents, trigger transitions, settlement, or terminal state.
+Retries cannot double-count sessions, beneficial uses, errors, irrelevant injections, corrections, root reversals, predecessor/successor transitions, inherited obligations, pre-retirement snapshots, post-retirement checkpoints, replacement-set/fingerprint/generation transitions, rebuild proofs, commit intents, trigger transitions, settlement, or terminal state.
 
 The implementation PR introducing a hashed payload must select one canonical encoding and ship golden test vectors before merge. No behavior may depend on an unspecified serializer.
 
@@ -393,7 +397,7 @@ Corrected prose remains in private canonical knowledge, not routine operational 
 
 Correction propagation passes vacuously when no direct correction occurs during a run. When one does occur, the obsolete claim identity—not merely its original pointer—must be absent from all later accepted context-supply telemetry and remain blocked after rebuild.
 
-A later explicit user reversal is a separate trusted-local transaction. Before beginning a new root attempt, GBrain must first run section 8.6 recovery for any existing nonterminal attempt under the same blocked identity. A genuinely new root reversal then:
+A later explicit user reversal is a separate trusted-local transaction. Before beginning a new root attempt, GBrain must first run section 8.6 recovery for any existing nonterminal or successor-linked attempt under the same blocked identity. A genuinely new root reversal then:
 
 1. binds and explicitly reinstates the exact blocked identity—including the same normalized claim fingerprint, class, scope, exact target, and trigger identity when applicable;
 2. allocates the stable `root_reversal_id` and attempt 1, acquires the lineage mutation guard, and resolves the complete current active linked-replacement set;
@@ -404,7 +408,7 @@ A later explicit user reversal is a separate trusted-local transaction. Before b
 7. atomically lifts the block and activates the reinstated authoritative claim under that guarded commit; and
 8. appends or crash-recovers `committed`, then verifies all linked replacements remain retired, the block is lifted, and only the reinstated state is active within that correction lineage.
 
-If the process exits, section 8.6 resumes from the durable phase rather than resolving the now-empty active set as a new reversal. If the lineage changes after a checkpoint, a successor attempt automatically inherits prior retirement obligations and adds the current active set. If any retirement, proof, commit-intent reconciliation, or CAS fails unsafely, the block remains enforced and the run aborts as `repair`. If the new user-authorized claim differs on any identity field, the old block remains and the request is processed separately or fails closed. No inferred or provider-originated event can perform either transition.
+If the process exits, section 8.6 resumes from the durable phase rather than resolving the now-empty active set as a new reversal. If accepted guarded lineage mutation makes a checkpoint or commit intent stale, the predecessor-to-successor transition and complete inherited obligation set are persisted atomically under rule 4; recovery follows that successor automatically. If any state drift is not explainable by accepted guarded lineage history, the block remains enforced and the run aborts as `repair`. If the new user-authorized claim differs on any identity field, the old block remains and the request is processed separately or fails closed. No inferred or provider-originated event can perform either transition.
 
 ## 11. Thin context request and bundle
 
@@ -443,12 +447,12 @@ The implementation PR for outcomes must introduce a complete discriminated evide
 - repeated known instruction;
 - re-asked known answer;
 - direct user correction or reversal via authoritative linkage;
-- reversal root/attempt identity, phase transitions, pre-retirement snapshot, atomic retirement/post-retirement checkpoint, rebuild proof, successor linkage, commit intent, checkpoint-CAS result, and committed marker;
+- reversal root/attempt identity, phase transitions, pre-retirement snapshot, atomic retirement/post-retirement checkpoint, rebuild proof, atomic predecessor/successor transition with inherited obligations, commit intent, recognized-drift successor recovery, checkpoint-CAS result, and committed marker;
 - open-loop trigger completion/cancellation;
 - objective task outcome or blocker; and
 - trust/privacy/authorization/replay failure.
 
-Every variant is pointer-, request-, claim-, trigger-, correction-, reversal-attempt-, replacement-set-, lineage-, checkpoint-, proof-, and source-bound as applicable. Free-form references, transcript excerpts, prompts, secrets, or verbatim user corrections are rejected before ledger persistence.
+Every variant is pointer-, request-, claim-, trigger-, correction-, reversal-attempt-, replacement-set-, lineage-, successor-, checkpoint-, proof-, and source-bound as applicable. Free-form references, transcript excerpts, prompts, secrets, or verbatim user corrections are rejected before ledger persistence.
 
 ### 12.1 Beneficial use
 
@@ -472,7 +476,7 @@ Agent self-report, generic task success, mere injection, or “context was appli
 
 Errors and materially irrelevant injections are reduced from typed, exact-match authoritative events. One actual irrelevant pointer counts at most once per `(run, session, pointer)`, regardless of duplicate evidence IDs.
 
-A correction, blocked-claim reappearance, unretired or not-rebuild-verified replacement, unrecoverable reversal state, stale/incomplete checkpoint proof, wrong action caused by memory, caller-authorization failure, cross-scope injection, private-body persistence attempt, conflicting replay, or invalid authority linkage cannot be reclassified as a beneficial use.
+A correction, blocked-claim reappearance, unretired or not-rebuild-verified replacement, unrecoverable reversal state, non-atomic/missing successor inheritance, unexplained commit-intent drift, stale/incomplete checkpoint proof, wrong action caused by memory, caller-authorization failure, cross-scope injection, private-body persistence attempt, conflicting replay, or invalid authority linkage cannot be reclassified as a beneficial use.
 
 ## 13. Deterministic verdict
 
@@ -485,8 +489,9 @@ Any of the following immediately aborts the run as `repair`:
 - an incorrect high-impact memory causes action;
 - a superseded or correction-blocked claim is later supplied without an exact explicit user reversal;
 - a reversal lifts a block or activates the reinstated claim before its recoverable phase machine proves every inherited/current retirement obligation and validates the post-retirement checkpoint;
-- a reversal commits when current lineage state differs from the verified post-retirement checkpoint;
-- committed canonical retirement exists without a recoverable durable attempt/checkpoint, or startup finds a reversal intent/live state combination outside the deterministic recovery cases in section 8.6;
+- a reversal commits when current lineage state differs from the verified post-retirement checkpoint without accepted guarded mutations that route the attempt to an atomic successor;
+- a predecessor is durably marked `superseded` without the same transaction durably creating and linking the successor plus its inherited obligation set;
+- committed canonical retirement exists without a recoverable durable attempt/checkpoint, or startup finds a reversal intent/live state combination outside the final-state, verified-checkpoint, or accepted-guarded-drift successor cases in section 8.6;
 - a canonical mutation capable of changing a correction lineage bypasses the common mutation guard or fails to advance its generation/set fingerprint;
 - brain/source or repository/project scope crosses boundaries;
 - an untrusted/unauthorized caller arms, aborts, changes mode, accesses a local transcript, appends authority, or mutates canonical state;
@@ -509,7 +514,7 @@ There is one repair path: `canary_aborted(repair)`. A trust defect discovered du
 - at least three strong beneficial uses;
 - no more than two materially irrelevant injected pointers;
 - correction propagation and durable blocked-claim enforcement pass;
-- every reversal bound to a cohort session is durably `committed`, including automatic recovery of any interrupted attempt, full inherited/current retirement proof, verified post-retirement checkpoint, and successful final CAS;
+- every reversal bound to a cohort session is durably `committed`, including automatic recovery of interrupted attempts, atomic predecessor/successor inheritance, full inherited/current retirement proof, verified post-retirement checkpoint, and successful final CAS;
 - no wrong high-impact active belief survives;
 - a valid frozen baseline selected by section 7.1 exists; and
 - the canary’s normalized supervision-error rate is strictly lower than the frozen baseline rate.
@@ -573,9 +578,9 @@ Implement only:
 - class-by-class activation predicates from section 9;
 - canonical fact-fence mapping and rebuild tests;
 - GBrain-owned repeated-pattern derivation from two eligible sessions;
-- authoritative correction transaction, durable blocked-claim identity, common correction-lineage mutation guard, complete active replacement-set tracking/fingerprint, monotonic lineage generation, recoverable root-reversal/attempt phase state, exact-identity direct user reversal, atomic retirement/checkpoint transaction, rebuild proof, successor-attempt inheritance, commit-intent recovery, guarded checkpoint CAS, and supersession verification.
+- authoritative correction transaction, durable blocked-claim identity, common correction-lineage mutation guard, complete active replacement-set tracking/fingerprint, monotonic lineage generation, recoverable root-reversal/attempt phase state, exact-identity direct user reversal, atomic retirement/checkpoint transaction, rebuild proof, atomic predecessor-supersession/successor-creation with inherited obligations, commit-intent recovery including recognized guarded drift, guarded checkpoint CAS, and supersession verification.
 
-Exit proof includes model text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, corrected claims cannot reactivate through repetition/verified outcome/new pointer, a reversal naming blocked identity A but authorizing different claim C leaves A blocked, A→B followed by exact A reinstatement completes all phases and retires B, a later linked B→C update is included in a successor attempt before A unblocks, B→C after checkpoint makes CAS fail and creates a successor proof for C, direct-statement or repeated-pattern recreation after checkpoint also forces a successor, the intended retirement transition’s generation advance does not self-fail, process exit after `retired_checkpointed` resumes rebuild with an empty current set, process exit after `commit_intent` reconciles to committed or retries safely, missing/ambiguous replacement state fails closed only for a new root attempt—not a recoverable predecessor—and correction/block/replacement/reversal state survives full rebuild.
+Exit proof includes model text cannot gain user authority, unrelated same-session user text cannot authorize another claim, ineligible sessions cannot satisfy repetition, corrected claims cannot reactivate through repetition/verified outcome/new pointer, a reversal naming blocked identity A but authorizing different claim C leaves A blocked, A→B followed by exact A reinstatement completes all phases and retires B, a later linked B→C update is included in a successor attempt before A unblocks, B→C after checkpoint or commit intent makes CAS fail and atomically creates a successor proof for C, direct-statement or repeated-pattern recreation after checkpoint also forces an atomic successor, process exit cannot observe a superseded predecessor without its linked successor/inherited obligations, the intended retirement transition’s generation advance does not self-fail, process exit after `retired_checkpointed` resumes rebuild with an empty current set, process exit after `commit_intent` reconciles to committed, retries safely, or atomically creates a successor for accepted guarded drift, and correction/block/replacement/reversal state survives full rebuild.
 
 ### PR 3 — context request, thin bundle, and supply telemetry
 
@@ -617,14 +622,14 @@ Implement only:
 - outcome/evidence replay semantics;
 - frozen baseline-evaluator version, complete per-session evaluation records, and section 7.1 validity reduction;
 - GBrain-owned close manifests and expected outcome identity;
-- typed correction/reversal phase, checkpoint, proof, successor, commit-intent/CAS, and trigger transitions;
-- automatic startup/retry reduction of nonterminal reversal attempts;
+- typed correction/reversal phase, checkpoint, proof, atomic successor inheritance, commit-intent/CAS, recognized-drift recovery, and trigger transitions;
+- automatic startup/retry reduction of nonterminal and successor-linked reversal attempts;
 - session settlement;
 - semantic deduplication;
 - frozen normalized baseline comparison;
 - terminal `keep|broaden|repair` behavior, including vacuous reversal-gate semantics when no reversal exists.
 
-Exit proof includes deterministic baseline selection from competing historical windows, tie-break ordering, fewer-than-10 and missing/conflicted evaluation yielding `baseline:null`, later transcript discovery not changing the frozen baseline, delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, unauthorized source events are rejected, conflicting retries abort, extra session 11 cannot change the cohort, blocked claims remain blocked, a crash after retirement resumes from the durable checkpoint rather than treating the empty set as a new failure, successor attempts preserve prior retirement obligations, commit-intent recovery is deterministic, unrecoverable third-state drift aborts, no-reversal runs do not fail the reversal-specific gate, hard failures terminate immediately, and replay produces the same verdict.
+Exit proof includes deterministic baseline selection from competing historical windows, tie-break ordering, fewer-than-10 and missing/conflicted evaluation yielding `baseline:null`, later transcript discovery not changing the frozen baseline, delayed/omitted outcome cannot settle, session 10 cannot finalize early, fabricated pointers cannot count, same-session wrong-pointer evidence is rejected, unauthorized source events are rejected, conflicting retries abort, extra session 11 cannot change the cohort, blocked claims remain blocked, a crash after retirement resumes from the durable checkpoint rather than treating the empty set as a new failure, predecessor supersession and successor creation/inheritance are atomic, accepted guarded drift after `commit_intent` creates a successor rather than corruption, unexplained third-state drift aborts, no-reversal runs do not fail the reversal-specific gate, hard failures terminate immediately, and replay produces the same verdict.
 
 ### Canary activation
 
@@ -642,7 +647,7 @@ No manufactured sessions and no date Sawyer must remember.
 
 Only after a successful `keep` or `broaden` result, remove personal-memory mechanisms that the proven loop replaces, such as manual promotion, unread session-summary Markdown, reminder-based canary tracking, duplicate context stores, and instructions requiring agents to inspect multiple Hub files.
 
-Do not delete rollback capability, correction blocks/history, complete replacement-set lineage/generation, reversal phase/checkpoint/intent state, or raw evidence needed to rebuild.
+Do not delete rollback capability, correction blocks/history, complete replacement-set lineage/generation, reversal phase/checkpoint/intent/successor state, or raw evidence needed to rebuild.
 
 ## 15. Required adversarial proof matrix
 
@@ -678,14 +683,17 @@ Across the implementation sequence, tests must cover at least:
 - a reversal naming blocked identity A while authorizing different claim C;
 - A→B correction followed by exact A reinstatement through every durable phase;
 - linked B→C correction followed by A reinstatement, with C incorporated into a successor attempt;
-- B→C or recreated B after checkpoint but before commit, causing checkpoint-CAS failure and automatic successor recovery;
+- B→C or recreated B after checkpoint but before commit, causing checkpoint-CAS failure and atomic successor recovery;
+- the same accepted guarded drift after `commit_intent`, producing an atomic successor rather than an unexplained-state abort;
+- a crash at every byte boundary around the atomic predecessor-superseded/successor-started/linkage/inherited-obligation transaction, proving either the predecessor remains nonterminal or the complete successor is visible;
 - planned retirement advancing generation/fingerprint without self-invalidating its own checkpoint;
 - process exit immediately before and after each reversal phase transition;
 - process exit after replacements retire but before rebuild, followed by automatic resume from `retired_checkpointed` despite an empty current active set;
 - process exit after rebuild verification and after commit intent;
 - final canonical state present with missing committed ledger event, completed idempotently from the durable commit marker;
 - checkpoint state still present after commit intent, retried safely;
-- a third unexpected live state after commit intent, aborting as repair while preserving the block;
+- explainable guarded lineage drift after commit intent, routed to an inherited-obligation successor;
+- a third unexpected live state not derivable from accepted guarded mutation history, aborting as repair while preserving the block;
 - successor attempt inheriting all unresolved predecessor retirement obligations;
 - any canonical lineage mutation attempting to bypass the common guard or omit a generation/set-fingerprint update;
 - completed/cancelled/triggerless open loop after rebuild;
@@ -717,7 +725,7 @@ V1 is complete only when:
 - relevant context is actually supplied and measured;
 - direct correction removes obsolete beliefs and durably blocks their claim identities immediately and after rebuild;
 - only an exact direct user reinstatement can lift a correction block, and only after the recoverable reversal phase machine retires/proves every inherited/current replacement obligation and successfully commits against the verified checkpoint;
-- interruption at any reversal phase resumes or reconciles automatically without treating a checkpointed empty active set as a fresh missing-replacement failure;
+- interruption at any reversal phase resumes or reconciles automatically, predecessor supersession cannot lose successor obligations, and accepted guarded drift after commit intent creates a successor rather than a manual incident;
 - every canonical mutation capable of changing a correction lineage is serialized through the common guard and advances the complete set fingerprint/generation;
 - no incorrect high-impact belief or contradictory linked replacement survives;
 - no Seascape or external write occurs;
