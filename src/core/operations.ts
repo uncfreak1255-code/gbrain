@@ -94,6 +94,12 @@ export class OperationError extends Error {
   }
 }
 
+function assertTrustedLocal(ctx: Pick<OperationContext, 'remote'>, operation: string): void {
+  if (ctx.remote !== false) {
+    throw new OperationError('permission_denied', `${operation} is local-only — call it through the trusted local CLI.`);
+  }
+}
+
 // --- Upload validators (Fix 1 / B5 / H5 / M4) ---
 
 /**
@@ -1417,6 +1423,7 @@ const purge_deleted_pages: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'purge_deleted_pages');
     const olderThanHours = (p.older_than_hours as number | undefined) ?? 72;
     if (ctx.dryRun) return { dry_run: true, action: 'purge_deleted_pages', older_than_hours: olderThanHours };
     const result = await ctx.engine.purgeDeletedPages(olderThanHours);
@@ -2182,7 +2189,7 @@ const list_link_sources: Operation = {
   // agent discovers which provenances a brain actually carries.
   description: 'List distinct link_source provenances in the brain with edge counts (e.g. citation-graph, manual, markdown)',
   params: {},
-  handler: async (ctx) => {
+  handler: async (ctx, p) => {
     // Route through sourceScopeOpts so the read honors both scalar ctx.sourceId
     // and federated ctx.auth.allowedSources (no cross-source provenance leak).
     return ctx.engine.listLinkSources(sourceScopeOpts(ctx));
@@ -2671,6 +2678,7 @@ const sync_brain: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'sync_brain');
     const { performSync } = await import('../commands/sync.ts');
     return performSync(ctx.engine, {
       repoPath: p.repo as string | undefined,
@@ -2800,6 +2808,7 @@ const file_list: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'file_list');
     const sql = db.getConnection();
     const slug = p.slug as string | undefined;
     const sourceId = ctx.sourceId || 'default';
@@ -2827,6 +2836,7 @@ const file_upload: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'file_upload');
     if (ctx.dryRun) return { dry_run: true, action: 'file_upload', path: p.path };
 
     const { readFileSync, statSync } = await import('fs');
@@ -2913,6 +2923,7 @@ const file_url: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'file_url');
     const storagePath = p.storage_path as string;
     const row = await ctx.engine.getFile(ctx.sourceId || 'default', storagePath);
     if (!row) {
@@ -3786,12 +3797,7 @@ const get_recent_transcripts: Operation = {
     // dream cycle pass through. This op is intentionally NOT in the subagent
     // allow-list (subagents always run with remote=true; they would always be
     // rejected, which is a footgun if the op is visible).
-    if (ctx.remote === true) {
-      throw new OperationError(
-        'permission_denied',
-        'get_recent_transcripts is local-only — call via the gbrain CLI.',
-      );
-    }
+    assertTrustedLocal(ctx, 'get_recent_transcripts');
     const { listRecentTranscripts } = await import('./transcripts.ts');
     return listRecentTranscripts(ctx.engine, {
       days: typeof p.days === 'number' ? p.days : undefined,
@@ -4445,6 +4451,7 @@ const code_traversal_cache_clear: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'code_traversal_cache_clear');
     // INTENTIONAL exemption from resolveRequestedScope: this is a localOnly
     // admin/destructive op with its own D8 all_sources guard. The read-side
     // trust+grant resolver does not apply here (no remote caller reaches it).
@@ -5198,6 +5205,201 @@ const run_skillopt: Operation = {
   },
 };
 
+// --- Personal Learning Loop V1 (PR 1 only) ---
+
+async function learningLoopCall<T>(fn: (mod: typeof import('./learning-loop.ts')) => Promise<T> | T): Promise<T> {
+  const mod = await import('./learning-loop.ts');
+  try {
+    return await fn(mod);
+  } catch (error) {
+    if (error instanceof mod.LearningLoopError) {
+      const permissionCodes = new Set(['forbidden', 'mode_off']);
+      throw new OperationError(
+        permissionCodes.has(error.code) ? 'permission_denied' : 'learning_loop_error',
+        error.message,
+      );
+    }
+    throw error;
+  }
+}
+
+const learning_loop_get_mode: Operation = {
+  name: 'learning_loop_get_mode',
+  description: 'Read the trusted-local Personal Learning Loop mode. Absence resolves to off.',
+  params: {},
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx) => {
+    assertTrustedLocal(ctx, 'learning_loop_get_mode');
+    return learningLoopCall(async ({ resolveLearningLoopMode }) => ({
+      mode: await resolveLearningLoopMode(ctx.engine, ctx.config),
+    }));
+  },
+};
+
+const learning_loop_set_mode: Operation = {
+  name: 'learning_loop_set_mode',
+  description: 'Set the trusted-local Personal Learning Loop mode. Changing out of canary aborts an active run first.',
+  params: { mode: { type: 'string', required: true, enum: ['off', 'capture', 'canary'] } },
+  mutating: true,
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_set_mode');
+    return learningLoopCall(async (mod) => mod.withLearningLoopLifecycleLock(ctx.engine, async () => {
+        const current = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
+        const next = p.mode as import('./learning-loop.ts').LearningLoopMode;
+        if (current === 'canary' && next !== 'canary') {
+          const state = mod.replayLearningLoop(mod.readLearningLoopLedger());
+          if (state.active_run_id !== null) await mod.abortLearningLoop(ctx.engine, `mode-change:${state.active_run_id}`, 'mode_changed');
+        }
+        await ctx.engine.setConfig('learning_loop.mode', next);
+        return { previous_mode: current, mode: next };
+      }));
+  },
+};
+
+const learning_loop_inspect: Operation = {
+  name: 'learning_loop_inspect',
+  description: 'Inspect trusted-local replay-derived Personal Learning Loop run and cohort state.',
+  params: {},
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx) => {
+    assertTrustedLocal(ctx, 'learning_loop_inspect');
+    return learningLoopCall((mod) => {
+      const state = mod.replayLearningLoop(mod.readLearningLoopLedger());
+      return {
+        active_run_id: state.active_run_id,
+        event_count: state.events.length,
+        runs: [...state.runs.values()].map((run) => ({
+          run_id: run.run_id,
+          terminal: run.terminal,
+          cohort_size: run.cohort.length,
+          cohort_sealed: run.sealed,
+          baseline_source_manifest_hash: run.armed.baseline_discovery.source_manifest_hash,
+        })),
+      };
+    });
+  },
+};
+
+const learning_loop_arm: Operation = {
+  name: 'learning_loop_arm',
+  description: 'Arm one trusted-local ten-session Codex run without changing mode or activating live hooks.',
+  params: {
+    command_id: { type: 'string', required: true },
+    authorized_client_id: { type: 'string', required: true },
+    authorized_source_id: { type: 'string', required: true },
+    brain_id: { type: 'string', required: true },
+    source_id: { type: 'string', required: true },
+    canonical_slug: { type: 'string', required: true },
+  },
+  mutating: true,
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_arm');
+    return learningLoopCall(async (mod) => {
+      return mod.armLearningLoop({
+        command_id: p.command_id as string,
+        engine: ctx.engine,
+        config: ctx.config,
+        authorized_adapter: {
+          client_id: p.authorized_client_id as string,
+          source_id: p.authorized_source_id as string,
+          provider: 'codex',
+        },
+        destination: {
+          brain_id: p.brain_id as string,
+          source_id: p.source_id as string,
+          canonical_slug: p.canonical_slug as string,
+        },
+      });
+    });
+  },
+};
+
+const learning_loop_abort: Operation = {
+  name: 'learning_loop_abort',
+  description: 'Abort the active Personal Learning Loop run through a trusted-local owner control.',
+  params: { command_id: { type: 'string', required: true } },
+  mutating: true,
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_abort');
+    return learningLoopCall((mod) => mod.abortLearningLoop(ctx.engine, p.command_id as string, 'owner_abort'));
+  },
+};
+
+const learning_loop_resolve_transcript: Operation = {
+  name: 'learning_loop_resolve_transcript',
+  description: 'Resolve and hash one server-local Codex transcript through the trusted-local owner boundary.',
+  params: {
+    provider_session_id: { type: 'string', required: true },
+    source_id: { type: 'string', required: true },
+  },
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_resolve_transcript');
+    return learningLoopCall((mod) => mod.resolveAuthoritativeTranscript({
+      engine: ctx.engine,
+      config: ctx.config,
+      provider: 'codex',
+      provider_session_id: p.provider_session_id as string,
+      source_id: p.source_id as string,
+    }));
+  },
+};
+
+const learning_loop_submit_session_v1: Operation = {
+  name: 'learning_loop_submit_session_v1',
+  description: 'Submit bounded Codex session metadata from an authenticated, source-bound adapter. GBrain resolves and hashes local transcript bytes.',
+  params: {
+    provider: { type: 'string', required: true, enum: ['codex'] },
+    provider_session_id: { type: 'string', required: true },
+    source_id: { type: 'string', required: true },
+    completion_state: { type: 'string', required: true, enum: ['completed'] },
+    completed_at: { type: 'string', required: true },
+    asserted_relative_path: { type: 'string' },
+    asserted_size_bytes: { type: 'number' },
+    asserted_content_hash: { type: 'string' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => learningLoopCall(async (mod) => {
+    if (!ctx.auth?.clientId || !ctx.auth.sourceId || ctx.remote !== true) {
+      throw new mod.LearningLoopError('forbidden', 'Learning Loop adapter submission requires authenticated remote client identity');
+    }
+    const provider = p.provider as string;
+    const sourceId = p.source_id as string;
+    if (provider !== 'codex' || sourceId !== ctx.auth.sourceId || sourceId !== ctx.sourceId) {
+      throw new mod.LearningLoopError('forbidden', 'Provider or source identity does not match the authenticated adapter');
+    }
+    const mode = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
+    if (mode === 'off') return { status: 'disabled', mode };
+    const receipt = await mod.resolveAuthoritativeTranscript({
+      engine: ctx.engine,
+      config: ctx.config,
+      provider: 'codex',
+      provider_session_id: p.provider_session_id as string,
+      source_id: sourceId,
+      asserted_relative_path: p.asserted_relative_path as string | undefined,
+      asserted_completed_at: p.completed_at as string,
+      asserted_size_bytes: p.asserted_size_bytes as number | undefined,
+      asserted_content_hash: p.asserted_content_hash as string | undefined,
+    });
+    return mod.recordSessionEvaluation({
+      engine: ctx.engine,
+      mode,
+      adapter: { client_id: ctx.auth.clientId, source_id: sourceId, provider: 'codex' },
+      receipt,
+    });
+  }),
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5279,6 +5481,11 @@ export const operations: Operation[] = [
   // deny-all for remote callers). NOT localOnly so admin OAuth clients
   // can submit; CLI bypass via ctx.remote === false.
   run_skillopt,
+  // Personal Learning Loop V1 PR 1: controls remain localOnly; only the
+  // authenticated source-bound session submission is agent-facing.
+  learning_loop_get_mode, learning_loop_set_mode, learning_loop_inspect,
+  learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript,
+  learning_loop_submit_session_v1,
 ];
 
 export const operationsByName = Object.fromEntries(

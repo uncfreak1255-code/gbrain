@@ -223,6 +223,14 @@ export async function dispatchToolCall(
   }
 
   const safeParams = params || {};
+  // Reject direct invocation before parameter validation. Otherwise a caller
+  // could probe a hidden local-only tool's required schema through errors.
+  if (op.localOnly && opts.remote !== false) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ error: 'forbidden', message: `Tool is local-only: ${name}` }, null, 2) }],
+      isError: true,
+    };
+  }
   const validationError = validateParams(op, safeParams);
   if (validationError) {
     return {

@@ -16,13 +16,9 @@
  *       * search_by_image — image_path + ctx.remote=true MUST reject
  *                        (D18 P0 source-isolation leak class)
  *
- *     `file_upload` and `sync_brain` are intentionally NOT in the
- *     handler-invocation set — both are localOnly, so the canonical
- *     filter removes them from mcpOperations and the HTTP path never
- *     reaches their handlers. Calling their handlers with remote=true
- *     tests an impossible production path (codex CMT-3). The defense-
- *     in-depth strict-mode checks inside those handlers still exist;
- *     they're proven by the localOnly-filtered-out contract here.
+ *     Local-only operations are hidden by each agent-facing registry and
+ *     denied by shared dispatch. Their handlers also reject unless
+ *     `ctx.remote === false`, so a future dispatcher regression stays closed.
  *
  * Criterion for the curated sensitive-ops list:
  *   ops whose HANDLER (not transport) has been broken historically.
@@ -153,6 +149,12 @@ describe('mcpOperations filter — localOnly ops are excluded from the HTTP-expo
       'purge_deleted_pages',
       'get_recent_transcripts',
       'code_traversal_cache_clear',
+      'learning_loop_get_mode',
+      'learning_loop_set_mode',
+      'learning_loop_inspect',
+      'learning_loop_arm',
+      'learning_loop_abort',
+      'learning_loop_resolve_transcript',
     ];
     const lookup = new Map(operations.map(op => [op.name, op] as const));
     for (const name of KNOWN_LOCAL_ONLY) {
