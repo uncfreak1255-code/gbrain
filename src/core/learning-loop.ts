@@ -857,7 +857,17 @@ export interface ArmLearningLoopInput {
   engine: BrainEngine;
   config?: GBrainConfig;
   authorized_adapter: AdapterIdentity;
-  destination: { brain_id: string; source_id: string; canonical_slug: string };
+  destination: { source_id: string; canonical_slug: string };
+}
+
+function resolveArmDestination(
+  input: ArmLearningLoopInput,
+  opts: LedgerOptions,
+): RunArmedEvent['destination'] {
+  return {
+    ...input.destination,
+    brain_id: ledgerScopeId(opts),
+  };
 }
 
 export function bindLearningLoopSession(
@@ -911,15 +921,15 @@ async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOp
   if (!COMMAND_ID_RE.test(input.command_id)) throw new LearningLoopError('invalid_input', 'Invalid arm command id');
   if (
     !validAdapter(input.authorized_adapter)
-    || !nonEmpty(input.destination.brain_id)
     || !nonEmpty(input.destination.source_id)
     || !nonEmpty(input.destination.canonical_slug)
     || input.authorized_adapter.source_id !== input.destination.source_id
   ) throw new LearningLoopError('forbidden', 'Arm destination must match the authorized adapter source');
+  const destination = resolveArmDestination(input, opts);
   const occurredAt = (opts.now ?? (() => new Date()))().toISOString();
   const payloadHash = commandPayloadHash({
     authorized_adapter: input.authorized_adapter,
-    destination: input.destination,
+    destination,
   });
   const existing = await withLedgerMutation<RunArmedEvent | null>(input.engine, opts, (state) => {
     const prior = state.events.find((event): event is RunArmedEvent => event.event_type === 'run_armed' && event.command_id === input.command_id);
@@ -954,7 +964,7 @@ async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOp
       target_cohort_size: TARGET_COHORT_SIZE,
       eligibility_classifier_version: ELIGIBILITY_CLASSIFIER_VERSION,
       authorized_adapter: input.authorized_adapter,
-      destination: input.destination,
+      destination,
       baseline_discovery: baselineDiscovery,
     };
     const event = completeEvent(body) as RunArmedEvent;
@@ -967,10 +977,42 @@ export async function armLearningLoop(
   opts: LedgerOptions = {},
 ): Promise<RunArmedEvent> {
   const scopedOpts = opts.root || opts.config ? opts : { ...opts, config: input.config };
+  if (!scopedOpts.root) {
+    if (!input.config || !scopedOpts.config) {
+      throw new LearningLoopError('invalid_input', 'Learning Loop arm requires explicit active-brain configuration');
+    }
+    if (computeBrainIdFromConfig(input.config) !== computeBrainIdFromConfig(scopedOpts.config)) {
+      throw new LearningLoopError('invalid_input', 'Learning Loop arm configuration does not match the active-brain ledger');
+    }
+  }
   return withLearningLoopLifecycleLock(input.engine, async () => {
     const mode = await resolveLearningLoopMode(input.engine, input.config);
     if (mode !== 'canary') throw new LearningLoopError('mode_off', 'Set mode to canary before arming');
     return armLearningLoopLocked(input, scopedOpts);
+  }, scopedOpts);
+}
+
+export async function setLearningLoopMode(
+  engine: BrainEngine,
+  config: GBrainConfig,
+  next: LearningLoopMode,
+  opts: LedgerOptions = {},
+): Promise<{ previous_mode: LearningLoopMode; mode: LearningLoopMode }> {
+  const scopedOpts = opts.root || opts.config ? opts : { ...opts, config };
+  return withLearningLoopLifecycleLock(engine, async () => {
+    const current = await resolveLearningLoopMode(engine, config);
+    if (current === 'canary' && next !== 'canary') {
+      const state = replayLearningLoop(readLearningLoopLedger(scopedOpts));
+      if (state.active_run_id !== null) {
+        try {
+          await abortLearningLoop(engine, `mode-change:${state.active_run_id}`, 'mode_changed', scopedOpts);
+        } catch (error) {
+          if (!(error instanceof LearningLoopError) || error.code !== 'no_active_run') throw error;
+        }
+      }
+    }
+    await engine.setConfig('learning_loop.mode', next);
+    return { previous_mode: current, mode: next };
   }, scopedOpts);
 }
 
@@ -1003,6 +1045,38 @@ export function abortLearningLoop(
   });
 }
 
+function requireSessionBinding(
+  state: LearningLoopProjection,
+  adapter: AdapterIdentity,
+  providerSessionId: string,
+): AdapterSessionBoundEvent {
+  const binding = state.session_bindings.get(`${adapter.provider}\u0000${providerSessionId}`);
+  if (
+    !binding
+    || binding.adapter.client_id !== adapter.client_id
+    || binding.adapter.source_id !== adapter.source_id
+    || binding.adapter.provider !== adapter.provider
+  ) {
+    throw new LearningLoopError('forbidden', 'Adapter is not bound to the submitted provider session');
+  }
+  return binding;
+}
+
+export function assertLearningLoopSessionBinding(
+  adapter: AdapterIdentity,
+  providerSessionId: string,
+  opts: LedgerOptions = {},
+): AdapterSessionBoundEvent {
+  if (!validAdapter(adapter) || !SESSION_ID_RE.test(providerSessionId)) {
+    throw new LearningLoopError('invalid_input', 'Invalid adapter session binding assertion');
+  }
+  return requireSessionBinding(
+    replayLearningLoop(readLearningLoopLedger(opts)),
+    adapter,
+    providerSessionId,
+  );
+}
+
 export function recordSessionEvaluation(input: {
   engine: BrainEngine;
   mode: LearningLoopMode;
@@ -1023,15 +1097,7 @@ export function recordSessionEvaluation(input: {
       }
     }
     const key = `${input.receipt.provider}\u0000${input.receipt.provider_session_id}`;
-    const binding = state.session_bindings.get(key);
-    if (
-      !binding
-      || binding.adapter.client_id !== input.adapter.client_id
-      || binding.adapter.source_id !== input.adapter.source_id
-      || binding.adapter.provider !== input.adapter.provider
-    ) {
-      throw new LearningLoopError('forbidden', 'Adapter is not bound to the submitted provider session');
-    }
+    requireSessionBinding(state, input.adapter, input.receipt.provider_session_id);
     const priorHash = state.session_hashes.get(key);
     if (priorHash !== undefined) {
       if (priorHash !== input.receipt.content_hash) throw new LearningLoopError('transcript_conflict', 'Session transcript hash changed');

@@ -5245,18 +5245,12 @@ const learning_loop_set_mode: Operation = {
   localOnly: true,
   handler: async (ctx, p) => {
     assertTrustedLocal(ctx, 'learning_loop_set_mode');
-    return learningLoopCall(async (mod) => mod.withLearningLoopLifecycleLock(ctx.engine, async () => {
-        const current = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
-        const next = p.mode as import('./learning-loop.ts').LearningLoopMode;
-        if (current === 'canary' && next !== 'canary') {
-          const state = mod.replayLearningLoop(mod.readLearningLoopLedger({ config: ctx.config }));
-          if (state.active_run_id !== null) {
-            await mod.abortLearningLoop(ctx.engine, `mode-change:${state.active_run_id}`, 'mode_changed', { config: ctx.config });
-          }
-        }
-        await ctx.engine.setConfig('learning_loop.mode', next);
-        return { previous_mode: current, mode: next };
-      }, { config: ctx.config }));
+    return learningLoopCall((mod) => mod.setLearningLoopMode(
+      ctx.engine,
+      ctx.config,
+      p.mode as import('./learning-loop.ts').LearningLoopMode,
+      { config: ctx.config },
+    ));
   },
 };
 
@@ -5292,7 +5286,6 @@ const learning_loop_arm: Operation = {
     command_id: { type: 'string', required: true },
     authorized_client_id: { type: 'string', required: true },
     authorized_source_id: { type: 'string', required: true },
-    brain_id: { type: 'string', required: true },
     source_id: { type: 'string', required: true },
     canonical_slug: { type: 'string', required: true },
   },
@@ -5312,7 +5305,6 @@ const learning_loop_arm: Operation = {
           provider: 'codex',
         },
         destination: {
-          brain_id: p.brain_id as string,
           source_id: p.source_id as string,
           canonical_slug: p.canonical_slug as string,
         },
@@ -5421,6 +5413,12 @@ const learning_loop_submit_session_v1: Operation = {
     }
     const mode = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
     if (mode === 'off') return { status: 'disabled', mode };
+    const adapter = { client_id: ctx.auth.clientId, source_id: sourceId, provider: 'codex' as const };
+    mod.assertLearningLoopSessionBinding(
+      adapter,
+      p.provider_session_id as string,
+      { config: ctx.config },
+    );
     const receipt = await mod.resolveAuthoritativeTranscript({
       engine: ctx.engine,
       config: ctx.config,
@@ -5435,7 +5433,7 @@ const learning_loop_submit_session_v1: Operation = {
     return mod.recordSessionEvaluation({
       engine: ctx.engine,
       mode,
-      adapter: { client_id: ctx.auth.clientId, source_id: sourceId, provider: 'codex' },
+      adapter,
       receipt,
     }, { config: ctx.config });
   }),

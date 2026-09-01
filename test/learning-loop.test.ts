@@ -20,12 +20,14 @@ import {
   replayLearningLoop,
   resolveAuthoritativeTranscript,
   resolveLearningLoopMode,
+  setLearningLoopMode,
   withLearningLoopLifecycleLock,
   type AdapterIdentity,
   type TranscriptReceipt,
 } from '../src/core/learning-loop.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const roots: string[] = [];
@@ -70,7 +72,7 @@ function ledger(root: string) {
 }
 
 const adapter: AdapterIdentity = { client_id: 'codex-adapter', source_id: 'personal', provider: 'codex' };
-const destination = { brain_id: 'personal-brain', source_id: 'personal', canonical_slug: 'personal/preferences' };
+const destination = { source_id: 'personal', canonical_slug: 'personal/preferences' };
 
 function armInput(corpus: string, commandId: string) {
   return { command_id: commandId, engine: corpusEngine(corpus) as BrainEngine, authorized_adapter: adapter, destination };
@@ -216,7 +218,10 @@ describe('mode and authoritative transcript boundary', () => {
 
 describe('append-only run, replay, and cohort reducer', () => {
   test('command payload canonical encoding has a fixed golden hash', () => {
-    expect(_testing.commandPayloadHash({ authorized_adapter: adapter, destination })).toBe(
+    expect(_testing.commandPayloadHash({
+      authorized_adapter: adapter,
+      destination: { ...destination, brain_id: 'personal-brain' },
+    })).toBe(
       '9f4808a557a00890d252072bfc75bddc8493d9207ad9d771200f09f8f33620f4',
     );
   });
@@ -306,6 +311,67 @@ describe('append-only run, replay, and cohort reducer', () => {
       expect(readLearningLoopLedger(optsB)[0]).toMatchObject({ provider_session_id: 'brain-b-session' });
       expect(() => learningLoopLedgerPath()).toThrow(/explicit active-brain configuration/);
     });
+  });
+
+  test('production arm derives destination brain identity from the active configuration', async () => {
+    const home = tempRoot('learning-loop-arm-brain-home-');
+    const corpus = tempRoot('learning-loop-arm-brain-corpus-');
+    const config = { engine: 'pglite' as const, database_path: tempRoot('learning-loop-arm-brain-db-') };
+    const otherConfig = { engine: 'pglite' as const, database_path: tempRoot('learning-loop-other-brain-db-') };
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      const armed = await armLearningLoop({
+        command_id: 'arm-computed-brain',
+        engine: corpusEngine(corpus) as BrainEngine,
+        config,
+        authorized_adapter: adapter,
+        destination,
+      }, { config, mutationLock: testMutationLock, lifecycleLock: testMutationLock });
+      expect(armed.destination.brain_id).toBe(computeBrainIdFromConfig(config));
+      await expect(armLearningLoop({
+        command_id: 'arm-mismatched-brain',
+        engine: corpusEngine(corpus) as BrainEngine,
+        config,
+        authorized_adapter: adapter,
+        destination,
+      }, { config: otherConfig, mutationLock: testMutationLock, lifecycleLock: testMutationLock }))
+        .rejects.toMatchObject({ code: 'invalid_input' });
+    });
+
+    const root = tempRoot('learning-loop-arm-root-scope-');
+    const armed = await armLearningLoop(armInput(corpus, 'arm-root-scope'), ledger(root));
+    expect(armed.destination.brain_id).toBe(_testing.ledgerScopeId({ root }));
+    expect(armed.destination.brain_id).not.toBe('caller-controlled-brain');
+    expect(readLearningLoopLedger({ root })).toHaveLength(1);
+  });
+
+  test('mode change completes when a concurrent owner abort wins first', async () => {
+    const root = tempRoot('learning-loop-mode-abort-race-');
+    const corpus = tempRoot('learning-loop-mode-abort-corpus-');
+    await engine.setConfig('learning_loop.mode', 'canary');
+    await engine.setConfig('learning_loop.corpus.codex.root', corpus);
+    await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
+    await armLearningLoop({
+      command_id: 'arm-mode-abort-race', engine, authorized_adapter: adapter, destination,
+    }, ledger(root));
+    let releaseModeAbort!: () => void;
+    let modeAbortEntered!: () => void;
+    const modeAbortHeld = new Promise<void>((resolve) => { modeAbortEntered = resolve; });
+    const modeAbortRelease = new Promise<void>((resolve) => { releaseModeAbort = resolve; });
+
+    const changingMode = setLearningLoopMode(engine, { engine: 'pglite' }, 'off', {
+      ...ledger(root),
+      beforeMutation: async () => {
+        modeAbortEntered();
+        await modeAbortRelease;
+      },
+    });
+    await modeAbortHeld;
+    await abortLearningLoop(engine, 'owner-abort-wins-race', 'owner_abort', ledger(root));
+    releaseModeAbort();
+
+    await expect(changingMode).resolves.toEqual({ previous_mode: 'canary', mode: 'off' });
+    expect(await engine.getConfig('learning_loop.mode')).toBe('off');
+    expect(replayLearningLoop(readLearningLoopLedger({ root })).active_run_id).toBeNull();
   });
 
   test('same session/hash is idempotent and a changed hash fails closed', async () => {

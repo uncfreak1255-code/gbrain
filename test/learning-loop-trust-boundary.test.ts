@@ -1,11 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { operations, operationsByName, type OperationContext } from '../src/core/operations.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { stdioOperations } from '../src/mcp/server.ts';
 import { legacyHttpOperations } from '../src/mcp/http-transport.ts';
 import { BRAIN_TOOL_ALLOWLIST } from '../src/core/minions/tools/brain-allowlist.ts';
 import { isProtectedOwnerControlKey } from '../src/commands/config.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const PRIVILEGED = [
   'learning_loop_get_mode',
@@ -99,5 +102,36 @@ describe('Learning Loop and generic localOnly transport boundary', () => {
     off.auth = { token: 'redacted', clientId: 'adapter', scopes: ['write'], sourceId: 'personal' };
     off.engine = { getConfig: async () => null } as unknown as OperationContext['engine'];
     await expect(op.handler(off, params)).resolves.toEqual({ status: 'disabled', mode: 'off' });
+  });
+
+  test('adapter submission checks session binding before transcript discovery', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'learning-loop-binding-order-'));
+    let transcriptConfigReads = 0;
+    try {
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        const ctx = unsafeContext(true);
+        ctx.sourceId = 'personal';
+        ctx.config = { engine: 'pglite', database_path: join(home, 'brain') };
+        ctx.auth = { token: 'redacted', clientId: 'adapter', scopes: ['write'], sourceId: 'personal' };
+        ctx.engine = {
+          getConfig: async (key: string) => {
+            if (key === 'learning_loop.mode') return 'capture';
+            if (key.startsWith('learning_loop.corpus.')) transcriptConfigReads += 1;
+            throw new Error(`unexpected transcript discovery config read: ${key}`);
+          },
+        } as unknown as OperationContext['engine'];
+
+        await expect(operationsByName.learning_loop_submit_session_v1.handler(ctx, {
+          provider: 'codex',
+          provider_session_id: 'unbound-session',
+          source_id: 'personal',
+          completion_state: 'completed',
+          completed_at: '2026-08-31T00:00:00Z',
+        })).rejects.toMatchObject({ code: 'permission_denied' });
+      });
+      expect(transcriptConfigReads).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
