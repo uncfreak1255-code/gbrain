@@ -1423,7 +1423,6 @@ const purge_deleted_pages: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
-    assertTrustedLocal(ctx, 'purge_deleted_pages');
     const olderThanHours = (p.older_than_hours as number | undefined) ?? 72;
     if (ctx.dryRun) return { dry_run: true, action: 'purge_deleted_pages', older_than_hours: olderThanHours };
     const result = await ctx.engine.purgeDeletedPages(olderThanHours);
@@ -2189,7 +2188,7 @@ const list_link_sources: Operation = {
   // agent discovers which provenances a brain actually carries.
   description: 'List distinct link_source provenances in the brain with edge counts (e.g. citation-graph, manual, markdown)',
   params: {},
-  handler: async (ctx, p) => {
+  handler: async (ctx) => {
     // Route through sourceScopeOpts so the read honors both scalar ctx.sourceId
     // and federated ctx.auth.allowedSources (no cross-source provenance leak).
     return ctx.engine.listLinkSources(sourceScopeOpts(ctx));
@@ -2678,7 +2677,6 @@ const sync_brain: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
-    assertTrustedLocal(ctx, 'sync_brain');
     const { performSync } = await import('../commands/sync.ts');
     return performSync(ctx.engine, {
       repoPath: p.repo as string | undefined,
@@ -2808,7 +2806,6 @@ const file_list: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
-    assertTrustedLocal(ctx, 'file_list');
     const sql = db.getConnection();
     const slug = p.slug as string | undefined;
     const sourceId = ctx.sourceId || 'default';
@@ -2836,7 +2833,6 @@ const file_upload: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
-    assertTrustedLocal(ctx, 'file_upload');
     if (ctx.dryRun) return { dry_run: true, action: 'file_upload', path: p.path };
 
     const { readFileSync, statSync } = await import('fs');
@@ -2923,7 +2919,6 @@ const file_url: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
-    assertTrustedLocal(ctx, 'file_url');
     const storagePath = p.storage_path as string;
     const row = await ctx.engine.getFile(ctx.sourceId || 'default', storagePath);
     if (!row) {
@@ -3797,7 +3792,12 @@ const get_recent_transcripts: Operation = {
     // dream cycle pass through. This op is intentionally NOT in the subagent
     // allow-list (subagents always run with remote=true; they would always be
     // rejected, which is a footgun if the op is visible).
-    assertTrustedLocal(ctx, 'get_recent_transcripts');
+    if (ctx.remote === true) {
+      throw new OperationError(
+        'permission_denied',
+        'get_recent_transcripts is local-only — call via the gbrain CLI.',
+      );
+    }
     const { listRecentTranscripts } = await import('./transcripts.ts');
     return listRecentTranscripts(ctx.engine, {
       days: typeof p.days === 'number' ? p.days : undefined,
@@ -4451,7 +4451,6 @@ const code_traversal_cache_clear: Operation = {
   scope: 'admin',
   localOnly: true,
   handler: async (ctx, p) => {
-    assertTrustedLocal(ctx, 'code_traversal_cache_clear');
     // INTENTIONAL exemption from resolveRequestedScope: this is a localOnly
     // admin/destructive op with its own D8 all_sources guard. The read-side
     // trust+grant resolver does not apply here (no remote caller reaches it).

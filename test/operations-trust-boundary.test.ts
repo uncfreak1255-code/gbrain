@@ -153,9 +153,9 @@ describe('mcpOperations filter — localOnly ops are excluded from the HTTP-expo
       'learning_loop_set_mode',
       'learning_loop_inspect',
       'learning_loop_arm',
-  'learning_loop_abort',
-  'learning_loop_resolve_transcript',
-  'learning_loop_bind_session',
+      'learning_loop_abort',
+      'learning_loop_resolve_transcript',
+      'learning_loop_bind_session',
     ];
     const lookup = new Map(operations.map(op => [op.name, op] as const));
     for (const name of KNOWN_LOCAL_ONLY) {
