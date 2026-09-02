@@ -2,7 +2,7 @@
 
 > **Execution rule:** Use `spine:work`. Keep exactly one writer in this isolated worktree. Do not implement until the frozen plan passes a new exact-hash native two-reviewer pressure test. Stop before PR 3.
 
-**Review status:** Implementation remains blocked. The latest two-round review found three final durability/consistency seams; this revision closes them but has not received a post-revision exact-hash review.
+**Review status:** Implementation remains blocked. The latest exact-hash review found one terminal-abort intent crash seam; this revision closes it but has not received a post-revision exact-hash review.
 
 ## Objective
 
@@ -37,12 +37,13 @@ The result must lower Sawyer supervision by making ordinary operation, crash rec
 - `src/core/learning-loop-knowledge.ts` owns the strict metadata codec and pure Learning Loop state reducer. Generic writers cannot construct or mutate lineage state.
 - The append-only Learning Loop ledger remains non-authoritative evidence. Canonical Markdown remains sufficient to rebuild block, lineage, reversal, and active-fact state.
 - The database remains a derived index reconciled only after a successful canonical rename.
+- The existing database config plane may hold at most one temporary, strictly decoded `learning_loop.mode_transition_intent_v1` record. It is non-authoritative delivery-safety metadata, not memory, a queue, or a second control plane. It cannot authorize a claim or reconstruct canonical managed state, and it is cleared only after exact terminal delivery is durable and canonical `pending_delivery` is clear.
 
 ## Non-negotiable invariants
 
 ### Authority and activation
 
-- Every PR 2 canonical learning mutation requires `learning_loop.mode === canary`, a replay-derived active V2 run, and exact equality with its frozen brain, source, slug, corpus binding, and destination-root binding. The only off-mode exception is the narrow disabled-recovery path defined below: it may durably deliver the exact event already stored in canonical `pending_delivery`, atomically replace that acknowledged record with one persisted exact `run_aborted` delivery record, durably deliver it, and clear it. These are delivery-bookkeeping renames, not new learning transitions. The exception cannot create authority, activate or reinstate a claim, lift a block, advance a lineage/reversal phase, or begin any other canonical transition.
+- Every PR 2 canonical learning mutation requires `learning_loop.mode === canary`, no mode-transition intent, a replay-derived active V2 run, and exact equality with its frozen brain, source, slug, corpus binding, and destination-root binding. The only off-mode exception is the narrow disabled-recovery path defined below: it may consume only the complete exact `run_aborted` event stored in `learning_loop.mode_transition_intent_v1`, durably deliver any earlier canonical `pending_delivery`, atomically replace that acknowledged record with the stored terminal event, durably deliver it, clear canonical pending state, then atomically set the requested mode and delete the same intent. These are delivery-bookkeeping renames, not new learning transitions. The exception cannot create or regenerate an event, create authority, activate or reinstate a claim, lift a block, advance a lineage/reversal phase, or begin any other canonical transition.
 - A PR 1/V1 armed run lacks frozen roots and is capture-only. It cannot activate, correct, reverse, or mutate canonical knowledge; it must be aborted and re-armed under V2.
 - Direct user authority comes only from a GBrain-read Codex transcript row whose parsed role is `user`. The authority event binds the exact normalized claim fingerprint, class, scope, target, trigger, provider/session, transcript hash, message locator, message hash, and source role.
 - Assistant/model text, unrelated user text in the same session, caller-supplied transcript text, and a changed authoritative transcript hash cannot gain user authority.
@@ -187,12 +188,36 @@ source sync/write boundary
 
 - Arm acquires the destination source boundary, then lifecycle lock, freezes both roots, performs baseline discovery, rechecks both bindings, and appends V2 `run_armed`.
 - Abort/off first reads a non-authoritative active-run snapshot to choose the frozen source boundary, acquires it, then acquires lifecycle and replays the ledger. If the run changed, it releases and retries up to three times.
-- With lifecycle and page ownership, abort/off durably delivers the current canonical pending event, then uses one atomic canonical rename to replace that acknowledged record with a complete exact `run_aborted` record. The terminal record contains its stable event ID, canonical payload bytes/hash, timestamp, semantic sequence, run identity, requested non-canary mode, and abort reason before any terminal append.
-- Only after the prior pending event is proven in the ledger may the persisted terminal record append. The terminal record is cleared only after durable same-ID/same-payload readback. Therefore no recovered learning event can appear causally after terminal state, and no crash can lose or regenerate an already-persisted abort identity.
-- If canonical recovery cannot complete, leaving canary must still disable behavior: the requested non-canary mode is written under lifecycle lock, the active run remains nonterminal and non-injecting, and the operation returns `disabled_recovery_pending`. The next trusted-local inspect/abort/arm/mode operation retries recovery automatically. A new run cannot arm until recovery appends the terminal abort.
-- `disabled_recovery_pending` re-enters only through the frozen run's exact source and destination bindings, in the normal source -> lifecycle -> page -> ledger lock order. While mode is non-canary it may append/read back the exact bytes already present in `pending_delivery`, reconcile the derived database only from that exact acknowledged canonical readback, and atomically replace the acknowledged record with one exact terminal-abort delivery record. It then appends/read backs that persisted terminal record and clears it with the final acknowledgement rename. If no earlier event is pending, the first bookkeeping rename stores the exact terminal record directly. It rejects different pending bytes, binding drift, a terminal or replaced run, and any request to compute new managed state. Mode remains non-canary throughout. This exception cannot activate, correct, reverse, unblock, reconstruct protected state from the database, or admit another session.
-- Direct owner abort uses the same path. If recovery fails, it forces mode `off` and returns the same recoverable state.
-- This is a bounded recovery state, not a queue or supervision surface: at most one active run and one pending canonical delivery exist, and ordinary owner operations retry it automatically.
+- While those locks are held, abort/off precomputes the complete terminal event before canonical work and stores this strict record with `canonicalJson` plus SHA-256:
+
+```text
+ModeTransitionIntentV1 = {
+  schema_version: 1,
+  run_id,
+  command_id: "mode-change:" + run_id,
+  requested_mode: off | capture,
+  reason: mode_changed,
+  event: ExactEventRecord,
+  brain_id,
+  source_id,
+  canonical_slug,
+  corpus_binding,
+  destination_binding,
+  expected_prior_pending_event_id: string | null,
+  intent_hash
+}
+```
+
+- `event` already contains its stable event ID, canonical payload bytes/hash, timestamp, semantic sequence, run identity, requested non-canary mode, and abort reason. The intent codec rejects unknown fields, invalid sizes or variants, a non-terminal event, binding disagreement, hash disagreement, and any record whose event does not encode the other fields exactly.
+- In one database transaction, abort/off rechecks that mode is canary and the active run is unchanged, then inserts the exact intent while leaving mode canary. An existing byte-identical intent is an idempotent retry; a different hash, run, event, requested mode, or expected predecessor fails closed. The transaction-scoped engine uses the existing config-table `setConfig` operation; no new table or persistence owner is added.
+- Intent presence is an immediate admission barrier independent of the visible mode. Session submission, activation, correction, reversal, arm, and any mode transition other than exact intent recovery must reject or first enter recovery. Thus a crash after intent commit but before the mode update leaves canary plus an intent, but cannot admit new learning.
+- With lifecycle and page ownership, recovery durably delivers the current canonical pending event. It then uses one atomic canonical rename to replace that acknowledged record with the exact `event` bytes from the stored intent. If no earlier event is pending, the first bookkeeping rename stores those same exact bytes directly. It never recomputes the terminal event.
+- Only after the prior pending event is proven in the ledger may the stored terminal event append. The terminal record is cleared only after durable same-ID/same-payload readback. Therefore no recovered learning event can appear causally after terminal state, and no crash can lose or regenerate an already-persisted abort identity.
+- On successful canonical terminal delivery and clear, one database transaction re-reads the same intent hash, replays the terminal ledger record, sets `learning_loop.mode` to the stored requested mode, and deletes the intent atomically. A crash before this transaction leaves an idempotently recoverable intent; a crash after it leaves the final non-canary mode with no intent.
+- If canonical recovery cannot complete, leaving canary must still disable behavior. One database transaction validates the unchanged exact intent and writes its requested non-canary mode while retaining the intent. The active run remains nonterminal and non-injecting, and the operation returns `disabled_recovery_pending`. Therefore every persisted non-canary/nonterminal failure state has the complete durable intent needed for recovery. A crash before this transaction leaves canary plus the admission barrier; a crash after it leaves non-canary plus the same intent.
+- `disabled_recovery_pending` re-enters only through the stored intent and its frozen source and destination bindings, in the normal source -> lifecycle -> page -> ledger lock order. It may append/read back exact bytes already present in canonical `pending_delivery`, reconcile the derived database only from that exact acknowledged canonical readback, install only the stored terminal event, durably append/read back it, clear it, and finalize mode plus intent deletion atomically. Missing intent, different bytes/hash, binding drift, a terminal/replaced run inconsistent with the exact stored event, or an off/capture nonterminal run without an intent fails closed and blocks re-arm. Recovery never synthesizes a replacement record from ledger, database page rows, current time, or caller input.
+- Direct owner abort uses the same path. If recovery fails, it changes mode only through the intent-retaining transaction and returns the same recoverable state.
+- This is a bounded recovery state, not a queue or supervision surface: at most one active run, one temporary config intent, and one canonical pending delivery exist, and ordinary owner operations retry it automatically.
 - Whole-checkout recovery, source refresh/replacement, and source removal are refused while that source is frozen by an active V2 run. They do not publish a new root inode. After the run is terminal, checkout recovery may proceed only after copying and validating protected fences; a later run freezes the new root identity.
 
 ## Canonical event-delivery protocol
@@ -204,7 +229,7 @@ The metadata fence contains `pending_delivery: null | ExactEventRecord`.
 - While locks remain held, GBrain appends those exact bytes to the ledger and reads them back.
 - The append path `fsync`s the ledger file before readback. If the append created the ledger, it also `fsync`s the ledger parent directory. Terminal events use the same durable append primitive.
 - A second atomic canonical rename clears `pending_delivery` only after durable exact ledger equality is proven.
-- Abort/off is the sole replacement case: after durable equality for a prior pending event, the acknowledgement rename replaces that record directly with the precomputed exact `run_aborted` record instead of clearing to null. The terminal event then follows the same append, file/directory `fsync`, exact readback, and final-clear protocol. At every crash point canonical state contains either the prior pending record, the terminal pending record, or a cleared record whose terminal event has already been durably verified.
+- Abort/off is the sole replacement case: after durable equality for a prior pending event, the acknowledgement rename replaces that record directly with the exact `run_aborted` bytes from the already-committed `ModeTransitionIntentV1` instead of clearing to null. The terminal event then follows the same append, file/directory `fsync`, exact readback, and final-clear protocol. At every crash point the intent retains the immutable terminal identity and canonical state contains either the prior pending record, the terminal pending record, or a cleared record whose terminal event has already been durably verified.
 - Crash after canonical rename but before append: recovery appends the exact stored bytes once.
 - Crash after append but before acknowledgement: recovery recognizes same-ID/same-payload and clears the record without double-counting.
 - Same-ID/different-payload, a second pending record, malformed bytes, or unexplained canonical/ledger disagreement fails closed.
@@ -354,7 +379,7 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 4. Persist commit intent, then perform exact generation/fingerprint/set CAS under the common guard.
 5. On accepted drift, atomically supersede predecessor and create/link successor with the union of inherited and current obligations.
 6. Recover every crash seam automatically from canonical state and exact ledger delivery.
-7. Implement abort/off snapshot-retry ordering and the narrow `disabled_recovery_pending` exception: under frozen bindings, durably deliver/read back any prior canonical pending event, atomically replace it with a complete exact terminal-abort record, durably deliver/read back that record, clear it, and reject every new learning transition while mode is off.
+7. Implement abort/off snapshot-retry ordering and the narrow `ModeTransitionIntentV1` / `disabled_recovery_pending` exception: transactionally persist the complete exact terminal intent before canonical work; make intent presence block all admissions; under its frozen bindings, durably deliver/read back any prior canonical pending event, atomically replace it with only the stored terminal record, durably deliver/read back that record, clear it, and transactionally finalize requested mode plus intent deletion.
 
 ### Phase 7 — full proof and landing
 
@@ -422,7 +447,8 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 - Later accepted mutation after immutable commit marker recovers the attempt as committed before replaying later state.
 - Unexplained third-state drift leaves the block enforced and fails closed.
 - Abort/off waits for an in-flight canonical commit, drains its pending delivery before terminal append, and cannot admit a later learning event.
-- Failed abort recovery disables mode and blocks re-arm. A later owner operation may, under exact frozen bindings, durably deliver/read back the already-canonical pending event, replace it atomically with a persisted exact terminal-abort record, reconcile the derived database from exact canonical readback, deliver/read back the terminal event, and clear it. Barrier tests cover crash before prior-event append, after append/before replacement, after terminal-record replacement/before append, during terminal append, after terminal append/before readback, and after readback/before clear; every retry preserves one stable terminal ID/payload and appends it at most once. Authority creation, activation, block lifting, lineage/reversal advancement, new learning transitions, and DB-derived protected-state reconstruction remain forbidden.
+- Mode-transition crash tests cover: before the intent transaction (canary, no intent); after intent commit but before canonical work (canary plus intent and admissions disabled); canonical failure before and after the intent-retaining mode transaction; and terminal durability before the final transaction. Any non-canary/nonterminal state must contain the complete exact intent. The final transaction must atomically set the stored requested mode and delete that same intent.
+- Failed abort recovery blocks re-arm. A later owner operation may, under the exact bindings in the stored intent, durably deliver/read back the already-canonical pending event, replace it atomically with only the intent's persisted terminal event, reconcile the derived database from exact canonical readback, deliver/read back the terminal event, clear it, then finalize mode and intent deletion. Barrier tests cover crash before prior-event append, after append/before replacement, after terminal-record replacement/before append, during terminal append, after terminal append/before readback, after readback/before canonical clear, and after canonical clear/before config finalization. Same-intent retry preserves one stable terminal ID/payload and appends it at most once; a different intent/hash, missing intent with off/capture plus active nonterminal state, or any attempted regeneration fails closed. Authority creation, activation, block lifting, lineage/reversal advancement, new learning transitions, and DB-derived protected-state reconstruction remain forbidden.
 - Active V2 run refuses whole-checkout recovery and source replacement/removal without changing the frozen inode; after terminal state, recovery preserves protected fences and a later arm freezes the replacement root.
 - A barrier-controlled GBrain root-swap attempt cannot pass the source boundary during canonical rename. A post-rename external binding mismatch is detected as a hard trust failure; no hostile-local dirfd guarantee is claimed.
 
