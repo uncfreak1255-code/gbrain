@@ -23,7 +23,7 @@ import {
   statSync,
 } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import { gbrainPath } from './config.ts';
@@ -33,6 +33,7 @@ import { pruneDir } from './sync.ts';
 import { VERSION } from '../version.ts';
 import { LockUnavailableError, withRefreshingLock } from './db-lock.ts';
 import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
+import { isPathContained } from './path-confine.ts';
 
 export type LearningLoopMode = 'off' | 'capture' | 'canary';
 export const LEARNING_LOOP_SCHEMA_VERSION = 1 as const;
@@ -269,6 +270,10 @@ function findSessionFiles(root: string, sessionId: string): string[] {
   return found.sort(compareUtf8);
 }
 
+function normalizeRelativePath(path: string, separator = sep): string {
+  return path.split(separator).join('/');
+}
+
 function readConfinedFileOnce(root: string, path: string, afterOpen?: () => void): {
   bytes: Buffer;
   relative_path: string;
@@ -281,8 +286,9 @@ function readConfinedFileOnce(root: string, path: string, afterOpen?: () => void
     if (!opened.isFile()) throw new Error('not a file');
     afterOpen?.();
     const resolved = realpathSync(path);
-    const rel = relative(root, resolved);
-    if (!rel || rel.startsWith('..') || rel.startsWith('/') || rel.includes('\\')) throw new Error('escape');
+    if (!isPathContained(resolved, root)) throw new Error('escape');
+    const rel = normalizeRelativePath(relative(root, resolved));
+    if (!rel) throw new Error('escape');
     const linked = statSync(resolved);
     if (opened.dev !== linked.dev || opened.ino !== linked.ino) throw new Error('identity changed');
     return { bytes: readFileSync(fd), relative_path: rel };
@@ -516,7 +522,7 @@ export async function discoverBaselineSnapshot(input: {
       });
     } catch {
       ambiguous = true;
-      manifest.push({ relative_path: relative(root, path), error: 'invalid_or_unreadable' });
+      manifest.push({ relative_path: normalizeRelativePath(relative(root, path)), error: 'invalid_or_unreadable' });
     }
   }
   manifest.sort((a, b) => compareUtf8(a.relative_path, b.relative_path));
@@ -1138,4 +1144,5 @@ export const _testing = {
   eventId,
   ledgerScopeId,
   readConfinedFileOnce,
+  normalizeRelativePath,
 };

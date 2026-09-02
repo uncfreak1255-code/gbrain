@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   MIN_TRANSCRIPT_BYTES,
@@ -28,6 +28,7 @@ import {
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
+import { operationsByName, type OperationContext } from '../src/core/operations.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const roots: string[] = [];
@@ -208,6 +209,11 @@ describe('mode and authoritative transcript boundary', () => {
     })).toThrow(/cannot be read safely/);
   });
 
+  test('nested Windows transcript paths normalize to stable ledger paths', () => {
+    const rel = win32.relative('C:\\corpus', 'C:\\corpus\\2026\\09\\session.jsonl');
+    expect(_testing.normalizeRelativePath(rel, win32.sep)).toBe('2026/09/session.jsonl');
+  });
+
   test('eligibility boundaries are deterministic', () => {
     expect(classifyTranscript(receipt('small', { size_bytes: MIN_TRANSCRIPT_BYTES - 1 }))).toEqual({ eligible: false, reason: 'transcript_too_small' });
     expect(classifyTranscript(receipt('few-user', { user_turn_count: 1 }))).toEqual({ eligible: false, reason: 'insufficient_user_turns' });
@@ -372,6 +378,75 @@ describe('append-only run, replay, and cohort reducer', () => {
     await expect(changingMode).resolves.toEqual({ previous_mode: 'canary', mode: 'off' });
     expect(await engine.getConfig('learning_loop.mode')).toBe('off');
     expect(replayLearningLoop(readLearningLoopLedger({ root })).active_run_id).toBeNull();
+  });
+
+  test('adapter submission rechecks mode after transcript discovery before recording', async () => {
+    const home = tempRoot('learning-loop-submit-mode-home-');
+    const corpus = tempRoot('learning-loop-submit-mode-corpus-');
+    const config = { engine: 'pglite' as const, database_path: tempRoot('learning-loop-submit-mode-db-') };
+    const sessionId = 'mode-race-session';
+    const nested = join(corpus, '2026', '09');
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(nested, `${sessionId}.jsonl`), codexTranscript(sessionId));
+
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await engine.setConfig('learning_loop.mode', 'capture');
+      await engine.setConfig('learning_loop.corpus.codex.root', corpus);
+      await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
+      await bindLearningLoopSession(engine, `bind:${sessionId}`, adapter, sessionId, {
+        config, mutationLock: testMutationLock,
+      });
+
+      let releaseTranscriptDiscovery!: () => void;
+      let transcriptDiscoveryStarted!: () => void;
+      const transcriptDiscoveryHeld = new Promise<void>((resolve) => { transcriptDiscoveryStarted = resolve; });
+      const transcriptDiscoveryRelease = new Promise<void>((resolve) => { releaseTranscriptDiscovery = resolve; });
+      const getConfig = engine.getConfig.bind(engine);
+      let modeReads = 0;
+      const handlerEngine = new Proxy(engine, {
+        get(target, property) {
+          if (property === 'getConfig') {
+            return async (key: string) => {
+              if (key === 'learning_loop.mode') {
+                modeReads += 1;
+                if (modeReads === 1) return 'capture';
+              }
+              if (key === 'learning_loop.corpus.codex.root') {
+                transcriptDiscoveryStarted();
+                await transcriptDiscoveryRelease;
+              }
+              return getConfig(key);
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as PGLiteEngine;
+      const ctx = {
+        remote: true,
+        dryRun: false,
+        config,
+        engine: handlerEngine,
+        logger: { info() {}, warn() {}, error() {} },
+        sourceId: 'personal',
+        auth: { token: 'redacted', clientId: adapter.client_id, scopes: ['write'], sourceId: 'personal' },
+      } as OperationContext;
+
+      const submitting = operationsByName.learning_loop_submit_session_v1.handler(ctx, {
+        provider: 'codex',
+        provider_session_id: sessionId,
+        source_id: 'personal',
+        completion_state: 'completed',
+        completed_at: '2026-08-01T00:00:00.000Z',
+      });
+      await transcriptDiscoveryHeld;
+      await setLearningLoopMode(engine, config, 'off', { config });
+      releaseTranscriptDiscovery();
+
+      await expect(submitting).resolves.toEqual({ status: 'disabled', mode: 'off' });
+      expect(modeReads).toBe(2);
+      expect(readLearningLoopLedger({ config }).filter((event) => event.event_type === 'session_evaluated')).toHaveLength(0);
+    });
   });
 
   test('same session/hash is idempotent and a changed hash fails closed', async () => {

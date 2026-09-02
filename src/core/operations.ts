@@ -5430,11 +5430,15 @@ const learning_loop_submit_session_v1: Operation = {
       asserted_size_bytes: p.asserted_size_bytes as number | undefined,
       asserted_content_hash: p.asserted_content_hash as string | undefined,
     });
-    return mod.recordSessionEvaluation({
-      engine: ctx.engine,
-      mode,
-      adapter,
-      receipt,
+    return mod.withLearningLoopLifecycleLock(ctx.engine, async () => {
+      const currentMode = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
+      if (currentMode === 'off') return { status: 'disabled' as const, mode: currentMode };
+      return mod.recordSessionEvaluation({
+        engine: ctx.engine,
+        mode: currentMode,
+        adapter,
+        receipt,
+      }, { config: ctx.config });
     }, { config: ctx.config });
   }),
 };
