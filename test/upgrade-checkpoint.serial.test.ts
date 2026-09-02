@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   computeBrainId,
+  computeBrainIdFromConfig,
   loadCheckpoint,
   writeCheckpoint,
   clearCheckpoint,
@@ -55,6 +56,22 @@ describe('computeBrainId — X2 multi-tenant safety', () => {
   test('null URL → same hash as undefined', () => {
     const a = computeBrainId(null);
     const b = computeBrainId(undefined);
+    expect(a).toBe(b);
+  });
+
+  test('explicit configs distinguish PGLite paths without ambient config', () => {
+    const first = join(tmpHome, 'brain-a');
+    const second = join(tmpHome, 'brain-b');
+    const a = computeBrainIdFromConfig({ database_path: first });
+    const b = computeBrainIdFromConfig({ database_path: second });
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+    expect(b).toMatch(/^[0-9a-f]{16}$/);
+    expect(a).not.toBe(b);
+  });
+
+  test('explicit Postgres config remains stable across credential rotation', () => {
+    const a = computeBrainIdFromConfig({ database_url: 'postgresql://user:passA@host:5432/db' });
+    const b = computeBrainIdFromConfig({ database_url: 'postgresql://user:passB@host:5432/db' });
     expect(a).toBe(b);
   });
 });

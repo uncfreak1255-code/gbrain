@@ -4,7 +4,7 @@
 # in the bun run verify chain.
 #
 # Background: serve-http.ts builds the HTTP MCP tools/list response from
-# `operations.filter(op => !op.localOnly)`. That filter is the only thing
+# the shared `filterAgentFacingOperations()` helper. That filter is the thing
 # keeping localOnly ops (sync_brain, file_upload, file_list, file_url —
 # any admin op the user EXPLICITLY marked as CLI-only) off the wire.
 #
@@ -41,15 +41,15 @@ cd "$ROOT"
 ALLOWED=(
   "src/cli.ts"                                  # local CLI; user owns the machine, no trust boundary
   "src/mcp/dispatch.ts"                         # shared dispatch; sets ctx.remote from caller, handlers self-gate
-  "src/mcp/server.ts"                           # stdio MCP; local-trusted (binary on user's box)
-  "src/mcp/http-transport.ts"                   # superseded by serve-http.ts; kept for back-compat tests
-  "src/mcp/tool-defs.ts"                        # pure helper; takes ops as parameter, never exposes them
+  "src/mcp/server.ts"                           # stdio MCP; applies the shared localOnly filter
+  "src/mcp/http-transport.ts"                   # legacy HTTP; applies the shared localOnly filter
+  "src/mcp/tool-defs.ts"                        # owns the shared agent-facing localOnly filter
   "src/core/minions/tools/brain-allowlist.ts"   # subagent registry; has its own opt-in allowlist (separate from localOnly)
   "src/commands/capture.ts"                     # local CLI tool; not network-exposed
   "src/commands/enrich.ts"                       # local CLI tool; calls put_page handler with remote=false, not network-exposed
   "src/commands/book-mirror.ts"                 # local CLI tool; not network-exposed
   "src/commands/tools-json.ts"                  # gbrain --tools-json introspection; full op list IS the purpose
-  "src/commands/serve-http.ts"                  # MUST APPLY .filter(op => !op.localOnly) — verified by grep below
+  "src/commands/serve-http.ts"                  # streamable HTTP; applies the shared localOnly filter
 )
 
 # Pattern: any import that brings the `operations` VALUE in from core/operations.ts.
@@ -93,19 +93,21 @@ while IFS= read -r file; do
   fi
 done <<< "$FOUND_FILES"
 
-# Check 2: serve-http.ts MUST contain the canonical filter expression near
-# its operations import. Without the filter, the entire HTTP MCP surface
-# leaks localOnly ops.
-SERVE_HTTP="src/commands/serve-http.ts"
-if [ -f "$SERVE_HTTP" ]; then
-  if ! grep -qE 'operations\.filter\(\s*op\s*=>\s*!op\.localOnly\s*\)' "$SERVE_HTTP"; then
-    echo "FAIL: $SERVE_HTTP no longer contains the canonical"
-    echo "      operations.filter(op => !op.localOnly) expression. The HTTP MCP"
-    echo "      surface depends on this filter to enforce localOnly. Restore"
-    echo "      the filter or refactor the trust boundary explicitly."
+# Check 2: the shared helper MUST implement the canonical predicate, and every
+# agent-facing registry MUST call it. This keeps the policy centralized without
+# weakening the transport-specific structural guard.
+HELPER="src/mcp/tool-defs.ts"
+if ! grep -qE 'return ops\.filter\(\s*op\s*=>\s*!op\.localOnly\s*\)' "$HELPER"; then
+  echo "FAIL: $HELPER no longer implements the canonical localOnly predicate."
+  FAIL=1
+fi
+
+for surface in src/mcp/server.ts src/mcp/http-transport.ts src/commands/serve-http.ts; do
+  if ! grep -qE 'filterAgentFacingOperations\(operations\)' "$surface"; then
+    echo "FAIL: $surface does not apply filterAgentFacingOperations(operations)."
     FAIL=1
   fi
-fi
+done
 
 if [ "$FAIL" -eq 1 ]; then
   echo ""

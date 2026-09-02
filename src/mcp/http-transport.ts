@@ -27,7 +27,7 @@
 
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
-import { buildToolDefs } from './tool-defs.ts';
+import { buildToolDefs, filterAgentFacingOperations } from './tool-defs.ts';
 import { operations } from '../core/operations.ts';
 import type { AuthInfo } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
@@ -36,6 +36,8 @@ import { buildDefaultLimiters, type RateLimiter } from './rate-limit.ts';
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { parseLegacyTokenScope } from '../core/legacy-token-scope.ts';
 export { parseLegacyTokenScope };
+
+export const legacyHttpOperations = filterAgentFacingOperations(operations);
 
 const DEFAULT_BODY_CAP = 1024 * 1024; // 1 MiB
 
@@ -148,7 +150,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
   const limiters = opts.limiters || buildDefaultLimiters();
   const bodyCap = envInt('GBRAIN_HTTP_MAX_BODY_BYTES', DEFAULT_BODY_CAP);
   const corsAllowlist = parseCorsAllowlist();
-  const tools = buildToolDefs(operations);
+  const tools = buildToolDefs(legacyHttpOperations);
 
   /**
    * v0.41.3 (T6): single consolidated CORS header builder. Pre-fix there were

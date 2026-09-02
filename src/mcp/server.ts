@@ -4,7 +4,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import type { BrainEngine } from '../core/engine.ts';
 import { operations } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
-import { buildToolDefs } from './tool-defs.ts';
+import { buildToolDefs, filterAgentFacingOperations } from './tool-defs.ts';
 import { dispatchToolCall, validateParams, buildOperationContext } from './dispatch.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
@@ -14,6 +14,8 @@ import {
   cleanupStaleSocket,
 } from '../core/context/resolve-ipc.ts';
 import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/context/retrieval-reflex.ts';
+
+export const stdioOperations = filterAgentFacingOperations(operations);
 
 export async function startMcpServer(engine: BrainEngine) {
   const server = new Server(
@@ -25,7 +27,7 @@ export async function startMcpServer(engine: BrainEngine) {
   // the subagent tool registry (v0.15+) can call the same mapper against a
   // filtered OPERATIONS subset instead of duplicating this shape.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: buildToolDefs(operations),
+    tools: buildToolDefs(stdioOperations),
   }));
 
   // Dispatch tool calls via shared dispatch.ts (parity with HTTP transport).

@@ -69,6 +69,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
         console.log(`No keys match prefix "${prefix}".`);
         return;
       }
+      const protectedKey = keys.find(isProtectedOwnerControlKey);
+      if (protectedKey) rejectProtectedOwnerControlKey(protectedKey);
       let deleted = 0;
       for (const k of keys) {
         const n = await engine.unsetConfig(k);
@@ -84,6 +86,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       console.error('Usage: gbrain config unset <key> | --pattern <prefix>');
       process.exit(1);
     }
+    if (isProtectedOwnerControlKey(key)) rejectProtectedOwnerControlKey(key);
     const n = await engine.unsetConfig(key);
     if (n > 0) {
       console.log(`Unset ${key}`);
@@ -106,6 +109,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
   } else if (action === 'set' && key && value) {
+    if (isProtectedOwnerControlKey(key)) rejectProtectedOwnerControlKey(key);
     // v0.37.11.0 fix wave (Lane C.2 + CDX2-13): refuse writes to schema-sizing
     // fields unconditionally. These fields size the `content_chunks.embedding`
     // column at init time and are file-plane canonical. `gbrain config set
@@ -360,4 +364,13 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     console.error('       gbrain config unset --pattern <prefix>');
     process.exit(1);
   }
+}
+export function isProtectedOwnerControlKey(key: string): boolean {
+  return key === 'learning_loop.mode';
+}
+
+function rejectProtectedOwnerControlKey(key: string): never {
+  console.error(`[config] ${key} is owned by a trusted-local lifecycle control.`);
+  console.error(`[config] Use: gbrain call learning_loop_set_mode '{"mode":"off|capture|canary"}'`);
+  process.exit(1);
 }

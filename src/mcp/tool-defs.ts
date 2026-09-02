@@ -10,6 +10,11 @@ export interface McpToolDef {
   };
 }
 
+/** Keep trusted-local operations out of every agent-facing tool surface. */
+export function filterAgentFacingOperations(ops: Operation[]): Operation[] {
+  return ops.filter(op => !op.localOnly);
+}
+
 /**
  * Convert a single ParamDef to a JSON Schema fragment. Recursive on `items`.
  *

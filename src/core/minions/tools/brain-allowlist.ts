@@ -36,7 +36,7 @@ import type { ToolCtx, ToolDef } from '../types.ts';
  * Knowledge Runtime).
  *
  * Read-only (all safe):
- *   query, search, get_page, list_pages, file_list, file_url,
+ *   query, search, get_page, list_pages,
  *   get_backlinks, traverse_graph, resolve_slugs, get_ingest_log
  *
  * Conditional write:
@@ -51,8 +51,6 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'search',
   'get_page',
   'list_pages',
-  'file_list',
-  'file_url',
   'get_backlinks',
   'traverse_graph',
   // v114 (#1941): read-only provenance discovery. Edge-WRITE ops (add_link /

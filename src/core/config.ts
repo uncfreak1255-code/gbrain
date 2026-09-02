@@ -47,6 +47,11 @@ export interface GBrainConfig {
    * merge → buildGatewayConfig env dict → recipe reads ZEROENTROPY_API_KEY.
    */
   zeroentropy_api_key?: string;
+  /** Personal Learning Loop repository contract. Absence is always `off`. */
+  learning_loop?: {
+    mode?: 'off' | 'capture' | 'canary';
+    corpus?: { codex?: { root?: string; source_id?: string } };
+  };
   /** AI gateway config (v0.14+). v0.36+ default: "zeroentropyai:zembed-1" / 1280 / "anthropic:claude-haiku-4-5-20251001". */
   embedding_model?: string;
   embedding_dimensions?: number;
@@ -844,6 +849,9 @@ export async function loadConfigWithEngine(
  */
 export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // File-plane (GBrainConfig static fields)
+  'learning_loop.mode',
+  'learning_loop.corpus.codex.root',
+  'learning_loop.corpus.codex.source_id',
   'engine',
   'database_url',
   'database_path',
