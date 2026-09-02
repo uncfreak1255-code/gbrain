@@ -28,6 +28,7 @@ import {
   type ParsedTake,
 } from '../core/takes-fence.ts';
 import { withPageLock } from '../core/page-lock.ts';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 
 // --- Helpers ---
@@ -134,6 +135,7 @@ function readBodyOrEmpty(path: string): string {
 }
 
 function writeBody(path: string, body: string): void {
+  assertUnmanagedPathMutation(path, body);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, body, 'utf-8');
 }

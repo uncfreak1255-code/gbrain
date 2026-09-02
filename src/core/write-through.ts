@@ -25,9 +25,18 @@ import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync,
 import { basename, dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
+import { importFromContent, type ImportResult } from './import-file.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from './markdown.ts';
 import { isWriteTargetContained } from './path-confine.ts';
 import { commitWriteThroughFile, isDurabilityHardened } from './brain-repo-durability.ts';
+import {
+  assertManagedPageMutationAllowed,
+  inspectExpectedManagedState,
+  resolveEffectiveCanonicalRoot,
+  withCanonicalSourceBoundary,
+  writeCanonicalPage,
+  type SourceQualifiedCanonicalTarget,
+} from './canonical-page-write.ts';
 import {
   getRecoveryBackedSourceCheckout,
   refreshRecoverySourceCheckout,
@@ -65,7 +74,7 @@ export interface WriteThroughResult {
    *   - path_escapes_source_root: the computed file path resolves outside the
    *     source's working tree (hostile slug row / symlinked subtree) — refused.
    */
-  skipped?: 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'page_not_found_after_write' | 'path_escapes_source_root';
+  skipped?: 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'page_not_found_after_write' | 'path_escapes_source_root' | 'subagent_sandbox';
   /** Set when the render/write/rename itself threw (EACCES, ENOTDIR, disk full). */
   error?: string;
 }
@@ -76,6 +85,96 @@ export interface WritePageThroughOpts {
   /** Merged over the page's own frontmatter at render time (e.g. provenance). */
   frontmatterOverrides?: Record<string, unknown>;
   logger?: WriteThroughLogger;
+}
+
+export interface CanonicalImportAndWriteOpts extends WritePageThroughOpts {
+  brainId?: string;
+  content: string;
+  importOptions?: Parameters<typeof importFromContent>[3];
+  skipWriteThrough?: boolean;
+}
+
+export interface CanonicalImportAndWriteResult {
+  result: ImportResult;
+  writeThrough: WriteThroughResult;
+}
+
+async function resolveCanonicalTarget(
+  engine: BrainEngine,
+  slug: string,
+  sourceId: string,
+  brainId: string,
+): Promise<SourceQualifiedCanonicalTarget | null> {
+  const configuredRoot = await resolveEffectiveCanonicalRoot(engine, sourceId);
+  if (!configuredRoot || !existsSync(configuredRoot) || !statSync(configuredRoot).isDirectory()) return null;
+  let cursor = configuredRoot;
+  for (const segment of slug.split('/').slice(0, -1)) {
+    cursor = join(cursor, segment);
+    try { if (!statSync(cursor).isDirectory()) return null; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
+      return null;
+    }
+  }
+  return { brain_id: brainId, source_id: sourceId, canonical_slug: slug, configured_root: configuredRoot };
+}
+
+/**
+ * Persist caller content without allowing a managed page to become DB-first.
+ * Managed targets commit ordinary content to canonical Markdown, then import
+ * only that exact readback while the same source lease remains live.
+ */
+export async function importAndWriteCanonicalPage(
+  engine: BrainEngine,
+  slug: string,
+  opts: CanonicalImportAndWriteOpts,
+): Promise<CanonicalImportAndWriteResult> {
+  const sourceId = opts.sourceId ?? 'default';
+  const target = await resolveCanonicalTarget(engine, slug, sourceId, opts.brainId ?? 'host');
+  const importOptions = { ...opts.importOptions, sourceId };
+  if (!target) {
+    const result = await importFromContent(engine, slug, opts.content, importOptions);
+    const writeThrough = opts.skipWriteThrough
+      ? { written: false, skipped: 'subagent_sandbox' as const }
+      : await writePageThrough(engine, result.slug, opts);
+    return { result, writeThrough };
+  }
+
+  return withCanonicalSourceBoundary(engine, target, async sourceLease => {
+    const preflight = inspectExpectedManagedState(target, sourceLease);
+    const recovery = await getRecoveryBackedSourceCheckout(engine, sourceId);
+    if (preflight.managed) {
+      if (opts.skipWriteThrough) throw new Error('managed_state_unavailable: managed canonical write is not available in a DB-only sandbox');
+      if (recovery) throw new Error('managed_state_unavailable: recovery-backed managed write requires checkout rebuild');
+      const readback = await writeCanonicalPage(target, opts.content, {
+        mode: 'ordinary_content', sourceLease, expectedManaged: true,
+      });
+      try {
+        const committed = inspectExpectedManagedState(target, sourceLease, { expected: true });
+        const result = await importFromContent(engine, slug, readback, {
+          ...importOptions,
+          canonicalPermit: committed.permit,
+          canonicalReadback: readback,
+        });
+        return { result, writeThrough: { written: true, path: join(sourceLease.root_realpath, `${slug}.md`) } };
+      } catch (error) {
+        try {
+          await writeCanonicalPage(target, preflight.canonical, {
+            mode: 'ordinary_content', sourceLease, expectedManaged: true,
+          });
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], 'Managed canonical import and rollback both failed');
+        }
+        throw error;
+      }
+    }
+
+    const result = await importFromContent(engine, slug, opts.content, importOptions);
+    const writeThrough = opts.skipWriteThrough
+      ? { written: false, skipped: 'subagent_sandbox' as const }
+      : await writePageThrough(engine, result.slug, { ...opts, recoveryCheckout: recovery });
+    return { result, writeThrough };
+  });
 }
 
 function warnSkip(
@@ -160,6 +259,9 @@ export async function writePageThrough(
     if (!isWriteTargetContained(filePath, writeRoot)) {
       return { written: false, skipped: 'path_escapes_source_root' };
     }
+
+    // DB-derived re-export cannot reconstruct a managed canonical projection.
+    await assertManagedPageMutationAllowed(engine, slug, sourceId, 'destructive_admin');
 
     const writtenPage = await engine.getPage(slug, { sourceId });
     if (!writtenPage) {

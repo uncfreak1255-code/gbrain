@@ -15,6 +15,7 @@ import { join, relative, basename } from 'path';
 import { extractEntityRefs as canonicalExtractEntityRefs } from '../core/link-extraction.ts';
 import { createProgress, startHeartbeat } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 
 interface BacklinkGap {
   /** The page that mentions the entity */
@@ -180,6 +181,7 @@ export function fixBacklinkGaps(brainDir: string, gaps: BacklinkGap[], dryRun: b
     }
 
     if (!dryRun) {
+      assertUnmanagedPathMutation(targetPath, content);
       writeFileSync(targetPath, content);
     }
   }

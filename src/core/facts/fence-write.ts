@@ -33,15 +33,17 @@
  * sees the constraint.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 import type { BrainEngine, NewFact, FactVisibility } from '../engine.ts';
-import { withPageLock } from '../page-lock.ts';
 import { gbrainPath } from '../config.ts';
 import { upsertFactRow, parseFactsFence } from '../facts-fence.ts';
 import { extractFactsFromFenceText } from './extract-from-fence.ts';
 import { logStubGuardEvent } from './stub-guard-audit.ts';
+import { parseLearningLoopFence } from '../learning-loop-knowledge.ts';
+import { computeBrainIdFromConfig } from '../upgrade-checkpoint.ts';
+import { withCanonicalSourceBoundary, writeCanonicalPage } from '../canonical-page-write.ts';
 
 /** Resolved source binding for the entity page. */
 export interface FenceTarget {
@@ -167,11 +169,18 @@ export async function writeFactsToFence(
   }
 
   const filePath = join(target.localPath, `${target.slug}.md`);
-  const tmpPath = `${filePath}.tmp`;
+  const initialBody = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
+  const initialManaged = parseLearningLoopFence(initialBody);
+  const brainId = initialManaged?.value.brain_id
+    ?? computeBrainIdFromConfig(engine.learningLoopLedgerConfig?.() ?? {});
+  const canonicalTarget = {
+    brain_id: brainId,
+    source_id: target.sourceId,
+    canonical_slug: target.slug,
+    configured_root: target.localPath,
+  };
 
-  return withPageLock(
-    target.slug,
-    async () => {
+  return withCanonicalSourceBoundary(engine, canonicalTarget, async sourceLease => {
       // 1. Read existing body or stub-create.
       let body: string;
       if (existsSync(filePath)) {
@@ -231,29 +240,31 @@ export async function writeFactsToFence(
         assignedRowNums.push(rowNum);
       }
 
-      // 3. Atomic write: .tmp first, then parse-validate, then rename.
-      writeFileSync(tmpPath, body, 'utf-8');
-
-      // 4. Parse-before-rename: re-read the .tmp content and verify the
-      //    fence is well-formed. Anything malformed → leave .tmp in
-      //    place as quarantine, write JSONL, do NOT insert to DB.
-      const tmpBody = readFileSync(tmpPath, 'utf-8');
-      const parsed = parseFactsFence(tmpBody);
+      // 3. Validate before the shared canonical rename. The shared writer
+      //    preserves Learning Loop metadata and owns page locking/fsync.
+      const parsed = parseFactsFence(body);
       if (parsed.warnings.length > 0) {
         recordWriteFailure(target.slug, target.sourceId, parsed.warnings, filePath);
         return { inserted: 0, ids: [], fenceWriteFailed: true };
       }
 
-      // 5. Rename .tmp → file. POSIX atomic; the canonical file is
-      //    either the old content or the new content, never partial.
-      renameSync(tmpPath, filePath);
+      // 4. Commit the non-lineage fact change without allowing metadata edits.
+      const canonicalReadback = await writeCanonicalPage(canonicalTarget, body, {
+        mode: 'non_lineage_fact',
+        sourceLease,
+        expectedManaged: Boolean(initialManaged),
+      });
+      const committedFacts = parseFactsFence(canonicalReadback);
+      if (committedFacts.warnings.length > 0) {
+        throw new Error('facts fence failed validation after canonical commit');
+      }
 
       // 6. Stamp the DB. extractFactsFromFenceText handles the
       //    validFrom/validUntil date derivation + the strikethrough
       //    semantic distinction. We only want to insert the NEW rows
       //    (those with row_nums in assignedRowNums), so filter the
       //    re-parsed facts to that subset.
-      const allExtracted = extractFactsFromFenceText(parsed.facts, target.slug, target.sourceId);
+      const allExtracted = extractFactsFromFenceText(committedFacts.facts, target.slug, target.sourceId);
       const newRowSet = new Set(assignedRowNums);
       const toInsert = allExtracted.filter(r => newRowSet.has(r.row_num));
 
@@ -270,9 +281,7 @@ export async function writeFactsToFence(
 
       const result = await engine.insertFacts(enriched, { source_id: target.sourceId }); // gbrain-allow-direct-insert: writeFactsToFence is the markdown-first reconcile path; runs only after the atomic fence write commits
       return { inserted: result.inserted, ids: result.ids };
-    },
-    { timeoutMs: 5_000 },
-  );
+  });
 }
 
 /**

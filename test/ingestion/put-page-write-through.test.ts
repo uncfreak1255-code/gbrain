@@ -16,10 +16,12 @@ import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import { operations } from '../../src/core/operations.ts';
 import type { OperationContext } from '../../src/core/operations.ts';
 import { resetGateway } from '../../src/core/ai/gateway.ts';
+import { renderLearningLoopFence } from '../../src/core/learning-loop-knowledge.ts';
 
 let engine: PGLiteEngine;
 let tmpRoot: string;
 let brainDir: string;
+let previousGbrainHome: string | undefined;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -47,6 +49,8 @@ beforeEach(async () => {
   // false → noEmbed=true → no network call.
   resetGateway();
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-wt-'));
+  previousGbrainHome = process.env.GBRAIN_HOME;
+  process.env.GBRAIN_HOME = tmpRoot;
   brainDir = path.join(tmpRoot, 'brain');
   fs.mkdirSync(brainDir, { recursive: true });
   // Wire sync.repo_path so write-through can find the repo.
@@ -54,6 +58,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  if (previousGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = previousGbrainHome;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -103,6 +109,29 @@ function makeCtxWithLogs(
 const putPage = operations.find((o) => o.name === 'put_page')!;
 
 describe('put_page write-through — happy path', () => {
+  test('managed page writes canonical first, preserves metadata, then reconciles the row', async () => {
+    const slug = 'inbox/managed-put';
+    const fence = renderLearningLoopFence({
+      brain_id: 'host', source_id: 'default', canonical_slug: slug,
+      managed_rows: {}, blocked_identities: [], correction_lineages: {},
+      reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
+    });
+    const file = path.join(brainDir, `${slug}.md`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `---\ntitle: Before\nslug: ${slug}\n---\n\nBefore.\n\n${fence}\n`);
+
+    const result = (await putPage.handler(makeCtx(), {
+      slug,
+      content: `---\ntitle: After\nslug: ${slug}\n---\n\nAfter.\n`,
+    })) as { write_through?: { written: boolean; path?: string } };
+
+    expect(result.write_through?.written).toBe(true);
+    const onDisk = fs.readFileSync(file, 'utf8');
+    expect(onDisk).toContain('After.');
+    expect(onDisk).toContain(fence);
+    expect((await engine.getPage(slug, { sourceId: 'default' }))?.title).toBe('After');
+  });
+
   test('writes the markdown file to disk at brainDir/<slug>.md', async () => {
     const ctx = makeCtx();
     const content = '---\ntitle: Test\n---\n\n# WT body';

@@ -62,6 +62,7 @@ import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, b
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { purgeDeletedPagesSafely } from './purge-deleted-pages.ts';
+import { assertManagedPageMutationAllowed } from './canonical-page-write.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -101,6 +102,13 @@ export class PostgresEngine implements BrainEngine {
   private _savedConfig: (EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }) | null = null;
   /** Whether a reconnect is in progress (prevents concurrent reconnects). */
   private _reconnecting = false;
+
+  learningLoopLedgerConfig(): Pick<EngineConfig, 'database_url' | 'database_path'> {
+    return {
+      database_url: this._savedConfig?.database_url,
+      database_path: this._savedConfig?.database_path,
+    };
+  }
   /**
    * #1471: module-singleton OWNERSHIP token. `true` only for the engine whose
    * connect() actually created the shared db.ts `sql` singleton (returned
@@ -1021,7 +1029,8 @@ export class PostgresEngine implements BrainEngine {
     return { slug: r.slug, id: Number(r.id) };
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page> {
+  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; canonicalPermit?: import('./canonical-page-write.ts').PageDbMutationPermit }): Promise<Page> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'canonical_reconciliation', opts?.canonicalPermit);
     slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page);
@@ -1085,6 +1094,7 @@ export class PostgresEngine implements BrainEngine {
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     await sql`DELETE FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}`;
   }
 
@@ -1095,6 +1105,7 @@ export class PostgresEngine implements BrainEngine {
    * so the caller can filter pagesAffected.
    */
   async deletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
+    for (const slug of slugs) await assertManagedPageMutationAllowed(this, slug, opts.sourceId, 'destructive_admin');
     if (slugs.length === 0) return [];
     if (slugs.length > DELETE_BATCH_SIZE) {
       throw new Error(
@@ -1136,6 +1147,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async softDeletePage(slug: string, opts?: { sourceId?: string }): Promise<{ slug: string } | null> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     const sql = this.sql;
     const sourceId = opts?.sourceId;
     // Idempotent-as-null contract: only flip rows that are currently active.
@@ -1151,6 +1163,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     const sql = this.sql;
     const sourceId = opts?.sourceId;
     const sourceCondition = sourceId ? sql`AND source_id = ${sourceId}` : sql``;
@@ -1176,6 +1189,7 @@ export class PostgresEngine implements BrainEngine {
     timeline: string,
     contentHash: string,
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     const sql = this.sql;
     // Narrow UPDATE — leaves frontmatter, type, chunks, links, embeddings,
     // tags, takes untouched. Skips soft-deleted rows so a redirect retry
@@ -4772,6 +4786,7 @@ export class PostgresEngine implements BrainEngine {
     versionId: number,
     opts?: { sourceId?: string },
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     const sql = this.sql;
     // v0.31.8 (D12): two-branch. With opts.sourceId, scope BOTH the page lookup
     // AND the version reference. Without it, multi-source brains can revert
@@ -4956,6 +4971,7 @@ export class PostgresEngine implements BrainEngine {
 
   // Sync
   async updateSlug(oldSlug: string, newSlug: string, opts?: { sourceId?: string }): Promise<void> {
+    await assertManagedPageMutationAllowed(this, oldSlug, opts?.sourceId ?? 'default', 'destructive_admin');
     newSlug = validateSlug(newSlug);
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';

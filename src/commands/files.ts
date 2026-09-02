@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 import { join, relative, extname, basename, dirname } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
@@ -505,8 +506,10 @@ async function redirectFiles(args: string[]) {
       mime: mimeType || 'application/octet-stream',
       uploaded: new Date().toISOString(),
     });
-    writeFileSync(filePath + '.redirect.yaml', pointer);
-    unlinkSync(filePath);
+  assertUnmanagedPathMutation(filePath);
+  writeFileSync(filePath + '.redirect.yaml', pointer);
+  assertUnmanagedPathMutation(filePath);
+  unlinkSync(filePath);
     redirected++;
   }
 
@@ -555,7 +558,11 @@ async function restoreFiles(args: string[]) {
     try {
       const storagePath = info.storage_path || info.path; // v0.9 or legacy format
       const data = await storage.download(storagePath);
+      // Binary restoration is not a canonical Markdown content transform;
+      // still reject an existing managed page before replacing it.
+      assertUnmanagedPathMutation(originalPath);
       writeFileSync(originalPath, data);
+      assertUnmanagedPathMutation(originalPath);
       unlinkSync(redirectPath);
       restored++;
     } catch (e: unknown) {

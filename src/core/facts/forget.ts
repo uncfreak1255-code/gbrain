@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { withPageLock } from '../page-lock.ts';
 import { parseFactsFence, renderFactsTable, type ParsedFact } from '../facts-fence.ts';
+import { assertManagedPageMutationAllowed, assertUnmanagedPathMutation } from '../canonical-page-write.ts';
 
 export interface ForgetFactResult {
   /** True iff the row was found AND a forget was applied (fence or DB). */
@@ -96,6 +97,11 @@ export async function forgetFactInFence(
     return { ok: false, path: 'not_found', reason };
   }
   const row = rows[0];
+
+  const managedSlug = row.source_markdown_slug ?? row.entity_slug;
+  if (managedSlug) {
+    await assertManagedPageMutationAllowed(engine, managedSlug, row.source_id, 'destructive_admin');
+  }
 
   if (row.expired_at !== null) {
     return { ok: false, path: 'already_expired', reason };
@@ -183,6 +189,8 @@ export async function forgetFactInFence(
       return { ok, path: 'legacy_db', reason };
     }
     const newBody = body.slice(0, begin) + newFence + body.slice(end + '<!--- gbrain:facts:end -->'.length);
+
+    assertUnmanagedPathMutation(filePath, newBody);
 
     writeFileSync(tmpPath, newBody, 'utf-8');
     const tmpBody = readFileSync(tmpPath, 'utf-8');

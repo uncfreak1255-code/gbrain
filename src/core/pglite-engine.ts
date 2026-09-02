@@ -31,6 +31,7 @@ import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
+import { assertManagedPageMutationAllowed } from './canonical-page-write.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
@@ -324,6 +325,13 @@ export class PGLiteEngine implements BrainEngine {
   get db(): PGLiteDB {
     if (!this._db) throw new Error('PGLite not connected. Call connect() first.');
     return this._db;
+  }
+
+  learningLoopLedgerConfig(): Pick<EngineConfig, 'database_url' | 'database_path'> {
+    return {
+      database_url: this._savedConfig?.database_url,
+      database_path: this._savedConfig?.database_path,
+    };
   }
 
   // Lifecycle
@@ -1153,7 +1161,8 @@ export class PGLiteEngine implements BrainEngine {
     return { slug: r.slug, id: Number(r.id) };
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page> {
+  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; canonicalPermit?: import('./canonical-page-write.ts').PageDbMutationPermit }): Promise<Page> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'canonical_reconciliation', opts?.canonicalPermit);
     slug = validateSlug(slug);
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
@@ -1213,6 +1222,7 @@ export class PGLiteEngine implements BrainEngine {
 
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
     const sourceId = opts?.sourceId ?? 'default';
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     await this.db.query(
       'DELETE FROM pages WHERE slug = $1 AND source_id = $2',
       [slug, sourceId]
@@ -1226,6 +1236,7 @@ export class PGLiteEngine implements BrainEngine {
    * proves this).
    */
   async deletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
+    for (const slug of slugs) await assertManagedPageMutationAllowed(this, slug, opts.sourceId, 'destructive_admin');
     if (slugs.length === 0) return [];
     if (slugs.length > DELETE_BATCH_SIZE) {
       throw new Error(
@@ -1263,6 +1274,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async softDeletePage(slug: string, opts?: { sourceId?: string }): Promise<{ slug: string } | null> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     // Idempotent-as-null: only flip rows currently active. Source filter is
     // optional; without it the first matching row across sources gets soft-deleted.
     const sourceId = opts?.sourceId;
@@ -1281,6 +1293,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     const sourceId = opts?.sourceId;
     const where: string[] = ['slug = $1', 'deleted_at IS NOT NULL'];
     const params: unknown[] = [slug];
@@ -1309,6 +1322,7 @@ export class PGLiteEngine implements BrainEngine {
     timeline: string,
     contentHash: string,
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     // Parity with PostgresEngine.refreshPageBody: narrow UPDATE only.
     // The deleted_at filter prevents a redirect retry from reviving a
     // canonical that was already purged.
@@ -4883,6 +4897,7 @@ export class PGLiteEngine implements BrainEngine {
     versionId: number,
     opts?: { sourceId?: string },
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     // v0.31.8 (D12): when opts.sourceId is set, scope BOTH the page lookup
     // and the version row reference. Without it, multi-source brains can
     // revert the wrong same-slug page (the one Postgres returns first).
@@ -5067,6 +5082,7 @@ export class PGLiteEngine implements BrainEngine {
 
   // Sync
   async updateSlug(oldSlug: string, newSlug: string, opts?: { sourceId?: string }): Promise<void> {
+    await assertManagedPageMutationAllowed(this, oldSlug, opts?.sourceId ?? 'default', 'destructive_admin');
     newSlug = validateSlug(newSlug);
     const sourceId = opts?.sourceId ?? 'default';
     // Source-qualify so a rename in source A doesn't sweep up same-slug rows

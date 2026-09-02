@@ -1,15 +1,47 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { acquirePageLock } from './page-lock.ts';
 import { parseLearningLoopFence, isLearningTransitionPermit, type LearningTransitionPermit } from './learning-loop-knowledge.ts';
+import type { BrainEngine } from './engine.ts';
+import { syncLockId, withRefreshingLock } from './db-lock.ts';
+import { activeV2DestinationBinding } from './learning-loop.ts';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 export type CanonicalWriterMode = 'ordinary_content' | 'non_lineage_fact' | 'learning_transition' | 'checkout_rebuild';
 export interface SourceQualifiedCanonicalTarget { brain_id: string; source_id: string; canonical_slug: string; configured_root: string; }
 export type CanonicalWriteTarget = SourceQualifiedCanonicalTarget;
 export interface SourceWriteLease { readonly __brand: 'SourceWriteLease'; readonly brain_id: string; readonly source_id: string; readonly configured_root: string; readonly root_realpath: string; readonly token: string; readonly dev: number; readonly ino: number; }
-export interface CanonicalWriteOptions { mode: CanonicalWriterMode; lockRoot?: string; sourceLease: SourceWriteLease; transitionPermit?: LearningTransitionPermit; beforeRename?: () => void; }
+export interface CanonicalWriteOptions { mode: CanonicalWriterMode; lockRoot?: string; sourceLease: SourceWriteLease; transitionPermit?: LearningTransitionPermit; beforeRename?: () => void; expectedManaged?: ManagedExpectation | boolean; }
+export type ManagedExpectation = 'expected' | 'not_expected' | 'unknown';
+export type PageDbMutationClass = 'canonical_reconciliation' | 'db_first_content' | 'destructive_admin' | 'derived_only';
+export interface PageDbMutationPermit {
+  readonly __brand: 'PageDbMutationPermit';
+  readonly brain_id: string;
+  readonly source_id: string;
+  readonly canonical_slug: string;
+  readonly mutation_class: PageDbMutationClass;
+  readonly managed: boolean;
+  readonly canonical_sha256: string | null;
+  readonly lease_token: string | null;
+}
+export interface ExpectedManagedState {
+  readonly managed: boolean;
+  readonly canonical: string;
+  readonly canonical_sha256: string;
+  readonly permit: PageDbMutationPermit;
+}
+export interface ExpectedManagedPreflightOptions {
+  /** A replay/active-run/derived-row hint. Hints can only make the check stricter. */
+  expected?: ManagedExpectation | boolean;
+  /** Optional previously accepted protected-state hash. Mismatch is a trust failure. */
+  protectedStateHash?: string | null;
+  mutationClass?: PageDbMutationClass;
+}
 const liveLeases = new WeakSet<object>();
+const liveLeaseTokens = new Set<string>();
+const mutationPermits = new WeakSet<object>();
+const sourceLeaseContext = new AsyncLocalStorage<SourceWriteLease>();
 const FACTS = /<!--- gbrain:facts:begin -->[\s\S]*?<!--- gbrain:facts:end -->/g;
 const META = /<!-- gbrain:learning-loop:v1:begin -->[\s\S]*?<!-- gbrain:learning-loop:v1:end -->/g;
 function validateTarget(t: SourceQualifiedCanonicalTarget): void {
@@ -35,7 +67,10 @@ function prepare(input: string, old: string, mode: CanonicalWriterMode, permit?:
     }
     return input;
   }
-  if (managed && next.some((value, index) => value && value !== previous[index])) {
+  if (managed && mode === 'non_lineage_fact' && next[1] && next[1] !== previous[1]) {
+    throw new Error('managed_state_unavailable: protected metadata fence changed');
+  }
+  if (managed && mode !== 'non_lineage_fact' && next.some((value, index) => value && value !== previous[index])) {
     throw new Error('managed_state_unavailable: protected fence changed');
   }
   let output = input;
@@ -45,7 +80,7 @@ function prepare(input: string, old: string, mode: CanonicalWriterMode, permit?:
     }
   }
   const staged = blocks(output);
-  if (managed && (staged[0] !== previous[0] || staged[1] !== previous[1])) {
+  if (managed && ((mode !== 'non_lineage_fact' && staged[0] !== previous[0]) || staged[1] !== previous[1])) {
     throw new Error('managed_state_unavailable: staged fences changed');
   }
   return output;
@@ -94,7 +129,235 @@ function atomic(
   }
 }
 function contained(p:string,r:string):boolean { const rel=relative(resolve(r),resolve(p)); return rel===''||(!rel.startsWith('..')&&!isAbsolute(rel)); }
-export async function withSourceWriteLease<T>(target: SourceQualifiedCanonicalTarget, fn: (lease: SourceWriteLease) => Promise<T>, opts: { sourceLock: (target: SourceQualifiedCanonicalTarget) => Promise<() => Promise<void>> }): Promise<T> { const release=await opts.sourceLock(target); try { const configured_root=resolve(target.configured_root), root_realpath=realpathSync(configured_root), st=statSync(root_realpath); if(!st.isDirectory())throw new Error('canonical root unavailable'); const lease=Object.freeze({__brand:'SourceWriteLease' as const,brain_id:target.brain_id,source_id:target.source_id,configured_root,root_realpath,token:randomUUID(),dev:st.dev,ino:st.ino}); liveLeases.add(lease); try{return await fn(lease);}finally{liveLeases.delete(lease);} } finally { await release(); } }
+
+function sha256(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
+function targetPath(target: SourceQualifiedCanonicalTarget, lease: SourceWriteLease): string {
+  return join(lease.root_realpath, `${target.canonical_slug}.md`);
+}
+function expectedBoolean(value: ManagedExpectation | boolean | undefined): boolean | undefined {
+  return typeof value === 'boolean' ? value : value === 'expected' ? true : value === 'not_expected' ? false : undefined;
+}
+
+/** Resolve the one live canonical root allowed for a source. */
+export async function resolveEffectiveCanonicalRoot(
+  engine: Pick<BrainEngine, 'executeRaw' | 'getConfig'>,
+  sourceId: string,
+): Promise<string | null> {
+  const sources = await engine.executeRaw<{ id: string; local_path: string | null }>(
+    'SELECT id, local_path FROM sources ORDER BY id',
+  );
+  const selected = sources.find(source => source.id === sourceId);
+  if (selected?.local_path) return selected.local_path;
+  if (sourceId === 'default' && sources.length === 1 && sources[0]?.id === 'default') {
+    return engine.getConfig('sync.repo_path');
+  }
+  return null;
+}
+
+async function expectedManagedByDurableHint(
+  engine: Pick<BrainEngine, 'executeRaw' | 'learningLoopLedgerConfig'>,
+  slug: string,
+  sourceId: string,
+): Promise<boolean> {
+  const rows = await engine.executeRaw<{ compiled_truth: string | null; timeline: string | null }>(
+    'SELECT compiled_truth, timeline FROM pages WHERE slug = $1 AND source_id = $2 LIMIT 1', [slug, sourceId],
+  );
+  const body = [rows[0]?.compiled_truth, rows[0]?.timeline].filter(Boolean).join('\n');
+  if (body) {
+    let fence: ReturnType<typeof parseLearningLoopFence>;
+    try { fence = parseLearningLoopFence(body); }
+    catch { throw new Error('managed_state_unavailable: malformed managed row marker'); }
+    if (fence) {
+      if (fence.value.source_id !== sourceId || fence.value.canonical_slug !== slug) {
+        throw new Error('managed_state_unavailable: managed row marker target mismatch');
+      }
+      return true;
+    }
+  }
+  const ledgerConfig = engine.learningLoopLedgerConfig?.();
+  const active = ledgerConfig ? activeV2DestinationBinding({ config: ledgerConfig }) : undefined;
+  return Boolean(active && active.source_id === sourceId && active.canonical_slug === slug);
+}
+
+/**
+ * Inspect the exact source-qualified canonical target before a DB mutation.
+ * Missing or malformed state is never treated as unmanaged when a caller has
+ * an expectation hint. The returned permit is module-created and cannot be
+ * forged by copying its fields.
+ */
+export function inspectExpectedManagedState(
+  target: SourceQualifiedCanonicalTarget,
+  lease: SourceWriteLease,
+  options: ExpectedManagedPreflightOptions = {},
+): ExpectedManagedState {
+  validateTarget(target);
+  checkLease(target, lease);
+  const path = targetPath(target, lease);
+  let canonical = '';
+  try { canonical = readFileSync(path, 'utf8'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (expectedBoolean(options.expected) === true) throw new Error('managed_state_unavailable: canonical page is missing');
+  }
+  let managed = false;
+  if (canonical) {
+    let parsed: ReturnType<typeof parseLearningLoopFence>;
+    try { parsed = parseLearningLoopFence(canonical); }
+    catch { throw new Error('managed_state_unavailable: malformed protected fence'); }
+    if (parsed) {
+      managed = true;
+      const identity = parsed.value;
+      if (identity.brain_id !== target.brain_id || identity.source_id !== target.source_id || identity.canonical_slug !== target.canonical_slug) {
+        throw new Error('managed_state_unavailable: metadata target mismatch');
+      }
+      if (options.protectedStateHash && options.protectedStateHash !== sha256(parsed.raw)) {
+        throw new Error('managed_state_unavailable: protected state hash mismatch');
+      }
+    }
+  }
+  const expected = expectedBoolean(options.expected);
+  if (expected === true && !managed) throw new Error('managed_state_unavailable: expected managed state is absent');
+  if (expected === false && managed) throw new Error('managed_state_unavailable: unexpected managed state');
+  const canonical_sha256 = canonical ? sha256(canonical) : sha256('');
+  const permit = Object.freeze({
+    __brand: 'PageDbMutationPermit' as const,
+    brain_id: target.brain_id, source_id: target.source_id, canonical_slug: target.canonical_slug,
+    mutation_class: options.mutationClass ?? 'canonical_reconciliation',
+    managed, canonical_sha256: managed ? canonical_sha256 : null,
+    lease_token: lease.token,
+  });
+  mutationPermits.add(permit);
+  return { managed, canonical, canonical_sha256, permit };
+}
+
+export function assertPageDbMutationPermit(
+  permit: PageDbMutationPermit,
+  target: SourceQualifiedCanonicalTarget,
+  mutationClass: PageDbMutationClass,
+): void {
+  if (!permit || !mutationPermits.has(permit) || permit.__brand !== 'PageDbMutationPermit'
+    || permit.brain_id !== target.brain_id || permit.source_id !== target.source_id
+    || permit.canonical_slug !== target.canonical_slug || permit.mutation_class !== mutationClass) {
+    throw new Error('managed_state_unavailable: invalid page DB mutation permit');
+  }
+  if (permit.lease_token === null || !liveLeaseTokens.has(permit.lease_token)) throw new Error('managed_state_unavailable: stale page DB mutation permit');
+}
+
+/** Reconcile a page row only from bytes that were returned by the canonical sink. */
+export function reconcileCanonicalReadback(
+  target: SourceQualifiedCanonicalTarget,
+  lease: SourceWriteLease,
+  readback: string,
+  permit: PageDbMutationPermit,
+): string {
+  checkLease(target, lease);
+  assertPageDbMutationPermit(permit, target, 'canonical_reconciliation');
+  const path = targetPath(target, lease);
+  let actual: string;
+  try { actual = readFileSync(path, 'utf8'); } catch { throw new Error('managed_state_unavailable: canonical readback unavailable'); }
+  if (sha256(actual) !== permit.canonical_sha256 && permit.managed) throw new Error('managed_state_unavailable: canonical readback hash changed');
+  if (actual !== readback) throw new Error('managed_state_unavailable: canonical readback mismatch');
+  const inspected = inspectExpectedManagedState(target, lease, { expected: permit.managed });
+  if (inspected.canonical !== readback) throw new Error('managed_state_unavailable: canonical readback changed');
+  return actual;
+}
+
+/**
+ * Guard for legacy path-only writers. Such a lane is safe only outside a
+ * managed canonical page; it must reject before touching bytes when either
+ * the current or proposed content carries Learning Loop metadata.
+ */
+export function assertUnmanagedPathMutation(path: string, nextContent?: string): void {
+  let current = '';
+  try { current = readFileSync(path, 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  try {
+    if (current) parseLearningLoopFence(current);
+    if (nextContent) parseLearningLoopFence(nextContent);
+  } catch {
+    throw new Error('managed_state_unavailable: malformed protected fence');
+  }
+  if (parseLearningLoopFence(current) || (nextContent && parseLearningLoopFence(nextContent))) {
+    throw new Error('managed_state_unavailable: path-only writer cannot mutate managed canonical page');
+  }
+}
+
+/** Engine-sink guard for mutations which can replace canonical content. */
+export async function assertManagedPageMutationAllowed(
+  engine: Pick<BrainEngine, 'executeRaw' | 'getConfig' | 'learningLoopLedgerConfig'>,
+  slug: string,
+  sourceId: string,
+  mutationClass: PageDbMutationClass,
+  permit?: PageDbMutationPermit,
+): Promise<void> {
+  if (permit && (permit.source_id !== sourceId || permit.canonical_slug !== slug)) {
+    throw new Error('managed_state_unavailable: canonical permit target mismatch');
+  }
+  const expectedManaged = await expectedManagedByDurableHint(engine, slug, sourceId);
+  const root = await resolveEffectiveCanonicalRoot(engine, sourceId);
+  if (!root) {
+    if (expectedManaged) throw new Error('managed_state_unavailable: expected canonical root is unavailable');
+    return;
+  }
+  const path = join(resolve(root), `${slug}.md`);
+  let content: string;
+  try { content = readFileSync(path, 'utf8'); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if ((code === 'ENOENT' || code === 'ENOTDIR') && !permit && !expectedManaged) return;
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw new Error('managed_state_unavailable: canonical permit target is missing');
+    throw error;
+  }
+  let fence: ReturnType<typeof parseLearningLoopFence>;
+  try { fence = parseLearningLoopFence(content); }
+  catch { throw new Error('managed_state_unavailable: malformed protected fence'); }
+  if (!fence) {
+    if (expectedManaged) throw new Error('managed_state_unavailable: expected managed state is absent');
+    return;
+  }
+  if (permit && (permit.brain_id !== fence.value.brain_id
+    || permit.source_id !== fence.value.source_id
+    || permit.canonical_slug !== fence.value.canonical_slug
+    || sourceId !== fence.value.source_id || slug !== fence.value.canonical_slug)) {
+    throw new Error('managed_state_unavailable: canonical permit target mismatch');
+  }
+  if (mutationClass !== 'derived_only') {
+    if (mutationClass === 'canonical_reconciliation' && permit) {
+      assertPageDbMutationPermit(permit, { brain_id: fence.value.brain_id, source_id: fence.value.source_id, canonical_slug: fence.value.canonical_slug, configured_root: root }, mutationClass);
+      if (!permit.managed || permit.canonical_sha256 !== sha256(content)) throw new Error('managed_state_unavailable: canonical permit hash mismatch');
+      return;
+    }
+    throw new Error('managed_state_unavailable: managed canonical page mutation rejected');
+  }
+}
+export async function withSourceWriteLease<T>(target: SourceQualifiedCanonicalTarget, fn: (lease: SourceWriteLease) => Promise<T>, opts: { sourceLock: (target: SourceQualifiedCanonicalTarget) => Promise<() => Promise<void>> }): Promise<T> { const release=await opts.sourceLock(target); try { const configured_root=resolve(target.configured_root), root_realpath=realpathSync(configured_root), st=statSync(root_realpath); if(!st.isDirectory())throw new Error('canonical root unavailable'); const lease=Object.freeze({__brand:'SourceWriteLease' as const,brain_id:target.brain_id,source_id:target.source_id,configured_root,root_realpath,token:randomUUID(),dev:st.dev,ino:st.ino}); liveLeases.add(lease); liveLeaseTokens.add(lease.token); try{return await fn(lease);}finally{liveLeases.delete(lease); liveLeaseTokens.delete(lease.token);} } finally { await release(); } }
+/** Acquire the existing per-source DB lock and expose its exact lease. */
+export async function withCanonicalSourceBoundary<T>(
+  engine: BrainEngine,
+  target: SourceQualifiedCanonicalTarget,
+  fn: (lease: SourceWriteLease) => Promise<T>,
+): Promise<T> {
+  const inherited = sourceLeaseContext.getStore();
+  if (inherited
+    && inherited.brain_id === target.brain_id
+    && inherited.source_id === target.source_id
+    && inherited.configured_root === resolve(target.configured_root)) {
+    checkLease(target, inherited);
+    return fn(inherited);
+  }
+  return withRefreshingLock(engine, syncLockId(target.source_id), async () => {
+    const configured_root = resolve(target.configured_root);
+    const root_realpath = realpathSync(configured_root);
+    const st = statSync(root_realpath);
+    if (!st.isDirectory()) throw new Error('canonical root unavailable');
+    const lease = Object.freeze({ __brand: 'SourceWriteLease' as const,
+      brain_id: target.brain_id, source_id: target.source_id, configured_root,
+      root_realpath, token: randomUUID(), dev: st.dev, ino: st.ino });
+    liveLeases.add(lease); liveLeaseTokens.add(lease.token);
+    try { return await sourceLeaseContext.run(lease, () => fn(lease)); }
+    finally { liveLeases.delete(lease); liveLeaseTokens.delete(lease.token); }
+  });
+}
 function checkLease(t:SourceQualifiedCanonicalTarget,l:SourceWriteLease):void { const configured=resolve(t.configured_root), real=realpathSync(configured), st=statSync(real); if(!l || !liveLeases.has(l) || l.__brand!=='SourceWriteLease' || l.brain_id!==t.brain_id || l.source_id!==t.source_id || l.configured_root!==configured || l.root_realpath!==real || l.dev!==st.dev || l.ino!==st.ino) throw new Error('invalid or stale SourceWriteLease'); }
 export async function writeCanonicalPage(target: SourceQualifiedCanonicalTarget, content: string, options: CanonicalWriteOptions): Promise<string> {
   validateTarget(target);
@@ -104,6 +367,7 @@ export async function writeCanonicalPage(target: SourceQualifiedCanonicalTarget,
   const lock = await acquirePageLock(target.canonical_slug, { lockRoot: options.lockRoot, brainId: target.brain_id, sourceId: target.source_id });
   if (!lock) throw new Error('canonical page is busy');
   try {
+    const preflight = inspectExpectedManagedState(target, options.sourceLease, { expected: options.expectedManaged });
     const current = (() => {
       try { return readFileSync(path, 'utf8'); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; }
@@ -113,7 +377,13 @@ export async function writeCanonicalPage(target: SourceQualifiedCanonicalTarget,
       throw new Error('managed_state_unavailable: metadata target mismatch');
     }
     const staged = prepare(content, current, options.mode, options.transitionPermit);
-    atomic(path, staged, root, () => checkLease(target, options.sourceLease), options.beforeRename);
+    atomic(path, staged, root, () => {
+      checkLease(target, options.sourceLease);
+      // Repeat the expectation check after all caller barriers and immediately
+      // before rename. A deleted/corrupted managed fence cannot downgrade to
+      // an unmanaged write between preflight and commit.
+      inspectExpectedManagedState(target, options.sourceLease, { expected: preflight.managed });
+    }, options.beforeRename);
     const readback = readFileSync(path, 'utf8');
     if (readback !== staged) throw new Error('canonical readback mismatch');
     return readback;

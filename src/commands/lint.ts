@@ -28,6 +28,7 @@ import {
 import { loadOperatorLiterals } from '../core/content-sanity-literals.ts';
 import { loadConfig, loadConfigWithEngine, gbrainPath } from '../core/config.ts';
 import type { BrainEngine } from '../core/engine.ts';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 
 export interface LintIssue {
   file: string;
@@ -474,6 +475,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
         const fixCount = issues.filter(i => i.fixable).length;
         totalFixed += fixCount;
         if (!opts.dryRun) {
+          assertUnmanagedPathMutation(page, fixed);
           writeFileSync(page, fixed);
         }
       }
@@ -544,6 +546,7 @@ export async function runLint(args: string[]) {
       if (fixed !== content) {
         const fixCount = issues.filter(i => i.fixable).length;
         if (!dryRun) {
+          assertUnmanagedPathMutation(page, fixed);
           writeFileSync(page, fixed);
         }
         console.log(`  ${dryRun ? '(dry run) ' : ''}Fixed ${fixCount} issue(s)`);

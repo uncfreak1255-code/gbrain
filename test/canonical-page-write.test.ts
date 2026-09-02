@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import {
   writeCanonicalPage,
   withSourceWriteLease,
+  inspectExpectedManagedState,
   type CanonicalWriterMode,
   type SourceQualifiedCanonicalTarget,
   type SourceWriteLease,
@@ -108,6 +109,20 @@ describe('canonical page write boundary', () => {
     expect(readFileSync(join(moved, 'x.md'), 'utf8')).toBe('# Original\n');
     expect(readdirSync(moved).filter(name => name.endsWith('.tmp'))).toEqual([]);
     expect(existsSync(join(root, 'x.md'))).toBe(false);
+  }));
+
+  test('expected-managed preflight fails closed when the fence is deleted at the barrier', async () => inRoot(async ({ target, path, locks }) => {
+    writeFileSync(path, managedPage());
+    await withSourceWriteLease(target, async lease => {
+      const preflight = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      expect(preflight.managed).toBe(true);
+      await expect(writeCanonicalPage(target, '# Changed\n', {
+        mode: 'ordinary_content', lockRoot: locks, sourceLease: lease,
+        expectedManaged: preflight.managed,
+        beforeRename: () => writeFileSync(path, '# unmanaged replacement\n'),
+      })).rejects.toThrow('expected managed state is absent');
+    }, { sourceLock });
+    expect(readFileSync(path, 'utf8')).toBe('# unmanaged replacement\n');
   }));
 
   test('rejects traversal before consulting a lease', async () => inRoot(async ({ root, locks }) => {

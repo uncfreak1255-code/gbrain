@@ -10,7 +10,7 @@ import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import type { EvalReplaySurface, PageType } from './types.ts';
 import { importFromContent } from './import-file.ts';
-import { writePageThrough } from './write-through.ts';
+import { importAndWriteCanonicalPage } from './write-through.ts';
 import { parseMarkdown } from './markdown.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags } from './search/hybrid.ts';
 import { expandQuery } from './search/expansion.ts';
@@ -947,12 +947,14 @@ const put_page: Operation = {
     if (provenanceUri) {
       frontmatterOverrides.source_uri = provenanceUri;
     }
-    const { withRecoverySourceWriteBoundary } = await import('./recovery-source-refresh.ts');
-    const { result, writeThrough } = await withRecoverySourceWriteBoundary(
-      ctx.engine,
+    const { result, writeThrough } = await importAndWriteCanonicalPage(ctx.engine, slug, {
+      brainId: ctx.brainId ?? 'host',
       sourceId,
-      async (recovery) => {
-        const imported = await importFromContent(ctx.engine, slug, content, {
+      content,
+      skipWriteThrough: isSandboxSubagent,
+      frontmatterOverrides,
+      logger: ctx.logger,
+      importOptions: {
           noEmbed,
           // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
           // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
@@ -970,24 +972,9 @@ const put_page: Operation = {
           source_kind: provenanceKind,
           source_uri: provenanceUri,
           ingested_via: provenanceVia,
-        });
-
-        let writeThrough: { written: boolean; path?: string; skipped?: string; error?: string } | undefined;
-        if (!ctx.dryRun && imported.status !== 'error' && !isSandboxSubagent) {
-          writeThrough = await writePageThrough(ctx.engine, imported.slug, {
-            sourceId,
-            recoveryCheckout: recovery,
-            frontmatterOverrides,
-            logger: ctx.logger,
-          });
-        } else if (isSandboxSubagent) {
-          writeThrough = { written: false, skipped: 'subagent_sandbox' };
-        } else if (ctx.dryRun) {
-          writeThrough = { written: false, skipped: 'dry_run' };
-        }
-        return { result: imported, writeThrough };
       },
-    );
+    });
+    const effectiveWriteThrough = writeThrough;
 
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
@@ -1166,7 +1153,7 @@ const put_page: Operation = {
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
       ...(writerLint ? { writer_lint: writerLint } : {}),
       ...(factsQueued ? { facts_backstop: factsQueued } : {}),
-      ...(writeThrough ? { write_through: writeThrough } : {}),
+      ...(effectiveWriteThrough ? { write_through: effectiveWriteThrough } : {}),
     };
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },

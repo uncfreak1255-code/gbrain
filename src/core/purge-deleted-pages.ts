@@ -3,6 +3,7 @@ import type {
   PurgeDeletedPageCandidate,
   PurgeDeletedPagesResult,
 } from './engine.ts';
+import { assertManagedPageMutationAllowed } from './canonical-page-write.ts';
 
 interface PurgeCandidateRow extends PurgeDeletedPageCandidate {
   id: number;
@@ -240,6 +241,14 @@ export async function purgeDeletedPagesSafely(
 
   return engine.transaction(async (transaction) => {
     const candidates = await selectLiveCandidates(transaction, hours);
+    for (const candidate of candidates) {
+      await assertManagedPageMutationAllowed(
+        transaction,
+        candidate.slug,
+        candidate.source_id,
+        'destructive_admin',
+      );
+    }
     const deletedIds = new Set(await deleteCandidateBatch(
       transaction,
       candidates,

@@ -18,6 +18,7 @@ import type {
   AdjacencyRow,
   EnrichCandidatesOpts, EnrichCandidate,
 } from './types.ts';
+import type { PageDbMutationPermit } from './canonical-page-write.ts';
 
 /**
  * v0.27.1: file row for binary-asset metadata. Mirrors the `files` table
@@ -677,6 +678,8 @@ export interface BrainEngine {
    */
   reconnect(ctx?: { error?: unknown }): Promise<void>;
   initSchema(): Promise<void>;
+  /** Exact connection identity used to scope the local Learning Loop ledger. */
+  learningLoopLedgerConfig?(): Pick<EngineConfig, 'database_url' | 'database_path'>;
   transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T>;
   /**
    * Run `fn` inside a database savepoint on the current transaction-scoped
@@ -708,7 +711,7 @@ export interface BrainEngine {
    * DO UPDATE actually targets the intended row instead of fabricating a
    * duplicate at (default, slug). Multi-source brains MUST pass sourceId.
    */
-  putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page>;
+  putPage(slug: string, page: PageInput, opts?: { sourceId?: string; canonicalPermit?: PageDbMutationPermit }): Promise<Page>;
   /**
    * v0.41.13 (#1309) — identity-based dedup pre-check for the import pipeline.
    *

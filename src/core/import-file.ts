@@ -1,8 +1,14 @@
-import { readFileSync, statSync, lstatSync } from 'fs';
-import { basename, extname } from 'path';
+import { readFileSync, statSync, lstatSync, realpathSync } from 'fs';
+import { basename, extname, join } from 'path';
 import { createHash } from 'crypto';
 import { marked } from 'marked';
 import type { BrainEngine, FileSpec } from './engine.ts';
+import {
+  inspectExpectedManagedState,
+  resolveEffectiveCanonicalRoot,
+  withCanonicalSourceBoundary,
+  type PageDbMutationPermit,
+} from './canonical-page-write.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
@@ -47,6 +53,8 @@ import {
   type VerifiedRecoverySlugOverride,
 } from './source-recovery-manifest.ts';
 import { hashParsedMarkdownForImport } from './import-content-hash.ts';
+import { parseLearningLoopFence } from './learning-loop-knowledge.ts';
+import { activeV2DestinationBinding } from './learning-loop.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -243,6 +251,8 @@ export async function importFromContent(
   opts: {
     noEmbed?: boolean;
     sourceId?: string;
+    canonicalPermit?: PageDbMutationPermit;
+    canonicalReadback?: string;
     /**
      * v0.29.1: basename without extension for filename-date precedence on
      * `daily/`, `meetings/` slugs. importFromFile threads this from the
@@ -309,6 +319,9 @@ export async function importFromContent(
     recoverySlug?: VerifiedRecoverySlugOverride;
   } = {},
 ): Promise<ImportResult> {
+  if (opts.canonicalPermit && (opts.canonicalReadback === undefined || content !== opts.canonicalReadback)) {
+    throw new Error('managed_state_unavailable: import content is not exact canonical readback');
+  }
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
   // every per-page tx call must carry `sourceId` so writes target the right
   // (source_id, slug) row. Pre-fix, putPage relied on the schema DEFAULT and
@@ -741,7 +754,9 @@ export async function importFromContent(
   // caller's sourceId so writes target (sourceId, slug) rather than the
   // schema DEFAULT — required for multi-source brains; harmless ('default')
   // for single-source callers.
-  const txOpts = sourceId ? { sourceId } : undefined;
+  const txOpts = sourceId || opts.canonicalPermit
+    ? { ...(sourceId ? { sourceId } : {}), ...(opts.canonicalPermit ? { canonicalPermit: opts.canonicalPermit } : {}) }
+    : undefined;
   await engine.transaction(async (tx) => {
     if (opts.recoverySlug !== undefined) {
       await assertVerifiedRecoverySlugOverrideForWrite(
@@ -932,6 +947,8 @@ export async function importFromFile(
     noEmbed?: boolean;
     inferFrontmatter?: boolean;
     sourceId?: string;
+    canonicalPermit?: PageDbMutationPermit;
+    canonicalReadback?: string;
     forceRechunk?: boolean;
     /**
      * v0.39 T1.5: active schema pack threaded through to importFromContent so
@@ -964,6 +981,7 @@ export async function importFromFile(
   // so reopening the path later would reintroduce a file TOCTOU window.
   const contentBytes = readFileSync(filePath);
   let content = contentBytes.toString('utf8');
+  const canonicalContent = content;
 
   // Route code files through the code import path
   if (opts.recoverySlug?.pageKind === 'code') {
@@ -1113,6 +1131,40 @@ export async function importFromFile(
   // filename `2024-03-15`.
   const fileBasename = basename(relativePath, '.md');
   try {
+    if (!opts.canonicalPermit) {
+      const sourceId = opts.sourceId ?? 'default';
+      const root = await resolveEffectiveCanonicalRoot(engine, sourceId);
+      const marker = parseLearningLoopFence(canonicalContent);
+      const ledgerConfig = engine.learningLoopLedgerConfig?.();
+      const active = ledgerConfig ? activeV2DestinationBinding({ config: ledgerConfig }) : undefined;
+      const activeExpected = Boolean(active && active.source_id === sourceId && active.canonical_slug === resolvedSlug);
+      if (marker || activeExpected) {
+        if (!root) throw new Error('managed_state_unavailable: expected canonical root is unavailable');
+        const target = {
+          brain_id: marker?.value.brain_id ?? active!.brain_id,
+          source_id: sourceId,
+          canonical_slug: resolvedSlug,
+          configured_root: root,
+        };
+        return await withCanonicalSourceBoundary(engine, target, async sourceLease => {
+          const expectedPath = join(sourceLease.root_realpath, `${resolvedSlug}.md`);
+          if (realpathSync(filePath) !== realpathSync(expectedPath)) {
+            throw new Error('managed_state_unavailable: import path is not the canonical target');
+          }
+          const inspected = inspectExpectedManagedState(target, sourceLease, { expected: true });
+          if (inspected.canonical !== canonicalContent) {
+            throw new Error('managed_state_unavailable: import content is not exact canonical readback');
+          }
+          return importFromContent(engine, resolvedSlug, canonicalContent, {
+            ...opts,
+            filename: fileBasename,
+            sourcePath: relativePath,
+            canonicalPermit: inspected.permit,
+            canonicalReadback: inspected.canonical,
+          });
+        });
+      }
+    }
     return await importFromContent(engine, resolvedSlug, content, {
       ...opts,
       filename: fileBasename,
@@ -1481,6 +1533,7 @@ export interface ImportTransactionSpec {
   /** Source containing the page, chunks, file row, and type-specific writes. */
   sourceId?: string;
   page: PageInput;
+  canonicalPermit?: PageDbMutationPermit;
   /** When undefined, no chunk write happens. When [], deletes any prior chunks. */
   chunks?: ChunkInput[];
   /** Optional file-row insert (image ingest). Page link injected automatically. */
@@ -1494,7 +1547,9 @@ export async function withImportTransaction(
   spec: ImportTransactionSpec,
 ): Promise<void> {
   const sourceId = spec.sourceId ?? 'default';
-  const txOpts = spec.sourceId ? { sourceId: spec.sourceId } : undefined;
+  const txOpts = spec.sourceId || spec.canonicalPermit
+    ? { ...(spec.sourceId ? { sourceId: spec.sourceId } : {}), ...(spec.canonicalPermit ? { canonicalPermit: spec.canonicalPermit } : {}) }
+    : undefined;
   await engine.transaction(async (tx) => {
     if (spec.hadExisting) await tx.createVersion(spec.slug, txOpts);
     await tx.putPage(spec.slug, spec.page, txOpts);

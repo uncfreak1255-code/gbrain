@@ -1045,6 +1045,14 @@ export function activeV2CorpusBinding(opts: LedgerOptions = {}): CorpusBindingV1
   return armed?.contract_version === 2 ? armed.corpus_binding : undefined;
 }
 
+/** Frozen canonical destination for the active V2 run, if one exists. */
+export function activeV2DestinationBinding(opts: LedgerOptions = {}): DestinationBindingV1 | undefined {
+  const state = replayLearningLoop(readLearningLoopLedger(opts));
+  if (state.active_run_id === null) return undefined;
+  const armed = state.runs.get(state.active_run_id)?.armed;
+  return armed?.contract_version === 2 ? armed.destination_binding : undefined;
+}
+
 function appendEvent(event: LearningLoopEvent, opts: LedgerOptions): void {
   verifyEvent(event);
   const path = learningLoopLedgerPath(opts);

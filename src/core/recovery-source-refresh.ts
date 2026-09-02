@@ -14,15 +14,27 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { syncLockId, withRefreshingLock } from './db-lock.ts';
 import type { BrainEngine } from './engine.ts';
 import { serializeMarkdown } from './markdown.ts';
 import { renameDirectoryNoReplace } from './atomic-directory-publish.ts';
 import type { RawData } from './types.ts';
 import type { WriteThroughResult } from './write-through.ts';
+import { activeV2CorpusBinding, activeV2DestinationBinding } from './learning-loop.ts';
+import { withCanonicalSourceBoundary } from './canonical-page-write.ts';
+import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
 
 const MANIFEST_FILENAME = '.gbrain-export-manifest.json';
 const SCOPED_EXPORT_BATCH_SIZE = 5_000;
+
+function assertNoActiveV2SourceReplacement(engine: BrainEngine, sourceId: string): void {
+  const config = engine.learningLoopLedgerConfig?.();
+  if (!config) throw new Error('managed_state_unavailable: Learning Loop brain scope is unavailable');
+  const corpus = activeV2CorpusBinding({ config });
+  const destination = activeV2DestinationBinding({ config });
+  if (corpus?.source_id === sourceId || destination?.source_id === sourceId) {
+    throw new Error(`managed_state_unavailable: active V2 run freezes source ${JSON.stringify(sourceId)}`);
+  }
+}
 
 interface ExportManifestPage {
   slug: string;
@@ -761,9 +773,17 @@ export async function withRecoverySourceWriteBoundary<T>(
   sourceId: string,
   fn: (recovery: RecoveryBackedSourceCheckout | null) => Promise<T>,
 ): Promise<T> {
+  assertNoActiveV2SourceReplacement(engine, sourceId);
   const initial = await getRecoveryBackedSourceCheckout(engine, sourceId);
   if (!initial) return fn(null);
-  return withRefreshingLock(engine, syncLockId(sourceId), async () => {
+  const target = {
+    brain_id: computeBrainIdFromConfig(engine.learningLoopLedgerConfig?.() ?? {}),
+    source_id: sourceId,
+    canonical_slug: '_source-boundary',
+    configured_root: initial.repoPath,
+  };
+  return withCanonicalSourceBoundary(engine, target, async () => {
+    assertNoActiveV2SourceReplacement(engine, sourceId);
     const locked = await getRecoveryBackedSourceCheckout(engine, sourceId);
     if (!locked) {
       throw new Error(
@@ -781,6 +801,7 @@ export async function refreshRecoverySourceCheckout(
   slug: string,
   recovery: RecoveryBackedSourceCheckout,
 ): Promise<RecoveryRefreshResult> {
+  assertNoActiveV2SourceReplacement(engine, sourceId);
   if (!existsSync(recovery.repoPath) || !lstatSync(recovery.repoPath).isDirectory()) {
     return {
       written: false,
