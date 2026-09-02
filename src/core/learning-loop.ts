@@ -95,6 +95,96 @@ export interface RunArmedEvent extends EventBase {
   };
 }
 
+/** Version 2 freezes the inputs which identify both evidence and its target. */
+export interface RootBindingV1 {
+  configured_root_hash: string;
+  canonical_realpath: string;
+  device: number;
+  inode: number;
+  binding_hash: string;
+}
+export interface CorpusBindingV1 extends RootBindingV1 { source_id: string }
+export interface DestinationBindingV1 extends RootBindingV1 {
+  brain_id: string;
+  source_id: string;
+  canonical_slug: string;
+  topology: 'source_local_path' | 'sync_repo_path';
+}
+export interface ExactEventRecordV1 {
+  schema_version: 1;
+  event_id: string;
+  event_payload_canonical_json: string;
+  event_payload_sha256: string;
+  brain_id: string;
+  run_id: string;
+  occurred_at: string;
+  semantic_sequence: number;
+}
+export interface RunArmedEventV2 extends Omit<RunArmedEvent, 'contract_version' | 'destination'> {
+  contract_version: 2;
+  corpus_binding: CorpusBindingV1;
+  destination_binding: DestinationBindingV1;
+}
+
+export type CorpusConfiguredRootPreimageV1 = {
+  schema_version: 1;
+  binding_kind: 'corpus_codex';
+  root: { plane: 'db_config' | 'file_config'; key: 'learning_loop.corpus.codex.root'; value: string };
+  source: { plane: 'db_config' | 'file_config'; key: 'learning_loop.corpus.codex.source_id'; value: string };
+};
+export type DestinationConfiguredRootPreimageV1 = {
+  schema_version: 1;
+  binding_kind: 'destination';
+  source_id: string;
+  topology: 'source_local_path' | 'sync_repo_path';
+  root:
+    | { plane: 'sources_row'; key: 'sources.local_path'; value: string }
+    | { plane: 'db_config'; key: 'sync.repo_path'; value: string };
+};
+export type CanonicalRootPreimageV1 = CorpusConfiguredRootPreimageV1 | DestinationConfiguredRootPreimageV1;
+
+export function canonicalSha256(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
+}
+
+function strictObject(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new LearningLoopError('ledger_corrupt', 'Expected an object');
+  const object = value as Record<string, unknown>;
+  if (Object.keys(object).some((key) => !keys.includes(key))) throw new LearningLoopError('ledger_corrupt', 'Unknown exact-record field');
+  return object;
+}
+
+export function decodeExactEventRecordV1(value: unknown): ExactEventRecordV1 {
+  const o = strictObject(value, ['schema_version', 'event_id', 'event_payload_canonical_json', 'event_payload_sha256', 'brain_id', 'run_id', 'occurred_at', 'semantic_sequence']);
+  if (o.schema_version !== 1 || typeof o.event_id !== 'string' || typeof o.event_payload_canonical_json !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(String(o.event_payload_sha256)) || typeof o.brain_id !== 'string' || typeof o.run_id !== 'string' ||
+      typeof o.occurred_at !== 'string' || !Number.isSafeInteger(o.semantic_sequence) || (o.semantic_sequence as number) < 1) {
+    throw new LearningLoopError('ledger_corrupt', 'Invalid ExactEventRecordV1');
+  }
+  let payload: unknown;
+  try { payload = JSON.parse(o.event_payload_canonical_json); } catch { throw new LearningLoopError('ledger_corrupt', 'Exact event payload is not JSON'); }
+  if (canonicalJson(payload) !== o.event_payload_canonical_json || canonicalSha256(payload) !== o.event_payload_sha256 ||
+      canonicalSha256(payload) !== o.event_id) {
+    throw new LearningLoopError('ledger_corrupt', 'Exact event payload bytes or hash disagree');
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new LearningLoopError('ledger_corrupt', 'Exact event payload must be an object');
+  const p = payload as Record<string, unknown>;
+  if (p.brain_id !== o.brain_id || p.run_id !== o.run_id || p.occurred_at !== o.occurred_at || p.semantic_sequence !== o.semantic_sequence) {
+    throw new LearningLoopError('ledger_corrupt', 'Exact event identity disagrees with its envelope');
+  }
+  return o as unknown as ExactEventRecordV1;
+}
+
+export function makeExactEventRecordV1(input: {
+  event_payload: unknown; brain_id: string; run_id: string; occurred_at: string; semantic_sequence: number;
+}): ExactEventRecordV1 {
+  const bytes = canonicalJson(input.event_payload);
+  const event_id = createHash('sha256').update(bytes, 'utf8').digest('hex');
+  return decodeExactEventRecordV1({ schema_version: 1, event_id, event_payload_canonical_json: bytes,
+    event_payload_sha256: createHash('sha256').update(bytes, 'utf8').digest('hex'), brain_id: input.brain_id,
+    run_id: input.run_id, occurred_at: input.occurred_at, semantic_sequence: input.semantic_sequence });
+}
+
 export interface RunAbortedEvent extends EventBase {
   event_type: 'run_aborted';
   command_id: string;
@@ -128,7 +218,7 @@ export interface SessionEvaluatedEvent extends EventBase {
   cohort_sealed: boolean;
 }
 
-export type LearningLoopEvent = RunArmedEvent | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent;
+export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent;
 export type EligibilityReason =
   | 'eligible'
   | 'transcript_too_small'
@@ -138,7 +228,7 @@ export type EligibilityReason =
 export interface RunProjection {
   run_id: string;
   terminal: boolean;
-  armed: RunArmedEvent;
+  armed: RunArmedEvent | RunArmedEventV2;
   cohort: Array<{ provider: 'codex'; provider_session_id: string; content_hash: string }>;
   sealed: boolean;
 }
@@ -166,7 +256,8 @@ export class LearningLoopError extends Error {
       | 'transcript_ambiguous'
       | 'transcript_conflict'
       | 'command_conflict'
-      | 'assertion_mismatch',
+      | 'assertion_mismatch'
+      | 'binding_unavailable',
     message: string,
   ) {
     super(message);
@@ -243,6 +334,96 @@ export async function resolveCodexCorpus(
     return { root, source_id: configuredSource };
   } catch {
     throw new LearningLoopError('transcript_not_found', 'Configured Codex transcript corpus root is unavailable');
+  }
+}
+
+function configuredPath(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0') || !value.startsWith('/')) {
+    throw new LearningLoopError('forbidden', 'Learning Loop binding requires a non-empty absolute path');
+  }
+  return value;
+}
+
+function freezeRoot(preimage: CanonicalRootPreimageV1): Omit<RootBindingV1, 'binding_hash'> {
+  const value = configuredPath(preimage.root.value);
+  let canonical_realpath: string;
+  try { canonical_realpath = realpathSync(value); } catch { throw new LearningLoopError('binding_unavailable', 'Learning Loop binding root is unavailable'); }
+  let st: ReturnType<typeof statSync>;
+  try { st = statSync(canonical_realpath); } catch { throw new LearningLoopError('binding_unavailable', 'Learning Loop binding root cannot be stated'); }
+  if (!st.isDirectory()) throw new LearningLoopError('forbidden', 'Learning Loop binding root is not a directory');
+  const configured_root_hash = canonicalSha256(preimage);
+  return { configured_root_hash, canonical_realpath, device: st.dev, inode: st.ino };
+}
+
+export async function resolveCodexCorpusBinding(
+  engine: Pick<BrainEngine, 'getConfig'>,
+  sourceId: string,
+  config?: GBrainConfig,
+): Promise<CorpusBindingV1> {
+  const read = async (key: string, fileValue: unknown): Promise<{ plane: 'db_config' | 'file_config'; value: string }> => {
+    let db: string | null;
+    try { db = await engine.getConfig(key); } catch { throw new LearningLoopError('binding_unavailable', `Unable to read ${key}`); }
+    if (db !== null) return { plane: 'db_config', value: configuredPath(db) };
+    return { plane: 'file_config', value: configuredPath(fileValue) };
+  };
+  const root = await read('learning_loop.corpus.codex.root', config?.learning_loop?.corpus?.codex?.root);
+  let dbSource: string | null;
+  try { dbSource = await engine.getConfig('learning_loop.corpus.codex.source_id'); } catch { throw new LearningLoopError('binding_unavailable', 'Unable to read corpus source'); }
+  const source = dbSource !== null ? { plane: 'db_config' as const, value: dbSource } : { plane: 'file_config' as const, value: config?.learning_loop?.corpus?.codex?.source_id };
+  if (typeof source.value !== 'string' || source.value.length === 0 || source.value.includes('\0') || source.value !== sourceId) throw new LearningLoopError('forbidden', 'Codex corpus source does not match adapter source');
+  const preimage: CorpusConfiguredRootPreimageV1 = { schema_version: 1, binding_kind: 'corpus_codex', root: { plane: root.plane, key: 'learning_loop.corpus.codex.root', value: root.value }, source: { plane: source.plane, key: 'learning_loop.corpus.codex.source_id', value: source.value } };
+  const frozen = freezeRoot(preimage);
+  const binding = { source_id: sourceId, ...frozen };
+  return { ...binding, binding_hash: canonicalSha256(binding) };
+}
+
+export function assertRootBindingUnchanged(binding: RootBindingV1, current: RootBindingV1): void {
+  if (canonicalJson(binding) !== canonicalJson(current)) throw new LearningLoopError('assertion_mismatch', 'Learning Loop root binding changed');
+}
+
+export async function resolveLearningLoopDestinationBinding(
+  engine: Pick<BrainEngine, 'getConfig' | 'executeRaw'>,
+  brainId: string,
+  sourceId: string,
+  canonicalSlug: string,
+): Promise<DestinationBindingV1> {
+  if (!nonEmpty(brainId) || !nonEmpty(sourceId) || !nonEmpty(canonicalSlug) || canonicalSlug.includes('\0')) throw new LearningLoopError('invalid_input', 'Invalid Learning Loop destination');
+  let rows: Array<{ local_path?: string | null }>;
+  try { rows = await engine.executeRaw<{ local_path?: string | null }>('SELECT local_path FROM sources WHERE id = $1', [sourceId]); }
+  catch { throw new LearningLoopError('binding_unavailable', 'Unable to read destination source binding'); }
+  const local = rows[0]?.local_path;
+  let topology: DestinationBindingV1['topology'];
+  let root: DestinationConfiguredRootPreimageV1['root'];
+  if (local !== null && local !== undefined) {
+    root = { plane: 'sources_row', key: 'sources.local_path', value: configuredPath(local) }; topology = 'source_local_path';
+  } else if (sourceId === 'default') {
+    let repo: string | null;
+    try { repo = await engine.getConfig('sync.repo_path'); } catch { throw new LearningLoopError('binding_unavailable', 'Unable to read sync repository binding'); }
+    root = { plane: 'db_config', key: 'sync.repo_path', value: configuredPath(repo) }; topology = 'sync_repo_path';
+  } else throw new LearningLoopError('forbidden', 'Learning Loop destination source has no local path');
+  const preimage: CanonicalRootPreimageV1 = { schema_version: 1, binding_kind: 'destination', source_id: sourceId, topology, root };
+  const frozen = freezeRoot(preimage);
+  const base = { brain_id: brainId, source_id: sourceId, canonical_slug: canonicalSlug, topology, ...frozen };
+  return { ...base, binding_hash: canonicalSha256(base) };
+}
+
+export const resolveDestinationBinding = resolveLearningLoopDestinationBinding;
+
+/** Replay-only validator for the V2 exact delivery stream. V1 events are ignored. */
+export function validateExactEventSequence(records: readonly ExactEventRecordV1[]): void {
+  const next = new Map<string, number>();
+  const seen = new Map<string, string>();
+  for (const raw of records) {
+    const record = decodeExactEventRecordV1(raw);
+    const key = `${record.brain_id}\u0000${record.run_id}`;
+    const identity = canonicalJson(record);
+    const prior = seen.get(`${key}\u0000${record.semantic_sequence}`);
+    if (prior !== undefined && prior !== identity) throw new LearningLoopError('ledger_corrupt', 'Exact sequence has conflicting records');
+    if (prior !== undefined) throw new LearningLoopError('ledger_corrupt', 'Exact sequence contains a duplicate');
+    seen.set(`${key}\u0000${record.semantic_sequence}`, identity);
+    const expected = next.get(key) ?? 1;
+    if (record.semantic_sequence !== expected) throw new LearningLoopError('ledger_corrupt', 'Exact sequence is not contiguous');
+    next.set(key, expected + 1);
   }
 }
 
@@ -390,6 +571,7 @@ function countTextRoles(text: string): { user: number; assistant: number } {
 export async function resolveAuthoritativeTranscript(input: {
   engine: Pick<BrainEngine, 'getConfig'>;
   config?: GBrainConfig;
+  expected_corpus_binding?: CorpusBindingV1;
   provider: 'codex';
   provider_session_id: string;
   source_id: string;
@@ -401,7 +583,14 @@ export async function resolveAuthoritativeTranscript(input: {
   if (input.provider !== 'codex' || !SESSION_ID_RE.test(input.provider_session_id)) {
     throw new LearningLoopError('invalid_input', 'Invalid provider or provider session id');
   }
-  const { root } = await resolveCodexCorpus(input.engine, input.source_id, input.config);
+  let root: string;
+  if (input.expected_corpus_binding) {
+    const current = await resolveCodexCorpusBinding(input.engine, input.source_id, input.config);
+    assertRootBindingUnchanged(input.expected_corpus_binding, current);
+    root = current.canonical_realpath;
+  } else {
+    ({ root } = await resolveCodexCorpus(input.engine, input.source_id, input.config));
+  }
   const matches = findSessionFiles(root, input.provider_session_id);
   if (matches.length === 0) throw new LearningLoopError('transcript_not_found', 'No transcript matches the authorized session');
   if (matches.length !== 1) throw new LearningLoopError('transcript_ambiguous', 'More than one transcript matches the authorized session');
@@ -465,12 +654,20 @@ interface BaselineManifestError {
 export async function discoverBaselineSnapshot(input: {
   engine: Pick<BrainEngine, 'getConfig'>;
   config?: GBrainConfig;
+  expected_corpus_binding?: CorpusBindingV1;
   source_id: string;
   cutoff_at: string;
 }): Promise<RunArmedEvent['baseline_discovery']> {
   const cutoffMs = Date.parse(input.cutoff_at);
   if (!Number.isFinite(cutoffMs)) throw new LearningLoopError('invalid_input', 'Baseline cutoff must be ISO 8601');
-  const { root } = await resolveCodexCorpus(input.engine, input.source_id, input.config);
+  let root: string;
+  if (input.expected_corpus_binding) {
+    const current = await resolveCodexCorpusBinding(input.engine, input.source_id, input.config);
+    assertRootBindingUnchanged(input.expected_corpus_binding, current);
+    root = current.canonical_realpath;
+  } else {
+    ({ root } = await resolveCodexCorpus(input.engine, input.source_id, input.config));
+  }
   const paths: string[] = [];
   const visit = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -571,6 +768,32 @@ function validCandidate(value: unknown): value is BaselineCandidate {
     && /^[a-f0-9]{64}$/.test(candidate.content_hash);
 }
 
+function validRootBinding(value: unknown): value is RootBindingV1 {
+  if (!value || typeof value !== 'object') return false;
+  const b = value as Partial<RootBindingV1>;
+  return /^[a-f0-9]{64}$/.test(b.configured_root_hash ?? '') && typeof b.canonical_realpath === 'string' &&
+    b.canonical_realpath.startsWith('/') && Number.isSafeInteger(b.device) && Number.isSafeInteger(b.inode) &&
+    /^[a-f0-9]{64}$/.test(b.binding_hash ?? '');
+}
+
+function validCorpusBinding(value: unknown): value is CorpusBindingV1 {
+  if (!validRootBinding(value)) return false;
+  const b = value as CorpusBindingV1;
+  return nonEmpty(b.source_id) && b.binding_hash === canonicalSha256({ source_id: b.source_id,
+    configured_root_hash: b.configured_root_hash, canonical_realpath: b.canonical_realpath,
+    device: b.device, inode: b.inode });
+}
+
+function validDestinationBinding(value: unknown): value is DestinationBindingV1 {
+  if (!validRootBinding(value)) return false;
+  const b = value as DestinationBindingV1;
+  return nonEmpty(b.brain_id) && nonEmpty(b.source_id) && nonEmpty(b.canonical_slug) &&
+    (b.topology === 'source_local_path' || b.topology === 'sync_repo_path') &&
+    b.binding_hash === canonicalSha256({ brain_id: b.brain_id, source_id: b.source_id, canonical_slug: b.canonical_slug,
+      topology: b.topology, configured_root_hash: b.configured_root_hash, canonical_realpath: b.canonical_realpath,
+      device: b.device, inode: b.inode });
+}
+
 function assertEventShape(event: LearningLoopEvent): void {
   const base = event as Partial<EventBase> & { event_type?: unknown };
   if (
@@ -586,16 +809,13 @@ function assertEventShape(event: LearningLoopEvent): void {
       !nonEmpty(event.run_id)
       || !COMMAND_ID_RE.test(event.command_id)
       || !/^[a-f0-9]{64}$/.test(event.command_payload_hash)
-      || event.contract_version !== 1
+      || (event.contract_version !== 1 && event.contract_version !== 2)
       || !nonEmpty(event.implementation_version)
       || event.provider_allow_list?.length !== 1
       || event.provider_allow_list[0] !== 'codex'
       || event.target_cohort_size !== TARGET_COHORT_SIZE
       || event.eligibility_classifier_version !== ELIGIBILITY_CLASSIFIER_VERSION
       || !validAdapter(event.authorized_adapter)
-      || !nonEmpty(event.destination?.brain_id)
-      || !nonEmpty(event.destination?.source_id)
-      || !nonEmpty(event.destination?.canonical_slug)
       || !validIso(event.baseline_discovery?.cutoff_at)
       || !['complete', 'insufficient', 'ambiguous'].includes(event.baseline_discovery?.status)
       || !/^[a-f0-9]{64}$/.test(event.baseline_discovery?.source_manifest_hash ?? '')
@@ -610,6 +830,17 @@ function assertEventShape(event: LearningLoopEvent): void {
       || canonicalJson(orderBaselineCandidates(selected)) !== canonicalJson(selected)
     ) {
       throw new LearningLoopError('ledger_corrupt', 'Learning Loop run_armed event has an invalid shape');
+    }
+    if (event.contract_version === 2) {
+      if ('destination' in event || !validCorpusBinding(event.corpus_binding) || !validDestinationBinding(event.destination_binding)) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning Loop V2 run_armed event has an invalid binding');
+      }
+      if (event.corpus_binding.source_id !== event.authorized_adapter.source_id
+        || event.destination_binding.source_id !== event.authorized_adapter.source_id) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning Loop V2 binding does not match its authorized adapter');
+      }
+    } else if (!nonEmpty(event.destination?.brain_id) || !nonEmpty(event.destination?.source_id) || !nonEmpty(event.destination?.canonical_slug)) {
+      throw new LearningLoopError('ledger_corrupt', 'Learning Loop V1 run_armed event has an invalid destination');
     }
     return;
   }
@@ -680,13 +911,28 @@ function verifyEvent(event: LearningLoopEvent): void {
   }
 }
 
-export function replayLearningLoop(events: LearningLoopEvent[]): LearningLoopProjection {
+type LearningLoopLedgerRecord = LearningLoopEvent | ExactEventRecordV1;
+
+function isExactEventRecord(value: LearningLoopLedgerRecord): value is ExactEventRecordV1 {
+  return 'event_payload_canonical_json' in value;
+}
+
+function eventFromExactRecord(value: ExactEventRecordV1): LearningLoopEvent {
+  const record = decodeExactEventRecordV1(value);
+  const payload = JSON.parse(record.event_payload_canonical_json) as Record<string, unknown>;
+  if ('event_id' in payload) throw new LearningLoopError('ledger_corrupt', 'Exact event payload must not contain event_id');
+  return { ...payload, event_id: record.event_id } as unknown as LearningLoopEvent;
+}
+
+export function replayLearningLoop(records: LearningLoopLedgerRecord[]): LearningLoopProjection {
   const projection: LearningLoopProjection = {
     events: [], active_run_id: null, runs: new Map(), session_hashes: new Map(), session_events: new Map(), session_bindings: new Map(),
   };
+  validateExactEventSequence(records.filter(isExactEventRecord));
   const ids = new Map<string, string>();
   const commands = new Set<string>();
-  for (const event of events) {
+  for (const ledgerRecord of records) {
+    const event = isExactEventRecord(ledgerRecord) ? eventFromExactRecord(ledgerRecord) : ledgerRecord;
     verifyEvent(event);
     const canonical = canonicalJson(event);
     const prior = ids.get(event.event_id);
@@ -783,14 +1029,20 @@ export function readLearningLoopLedger(opts: LedgerOptions = {}): LearningLoopEv
     throw new LearningLoopError('ledger_corrupt', 'Learning Loop ledger exceeds the bounded replay limit');
   }
   if (raw.length > 0 && !raw.endsWith('\n')) throw new LearningLoopError('ledger_corrupt', 'Learning Loop ledger has a partial final line');
-  const events: LearningLoopEvent[] = [];
+  const records: LearningLoopLedgerRecord[] = [];
   for (const line of raw.split('\n')) {
     if (!line) continue;
-    try { events.push(JSON.parse(line) as LearningLoopEvent); }
+    try { records.push(JSON.parse(line) as LearningLoopLedgerRecord); }
     catch { throw new LearningLoopError('ledger_corrupt', 'Learning Loop ledger contains malformed JSON'); }
   }
-  replayLearningLoop(events);
-  return events;
+  return replayLearningLoop(records).events;
+}
+
+export function activeV2CorpusBinding(opts: LedgerOptions = {}): CorpusBindingV1 | undefined {
+  const state = replayLearningLoop(readLearningLoopLedger(opts));
+  if (state.active_run_id === null) return undefined;
+  const armed = state.runs.get(state.active_run_id)?.armed;
+  return armed?.contract_version === 2 ? armed.corpus_binding : undefined;
 }
 
 function appendEvent(event: LearningLoopEvent, opts: LedgerOptions): void {
@@ -864,6 +1116,7 @@ export interface ArmLearningLoopInput {
   config?: GBrainConfig;
   authorized_adapter: AdapterIdentity;
   destination: { source_id: string; canonical_slug: string };
+  contract_version?: 1 | 2;
 }
 
 function resolveArmDestination(
@@ -923,7 +1176,7 @@ export function bindLearningLoopSession(
   });
 }
 
-async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOptions): Promise<RunArmedEvent> {
+async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOptions): Promise<RunArmedEvent | RunArmedEventV2> {
   if (!COMMAND_ID_RE.test(input.command_id)) throw new LearningLoopError('invalid_input', 'Invalid arm command id');
   if (
     !validAdapter(input.authorized_adapter)
@@ -932,13 +1185,17 @@ async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOp
     || input.authorized_adapter.source_id !== input.destination.source_id
   ) throw new LearningLoopError('forbidden', 'Arm destination must match the authorized adapter source');
   const destination = resolveArmDestination(input, opts);
+  const v2 = input.contract_version === 2;
+  const corpusBinding = v2 ? await resolveCodexCorpusBinding(input.engine, input.authorized_adapter.source_id, input.config) : null;
+  const destinationBinding = v2 ? await resolveLearningLoopDestinationBinding(input.engine, destination.brain_id, destination.source_id, destination.canonical_slug) : null;
   const occurredAt = (opts.now ?? (() => new Date()))().toISOString();
   const payloadHash = commandPayloadHash({
     authorized_adapter: input.authorized_adapter,
     destination,
+    ...(v2 ? { contract_version: 2 } : {}),
   });
-  const existing = await withLedgerMutation<RunArmedEvent | null>(input.engine, opts, (state) => {
-    const prior = state.events.find((event): event is RunArmedEvent => event.event_type === 'run_armed' && event.command_id === input.command_id);
+  const existing = await withLedgerMutation<RunArmedEvent | RunArmedEventV2 | null>(input.engine, opts, (state) => {
+    const prior = state.events.find((event): event is RunArmedEvent | RunArmedEventV2 => event.event_type === 'run_armed' && event.command_id === input.command_id);
     if (!prior) return { value: null };
     if (prior.command_payload_hash !== payloadHash) throw new LearningLoopError('command_conflict', 'Arm command id was reused with a different payload');
     return { value: prior };
@@ -947,11 +1204,18 @@ async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOp
   const baselineDiscovery = await discoverBaselineSnapshot({
     engine: input.engine,
     config: input.config,
+    expected_corpus_binding: corpusBinding ?? undefined,
     source_id: input.authorized_adapter.source_id,
     cutoff_at: occurredAt,
   });
-  return withLedgerMutation<RunArmedEvent>(input.engine, opts, (state) => {
-    const prior = state.events.find((event): event is RunArmedEvent => event.event_type === 'run_armed' && event.command_id === input.command_id);
+  if (v2) {
+    const corpusAfter = await resolveCodexCorpusBinding(input.engine, input.authorized_adapter.source_id, input.config);
+    const destinationAfter = await resolveLearningLoopDestinationBinding(input.engine, destination.brain_id, destination.source_id, destination.canonical_slug);
+    assertRootBindingUnchanged(corpusBinding!, corpusAfter);
+    assertRootBindingUnchanged(destinationBinding!, destinationAfter);
+  }
+  return withLedgerMutation<RunArmedEvent | RunArmedEventV2>(input.engine, opts, (state) => {
+    const prior = state.events.find((event): event is RunArmedEvent | RunArmedEventV2 => event.event_type === 'run_armed' && event.command_id === input.command_id);
     if (prior) {
       if (prior.command_payload_hash !== payloadHash) throw new LearningLoopError('command_conflict', 'Arm command id was reused with a different payload');
       return { value: prior };
@@ -964,24 +1228,25 @@ async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOp
       command_payload_hash: payloadHash,
       occurred_at: occurredAt,
       run_id: randomUUID(),
-      contract_version: 1 as const,
       implementation_version: VERSION,
       provider_allow_list: ['codex'] as ['codex'],
       target_cohort_size: TARGET_COHORT_SIZE,
       eligibility_classifier_version: ELIGIBILITY_CLASSIFIER_VERSION,
       authorized_adapter: input.authorized_adapter,
-      destination,
+      ...(v2 ? { contract_version: 2 as const, corpus_binding: corpusBinding!, destination_binding: destinationBinding! } : { contract_version: 1 as const, destination }),
       baseline_discovery: baselineDiscovery,
     };
-    const event = completeEvent(body) as RunArmedEvent;
+    const event = completeEvent(body) as RunArmedEvent | RunArmedEventV2;
     return { value: event, event };
   });
 }
 
+export function armLearningLoop(input: ArmLearningLoopInput & { contract_version: 2 }, opts?: LedgerOptions): Promise<RunArmedEventV2>;
+export function armLearningLoop(input: ArmLearningLoopInput & { contract_version?: 1 }, opts?: LedgerOptions): Promise<RunArmedEvent>;
 export async function armLearningLoop(
   input: ArmLearningLoopInput,
   opts: LedgerOptions = {},
-): Promise<RunArmedEvent> {
+): Promise<RunArmedEvent | RunArmedEventV2> {
   const scopedOpts = opts.root || opts.config ? opts : { ...opts, config: input.config };
   if (!scopedOpts.root) {
     if (!input.config || !scopedOpts.config) {

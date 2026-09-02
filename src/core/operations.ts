@@ -5288,6 +5288,7 @@ const learning_loop_arm: Operation = {
     authorized_source_id: { type: 'string', required: true },
     source_id: { type: 'string', required: true },
     canonical_slug: { type: 'string', required: true },
+    contract_version: { type: 'string', required: false, enum: ['1', '2'] },
   },
   mutating: true,
   scope: 'admin',
@@ -5295,7 +5296,8 @@ const learning_loop_arm: Operation = {
   handler: async (ctx, p) => {
     assertTrustedLocal(ctx, 'learning_loop_arm');
     return learningLoopCall(async (mod) => {
-      return mod.armLearningLoop({
+      const arm = mod.armLearningLoop as (input: import('./learning-loop.ts').ArmLearningLoopInput) => Promise<unknown>;
+      return arm({
         command_id: p.command_id as string,
         engine: ctx.engine,
         config: ctx.config,
@@ -5308,6 +5310,7 @@ const learning_loop_arm: Operation = {
           source_id: p.source_id as string,
           canonical_slug: p.canonical_slug as string,
         },
+        contract_version: p.contract_version === undefined ? 1 : Number(p.contract_version) as 1 | 2,
       });
     });
   },
@@ -5345,6 +5348,7 @@ const learning_loop_resolve_transcript: Operation = {
     return learningLoopCall((mod) => mod.resolveAuthoritativeTranscript({
       engine: ctx.engine,
       config: ctx.config,
+      expected_corpus_binding: mod.activeV2CorpusBinding({ config: ctx.config }),
       provider: 'codex',
       provider_session_id: p.provider_session_id as string,
       source_id: p.source_id as string,
@@ -5372,6 +5376,7 @@ const learning_loop_bind_session: Operation = {
       await mod.resolveAuthoritativeTranscript({
         engine: ctx.engine,
         config: ctx.config,
+        expected_corpus_binding: mod.activeV2CorpusBinding({ config: ctx.config }),
         provider: 'codex',
         provider_session_id: providerSessionId,
         source_id: sourceId,
@@ -5422,6 +5427,7 @@ const learning_loop_submit_session_v1: Operation = {
     const receipt = await mod.resolveAuthoritativeTranscript({
       engine: ctx.engine,
       config: ctx.config,
+      expected_corpus_binding: mod.activeV2CorpusBinding({ config: ctx.config }),
       provider: 'codex',
       provider_session_id: p.provider_session_id as string,
       source_id: sourceId,
