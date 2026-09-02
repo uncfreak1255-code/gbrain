@@ -449,6 +449,85 @@ describe('append-only run, replay, and cohort reducer', () => {
     });
   });
 
+  test('capture submission cannot join a canary armed during transcript discovery', async () => {
+    const home = tempRoot('learning-loop-submit-canary-race-home-');
+    const corpus = tempRoot('learning-loop-submit-canary-race-corpus-');
+    const config = { engine: 'pglite' as const, database_path: tempRoot('learning-loop-submit-canary-race-db-') };
+    const sessionId = 'capture-before-canary-session';
+    const nested = join(corpus, '2026', '09');
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(nested, `${sessionId}.jsonl`), codexTranscript(sessionId));
+
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await engine.setConfig('learning_loop.mode', 'capture');
+      await engine.setConfig('learning_loop.corpus.codex.root', corpus);
+      await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
+      await bindLearningLoopSession(engine, `bind:${sessionId}`, adapter, sessionId, {
+        config, mutationLock: testMutationLock,
+      });
+
+      let releaseTranscriptDiscovery!: () => void;
+      let transcriptDiscoveryStarted!: () => void;
+      const transcriptDiscoveryHeld = new Promise<void>((resolve) => { transcriptDiscoveryStarted = resolve; });
+      const transcriptDiscoveryRelease = new Promise<void>((resolve) => { releaseTranscriptDiscovery = resolve; });
+      const getConfig = engine.getConfig.bind(engine);
+      let modeReads = 0;
+      const handlerEngine = new Proxy(engine, {
+        get(target, property) {
+          if (property === 'getConfig') {
+            return async (key: string) => {
+              if (key === 'learning_loop.mode') {
+                modeReads += 1;
+                if (modeReads === 1) return 'capture';
+              }
+              if (key === 'learning_loop.corpus.codex.root') {
+                transcriptDiscoveryStarted();
+                await transcriptDiscoveryRelease;
+              }
+              return getConfig(key);
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as PGLiteEngine;
+      const ctx = {
+        remote: true,
+        dryRun: false,
+        config,
+        engine: handlerEngine,
+        logger: { info() {}, warn() {}, error() {} },
+        sourceId: 'personal',
+        auth: { token: 'redacted', clientId: adapter.client_id, scopes: ['write'], sourceId: 'personal' },
+      } as OperationContext;
+
+      const submitting = operationsByName.learning_loop_submit_session_v1.handler(ctx, {
+        provider: 'codex',
+        provider_session_id: sessionId,
+        source_id: 'personal',
+        completion_state: 'completed',
+        completed_at: '2026-08-01T00:00:00.000Z',
+      });
+      await transcriptDiscoveryHeld;
+      await setLearningLoopMode(engine, config, 'canary', { config });
+      await armLearningLoop({
+        command_id: 'arm-during-capture-submission',
+        engine,
+        config,
+        authorized_adapter: adapter,
+        destination,
+      }, { config });
+      releaseTranscriptDiscovery();
+
+      const result = await submitting;
+      expect(result).toMatchObject({ status: 'recorded' });
+      expect(modeReads).toBe(2);
+      const evaluated = readLearningLoopLedger({ config }).find((event) => event.event_type === 'session_evaluated');
+      expect(evaluated).toMatchObject({ run_id: null, cohort_member: false });
+      expect(replayLearningLoop(readLearningLoopLedger({ config })).runs.values().next().value?.cohort).toHaveLength(0);
+    });
+  });
+
   test('same session/hash is idempotent and a changed hash fails closed', async () => {
     const root = tempRoot('learning-loop-idem-');
     await bindSession(root, 'same');

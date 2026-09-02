@@ -5435,7 +5435,7 @@ const learning_loop_submit_session_v1: Operation = {
       if (currentMode === 'off') return { status: 'disabled' as const, mode: currentMode };
       return mod.recordSessionEvaluation({
         engine: ctx.engine,
-        mode: currentMode,
+        mode,
         adapter,
         receipt,
       }, { config: ctx.config });
