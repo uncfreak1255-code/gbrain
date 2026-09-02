@@ -32,7 +32,7 @@ import { readdirSync } from 'fs';
 import { runSources } from '../src/commands/sources.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
-import { armLearningLoop } from '../src/core/learning-loop.ts';
+import { armLearningLoop, setLearningLoopMode } from '../src/core/learning-loop.ts';
 
 // Tier 3: every PGLite spinup path needs the snapshot env unset (test
 // infrastructure detail; matches bootstrap.test.ts pattern).
@@ -306,13 +306,13 @@ describe('removeSource — clone-cleanup', () => {
     await withEnv2(async () => {
       const sourceRoot = join(FAKE_GIT_DIR, 'active-v2-source');
       const corpusRoot = join(FAKE_GIT_DIR, 'active-v2-corpus');
+      const config = { engine: 'pglite' as const };
       mkdirSync(sourceRoot, { recursive: true });
       mkdirSync(corpusRoot, { recursive: true });
       await addSource(engine, { id: 'active-v2', localPath: sourceRoot });
-      await engine.setConfig('learning_loop.mode', 'canary');
+      await setLearningLoopMode(engine, config, 'canary');
       await engine.setConfig('learning_loop.corpus.codex.root', corpusRoot);
       await engine.setConfig('learning_loop.corpus.codex.source_id', 'active-v2');
-      const config = { engine: 'pglite' as const };
       await armLearningLoop({
         command_id: 'source-remove-active-v2', contract_version: 2, engine, config,
         authorized_adapter: { client_id: 'codex-test', source_id: 'active-v2', provider: 'codex' },

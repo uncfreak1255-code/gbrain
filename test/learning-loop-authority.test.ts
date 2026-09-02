@@ -22,6 +22,7 @@ import {
   resolveCodexCorpusBinding,
   validateExactEventSequence,
   validateLearningClaimIdentity,
+  setLearningLoopMode,
   type AdapterIdentity,
   type TranscriptReceipt,
 } from '../src/core/learning-loop.ts';
@@ -88,7 +89,7 @@ async function preparedActivation(base: string, suffix: string) {
   writeFileSync(join(canonicalRoot, `${slug}.md`), initialCanonical);
   await activationEngine.executeRaw('DELETE FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]);
   await activationEngine.executeRaw('UPDATE sources SET local_path = $1 WHERE id = $2', [canonicalRoot, 'default']);
-  await activationEngine.setConfig('learning_loop.mode', 'canary');
+  await setLearningLoopMode(activationEngine, config, 'canary', { config });
   await activationEngine.setConfig('learning_loop.corpus.codex.root', corpusRoot);
   await activationEngine.setConfig('learning_loop.corpus.codex.source_id', 'default');
   const session = `activation-${suffix}`;

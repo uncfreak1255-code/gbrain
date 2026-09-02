@@ -248,7 +248,7 @@ describe('append-only run, replay, and cohort reducer', () => {
 
   test('real database locks exclude concurrent ledger mutation and mode transition', async () => {
     const corpus = tempRoot('learning-loop-real-lock-corpus-');
-    await engine.setConfig('learning_loop.mode', 'canary');
+    await setLearningLoopMode(engine, { engine: 'pglite' }, 'canary');
     await engine.setConfig('learning_loop.corpus.codex.root', corpus);
     await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
     const ledgerRoot = tempRoot('learning-loop-real-ledger-lock-');
@@ -291,7 +291,7 @@ describe('append-only run, replay, and cohort reducer', () => {
       });
       await armHeld;
       await expect(withLearningLoopLifecycleLock(engine, async () => {
-        await engine.setConfig('learning_loop.mode', 'off');
+        await setLearningLoopMode(engine, { engine: 'pglite' }, 'off', { root: lifecycleRoot });
       }, { root: lifecycleRoot })).rejects.toMatchObject({ code: 'ledger_busy' });
       releaseArm();
       const armed = await arming;
@@ -353,7 +353,7 @@ describe('append-only run, replay, and cohort reducer', () => {
   test('mode change completes when a concurrent owner abort wins first', async () => {
     const root = tempRoot('learning-loop-mode-abort-race-');
     const corpus = tempRoot('learning-loop-mode-abort-corpus-');
-    await engine.setConfig('learning_loop.mode', 'canary');
+    await setLearningLoopMode(engine, { engine: 'pglite' }, 'canary');
     await engine.setConfig('learning_loop.corpus.codex.root', corpus);
     await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
     await armLearningLoop({
@@ -390,7 +390,7 @@ describe('append-only run, replay, and cohort reducer', () => {
     writeFileSync(join(nested, `${sessionId}.jsonl`), codexTranscript(sessionId));
 
     await withEnv({ GBRAIN_HOME: home }, async () => {
-      await engine.setConfig('learning_loop.mode', 'capture');
+      await setLearningLoopMode(engine, config, 'capture', { config });
       await engine.setConfig('learning_loop.corpus.codex.root', corpus);
       await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
       await bindLearningLoopSession(engine, `bind:${sessionId}`, adapter, sessionId, {
@@ -459,7 +459,7 @@ describe('append-only run, replay, and cohort reducer', () => {
     writeFileSync(join(nested, `${sessionId}.jsonl`), codexTranscript(sessionId));
 
     await withEnv({ GBRAIN_HOME: home }, async () => {
-      await engine.setConfig('learning_loop.mode', 'capture');
+      await setLearningLoopMode(engine, config, 'capture', { config });
       await engine.setConfig('learning_loop.corpus.codex.root', corpus);
       await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
       await bindLearningLoopSession(engine, `bind:${sessionId}`, adapter, sessionId, {

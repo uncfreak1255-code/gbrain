@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
-import type { BrainEngine } from './engine.ts';
+import { createLearningLoopConfigMutationPermit, createLearningLoopLifecycleHolder, type BrainEngine } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import { gbrainPath } from './config.ts';
 import { canonicalJson } from './remediation-step.ts';
@@ -34,8 +34,8 @@ import { VERSION } from '../version.ts';
 import { LockUnavailableError, withRefreshingLock } from './db-lock.ts';
 import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
 import { isPathContained } from './path-confine.ts';
-import { parseLearningLoopFence, renderLearningLoopFence, createLearningTransitionPermit, type LearningLoopKnowledge } from './learning-loop-knowledge.ts';
-import { parseFactsFence, upsertFactRow } from './facts-fence.ts';
+import { parseLearningLoopFence, renderLearningLoopFence, createLearningTransitionPermit, reduceLearningLoopLineage, learningBlockedClaimKey, type LearningLoopKnowledge } from './learning-loop-knowledge.ts';
+import { parseFactsFence, renderFactsTable, upsertFactRow } from './facts-fence.ts';
 import { inspectExpectedManagedState, writeCanonicalPage, reconcileCanonicalReadback, withCanonicalSourceBoundary, type SourceQualifiedCanonicalTarget } from './canonical-page-write.ts';
 import { importFromContent } from './import-file.ts';
 import { learningClaimFingerprint, normalizeLearningClaim, parseAuthoritativeUserRows } from './learning-loop-knowledge.ts';
@@ -228,8 +228,9 @@ export interface SessionEvaluatedEvent extends EventBase {
 export interface LearningCandidateEvent extends EventBase { event_type: 'learning_candidate'; candidate_version: 1; run_id: string; identity: LearningClaimIdentity; evidence: TranscriptUserRow[]; eligible_session_ids: string[]; }
 export interface LearningAuthorityEvent extends EventBase { event_type: 'learning_authority'; authority_version: 1; run_id: string; identity: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; evidence: TranscriptUserRow[]; session_ids: [string, string] | [string]; }
 export interface LearningTransitionEvent extends EventBase { event_type: 'learning_transition'; transition_version: 1; brain_id: string; run_id: string; semantic_sequence: number; source_id: string; canonical_slug: string; transition: 'activate'; identity: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; fact_row: number; }
+export interface LearningCorrectionEvent extends EventBase { event_type: 'learning_correction'; correction_version: 1; brain_id: string; run_id: string; semantic_sequence: number; source_id: string; canonical_slug: string; predecessor: LearningClaimIdentity; replacement: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; blocked_claim_key: string; predecessor_fact_row: number; replacement_fact_row: number; lineage_generation: number; replacement_set_fingerprint: string; }
 
-export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent | LearningCandidateEvent | LearningAuthorityEvent | LearningTransitionEvent;
+export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent | LearningCandidateEvent | LearningAuthorityEvent | LearningTransitionEvent | LearningCorrectionEvent;
 export type EligibilityReason =
   | 'eligible'
   | 'transcript_too_small'
@@ -897,6 +898,8 @@ export async function activateLearningClaim(input: ActivateLearningClaimInput): 
       await importFromContent(input.engine, input.canonical_slug, clearReadback.canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: clearReadback.permit, canonicalReadback: clearReadback.canonical });
       return { event: pendingEvent, canonical: clearReadback.canonical, row_num: pendingEvent.fact_row };
     }
+    const blockedKey = learningBlockedClaimKey(input.identity);
+    if (fence.value.blocked_identities.includes(blockedKey) || fence.value.blocked_identities.includes(input.identity.claim_fingerprint!)) throw new LearningLoopError('forbidden', 'Claim is correction-blocked');
     const priorTransition = state.events.find((e): e is LearningTransitionEvent => e.event_type === 'learning_transition' && e.run_id === input.run_id && e.source_id === input.source_id && e.canonical_slug === input.canonical_slug && e.identity.claim_fingerprint === input.identity.claim_fingerprint);
     if (priorTransition) {
       const path = join(binding.canonical_realpath, `${input.canonical_slug}.md`);
@@ -909,11 +912,11 @@ export async function activateLearningClaim(input: ActivateLearningClaimInput): 
     const candidate = state.events.find((e): e is LearningCandidateEvent => e.event_type === 'learning_candidate' && e.run_id === input.run_id && e.identity.claim_fingerprint === input.identity.claim_fingerprint);
     const authority = state.events.find((e): e is LearningAuthorityEvent => e.event_type === 'learning_authority' && e.run_id === input.run_id && e.authority === input.authority && e.identity.claim_fingerprint === input.identity.claim_fingerprint);
     if (!candidate || !authority || canonicalJson(candidate.identity) !== canonicalJson(input.identity) || canonicalJson(authority.identity) !== canonicalJson(input.identity)) throw new LearningLoopError('forbidden', 'Candidate and authority must exactly match the activation identity');
-      if (fence.value.blocked_identities.includes(input.identity.claim_fingerprint!)) throw new LearningLoopError('forbidden', 'Claim is correction-blocked');
       const factKind = input.identity.class === 'constraint' ? 'belief' : input.identity.class === 'preference' ? 'preference' : input.identity.class === 'goal' || input.identity.class === 'open_loop' ? 'commitment' : 'fact';
       const appended = upsertFactRow(inspected.canonical, { claim: input.identity.claim, kind: factKind, confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `learning_class:${input.identity.class}`, active: true });
-      const next: LearningLoopKnowledge = { ...fence.value, managed_rows: { ...fence.value.managed_rows, [input.identity.claim_fingerprint!]: { claim: input.identity.claim, class: input.identity.class, row_num: appended.rowNum, active: true, run_id: input.run_id } }, pending_delivery: null };
-      const sequence = state.events.filter(e => e.event_type === 'learning_transition' && e.brain_id === binding.brain_id && e.run_id === input.run_id).length + 1;
+      const lineage = reduceLearningLoopLineage(fence.value, { kind: 'activate', identity: input.identity, pointer: { identity: blockedKey, canonical_slug: input.canonical_slug, row_num: appended.rowNum } });
+      const next: LearningLoopKnowledge = { ...lineage.next, managed_rows: { ...lineage.next.managed_rows, [input.identity.claim_fingerprint!]: { claim: input.identity.claim, class: input.identity.class, row_num: appended.rowNum, active: true, run_id: input.run_id } }, pending_delivery: null };
+      const sequence = state.events.filter(e => (e.event_type === 'learning_transition' || e.event_type === 'learning_correction') && e.brain_id === binding.brain_id && e.run_id === input.run_id).length + 1;
       const occurred_at = new Date().toISOString();
       const payload = { schema_version: 1 as const, event_type: 'learning_transition' as const, transition_version: 1 as const, brain_id: binding.brain_id, run_id: input.run_id, semantic_sequence: sequence, source_id: input.source_id, canonical_slug: input.canonical_slug, transition: 'activate' as const, identity: input.identity, authority: input.authority, fact_row: appended.rowNum, occurred_at };
       const event = completeEvent(payload) as LearningTransitionEvent;
@@ -938,6 +941,94 @@ export async function activateLearningClaim(input: ActivateLearningClaimInput): 
       if (clearReadback.canonical !== clearedCanonical) throw new LearningLoopError('assertion_mismatch', 'Canonical clear readback changed before derived reconciliation');
       await importFromContent(input.engine, input.canonical_slug, clearReadback.canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: clearReadback.permit, canonicalReadback: clearReadback.canonical });
     return { event, canonical: clearReadback.canonical, row_num: appended.rowNum };
+  }, { config: input.config, mutationLock: input.mutationLock }));
+}
+
+export interface CorrectLearningClaimInput {
+  engine: BrainEngine; config?: GBrainConfig; run_id: string; source_id: string; canonical_slug: string;
+  predecessor: LearningClaimIdentity; replacement: LearningClaimIdentity;
+  authority: 'direct_user' | 'repetition'; mutationLock?: <T>(work: () => Promise<T>) => Promise<T>;
+  afterCanonicalStage?: () => void; afterLedgerAppend?: () => void; afterCanonicalClear?: () => void;
+}
+
+/** Atomically strike a managed predecessor and append its authoritative replacement. */
+export async function correctLearningClaim(input: CorrectLearningClaimInput): Promise<{ event: LearningCorrectionEvent; canonical: string }> {
+  validateLearningClaimIdentity(input.predecessor); validateLearningClaimIdentity(input.replacement);
+  if (!['direct_user', 'repetition'].includes(input.authority)) throw new LearningLoopError('invalid_input', 'Correction authority is mandatory');
+  if (input.replacement.class === 'lesson' ? input.authority !== 'repetition' : ['constraint','preference','goal','open_loop'].includes(input.replacement.class) && input.authority !== 'direct_user') throw new LearningLoopError('forbidden', 'Replacement authority does not satisfy its class predicate');
+  if (!isActivatableClass(input.replacement.class) || input.replacement.class === 'friction' || input.replacement.class === 'business_candidate') throw new LearningLoopError('forbidden', 'Replacement class is not activatable');
+  if (input.predecessor.claim_fingerprint === input.replacement.claim_fingerprint) throw new LearningLoopError('invalid_input', 'Correction replacement must differ from predecessor');
+  const binding = activeV2DestinationBinding({ config: input.config });
+  if (!binding || binding.source_id !== input.source_id || binding.canonical_slug !== input.canonical_slug) throw new LearningLoopError('assertion_mismatch', 'Correction target is not the active frozen destination');
+  const target: SourceQualifiedCanonicalTarget = { brain_id: binding.brain_id, source_id: binding.source_id, canonical_slug: binding.canonical_slug, configured_root: binding.canonical_realpath };
+  return withCanonicalSourceBoundary(input.engine, target, async lease => withLearningLoopLifecycleLock(input.engine, async () => {
+    const admissionState = typeof input.engine.transaction === 'function'
+      ? await input.engine.transaction(async tx => ({ mode: await resolveLearningLoopMode(tx, input.config), intent: await tx.getConfig('learning_loop.mode_transition_intent_v1') }))
+      : { mode: await resolveLearningLoopMode(input.engine, input.config), intent: await input.engine.getConfig('learning_loop.mode_transition_intent_v1') };
+    if (admissionState.mode !== 'canary') throw new LearningLoopError('mode_off', 'Learning Loop correction requires canary mode');
+    if (admissionState.intent !== null) throw new LearningLoopError('forbidden', 'Learning Loop correction is blocked by a mode transition intent');
+    const state = replayLearningLoop(readLearningLoopLedger({ config: input.config }));
+    const run = state.runs.get(input.run_id);
+    if (!run || run.terminal || run.armed.contract_version !== 2) throw new LearningLoopError('no_active_run', 'Correction requires an active V2 run');
+    const frozen = run.armed.destination_binding;
+    if (frozen.brain_id !== computeBrainIdFromConfig(input.config ?? {}) || frozen.source_id !== input.source_id || frozen.canonical_slug !== input.canonical_slug) throw new LearningLoopError('assertion_mismatch', 'Correction destination does not match the frozen run');
+    const currentCorpus = await resolveCodexCorpusBinding(input.engine, run.armed.corpus_binding.source_id, input.config);
+    const currentDestination = await resolveLearningLoopDestinationBinding(input.engine, frozen.brain_id, frozen.source_id, frozen.canonical_slug);
+    assertRootBindingUnchanged(run.armed.corpus_binding, currentCorpus);
+    assertRootBindingUnchanged(frozen, currentDestination);
+    const currentTarget: SourceQualifiedCanonicalTarget = { brain_id: frozen.brain_id, source_id: frozen.source_id, canonical_slug: frozen.canonical_slug, configured_root: frozen.canonical_realpath };
+    if (currentTarget.configured_root !== target.configured_root || currentTarget.brain_id !== target.brain_id) throw new LearningLoopError('assertion_mismatch', 'Correction target changed during admission');
+    const inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+    const fence = parseLearningLoopFence(inspected.canonical); if (!fence) throw new LearningLoopError('forbidden', 'Managed canonical state is unavailable');
+    if (fence.value.pending_delivery !== null) {
+      const pending = decodeExactEventRecordV1(fence.value.pending_delivery); const pendingEvent = eventFromExactRecord(pending);
+      if (pendingEvent.event_type !== 'learning_correction' || pendingEvent.run_id !== input.run_id || pendingEvent.source_id !== input.source_id || pendingEvent.canonical_slug !== input.canonical_slug || canonicalJson(pendingEvent.predecessor) !== canonicalJson(input.predecessor) || canonicalJson(pendingEvent.replacement) !== canonicalJson(input.replacement) || pendingEvent.authority !== input.authority) throw new LearningLoopError('ledger_corrupt', 'Pending correction does not match this exact request');
+      const prior = state.events.find(e => e.event_id === pendingEvent.event_id); if (prior && canonicalJson(prior) !== canonicalJson(pendingEvent)) throw new LearningLoopError('ledger_corrupt', 'Pending correction conflicts with durable ledger');
+      if (!prior) appendEvent(pending, { config: input.config });
+      const delivered = readLearningLoopLedger({ config: input.config }).find(e => e.event_id === pendingEvent.event_id); if (!delivered || canonicalJson(delivered) !== canonicalJson(pendingEvent)) throw new LearningLoopError('ledger_corrupt', 'Pending correction readback mismatch');
+      const clearedState = { ...fence.value, pending_delivery: null }; const cleared = await writeCanonicalPage(target, inspected.canonical.replace(fence.raw, renderLearningLoopFence(clearedState)), { mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(fence.value, clearedState), expectedManaged: 'expected' });
+      const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      if (readback.canonical !== cleared) throw new LearningLoopError('assertion_mismatch', 'Recovered correction canonical readback changed before derived reconciliation');
+      await importFromContent(input.engine, input.canonical_slug, readback.canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: readback.canonical });
+      return { event: pendingEvent, canonical: readback.canonical };
+    }
+    const priorCorrection = state.events.find((e): e is LearningCorrectionEvent => e.event_type === 'learning_correction' && e.run_id === input.run_id && e.source_id === input.source_id && e.canonical_slug === input.canonical_slug && canonicalJson(e.predecessor) === canonicalJson(input.predecessor) && canonicalJson(e.replacement) === canonicalJson(input.replacement) && e.authority === input.authority);
+    if (priorCorrection) { const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' }); await importFromContent(input.engine, input.canonical_slug, readback.canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: readback.canonical }); return { event: priorCorrection, canonical: readback.canonical }; }
+    const predecessorKey = learningBlockedClaimKey(input.predecessor);
+    const candidate = state.events.find((e): e is LearningCandidateEvent => e.event_type === 'learning_candidate' && e.run_id === input.run_id && e.identity.claim_fingerprint === input.replacement.claim_fingerprint);
+    const authority = state.events.find((e): e is LearningAuthorityEvent => e.event_type === 'learning_authority' && e.run_id === input.run_id && e.identity.claim_fingerprint === input.replacement.claim_fingerprint && e.authority === input.authority);
+    if (!candidate || !authority || canonicalJson(candidate.identity) !== canonicalJson(input.replacement) || canonicalJson(authority.identity) !== canonicalJson(input.replacement)) throw new LearningLoopError('forbidden', 'Correction replacement requires exact candidate and authority');
+    const priorRow = (fence.value.managed_rows[input.predecessor.claim_fingerprint!] ?? {}) as Record<string, unknown>;
+    const predecessorRow = Number(priorRow.row_num);
+    if (!Number.isSafeInteger(predecessorRow) || predecessorRow < 1) throw new LearningLoopError('forbidden', 'Correction predecessor is not an active managed row');
+    const parsed = parseFactsFence(inspected.canonical);
+    const old = parsed.facts.find(row => row.rowNum === predecessorRow);
+    if (!old || !old.active || old.claim !== input.predecessor.claim) throw new LearningLoopError('forbidden', 'Correction predecessor is not active');
+    const struck = parsed.facts.map(row => row.rowNum === predecessorRow ? { ...row, active: false, context: `superseded by #${Math.max(...parsed.facts.map(f => f.rowNum), predecessorRow) + 1}` } : row);
+    const bodyWithoutFence = inspected.canonical.replace(/<!--- gbrain:facts:begin -->[\s\S]*?<!--- gbrain:facts:end -->/, renderFactsTable(struck));
+    const appended = upsertFactRow(bodyWithoutFence, { claim: input.replacement.claim, kind: input.replacement.class === 'constraint' ? 'belief' : input.replacement.class === 'preference' ? 'preference' : 'commitment', confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `learning_class:${input.replacement.class}`, active: true });
+    const lineage = reduceLearningLoopLineage(fence.value, { kind: 'correct', predecessor: input.predecessor, replacement: { identity: learningBlockedClaimKey(input.replacement), canonical_slug: input.canonical_slug, row_num: appended.rowNum } });
+    const next: LearningLoopKnowledge = { ...lineage.next, managed_rows: { ...lineage.next.managed_rows, [input.predecessor.claim_fingerprint!]: { ...priorRow, active: false }, [input.replacement.claim_fingerprint!]: { claim: input.replacement.claim, class: input.replacement.class, row_num: appended.rowNum, active: true, run_id: input.run_id } }, pending_delivery: null };
+    const sequence = state.events.filter(e => (e.event_type === 'learning_transition' || e.event_type === 'learning_correction') && e.brain_id === binding.brain_id && e.run_id === input.run_id).length + 1;
+    const occurred_at = new Date().toISOString();
+    const payload = { schema_version: 1 as const, event_type: 'learning_correction' as const, correction_version: 1 as const, brain_id: binding.brain_id, run_id: input.run_id, semantic_sequence: sequence, source_id: input.source_id, canonical_slug: input.canonical_slug, predecessor: input.predecessor, replacement: input.replacement, authority: input.authority, blocked_claim_key: predecessorKey, predecessor_fact_row: predecessorRow, replacement_fact_row: appended.rowNum, lineage_generation: (lineage.next.correction_lineages[predecessorKey] as { lineage_generation: number }).lineage_generation, replacement_set_fingerprint: (lineage.next.correction_lineages[predecessorKey] as { replacement_set_fingerprint: string }).replacement_set_fingerprint, occurred_at };
+    const event = completeEvent(payload) as LearningCorrectionEvent;
+    const pending = makeExactEventRecordV1({ event_payload: payload, brain_id: binding.brain_id, run_id: input.run_id, occurred_at, semantic_sequence: sequence });
+    const pendingState = { ...next, pending_delivery: pending };
+    const staged = appended.body.replace(fence.raw, renderLearningLoopFence(pendingState));
+    const canonical = await writeCanonicalPage(target, staged, { mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(fence.value, pendingState), expectedManaged: 'expected' });
+    input.afterCanonicalStage?.();
+    appendEvent(pending, { config: input.config });
+    input.afterLedgerAppend?.();
+    const delivered = readLearningLoopLedger({ config: input.config }).find(item => item.event_id === event.event_id);
+    if (!delivered || canonicalJson(delivered) !== canonicalJson(event)) throw new LearningLoopError('ledger_corrupt', 'Correction event was not read back exactly');
+    const clearedState = { ...next, pending_delivery: null };
+    const cleared = await writeCanonicalPage(target, canonical.replace(renderLearningLoopFence(pendingState), renderLearningLoopFence(clearedState)), { mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(pendingState, clearedState), expectedManaged: 'expected' });
+    input.afterCanonicalClear?.();
+    const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+    if (readback.canonical !== cleared) throw new LearningLoopError('assertion_mismatch', 'Correction canonical clear readback changed before derived reconciliation');
+    await importFromContent(input.engine, input.canonical_slug, readback.canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: readback.canonical });
+    return { event, canonical: readback.canonical };
   }, { config: input.config, mutationLock: input.mutationLock }));
 }
 
@@ -1253,6 +1344,22 @@ function assertEventShape(event: LearningLoopEvent): void {
     }
     return;
   }
+  if (event.event_type === 'learning_correction') {
+    const value = event as LearningCorrectionEvent;
+    if (Object.keys(value).some(key => !['schema_version','event_id','occurred_at','event_type','correction_version','brain_id','run_id','semantic_sequence','source_id','canonical_slug','predecessor','replacement','authority','blocked_claim_key','predecessor_fact_row','replacement_fact_row','lineage_generation','replacement_set_fingerprint'].includes(key))
+      || value.correction_version !== 1 || !nonEmpty(value.brain_id) || !nonEmpty(value.run_id) || !Number.isSafeInteger(value.semantic_sequence) || value.semantic_sequence < 1
+      || !nonEmpty(value.source_id) || !nonEmpty(value.canonical_slug) || !validIdentity(value.predecessor) || !validIdentity(value.replacement) || (value.authority !== 'direct_user' && value.authority !== 'repetition')
+      || !/^[a-f0-9]{64}$/.test(value.blocked_claim_key) || !Number.isSafeInteger(value.predecessor_fact_row) || value.predecessor_fact_row < 1
+      || !Number.isSafeInteger(value.replacement_fact_row) || value.replacement_fact_row < 1 || !Number.isSafeInteger(value.lineage_generation) || value.lineage_generation < 1
+      || !/^[a-f0-9]{64}$/.test(value.replacement_set_fingerprint)
+      || value.blocked_claim_key !== learningBlockedClaimKey(value.predecessor)
+      || value.replacement.claim_fingerprint !== learningBlockedClaimKey(value.replacement)
+      || value.predecessor.claim_fingerprint !== value.blocked_claim_key
+      || value.predecessor_fact_row === value.replacement_fact_row) {
+      throw new LearningLoopError('ledger_corrupt', 'Learning Loop correction event has an invalid shape');
+    }
+    return;
+  }
   throw new LearningLoopError('ledger_corrupt', 'Learning Loop ledger contains an unknown event type');
 }
 
@@ -1348,6 +1455,41 @@ export function replayLearningLoop(records: LearningLoopLedgerRecord[]): Learnin
       if (!run || run.terminal || run.armed.contract_version !== 2 || run.armed.destination_binding.brain_id !== event.brain_id
         || run.armed.destination_binding.source_id !== event.source_id || run.armed.destination_binding.canonical_slug !== event.canonical_slug) {
         throw new LearningLoopError('ledger_corrupt', 'Learning transition does not match the active V2 destination');
+      }
+      const priorLearningEvents = projection.events.filter((prior): prior is LearningTransitionEvent | LearningCorrectionEvent =>
+        (prior.event_type === 'learning_transition' || prior.event_type === 'learning_correction')
+        && prior.brain_id === event.brain_id && prior.run_id === event.run_id);
+      if (event.semantic_sequence !== priorLearningEvents.length + 1) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning transition semantic sequence is not contiguous');
+      }
+      projection.events.push(event);
+      continue;
+    } else if (event.event_type === 'learning_correction') {
+      const run = projection.runs.get(event.run_id);
+      if (!run || run.terminal || run.armed.contract_version !== 2 || run.armed.destination_binding.brain_id !== event.brain_id
+        || run.armed.destination_binding.source_id !== event.source_id || run.armed.destination_binding.canonical_slug !== event.canonical_slug) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning correction does not match the active V2 destination');
+      }
+      const priorLearningEvents = projection.events.filter((prior): prior is LearningTransitionEvent | LearningCorrectionEvent =>
+        (prior.event_type === 'learning_transition' || prior.event_type === 'learning_correction')
+        && prior.brain_id === event.brain_id && prior.run_id === event.run_id);
+      if (event.semantic_sequence !== priorLearningEvents.length + 1) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning correction semantic sequence is not contiguous');
+      }
+      const predecessorTransition = priorLearningEvents.find((prior): prior is LearningTransitionEvent =>
+        prior.event_type === 'learning_transition' && canonicalJson(prior.identity) === canonicalJson(event.predecessor));
+      const candidate = projection.events.find((prior): prior is LearningCandidateEvent =>
+        prior.event_type === 'learning_candidate' && prior.run_id === event.run_id
+        && canonicalJson(prior.identity) === canonicalJson(event.replacement));
+      const authority = projection.events.find((prior): prior is LearningAuthorityEvent =>
+        prior.event_type === 'learning_authority' && prior.run_id === event.run_id
+        && prior.authority === event.authority && canonicalJson(prior.identity) === canonicalJson(event.replacement));
+      const replacementRequiresRepetition = event.replacement.class === 'lesson';
+      const replacementRequiresDirectUser = ['constraint', 'preference', 'goal', 'open_loop'].includes(event.replacement.class);
+      if (!predecessorTransition || !candidate || !authority || (replacementRequiresRepetition && event.authority !== 'repetition')
+        || (replacementRequiresDirectUser && event.authority !== 'direct_user')
+        || !isActivatableClass(event.replacement.class) || event.replacement.class === 'friction' || event.replacement.class === 'business_candidate') {
+        throw new LearningLoopError('ledger_corrupt', 'Learning correction lacks its exact predecessor, candidate, or authority evidence');
       }
       projection.events.push(event);
       continue;
@@ -1725,6 +1867,11 @@ export async function setLearningLoopMode(
 ): Promise<{ previous_mode: LearningLoopMode; mode: LearningLoopMode }> {
   const scopedOpts = opts.root || opts.config ? opts : { ...opts, config };
   return withLearningLoopLifecycleLock(engine, async () => {
+    // Keep the persisted preimage distinct from the normalized mode. A missing
+    // row resolves to `off`, but its guarded write must still compare against
+    // the database's actual NULL value.
+    let persistedCurrent: string | null = null;
+    try { persistedCurrent = await engine.getConfig('learning_loop.mode'); } catch { /* resolveLearningLoopMode applies the file fallback */ }
     const current = await resolveLearningLoopMode(engine, config);
     if (current === 'canary' && next !== 'canary') {
       const state = replayLearningLoop(readLearningLoopLedger(scopedOpts));
@@ -1738,7 +1885,11 @@ export async function setLearningLoopMode(
         }
       }
     }
-    await engine.setConfig('learning_loop.mode', next);
+    const lifecycleHolder = createLearningLoopLifecycleHolder();
+    const permit = createLearningLoopConfigMutationPermit({
+      key: 'learning_loop.mode', operation: 'set', engine, lifecycleHolder, expectedOldValue: persistedCurrent,
+    });
+    await engine.setConfig('learning_loop.mode', next, permit);
     return { previous_mode: current, mode: next };
   }, scopedOpts);
 }

@@ -5,6 +5,32 @@ export type LearningClass = 'constraint' | 'preference' | 'goal' | 'lesson' | 'f
 export type LearningScope = { kind: 'global' } | { kind: 'repository'; target: string } | { kind: 'project'; target: string };
 export type LearningTrigger = null | { kind: string; id: string; state: 'pending' };
 export interface LearningClaimIdentity { claim: string; class: LearningClass; scope: LearningScope; target: string | null; trigger: LearningTrigger; claim_fingerprint?: string; }
+export type BlockedClaimKey = string & { readonly __blockedClaimKey: unique symbol };
+export interface LearningPointer { identity: BlockedClaimKey; canonical_slug: string; row_num: number; }
+export interface CorrectionLineage {
+  blocked_identity: BlockedClaimKey;
+  active_replacements: readonly LearningPointer[];
+  replacement_set_fingerprint: string;
+  lineage_generation: number;
+}
+export function learningBlockedClaimKey(identity: LearningClaimIdentity): BlockedClaimKey {
+  const normalized = makeLearningClaimIdentity({
+    claim: identity.claim,
+    class: identity.class,
+    scope: identity.scope,
+    target: identity.target,
+    trigger: identity.trigger,
+  });
+  return createHash('sha256').update(canonicalJson({
+    claim: normalized.claim, class: normalized.class, scope: normalized.scope,
+    target: normalized.target, trigger: normalized.trigger,
+  })).digest('hex') as BlockedClaimKey;
+}
+export function replacementPointerEncoding(pointer: LearningPointer): string { return canonicalJson(pointer); }
+export function replacementSetFingerprint(pointers: readonly LearningPointer[]): string {
+  const sorted = [...pointers].map(replacementPointerEncoding).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
+  return createHash('sha256').update(canonicalJson(sorted)).digest('hex');
+}
 export interface TranscriptUserRow { provider: 'codex'; provider_session_id: string; transcript_hash: string; line: number; message_index: number; message_hash: string; role: 'user'; text: string; }
 export function normalizeLearningClaim(claim: string): string {
   return claim.replace(/\r\n?/g, '\n').normalize('NFC').replace(/\s+/gu, ' ').trim();
@@ -66,17 +92,65 @@ export type LearningLoopKnowledge = {
   pending_delivery: unknown;
   protected_state_hash?: string;
 };
+
+export type LearningLineageCommand =
+  | { kind: 'activate'; identity: LearningClaimIdentity; pointer: LearningPointer }
+  | { kind: 'correct'; predecessor: LearningClaimIdentity; replacement: LearningPointer };
+export function reduceLearningLoopLineage(previous: LearningLoopKnowledge, command: LearningLineageCommand): {
+  next: LearningLoopKnowledge; permit: LearningTransitionPermit;
+} {
+  const key = command.kind === 'activate' ? learningBlockedClaimKey(command.identity) : learningBlockedClaimKey(command.predecessor);
+  const existing = (previous.correction_lineages[key] ?? {}) as Partial<CorrectionLineage>;
+  const pointers = [...(existing.active_replacements ?? [])] as LearningPointer[];
+  const replacement = command.kind === 'activate' ? command.pointer : command.replacement;
+  if (command.kind === 'correct') {
+    const predecessorKey = learningBlockedClaimKey(command.predecessor);
+    // Retire the predecessor pointer, then add the complete successor set.
+    for (let i = pointers.length - 1; i >= 0; i--) if (pointers[i].identity === predecessorKey) pointers.splice(i, 1);
+  }
+  const alreadyPresent = pointers.some(p => canonicalJson(p) === canonicalJson(replacement));
+  if (!alreadyPresent) pointers.push(replacement);
+  pointers.sort((a, b) => Buffer.from(replacementPointerEncoding(a)).compare(Buffer.from(replacementPointerEncoding(b))));
+  const lineage: CorrectionLineage = {
+    blocked_identity: key, active_replacements: pointers,
+    replacement_set_fingerprint: replacementSetFingerprint(pointers),
+    lineage_generation: alreadyPresent && command.kind === 'correct' ? (existing.lineage_generation ?? 0) : (existing.lineage_generation ?? 0) + 1,
+  };
+  const blocked = command.kind === 'correct' && !previous.blocked_identities.includes(key) ? [...previous.blocked_identities, key].sort() : [...previous.blocked_identities];
+  const next: LearningLoopKnowledge = { ...previous, blocked_identities: blocked, correction_lineages: { ...previous.correction_lineages, [key]: lineage } };
+  return { next, permit: createLearningTransitionPermit(previous, next) };
+}
 const KEYS = new Set(['brain_id','source_id','canonical_slug','managed_rows','blocked_identities','correction_lineages','reversal_attempts','immutable_commit_markers','pending_delivery','protected_state_hash']);
 function fail(message: string): never { throw new Error(`learning-loop metadata: ${message}`); }
 function object(value: unknown, name: string): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${name} must be an object`); return value as Record<string, unknown>; }
+function validateLineages(value: Record<string, unknown>): void {
+  for (const [key, raw] of Object.entries(value)) {
+    if (!/^[a-f0-9]{64}$/.test(key)) fail('correction lineage key must be sha256');
+    const row = object(raw, 'correction lineage');
+    if (Object.keys(row).some(k => !['blocked_identity','active_replacements','replacement_set_fingerprint','lineage_generation'].includes(k))) fail('correction lineage unknown field');
+    if (row.blocked_identity !== key || !/^[a-f0-9]{64}$/.test(String(row.blocked_identity))) fail('correction lineage blocked identity mismatch');
+    if (!Array.isArray(row.active_replacements) || !Number.isSafeInteger(row.lineage_generation) || Number(row.lineage_generation) < 1 || !/^[a-f0-9]{64}$/.test(String(row.replacement_set_fingerprint))) fail('correction lineage fields invalid');
+    const pointers = row.active_replacements as unknown[];
+    const encodings: string[] = [];
+    for (const pointer of pointers) {
+      const p = object(pointer, 'replacement pointer');
+      if (Object.keys(p).some(k => !['identity','canonical_slug','row_num'].includes(k)) || !/^[a-f0-9]{64}$/.test(String(p.identity)) || typeof p.canonical_slug !== 'string' || !p.canonical_slug || !Number.isSafeInteger(p.row_num) || Number(p.row_num) < 1) fail('replacement pointer invalid');
+      encodings.push(canonicalJson(p));
+    }
+    const sorted = [...encodings].sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
+    if (canonicalJson(encodings) !== canonicalJson(sorted) || new Set(encodings).size !== encodings.length || replacementSetFingerprint(pointers as LearningPointer[]) !== row.replacement_set_fingerprint) fail('replacement set is not complete, sorted, or correctly fingerprinted');
+  }
+}
 export function encodeLearningLoopKnowledge(value: LearningLoopKnowledge): string {
   const obj = object(value, 'value');
   for (const key of Object.keys(obj)) if (!KEYS.has(key)) fail(`unknown field ${key}`);
   for (const key of ['brain_id','source_id','canonical_slug']) if (typeof obj[key] !== 'string' || !obj[key]) fail(`${key} must be non-empty`);
-  if (!Array.isArray(obj.blocked_identities) || !obj.blocked_identities.every(x => typeof x === 'string')) fail('blocked_identities must be strings');
+  if (!Array.isArray(obj.blocked_identities) || !obj.blocked_identities.every(x => typeof x === 'string' && /^[a-f0-9]{64}$/.test(x))) fail('blocked_identities must be sorted sha256 keys');
+  const blocked = obj.blocked_identities as string[];
+  if (blocked.some((key, index) => index > 0 && Buffer.from(blocked[index - 1]).compare(Buffer.from(key)) >= 0)) fail('blocked_identities must be unique and sorted');
   if (!Array.isArray(obj.immutable_commit_markers) || !obj.immutable_commit_markers.every(x => typeof x === 'string')) fail('immutable_commit_markers must be strings');
   object(obj.managed_rows, 'managed_rows');
-  object(obj.correction_lineages, 'correction_lineages');
+  validateLineages(object(obj.correction_lineages, 'correction_lineages'));
   object(obj.reversal_attempts, 'reversal_attempts');
   if (typeof obj.protected_state_hash !== 'undefined' && !/^[0-9a-f]{64}$/.test(String(obj.protected_state_hash))) fail('protected_state_hash must be sha256');
   return canonicalJson(value);

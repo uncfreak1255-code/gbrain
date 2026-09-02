@@ -5481,6 +5481,17 @@ const learning_loop_activate: Operation = {
   },
 };
 
+const learning_loop_correct: Operation = {
+  name: 'learning_loop_correct', description: 'Apply a trusted-local correction that blocks the predecessor and activates its exact replacement.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, canonical_slug: { type: 'string', required: true }, predecessor: { type: 'object', required: true }, replacement: { type: 'object', required: true }, authority: { type: 'string', required: true, enum: ['direct_user', 'repetition'] } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_correct');
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'Learning Loop correction requires trusted local execution');
+    return learningLoopCall((mod) => mod.correctLearningClaim({ engine: ctx.engine, config: ctx.config, run_id: p.run_id as string, source_id: p.source_id as string, canonical_slug: p.canonical_slug as string, predecessor: p.predecessor as never, replacement: p.replacement as never, authority: p.authority as 'direct_user' | 'repetition' }));
+  },
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5567,7 +5578,7 @@ export const operations: Operation[] = [
   learning_loop_get_mode, learning_loop_set_mode, learning_loop_inspect,
   learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript, learning_loop_bind_session,
   learning_loop_submit_session_v1,
-  learning_loop_candidate, learning_loop_authority, learning_loop_activate,
+  learning_loop_candidate, learning_loop_authority, learning_loop_activate, learning_loop_correct,
 ];
 
 export const operationsByName = Object.fromEntries(

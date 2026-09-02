@@ -11,7 +11,7 @@ import { getRecoveryBackedSourceCheckout, withRecoverySourceWriteBoundary } from
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { renderLearningLoopFence } from '../src/core/learning-loop-knowledge.ts';
 import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
-import { armLearningLoop } from '../src/core/learning-loop.ts';
+import { armLearningLoop, setLearningLoopMode } from '../src/core/learning-loop.ts';
 
 let engine: PGLiteEngine;
 let tmpRoot: string;
@@ -232,14 +232,14 @@ describe('recovery-backed source refresh', () => {
 
   test('active V2 run refuses recovery before changing the frozen checkout inode', async () => {
     const corpus = path.join(tmpRoot, 'corpus');
+    const config = { engine: 'pglite' as const };
     fs.mkdirSync(corpus, { recursive: true });
     await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
     commitRecoveryCheckout(recoveryRepo, 'active V2 recovery fixture');
     await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [recoveryRepo]);
-    await engine.setConfig('learning_loop.mode', 'canary');
+    await setLearningLoopMode(engine, config, 'canary');
     await engine.setConfig('learning_loop.corpus.codex.root', corpus);
     await engine.setConfig('learning_loop.corpus.codex.source_id', 'default');
-    const config = { engine: 'pglite' as const };
     await armLearningLoop({
       command_id: 'recovery-active-v2', contract_version: 2, engine, config,
       authorized_adapter: { client_id: 'codex-test', source_id: 'default', provider: 'codex' },
