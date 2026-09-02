@@ -17,6 +17,7 @@
 // PGLite + Postgres parity via `executeRaw`.
 
 import type { BrainEngine } from '../engine.ts';
+import { assertManagedPageMutationAllowed } from '../canonical-page-write.ts';
 import { loadActivePackBestEffort } from './best-effort.ts';
 import type { OperationContext } from '../operations.ts';
 
@@ -119,6 +120,17 @@ async function applyTypeAssignment(
   // Loop guard: max 10000 iterations protects against runaway.
   for (let i = 0; i < 10000; i++) {
     try {
+      const candidates = await engine.executeRaw<{ slug: string; source_id: string }>(
+        `SELECT slug, source_id FROM pages
+         WHERE deleted_at IS NULL
+           AND (type IS NULL OR type = '')
+           AND source_path LIKE $1${sourceId ? ' AND source_id = $3' : ''}
+         LIMIT $2`,
+        sourceId ? [`${prefix}%`, batchSize, sourceId] : [`${prefix}%`, batchSize],
+      );
+      for (const candidate of candidates) {
+        await assertManagedPageMutationAllowed(engine, candidate.slug, candidate.source_id, 'destructive_admin');
+      }
       const rows = await engine.executeRaw<{ updated: string }>(
         `WITH win AS (
            SELECT id FROM pages

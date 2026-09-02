@@ -21,7 +21,7 @@
  * only does "row exists + repo is a real dir → render + atomic write".
  */
 
-import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync, realpathSync } from 'fs';
+import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, realpathSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
@@ -36,6 +36,7 @@ import {
   withCanonicalSourceBoundary,
   writeCanonicalPage,
   type SourceQualifiedCanonicalTarget,
+  type SourceWriteLease,
 } from './canonical-page-write.ts';
 import {
   getRecoveryBackedSourceCheckout,
@@ -43,6 +44,7 @@ import {
   withRecoverySourceWriteBoundary,
 } from './recovery-source-refresh.ts';
 import type { RecoveryBackedSourceCheckout } from './recovery-source-refresh.ts';
+import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
 
 /** Minimal logger surface — structurally compatible with operations.ts `Logger`. */
 export interface WriteThroughLogger {
@@ -85,6 +87,8 @@ export interface WritePageThroughOpts {
   /** Merged over the page's own frontmatter at render time (e.g. provenance). */
   frontmatterOverrides?: Record<string, unknown>;
   logger?: WriteThroughLogger;
+  /** Internal: exact source boundary already held by a canonical caller. */
+  sourceLease?: SourceWriteLease;
 }
 
 export interface CanonicalImportAndWriteOpts extends WritePageThroughOpts {
@@ -130,7 +134,12 @@ export async function importAndWriteCanonicalPage(
   opts: CanonicalImportAndWriteOpts,
 ): Promise<CanonicalImportAndWriteResult> {
   const sourceId = opts.sourceId ?? 'default';
-  const target = await resolveCanonicalTarget(engine, slug, sourceId, opts.brainId ?? 'host');
+  const target = await resolveCanonicalTarget(
+    engine,
+    slug,
+    sourceId,
+    opts.brainId ?? computeBrainIdFromConfig(engine.learningLoopLedgerConfig?.() ?? {}),
+  );
   const importOptions = { ...opts.importOptions, sourceId };
   if (!target) {
     const result = await importFromContent(engine, slug, opts.content, importOptions);
@@ -145,7 +154,6 @@ export async function importAndWriteCanonicalPage(
     const recovery = await getRecoveryBackedSourceCheckout(engine, sourceId);
     if (preflight.managed) {
       if (opts.skipWriteThrough) throw new Error('managed_state_unavailable: managed canonical write is not available in a DB-only sandbox');
-      if (recovery) throw new Error('managed_state_unavailable: recovery-backed managed write requires checkout rebuild');
       const readback = await writeCanonicalPage(target, opts.content, {
         mode: 'ordinary_content', sourceLease, expectedManaged: true,
       });
@@ -156,7 +164,10 @@ export async function importAndWriteCanonicalPage(
           canonicalPermit: committed.permit,
           canonicalReadback: readback,
         });
-        return { result, writeThrough: { written: true, path: join(sourceLease.root_realpath, `${slug}.md`) } };
+        const writeThrough = recovery
+          ? await refreshRecoverySourceCheckout(engine, sourceId, slug, recovery, sourceLease)
+          : { written: true, path: join(sourceLease.root_realpath, `${slug}.md`) };
+        return { result, writeThrough };
       } catch (error) {
         try {
           await writeCanonicalPage(target, preflight.canonical, {
@@ -172,7 +183,7 @@ export async function importAndWriteCanonicalPage(
     const result = await importFromContent(engine, slug, opts.content, importOptions);
     const writeThrough = opts.skipWriteThrough
       ? { written: false, skipped: 'subagent_sandbox' as const }
-      : await writePageThrough(engine, result.slug, { ...opts, recoveryCheckout: recovery });
+      : await writePageThrough(engine, result.slug, { ...opts, recoveryCheckout: recovery, sourceLease });
     return { result, writeThrough };
   });
 }
@@ -280,7 +291,7 @@ export async function writePageThrough(
             + 'the checkout was not modified.',
           );
         }
-        return refreshRecoverySourceCheckout(engine, sourceId, slug, checkout);
+        return refreshRecoverySourceCheckout(engine, sourceId, slug, checkout, opts.sourceLease);
       };
       const refreshed = opts.recoveryCheckout === undefined
         ? await withRecoverySourceWriteBoundary(engine, sourceId, refresh)

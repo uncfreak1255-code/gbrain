@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, closeSync, constants, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { acquirePageLock } from './page-lock.ts';
@@ -6,10 +6,12 @@ import { parseLearningLoopFence, isLearningTransitionPermit, type LearningTransi
 import type { BrainEngine } from './engine.ts';
 import { syncLockId, withRefreshingLock } from './db-lock.ts';
 import { activeV2DestinationBinding } from './learning-loop.ts';
+import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 export type CanonicalWriterMode = 'ordinary_content' | 'non_lineage_fact' | 'learning_transition' | 'checkout_rebuild';
 export interface SourceQualifiedCanonicalTarget { brain_id: string; source_id: string; canonical_slug: string; configured_root: string; }
+export interface SourceQualifiedMutation { engine: BrainEngine; sourceId: string; slug: string; brainId?: string; }
 export type CanonicalWriteTarget = SourceQualifiedCanonicalTarget;
 export interface SourceWriteLease { readonly __brand: 'SourceWriteLease'; readonly brain_id: string; readonly source_id: string; readonly configured_root: string; readonly root_realpath: string; readonly token: string; readonly dev: number; readonly ino: number; }
 export interface CanonicalWriteOptions { mode: CanonicalWriterMode; lockRoot?: string; sourceLease: SourceWriteLease; transitionPermit?: LearningTransitionPermit; beforeRename?: () => void; expectedManaged?: ManagedExpectation | boolean; }
@@ -143,9 +145,10 @@ export async function resolveEffectiveCanonicalRoot(
   engine: Pick<BrainEngine, 'executeRaw' | 'getConfig'>,
   sourceId: string,
 ): Promise<string | null> {
-  const sources = await engine.executeRaw<{ id: string; local_path: string | null }>(
+  const rawSources = await engine.executeRaw<{ id: string; local_path: string | null }>(
     'SELECT id, local_path FROM sources ORDER BY id',
   );
+  const sources = Array.isArray(rawSources) ? rawSources : [];
   const selected = sources.find(source => source.id === sourceId);
   if (selected?.local_path) return selected.local_path;
   if (sourceId === 'default' && sources.length === 1 && sources[0]?.id === 'default') {
@@ -330,6 +333,89 @@ export async function assertManagedPageMutationAllowed(
     throw new Error('managed_state_unavailable: managed canonical page mutation rejected');
   }
 }
+
+/**
+ * Rejection-only inventory for legacy path lanes. A path inside any
+ * registered source root must carry the exact source identity; overlapping or
+ * ambiguous realpaths fail closed before a writer can choose a source.
+ */
+export async function assertLegacyPathMutationAllowed(
+  mutation: SourceQualifiedMutation,
+  path: string,
+): Promise<void> {
+  const rawRows = await mutation.engine.executeRaw<{ id: string; local_path: string | null }>(
+    'SELECT id, local_path FROM sources ORDER BY id',
+  );
+  const rows = Array.isArray(rawRows) ? rawRows : [];
+  const configuredRoots = rows.flatMap(row => row.local_path ? [{ id: row.id, path: row.local_path }] : []);
+  if (rows.length === 1 && rows[0]?.id === 'default' && !rows[0].local_path) {
+    const fallback = await mutation.engine.getConfig('sync.repo_path');
+    if (fallback) configuredRoots.push({ id: 'default', path: fallback });
+  }
+  const lexicalCandidate = resolve(path);
+  let realCandidate: string;
+  try { realCandidate = realpathSync(lexicalCandidate); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const missing: string[] = [];
+    let cursor = lexicalCandidate;
+    while (true) {
+      const parent = dirname(cursor);
+      missing.unshift(basename(cursor));
+      try {
+        realCandidate = join(realpathSync(parent), ...missing);
+        break;
+      } catch (parentError) {
+        if ((parentError as NodeJS.ErrnoException).code !== 'ENOENT' || parent === cursor) throw parentError;
+        cursor = parent;
+      }
+    }
+  }
+  const matches: Array<{ id: string; root: string }> = [];
+  for (const configured of configuredRoots) {
+    const lexicalRoot = resolve(configured.path);
+    let root: string;
+    try {
+      root = realpathSync(lexicalRoot);
+      accessSync(root, constants.R_OK);
+    }
+    catch { throw new Error('managed_state_unavailable: registered source root is unreadable'); }
+    const lexicalMatch = contained(lexicalCandidate, lexicalRoot);
+    const realMatch = contained(realCandidate, root);
+    if (lexicalMatch !== realMatch) {
+      throw new Error('managed_state_unavailable: registered source path is symlink-ambiguous');
+    }
+    if (lexicalMatch) matches.push({ id: configured.id, root });
+  }
+  if (matches.length === 0) return;
+  const exact = matches.filter(match => match.id === mutation.sourceId);
+  if (matches.length !== 1 || exact.length !== 1) {
+    throw new Error('managed_state_unavailable: canonical path requires explicit unambiguous source identity');
+  }
+  throw new Error('managed_state_unavailable: registered canonical path cannot use legacy path lane');
+}
+
+/** Write one explicitly source-qualified page through the canonical boundary. */
+export async function writeSourceQualifiedCanonicalPage(
+  mutation: SourceQualifiedMutation,
+  content: string,
+  mode: Extract<CanonicalWriterMode, 'ordinary_content' | 'non_lineage_fact'> = 'ordinary_content',
+): Promise<string> {
+  const root = await resolveEffectiveCanonicalRoot(mutation.engine, mutation.sourceId);
+  if (!root) throw new Error('managed_state_unavailable: source canonical root is unavailable');
+  const target: SourceQualifiedCanonicalTarget = {
+    brain_id: mutation.brainId ?? computeBrainIdFromConfig(mutation.engine.learningLoopLedgerConfig?.() ?? {}),
+    source_id: mutation.sourceId,
+    canonical_slug: mutation.slug,
+    configured_root: root,
+  };
+  validateTarget(target);
+  const expectedManaged = await expectedManagedByDurableHint(mutation.engine, mutation.slug, mutation.sourceId);
+  return withCanonicalSourceBoundary(mutation.engine, target, sourceLease => {
+    mkdirSync(dirname(join(sourceLease.root_realpath, `${mutation.slug}.md`)), { recursive: true });
+    return writeCanonicalPage(target, content, { mode, sourceLease, expectedManaged: expectedManaged || undefined });
+  });
+}
 export async function withSourceWriteLease<T>(target: SourceQualifiedCanonicalTarget, fn: (lease: SourceWriteLease) => Promise<T>, opts: { sourceLock: (target: SourceQualifiedCanonicalTarget) => Promise<() => Promise<void>> }): Promise<T> { const release=await opts.sourceLock(target); try { const configured_root=resolve(target.configured_root), root_realpath=realpathSync(configured_root), st=statSync(root_realpath); if(!st.isDirectory())throw new Error('canonical root unavailable'); const lease=Object.freeze({__brand:'SourceWriteLease' as const,brain_id:target.brain_id,source_id:target.source_id,configured_root,root_realpath,token:randomUUID(),dev:st.dev,ino:st.ino}); liveLeases.add(lease); liveLeaseTokens.add(lease.token); try{return await fn(lease);}finally{liveLeases.delete(lease); liveLeaseTokens.delete(lease.token);} } finally { await release(); } }
 /** Acquire the existing per-source DB lock and expose its exact lease. */
 export async function withCanonicalSourceBoundary<T>(
@@ -357,6 +443,33 @@ export async function withCanonicalSourceBoundary<T>(
     try { return await sourceLeaseContext.run(lease, () => fn(lease)); }
     finally { liveLeases.delete(lease); liveLeaseTokens.delete(lease.token); }
   });
+}
+
+/**
+ * Bind a fresh recovery staging root while reusing the already-held source
+ * lock. Only checkout rebuild owns this root-rebinding exception.
+ */
+export async function withCanonicalCheckoutRebuildBoundary<T>(
+  target: SourceQualifiedCanonicalTarget,
+  fn: (lease: SourceWriteLease) => Promise<T>,
+  parentLease?: SourceWriteLease,
+): Promise<T> {
+  const parent = parentLease ?? sourceLeaseContext.getStore();
+  if (!parent) throw new Error('managed_state_unavailable: checkout rebuild requires the live source boundary');
+  if (!liveLeases.has(parent)) throw new Error('managed_state_unavailable: checkout rebuild source boundary is stale');
+  if (parent.brain_id !== target.brain_id || parent.source_id !== target.source_id) {
+    throw new Error('managed_state_unavailable: checkout rebuild source boundary identity mismatch');
+  }
+  const configured_root = resolve(target.configured_root);
+  const root_realpath = realpathSync(configured_root);
+  const st = statSync(root_realpath);
+  if (!st.isDirectory()) throw new Error('canonical rebuild root unavailable');
+  const lease = Object.freeze({ __brand: 'SourceWriteLease' as const,
+    brain_id: target.brain_id, source_id: target.source_id, configured_root,
+    root_realpath, token: randomUUID(), dev: st.dev, ino: st.ino });
+  liveLeases.add(lease); liveLeaseTokens.add(lease.token);
+  try { return await sourceLeaseContext.run(lease, () => fn(lease)); }
+  finally { liveLeases.delete(lease); liveLeaseTokens.delete(lease.token); }
 }
 function checkLease(t:SourceQualifiedCanonicalTarget,l:SourceWriteLease):void { const configured=resolve(t.configured_root), real=realpathSync(configured), st=statSync(real); if(!l || !liveLeases.has(l) || l.__brand!=='SourceWriteLease' || l.brain_id!==t.brain_id || l.source_id!==t.source_id || l.configured_root!==configured || l.root_realpath!==real || l.dev!==st.dev || l.ino!==st.ino) throw new Error('invalid or stale SourceWriteLease'); }
 export async function writeCanonicalPage(target: SourceQualifiedCanonicalTarget, content: string, options: CanonicalWriteOptions): Promise<string> {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTakes } from '../src/commands/takes.ts';
@@ -24,8 +24,18 @@ function makeEngine(opts: {
   const supersedePageIds: number[] = [];
   const resolvePageIds: number[] = [];
   const engine = {
+    kind: 'pglite',
+    db: {
+      query: async (sql: string) => ({ rows: sql.includes('RETURNING id') ? [{ id: 'lock' }] : [] }),
+    },
     getConfig: async (key: string) => key === 'sync.repo_path' ? (opts.legacyRepoPath ?? null) : null,
     executeRaw: async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('SELECT id, local_path FROM sources ORDER BY id')) {
+        const entries = Object.entries(opts.sourcePaths ?? {});
+        return entries.length > 0
+          ? entries.map(([id, local_path]) => ({ id, local_path }))
+          : [{ id: 'default', local_path: null }];
+      }
       if (sql.includes('SELECT local_path FROM sources WHERE id = $1')) {
         return [{ local_path: opts.sourcePaths?.[String(params[0])] ?? null }];
       }
@@ -97,6 +107,8 @@ describe('gbrain takes CLI source scoping', () => {
         'take',
         '--who',
         'self',
+        '--source-id',
+        'dept',
         '--dir',
         brainDir,
       ]);
@@ -127,12 +139,22 @@ describe('gbrain takes CLI source scoping', () => {
         'take',
         '--who',
         'self',
+        '--source-id',
+        'INVALID_SOURCE',
         '--dir',
         brainDir,
-      ])).rejects.toThrow(/Invalid GBRAIN_SOURCE/);
+      ])).rejects.toThrow(/Invalid --source value/);
     });
 
     expect(pageLookups).toEqual([]);
+    expect(added).toEqual([]);
+  });
+
+  test('mutation rejects when explicit source identity is omitted', async () => {
+    const { engine, added } = makeEngine();
+    await expect(runTakes(engine, [
+      'add', 'shared/page', '--claim', 'No ambient source', '--kind', 'take', '--who', 'self',
+    ])).rejects.toThrow('explicit --source-id');
     expect(added).toEqual([]);
   });
 
@@ -155,6 +177,8 @@ describe('gbrain takes CLI source scoping', () => {
         'take',
         '--who',
         'self',
+        '--source-id',
+        'dept',
       ]);
     });
 
@@ -176,16 +200,16 @@ describe('gbrain takes CLI source scoping', () => {
 
     await withEnv({ GBRAIN_SOURCE: 'dept', GBRAIN_HOME: home }, async () => {
       await runTakes(engine, [
-        'add', 'shared/page', '--claim', 'Original claim', '--kind', 'take', '--who', 'self',
+        'add', 'shared/page', '--claim', 'Original claim', '--kind', 'take', '--who', 'self', '--source-id', 'dept',
       ]);
       await runTakes(engine, [
-        'update', 'shared/page', '--row', '1', '--weight', '0.8',
+        'update', 'shared/page', '--row', '1', '--weight', '0.8', '--source-id', 'dept',
       ]);
       await runTakes(engine, [
-        'supersede', 'shared/page', '--row', '1', '--claim', 'Revised claim',
+        'supersede', 'shared/page', '--row', '1', '--claim', 'Revised claim', '--source-id', 'dept',
       ]);
       await runTakes(engine, [
-        'resolve', 'shared/page', '--row', '2', '--quality', 'correct',
+        'resolve', 'shared/page', '--row', '2', '--quality', 'correct', '--source-id', 'dept',
       ]);
     });
 
@@ -195,5 +219,25 @@ describe('gbrain takes CLI source scoping', () => {
     const markdown = readFileSync(join(sourceDir, 'shared/page.md'), 'utf-8');
     expect(markdown).toContain('Revised claim');
     expect(markdown).toContain('correct');
+  });
+
+  test('canonical rejection leaves the take row unchanged', async () => {
+    const sourceDir = mkdtempSync(join(tmpdir(), 'gbrain-takes-dept-'));
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-takes-home-'));
+    tmpRoots.push(sourceDir, home);
+    const { engine, updatePageIds } = makeEngine({ sourcePaths: { dept: sourceDir } });
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await runTakes(engine, [
+        'add', 'shared/page', '--claim', 'Original', '--kind', 'take', '--who', 'self', '--source-id', 'dept',
+      ]);
+      const file = join(sourceDir, 'shared/page.md');
+      const broken = `${readFileSync(file, 'utf8')}\n<!-- gbrain:learning-loop:v1:begin -->\n`;
+      writeFileSync(file, broken);
+      await expect(runTakes(engine, [
+        'update', 'shared/page', '--row', '1', '--weight', '0.9', '--source-id', 'dept',
+      ])).rejects.toThrow(/malformed/);
+      expect(updatePageIds).toEqual([]);
+      expect(readFileSync(file, 'utf8')).toBe(broken);
+    });
   });
 });

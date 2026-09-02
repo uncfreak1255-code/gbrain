@@ -7,12 +7,16 @@ import { runExport } from '../src/commands/export.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
-import { getRecoveryBackedSourceCheckout } from '../src/core/recovery-source-refresh.ts';
+import { getRecoveryBackedSourceCheckout, withRecoverySourceWriteBoundary } from '../src/core/recovery-source-refresh.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { renderLearningLoopFence } from '../src/core/learning-loop-knowledge.ts';
+import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
+import { armLearningLoop } from '../src/core/learning-loop.ts';
 
 let engine: PGLiteEngine;
 let tmpRoot: string;
 let recoveryRepo: string;
+let previousGbrainHome: string | undefined;
 
 function commitRecoveryCheckout(repoPath: string, message: string): void {
   execFileSync('git', ['init'], { cwd: repoPath, stdio: 'pipe' });
@@ -66,10 +70,14 @@ beforeEach(async () => {
   await resetPgliteState(engine);
   resetGateway();
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-recovery-refresh-'));
+  previousGbrainHome = process.env.GBRAIN_HOME;
+  process.env.GBRAIN_HOME = tmpRoot;
   recoveryRepo = path.join(tmpRoot, 'recovery');
 });
 
 afterEach(() => {
+  if (previousGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = previousGbrainHome;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -183,6 +191,66 @@ describe('recovery-backed source refresh', () => {
     });
 
     expect(await activeSlugs()).toEqual([legacySlug, newSlug]);
+    expect(gitStatus(recoveryRepo)).toEqual([]);
+  });
+
+  test('managed put_page carries protected metadata through checkout rebuild', async () => {
+    const slug = 'notes/managed-recovery';
+    const brainId = computeBrainIdFromConfig(engine.learningLoopLedgerConfig());
+    const fence = renderLearningLoopFence({
+      brain_id: brainId, source_id: 'default', canonical_slug: slug,
+      managed_rows: {}, blocked_identities: [], correction_lineages: {},
+      reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
+    });
+    await engine.putPage(slug, {
+      type: 'note', title: 'Managed before', compiled_truth: `Before.\n\n${fence}`,
+      timeline: '', frontmatter: {}, source_path: `${slug}.md`,
+    }, { sourceId: 'default' });
+
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    commitRecoveryCheckout(recoveryRepo, 'managed recovery fixture');
+    await engine.executeRaw(
+      `UPDATE sources SET local_path = $1,
+         config = jsonb_set(config, '{remote_url}', to_jsonb($2::text), true)
+       WHERE id = 'default'`,
+      [recoveryRepo, 'https://example.com/gbrain-default.git'],
+    );
+
+    const putPage = operations.find((op) => op.name === 'put_page')!;
+    const result = await putPage.handler(makeCtx(), {
+      slug,
+      content: `---\ntitle: Managed after\nslug: ${slug}\n---\n\nAfter.\n`,
+    }) as { write_through?: { written: boolean; refreshed?: boolean } };
+
+    expect(result.write_through?.written).toBe(true);
+    expect(result.write_through?.refreshed).toBe(true);
+    const readback = fs.readFileSync(path.join(recoveryRepo, `${slug}.md`), 'utf8');
+    expect(readback).toContain('After.');
+    expect(readback).toContain(fence);
+    expect(gitStatus(recoveryRepo)).toEqual([]);
+  });
+
+  test('active V2 run refuses recovery before changing the frozen checkout inode', async () => {
+    const corpus = path.join(tmpRoot, 'corpus');
+    fs.mkdirSync(corpus, { recursive: true });
+    await runExport(engine, ['--dir', recoveryRepo, '--source', 'default']);
+    commitRecoveryCheckout(recoveryRepo, 'active V2 recovery fixture');
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [recoveryRepo]);
+    await engine.setConfig('learning_loop.mode', 'canary');
+    await engine.setConfig('learning_loop.corpus.codex.root', corpus);
+    await engine.setConfig('learning_loop.corpus.codex.source_id', 'default');
+    const config = { engine: 'pglite' as const };
+    await armLearningLoop({
+      command_id: 'recovery-active-v2', contract_version: 2, engine, config,
+      authorized_adapter: { client_id: 'codex-test', source_id: 'default', provider: 'codex' },
+      destination: { source_id: 'default', canonical_slug: 'notes/frozen' },
+    });
+    const before = fs.statSync(recoveryRepo);
+
+    await expect(withRecoverySourceWriteBoundary(engine, 'default', async () => true))
+      .rejects.toThrow('active V2 run freezes source');
+    const after = fs.statSync(recoveryRepo);
+    expect([after.dev, after.ino]).toEqual([before.dev, before.ino]);
     expect(gitStatus(recoveryRepo)).toEqual([]);
   });
 });

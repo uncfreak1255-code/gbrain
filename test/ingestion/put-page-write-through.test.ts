@@ -120,7 +120,7 @@ describe('put_page write-through — happy path', () => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, `---\ntitle: Before\nslug: ${slug}\n---\n\nBefore.\n\n${fence}\n`);
 
-    const result = (await putPage.handler(makeCtx(), {
+    const result = (await putPage.handler(makeCtx({ brainId: 'host' }), {
       slug,
       content: `---\ntitle: After\nslug: ${slug}\n---\n\nAfter.\n`,
     })) as { write_through?: { written: boolean; path?: string } };
@@ -130,6 +130,27 @@ describe('put_page write-through — happy path', () => {
     expect(onDisk).toContain('After.');
     expect(onDisk).toContain(fence);
     expect((await engine.getPage(slug, { sourceId: 'default' }))?.title).toBe('After');
+  });
+
+  test('rejects a managed fence that claims a different brain before file or row mutation', async () => {
+    const slug = 'inbox/wrong-brain';
+    const fence = renderLearningLoopFence({
+      brain_id: 'other-brain', source_id: 'default', canonical_slug: slug,
+      managed_rows: {}, blocked_identities: [], correction_lineages: {},
+      reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
+    });
+    const file = path.join(brainDir, `${slug}.md`);
+    const before = `---\ntitle: Before\nslug: ${slug}\n---\n\nBefore.\n\n${fence}\n`;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, before);
+
+    await expect(putPage.handler(makeCtx({ brainId: 'host' }), {
+      slug,
+      content: `---\ntitle: After\nslug: ${slug}\n---\n\nAfter.\n`,
+    })).rejects.toThrow('metadata target mismatch');
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    expect(await engine.getPage(slug, { sourceId: 'default' })).toBeNull();
   });
 
   test('writes the markdown file to disk at brainDir/<slug>.md', async () => {

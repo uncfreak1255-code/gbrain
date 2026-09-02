@@ -1,15 +1,18 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   writeCanonicalPage,
   withSourceWriteLease,
   inspectExpectedManagedState,
+  assertLegacyPathMutationAllowed,
+  writeSourceQualifiedCanonicalPage,
   type CanonicalWriterMode,
   type SourceQualifiedCanonicalTarget,
   type SourceWriteLease,
 } from '../src/core/canonical-page-write.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
 
 const facts = '<!--- gbrain:facts:begin -->\n| Fact | Value |\n|---|---|\n| Managed | yes |\n<!--- gbrain:facts:end -->';
@@ -30,6 +33,20 @@ async function inRoot<T>(fn: (ctx: { base: string; root: string; target: SourceQ
 }
 
 const sourceLock = async () => async () => {};
+
+function boundaryEngine(roots: Array<{ id: string; local_path: string | null }>, managedBody = ''): BrainEngine {
+  return {
+    kind: 'pglite',
+    db: { query: async (sql: string) => ({ rows: sql.includes('RETURNING id') ? [{ id: 'lock' }] : [] }) },
+    executeRaw: async (sql: string) => {
+      if (sql.includes('SELECT id, local_path FROM sources')) return roots;
+      if (sql.includes('SELECT compiled_truth, timeline FROM pages')) return managedBody ? [{ compiled_truth: managedBody, timeline: null }] : [];
+      return [];
+    },
+    getConfig: async () => null,
+    learningLoopLedgerConfig: () => ({ engine: 'pglite', database_url: 'test-boundary' }),
+  } as unknown as BrainEngine;
+}
 
 describe('canonical page write boundary', () => {
   for (const mode of ['ordinary_content', 'non_lineage_fact', 'checkout_rebuild'] as const satisfies readonly CanonicalWriterMode[]) {
@@ -130,4 +147,58 @@ describe('canonical page write boundary', () => {
       mode: 'ordinary_content', lockRoot: locks, sourceLease: undefined as never,
     })).rejects.toThrow('invalid canonical target');
   }));
+});
+
+describe('source-qualified and standalone path lanes', () => {
+  test('standalone lane rejects registered, overlapping, symlink-ambiguous, and unreadable roots', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'canonical-lanes-'));
+    try {
+      const root = join(base, 'root');
+      const nested = join(root, 'nested');
+      const outside = join(base, 'outside');
+      mkdirSync(nested, { recursive: true });
+      mkdirSync(outside);
+      writeFileSync(join(nested, 'x.md'), '# X\n');
+      const engine = boundaryEngine([{ id: 'a', local_path: root }]);
+      await expect(assertLegacyPathMutationAllowed({ engine, sourceId: '', slug: '' }, join(nested, 'x.md')))
+        .rejects.toThrow('explicit unambiguous source identity');
+      await expect(assertLegacyPathMutationAllowed({ engine, sourceId: '', slug: '' }, join(outside, 'x.md')))
+        .resolves.toBeUndefined();
+
+      const overlap = boundaryEngine([{ id: 'a', local_path: root }, { id: 'b', local_path: nested }]);
+      await expect(assertLegacyPathMutationAllowed({ engine: overlap, sourceId: 'a', slug: 'nested/x' }, join(nested, 'x.md')))
+        .rejects.toThrow('unambiguous source identity');
+
+      const link = join(base, 'root-link');
+      symlinkSync(root, link);
+      await expect(assertLegacyPathMutationAllowed({ engine, sourceId: '', slug: '' }, join(link, 'nested/x.md')))
+        .rejects.toThrow(/symlink-ambiguous|registered canonical path/);
+
+      const unreadable = boundaryEngine([{ id: 'missing', local_path: join(base, 'missing') }]);
+      await expect(assertLegacyPathMutationAllowed({ engine: unreadable, sourceId: '', slug: '' }, join(outside, 'x.md')))
+        .rejects.toThrow('root is unreadable');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  test('source-qualified lane writes only the exact selected source and rejects missing expected-managed state', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'canonical-qualified-'));
+    try {
+      const a = join(base, 'a');
+      const b = join(base, 'b');
+      mkdirSync(a); mkdirSync(b);
+      const roots = [{ id: 'a', local_path: a }, { id: 'b', local_path: b }];
+      const engine = boundaryEngine(roots);
+      const escaped = join(base, 'escaped');
+      await expect(writeSourceQualifiedCanonicalPage({ engine, sourceId: 'a', slug: '../../escaped/new' }, '# no\n'))
+        .rejects.toThrow('invalid canonical target');
+      expect(existsSync(escaped)).toBe(false);
+      await writeSourceQualifiedCanonicalPage({ engine, sourceId: 'a', slug: 'same' }, '# A\n');
+      expect(readFileSync(join(a, 'same.md'), 'utf8')).toBe('# A\n');
+      expect(existsSync(join(b, 'same.md'))).toBe(false);
+
+      const expected = boundaryEngine(roots, renderLearningLoopFence({ ...knowledge(), source_id: 'a', canonical_slug: 'missing' }));
+      await expect(writeSourceQualifiedCanonicalPage({ engine: expected, sourceId: 'a', slug: 'missing' }, '# no\n'))
+        .rejects.toThrow('canonical page is missing');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
 });

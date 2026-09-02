@@ -28,7 +28,11 @@ import {
   type ParsedTake,
 } from '../core/takes-fence.ts';
 import { withPageLock } from '../core/page-lock.ts';
-import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
+import {
+  assertLegacyPathMutationAllowed,
+  assertUnmanagedPathMutation,
+  writeSourceQualifiedCanonicalPage,
+} from '../core/canonical-page-write.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 
 // --- Helpers ---
@@ -122,11 +126,10 @@ async function getPageId(engine: BrainEngine, slug: string, sourceId?: string): 
   return rows[0].id;
 }
 
-async function resolveTakesSourceId(engine: BrainEngine): Promise<string> {
-  // Fail closed: an invalid or missing selected source must never degrade to
-  // getPageId's legacy unscoped lookup, which can pick an arbitrary same-slug
-  // page from another source.
-  return resolveSourceId(engine, null);
+async function resolveTakesSourceId(engine: BrainEngine, args: string[]): Promise<string> {
+  const sourceId = flagValue(args, '--source-id');
+  if (!sourceId) throw new Error('takes mutation requires explicit --source-id <id>');
+  return resolveSourceId(engine, sourceId);
 }
 
 function readBodyOrEmpty(path: string): string {
@@ -134,7 +137,19 @@ function readBodyOrEmpty(path: string): string {
   return readFileSync(path, 'utf-8');
 }
 
-function writeBody(path: string, body: string): void {
+async function writeBody(
+  engine: BrainEngine,
+  sourceId: string,
+  slug: string,
+  path: string,
+  body: string,
+  standalone: boolean,
+): Promise<void> {
+  if (!standalone) {
+    await writeSourceQualifiedCanonicalPage({ engine, sourceId, slug }, body);
+    return;
+  }
+  await assertLegacyPathMutationAllowed({ engine, sourceId, slug }, path);
   assertUnmanagedPathMutation(path, body);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, body, 'utf-8');
@@ -204,7 +219,7 @@ async function cmdSearch(engine: BrainEngine, args: string[]): Promise<void> {
   }
 }
 
-async function cmdAdd(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
+async function cmdAdd(engine: BrainEngine, args: string[], sourceId: string): Promise<void> {
   const slug = args[0];
   if (!slug) {
     console.error('Usage: gbrain takes add <slug> --claim "..." --kind <k> --who <h> [--weight 0.5] [--source "..."] [--since YYYY-MM]');
@@ -227,7 +242,7 @@ async function cmdAdd(engine: BrainEngine, args: string[], sourceId?: string): P
     const { body: nextBody, rowNum } = upsertTakeRow(body, {
       claim, kind, holder, weight, source, sinceDate: since, active: true,
     });
-    writeBody(path, nextBody);
+    await writeBody(engine, sourceId, slug, path, nextBody, Boolean(dirArg));
 
     // Mirror to DB. Page may not be in DB yet if not synced — caller must run sync first.
     const pageId = await getPageId(engine, slug, sourceId);
@@ -239,7 +254,7 @@ async function cmdAdd(engine: BrainEngine, args: string[], sourceId?: string): P
   });
 }
 
-async function cmdUpdate(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
+async function cmdUpdate(engine: BrainEngine, args: string[], sourceId: string): Promise<void> {
   const slug = args[0];
   const rowNumStr = flagValue(args, '--row');
   if (!slug || !rowNumStr) {
@@ -259,9 +274,8 @@ async function cmdUpdate(engine: BrainEngine, args: string[], sourceId?: string)
 
   await withPageLock(slug, async () => {
     const pageId = await getPageId(engine, slug, sourceId);
-    await engine.updateTake(pageId, rowNum, fields);
 
-    // Sync the markdown table: read fence, find row, apply field updates, re-render.
+    // Canonical first: reject any protected-state problem before changing DB.
     const path = pageFilePath(brainDir, slug);
     const body = readBodyOrEmpty(path);
     const parsed = parseTakesFence(body);
@@ -284,12 +298,13 @@ async function cmdUpdate(engine: BrainEngine, args: string[], sourceId?: string)
     const beginIdx = body.indexOf(TAKES_FENCE_BEGIN);
     const endIdx = body.indexOf(TAKES_FENCE_END, beginIdx + TAKES_FENCE_BEGIN.length);
     const out = body.slice(0, beginIdx) + newFence + body.slice(endIdx + TAKES_FENCE_END.length);
-    writeBody(path, out);
+    await writeBody(engine, sourceId, slug, path, out, Boolean(dirArg));
+    await engine.updateTake(pageId, rowNum, fields);
     console.log(`Updated take #${rowNum} on ${slug}.`);
   });
 }
 
-async function cmdSupersede(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
+async function cmdSupersede(engine: BrainEngine, args: string[], sourceId: string): Promise<void> {
   const slug = args[0];
   const rowNumStr = flagValue(args, '--row');
   if (!slug || !rowNumStr) {
@@ -318,26 +333,25 @@ async function cmdSupersede(engine: BrainEngine, args: string[], sourceId?: stri
     const source = flagValue(args, '--source');
     const since = flagValue(args, '--since');
 
-    const dbResult = await engine.supersedeTake(pageId, rowNum, {
-      claim, kind, holder, weight, source, since_date: since, active: true,
-    });
-
-    // Mirror in markdown
+    // Canonical first: reject missing/corrupt protected state before DB.
     const path = pageFilePath(brainDir, slug);
     const body = readBodyOrEmpty(path);
     if (parseTakesFence(body).takes.find(t => t.rowNum === rowNum)) {
       const { body: nextBody } = supersedeRow(body, rowNum, {
         claim, kind, holder, weight, source, sinceDate: since,
       });
-      writeBody(path, nextBody);
+      await writeBody(engine, sourceId, slug, path, nextBody, Boolean(dirArg));
     } else {
-      console.warn(`[takes supersede] DB updated but markdown lacks row #${rowNum}; only DB written.`);
+      throw new Error(`[takes supersede] markdown lacks row #${rowNum}; DB was not changed`);
     }
+    const dbResult = await engine.supersedeTake(pageId, rowNum, {
+      claim, kind, holder, weight, source, since_date: since, active: true,
+    });
     console.log(`Superseded #${dbResult.oldRow} → new #${dbResult.newRow} on ${slug}.`);
   });
 }
 
-async function cmdResolve(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
+async function cmdResolve(engine: BrainEngine, args: string[], sourceId: string): Promise<void> {
   const slug = args[0];
   const rowNumStr = flagValue(args, '--row');
   const qualityStr = flagValue(args, '--quality');
@@ -384,16 +398,8 @@ async function cmdResolve(engine: BrainEngine, args: string[], sourceId?: string
 
   const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
   const pageId = await getPageId(engine, slug, sourceId);
-  await engine.resolveTake(pageId, rowNum, {
-    quality,
-    outcome,
-    value,
-    unit,
-    source,
-    resolvedBy,
-  });
 
-  // Mirror resolution into the markdown fence so the page is self-describing.
+  // Canonical first: the DB is reconciled only after the source page commits.
   // The renderer conditionally widens the table to 13 columns when at least one
   // row has resolution data; pages with no resolved rows keep the 7-col shape.
   // Round-trip via parseTakesFence + renderTakesFence preserves all rows.
@@ -401,15 +407,13 @@ async function cmdResolve(engine: BrainEngine, args: string[], sourceId?: string
     const path = pageFilePath(brainDir, slug);
     const body = readBodyOrEmpty(path);
     if (!body) {
-      console.warn(`[takes resolve] markdown file not found at ${path}; DB updated but on-disk page absent.`);
-      return;
+      throw new Error(`[takes resolve] markdown file not found at ${path}; DB was not changed`);
     }
     const { parseTakesFence, renderTakesFence, TAKES_FENCE_BEGIN, TAKES_FENCE_END } = await import('../core/takes-fence.ts');
     const parsed = parseTakesFence(body);
     const target = parsed.takes.find(t => t.rowNum === rowNum);
     if (!target) {
-      console.warn(`[takes resolve] DB updated but row #${rowNum} not in markdown fence; run 'gbrain extract takes --slugs ${slug}' to reconcile.`);
-      return;
+      throw new Error(`[takes resolve] row #${rowNum} is absent from markdown; DB was not changed`);
     }
     // Derive resolved fields from the inputs. Mirror the engine semantics:
     // quality wins when both set; partial → outcome=null.
@@ -432,7 +436,15 @@ async function cmdResolve(engine: BrainEngine, args: string[], sourceId?: string
     const beginIdx = body.indexOf(TAKES_FENCE_BEGIN);
     const endIdx = body.indexOf(TAKES_FENCE_END, beginIdx + TAKES_FENCE_BEGIN.length);
     const out = body.slice(0, beginIdx) + newFence + body.slice(endIdx + TAKES_FENCE_END.length);
-    writeBody(path, out);
+    await writeBody(engine, sourceId, slug, path, out, Boolean(dirArg));
+  });
+  await engine.resolveTake(pageId, rowNum, {
+    quality,
+    outcome,
+    value,
+    unit,
+    source,
+    resolvedBy,
   });
 
   const finalQuality = quality ?? (outcome === true ? 'correct' : outcome === false ? 'incorrect' : 'unknown');
@@ -599,13 +611,13 @@ Common flags:
 
   switch (sub) {
     case 'search':      return cmdSearch(engine, rest);
-    case 'add':         return cmdAdd(engine, rest, await resolveTakesSourceId(engine));
-    case 'update':      return cmdUpdate(engine, rest, await resolveTakesSourceId(engine));
-    case 'supersede':   return cmdSupersede(engine, rest, await resolveTakesSourceId(engine));
-    case 'resolve':     return cmdResolve(engine, rest, await resolveTakesSourceId(engine));
+    case 'add':         return cmdAdd(engine, rest, await resolveTakesSourceId(engine, rest));
+    case 'update':      return cmdUpdate(engine, rest, await resolveTakesSourceId(engine, rest));
+    case 'supersede':   return cmdSupersede(engine, rest, await resolveTakesSourceId(engine, rest));
+    case 'resolve':     return cmdResolve(engine, rest, await resolveTakesSourceId(engine, rest));
     case 'scorecard':   return cmdScorecard(engine, rest);
     case 'calibration': return cmdCalibration(engine, rest);
-    case 'revisit':     return cmdRevisit(engine, rest);
+    case 'revisit':     return cmdRevisit(engine, rest, await resolveTakesSourceId(engine, rest));
     case 'extract':     return cmdExtract(engine, rest);
     default:
       // No subcommand keyword → treat first arg as <slug> for the list path.
@@ -687,22 +699,16 @@ async function cmdExtract(engine: BrainEngine, rest: string[]): Promise<void> {
  * Inserts a `<!-- gbrain:revisit -->` cursor marker at the bottom of the
  * page body so the editor opens with intent visible.
  */
-async function cmdRevisit(_engine: BrainEngine, rest: string[]): Promise<void> {
+async function cmdRevisit(engine: BrainEngine, rest: string[], sourceId: string): Promise<void> {
   const slug = rest[0];
   if (!slug) {
     process.stderr.write('Usage: gbrain takes revisit <slug>\n');
     process.exit(1);
   }
-  const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
+  const { existsSync, readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { execFileSync, spawnSync } = await import('node:child_process');
-  const { loadConfig } = await import('../core/config.ts');
-  const cfg = loadConfig();
-  const repoPath = (cfg as { sync?: { repo_path?: string } } | null)?.sync?.repo_path;
-  if (!repoPath) {
-    process.stderr.write('No brain repo configured. Run `gbrain config set sync.repo_path /path/to/brain`.\n');
-    process.exit(1);
-  }
+  const repoPath = await resolveBrainDir(engine, null, sourceId);
   const filePath = join(repoPath, `${slug}.md`);
   if (!existsSync(filePath)) {
     process.stderr.write(`Page not found: ${filePath}\n`);
@@ -711,8 +717,9 @@ async function cmdRevisit(_engine: BrainEngine, rest: string[]): Promise<void> {
   // Append a cursor marker if not already present.
   const existing = readFileSync(filePath, 'utf8');
   const marker = '\n<!-- gbrain:revisit -->\n';
+  assertUnmanagedPathMutation(filePath, existing.includes('<!-- gbrain:revisit -->') ? existing : existing + marker);
   if (!existing.includes('<!-- gbrain:revisit -->')) {
-    writeFileSync(filePath, existing + marker);
+    await writeSourceQualifiedCanonicalPage({ engine, sourceId, slug }, existing + marker);
   }
   const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
   process.stderr.write(`Opening ${filePath} in ${editor}...\n`);

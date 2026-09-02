@@ -948,7 +948,7 @@ const put_page: Operation = {
       frontmatterOverrides.source_uri = provenanceUri;
     }
     const { result, writeThrough } = await importAndWriteCanonicalPage(ctx.engine, slug, {
-      brainId: ctx.brainId ?? 'host',
+      brainId: ctx.brainId,
       sourceId,
       content,
       skipWriteThrough: isSandboxSubagent,

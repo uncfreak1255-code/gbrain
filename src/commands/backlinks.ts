@@ -10,12 +10,20 @@
  *   gbrain check-backlinks fix --dry-run                  # preview fixes
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, realpathSync } from 'fs';
 import { join, relative, basename } from 'path';
 import { extractEntityRefs as canonicalExtractEntityRefs } from '../core/link-extraction.ts';
 import { createProgress, startHeartbeat } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
-import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
+import {
+  assertLegacyPathMutationAllowed,
+  assertUnmanagedPathMutation,
+  resolveEffectiveCanonicalRoot,
+  writeSourceQualifiedCanonicalPage,
+} from '../core/canonical-page-write.ts';
+import type { BrainEngine } from '../core/engine.ts';
+import { loadConfig, toEngineConfig } from '../core/config.ts';
+import { createEngine } from '../core/engine-factory.ts';
 
 interface BacklinkGap {
   /** The page that mentions the entity */
@@ -134,7 +142,12 @@ export function findBacklinkGaps(brainDir: string): BacklinkGap[] {
 }
 
 /** Fix back-link gaps by appending timeline entries to target pages */
-export function fixBacklinkGaps(brainDir: string, gaps: BacklinkGap[], dryRun: boolean = false): number {
+export async function fixBacklinkGaps(
+  brainDir: string,
+  gaps: BacklinkGap[],
+  dryRun: boolean = false,
+  mutation?: { engine: BrainEngine; sourceId?: string },
+): Promise<number> {
   const today = new Date().toISOString().slice(0, 10);
   let fixed = 0;
 
@@ -181,8 +194,18 @@ export function fixBacklinkGaps(brainDir: string, gaps: BacklinkGap[], dryRun: b
     }
 
     if (!dryRun) {
-      assertUnmanagedPathMutation(targetPath, content);
-      writeFileSync(targetPath, content);
+      const slug = targetPage.replace(/\.md$/, '');
+      const root = mutation?.sourceId
+        ? await resolveEffectiveCanonicalRoot(mutation.engine, mutation.sourceId)
+        : null;
+      const qualified = Boolean(root && realpathSync(root!) === realpathSync(brainDir));
+      if (mutation?.sourceId && qualified) {
+        await writeSourceQualifiedCanonicalPage({ engine: mutation.engine, sourceId: mutation.sourceId, slug }, content);
+      } else {
+        if (mutation) await assertLegacyPathMutationAllowed({ engine: mutation.engine, sourceId: mutation.sourceId ?? '', slug }, targetPath);
+        assertUnmanagedPathMutation(targetPath, content);
+        writeFileSync(targetPath, content);
+      }
     }
   }
 
@@ -193,6 +216,8 @@ export interface BacklinksOpts {
   action: 'check' | 'fix';
   dir: string;
   dryRun?: boolean;
+  engine?: BrainEngine;
+  sourceId?: string;
 }
 
 export interface BacklinksResult {
@@ -231,7 +256,8 @@ export async function runBacklinksCore(opts: BacklinksOpts): Promise<BacklinksRe
   const pagesAffected = new Set(gaps.map(g => g.targetPage)).size;
 
   if (opts.action === 'fix' && gaps.length > 0) {
-    const fixed = fixBacklinkGaps(opts.dir, gaps, !!opts.dryRun);
+    const fixed = await fixBacklinkGaps(opts.dir, gaps, !!opts.dryRun,
+      opts.engine ? { engine: opts.engine, sourceId: opts.sourceId } : undefined);
     return { action: 'fix', gaps_found: gaps.length, fixed, pages_affected: pagesAffected, dryRun: !!opts.dryRun };
   }
   return { action: opts.action, gaps_found: gaps.length, fixed: 0, pages_affected: pagesAffected, dryRun: !!opts.dryRun };
@@ -242,6 +268,8 @@ export async function runBacklinks(args: string[]) {
   const dirIdx = args.indexOf('--dir');
   const brainDir = dirIdx >= 0 ? args[dirIdx + 1] : '.';
   const dryRun = args.includes('--dry-run');
+  const sourceIdx = args.indexOf('--source-id');
+  const sourceId = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
 
   if (!subcommand || !['check', 'fix'].includes(subcommand)) {
     console.error('Usage: gbrain check-backlinks <check|fix> [--dir <brain-dir>] [--dry-run]');
@@ -253,15 +281,28 @@ export async function runBacklinks(args: string[]) {
   }
 
   let result: BacklinksResult;
+  let engine: BrainEngine | undefined;
   try {
+    if (subcommand === 'fix' && !dryRun) {
+      const config = loadConfig();
+      if (config) {
+        const engineConfig = toEngineConfig(config);
+        engine = await createEngine(engineConfig);
+        await engine.connect(engineConfig);
+      }
+    }
     result = await runBacklinksCore({
       action: subcommand as 'check' | 'fix',
       dir: brainDir,
       dryRun,
+      engine,
+      sourceId,
     });
   } catch (e) {
     console.error(e instanceof Error ? e.message : String(e));
     process.exit(1);
+  } finally {
+    await engine?.disconnect();
   }
 
   if (result.gaps_found === 0) {

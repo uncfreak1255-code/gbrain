@@ -36,6 +36,7 @@ import {
   sourceArchiveDrainPurpose,
   waitForSourceEmbeddingLeases,
 } from '../core/source-embedding-lease.ts';
+import { assertManagedPageMutationAllowed } from '../core/canonical-page-write.ts';
 
 interface MigrateOpts {
   targetEngine: 'postgres' | 'pglite';
@@ -1377,6 +1378,18 @@ async function runMigrateEngineWithHostLock(sourceEngine: BrainEngine, args: str
       targetEngine,
       copiedSourceIds,
       async (tx) => {
+        const candidates = await tx.executeRaw<{ slug: string; source_id: string }>(
+          `SELECT slug, source_id FROM pages WHERE source_id = ANY($1::text[])`,
+          [copiedSourceIds],
+        );
+        for (const candidate of candidates) {
+          await assertManagedPageMutationAllowed(
+            tx,
+            candidate.slug,
+            candidate.source_id,
+            'destructive_admin',
+          );
+        }
         await tx.executeRaw(
           `DELETE FROM pages WHERE source_id = ANY($1::text[])`,
           [copiedSourceIds],

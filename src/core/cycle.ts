@@ -761,6 +761,7 @@ export async function runPhaseLint(
   engine?: BrainEngine | null,
   signal?: AbortSignal,
   fixLint = true,
+  sourceId?: string,
 ): Promise<PhaseResult> {
   try {
     const { runLintCore } = await import('../commands/lint.ts');
@@ -769,7 +770,7 @@ export async function runPhaseLint(
     // competing module-style engine that nulls the shared db singleton
     // mid-cycle (which broke every phase after lint with a misleading
     // "connect() has not been called").
-    const result = await runLintCore({ target: brainDir, fix: fixLint, dryRun, engine: engine ?? undefined, signal });
+    const result = await runLintCore({ target: brainDir, fix: fixLint, dryRun, engine: engine ?? undefined, sourceId, signal });
     const issues = result.total_issues ?? 0;
     const fixed = result.total_fixed ?? 0;
     const remaining = Math.max(0, issues - fixed);
@@ -1621,6 +1622,7 @@ export async function runCycle(
           engine,
           opts.signal,
           opts.fixLint !== false,
+          cycleSourceId,
         ));
         result.duration_ms = duration_ms;
         phaseResults.push(result);
