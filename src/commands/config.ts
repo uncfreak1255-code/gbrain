@@ -366,11 +366,11 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   }
 }
 export function isProtectedOwnerControlKey(key: string): boolean {
-  return key === 'learning_loop.mode';
+  return key === 'learning_loop.mode' || key === 'learning_loop.mode_transition_intent_v1';
 }
 
 function rejectProtectedOwnerControlKey(key: string): never {
   console.error(`[config] ${key} is owned by a trusted-local lifecycle control.`);
-  console.error(`[config] Use: gbrain call learning_loop_set_mode '{"mode":"off|capture|canary"}'`);
+  console.error(`[config] Use the trusted-local Learning Loop lifecycle command; generic config writes are rejected.`);
   process.exit(1);
 }

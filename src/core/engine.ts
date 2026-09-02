@@ -19,6 +19,85 @@ import type {
   EnrichCandidatesOpts, EnrichCandidate,
 } from './types.ts';
 import type { PageDbMutationPermit } from './canonical-page-write.ts';
+import { createHash } from 'node:crypto';
+
+export type LearningLoopConfigKey =
+  | 'learning_loop.mode'
+  | 'learning_loop.mode_transition_intent_v1';
+export type LearningLoopConfigMutationOperation = 'set' | 'unset';
+
+/** A capability minted only by the Learning Loop owner while holding lifecycle. */
+export interface LearningLoopConfigMutationPermit {
+  readonly __brand: 'LearningLoopConfigMutationPermit';
+  readonly key: LearningLoopConfigKey;
+  readonly operation: LearningLoopConfigMutationOperation;
+  readonly engine: BrainEngine;
+  readonly lifecycleHolder: object;
+  readonly expectedOldValueHash: string;
+}
+
+const learningLoopConfigPermits = new WeakSet<object>();
+const consumedLearningLoopConfigPermits = new WeakSet<object>();
+const learningLoopLifecycleHolders = new WeakSet<object>();
+
+/** Create the opaque lifecycle capability required to mint a config permit. */
+export function createLearningLoopLifecycleHolder(): object {
+  const holder = Object.freeze({});
+  learningLoopLifecycleHolders.add(holder);
+  return holder;
+}
+
+export function learningLoopConfigValueHash(value: string | null): string {
+  return createHash('sha256').update(value === null ? 'null' : `string:${value}`, 'utf8').digest('hex');
+}
+
+export function createLearningLoopConfigMutationPermit(input: {
+  key: LearningLoopConfigKey;
+  operation: LearningLoopConfigMutationOperation;
+  engine: BrainEngine;
+  lifecycleHolder: object;
+  expectedOldValue: string | null;
+}): LearningLoopConfigMutationPermit {
+  if (!learningLoopLifecycleHolders.has(input.lifecycleHolder)) {
+    throw new Error('learning_loop_config_boundary: lifecycle holder was not created by the owner module');
+  }
+  const permit = Object.freeze({
+    __brand: 'LearningLoopConfigMutationPermit' as const,
+    key: input.key,
+    operation: input.operation,
+    engine: input.engine,
+    lifecycleHolder: input.lifecycleHolder,
+    expectedOldValueHash: learningLoopConfigValueHash(input.expectedOldValue),
+  });
+  learningLoopConfigPermits.add(permit);
+  return permit;
+}
+
+export function assertLearningLoopConfigMutationPermit(
+  permit: unknown,
+  key: string,
+  operation: LearningLoopConfigMutationOperation,
+  engine: BrainEngine,
+): asserts permit is LearningLoopConfigMutationPermit {
+  if (!permit || typeof permit !== 'object' || !learningLoopConfigPermits.has(permit)
+    || consumedLearningLoopConfigPermits.has(permit)
+    || (permit as LearningLoopConfigMutationPermit).__brand !== 'LearningLoopConfigMutationPermit'
+    || (permit as LearningLoopConfigMutationPermit).key !== key
+    || (permit as LearningLoopConfigMutationPermit).operation !== operation
+    || (permit as LearningLoopConfigMutationPermit).engine !== engine
+    || typeof (permit as LearningLoopConfigMutationPermit).lifecycleHolder !== 'object'
+    || !learningLoopLifecycleHolders.has((permit as LearningLoopConfigMutationPermit).lifecycleHolder)) {
+    throw new Error(`learning_loop_config_boundary: ${operation} requires a valid typed permit for ${key}`);
+  }
+}
+
+export function consumeLearningLoopConfigMutationPermit(permit: LearningLoopConfigMutationPermit): void {
+  consumedLearningLoopConfigPermits.add(permit);
+}
+
+export function isLearningLoopConfigKey(key: string): key is LearningLoopConfigKey {
+  return key === 'learning_loop.mode' || key === 'learning_loop.mode_transition_intent_v1';
+}
 
 /**
  * v0.27.1: file row for binary-asset metadata. Mirrors the `files` table
@@ -1997,13 +2076,13 @@ export interface BrainEngine {
 
   // Config
   getConfig(key: string): Promise<string | null>;
-  setConfig(key: string, value: string): Promise<void>;
+  setConfig(key: string, value: string, permit?: LearningLoopConfigMutationPermit): Promise<void>;
   /**
    * v0.32.3 — delete a config row. Returns the number of rows deleted (0 or 1).
    * No-op when the key doesn't exist. Used by `gbrain config unset` and by
    * `gbrain search modes --reset`. Engine-agnostic.
    */
-  unsetConfig(key: string): Promise<number>;
+  unsetConfig(key: string, permit?: LearningLoopConfigMutationPermit): Promise<number>;
   /**
    * v0.32.3 — list config keys matching a literal prefix (e.g. "search.").
    * Used by `gbrain config unset --pattern` and the search-modes --reset path.

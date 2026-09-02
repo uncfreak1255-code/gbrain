@@ -19,6 +19,7 @@ import type {
   DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow,
 } from './types.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
+import { assertLearningLoopConfigMutationPermit, consumeLearningLoopConfigMutationPermit, isLearningLoopConfigKey, learningLoopConfigValueHash, type LearningLoopConfigMutationPermit } from './engine.ts';
 import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts';
 import { normalizeWeightForStorage } from './takes-fence.ts';
 import { executeRawJsonb } from './sql-query.ts';
@@ -5091,18 +5092,29 @@ export class PostgresEngine implements BrainEngine {
     );
   }
 
-  async setConfig(key: string, value: string): Promise<void> {
+  async setConfig(key: string, value: string, permit?: LearningLoopConfigMutationPermit): Promise<void> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'set', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+    }
     const sql = this.sql;
     await sql`
       INSERT INTO config (key, value) VALUES (${key}, ${value})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
     `;
+    if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
   }
 
-  async unsetConfig(key: string): Promise<number> {
+  async unsetConfig(key: string, permit?: LearningLoopConfigMutationPermit): Promise<number> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'unset', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+    }
     const sql = this.sql;
     const result = await sql`DELETE FROM config WHERE key = ${key}` as unknown as { count: number };
-    return result.count ?? 0;
+    const count = result.count ?? 0;
+    if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
+    return count;
   }
 
   async listConfigKeys(prefix: string): Promise<string[]> {

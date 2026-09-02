@@ -24,7 +24,7 @@ import type {
   NewFact, FactListOpts, FactsHealth,
   SourceRow, PurgeDeletedPagesResult,
 } from './engine.ts';
-import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
+import { MAX_SEARCH_LIMIT, clampSearchLimit, assertLearningLoopConfigMutationPermit, consumeLearningLoopConfigMutationPermit, isLearningLoopConfigKey, learningLoopConfigValueHash, type LearningLoopConfigMutationPermit } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import { runMigrations } from './migrate.ts';
@@ -5186,20 +5186,31 @@ export class PGLiteEngine implements BrainEngine {
     return rows.length > 0 ? (rows[0] as { value: string }).value : null;
   }
 
-  async setConfig(key: string, value: string): Promise<void> {
+  async setConfig(key: string, value: string, permit?: LearningLoopConfigMutationPermit): Promise<void> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'set', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+    }
     await this.db.query(
       `INSERT INTO config (key, value) VALUES ($1, $2)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
       [key, value]
     );
+    if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
   }
 
-  async unsetConfig(key: string): Promise<number> {
+  async unsetConfig(key: string, permit?: LearningLoopConfigMutationPermit): Promise<number> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'unset', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+    }
     const { affectedRows } = await this.db.query(
       'DELETE FROM config WHERE key = $1',
       [key],
     ) as { affectedRows?: number };
-    return affectedRows ?? 0;
+    const count = affectedRows ?? 0;
+    if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
+    return count;
   }
 
   async listConfigKeys(prefix: string): Promise<string[]> {
