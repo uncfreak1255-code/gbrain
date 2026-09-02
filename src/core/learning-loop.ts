@@ -1308,7 +1308,10 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
       const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
       if (readback.canonical !== written) throw new LearningLoopError('assertion_mismatch', 'Retirement canonical readback changed');
       await importFromContent(input.engine, input.canonical_slug, written, { sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: written });
-      canonical = written; inspected = readback; fence = parseLearningLoopFence(canonical)!; attempt = (fence.value.reversal_attempts[`${rootId}:1`] as LearningReversalAttempt);
+      canonical = written;
+      inspected = readback;
+      fence = parseLearningLoopFence(canonical)!;
+      attempt = fence.value.reversal_attempts[`${rootId}:${attempt.attempt_no}`] as LearningReversalAttempt;
     }
 
     if (attempt.phase === 'retired_checkpointed') {
@@ -1340,7 +1343,10 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
         && currentLineage.replacement_set_fingerprint === checkpoint.replacement_set_fingerprint
         && canonicalJson(currentLineage.active_replacements) === canonicalJson(checkpoint.active_replacements);
       if (!checkpointMatches) {
-        const checkpointSequence = checkpoint.learning_event_sequence ?? 0;
+        if (checkpoint.learning_event_sequence === undefined) {
+          throw new LearningLoopError('assertion_mismatch', 'Reversal checkpoint watermark is unavailable');
+        }
+        const checkpointSequence = checkpoint.learning_event_sequence;
         const acceptedDrift = state.events
           .filter((event): event is LearningTransitionEvent | LearningCorrectionEvent => event.event_type === 'learning_transition' || event.event_type === 'learning_correction')
           .filter(event => event.run_id === input.run_id

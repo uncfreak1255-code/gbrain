@@ -219,4 +219,38 @@ describe('Phase 5 correction lineage reducer', () => {
       expect(retry.canonical).toBe(reversed.canonical);
     }); } finally { rmSync(f.root, { recursive: true, force: true }); }
   }, 60_000);
+
+  test('linked recreation after commit intent creates and completes a successor attempt', async () => {
+    const f = await fixture('reversal-successor');
+    try { await withEnv({ GBRAIN_HOME: f.root }, async () => {
+      await activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority: 'direct_user' });
+      await authorizeReplacement(f);
+      await correctLearningClaim(correctionInput(f));
+      const authority = readLearningLoopLedger({ config: f.config }).find(event => event.event_type === 'learning_authority' && event.identity.claim_fingerprint === f.a.claim_fingerprint);
+      expect(authority?.event_id).toBeTruthy();
+      await expect(reverseLearningClaim({
+        engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug,
+        identity: f.a, authority_event_id: authority!.event_id, root_reversal_id: 'reversal-successor',
+        afterCommitIntent: () => { throw new Error('simulated after commit intent'); },
+      })).rejects.toThrow('simulated after commit intent');
+      expect(parseLearningLoopFence(readFileSync(canonicalPath(f), 'utf8'))!.value.reversal_attempts['reversal-successor:1']).toMatchObject({ phase: 'commit_intent' });
+
+      // B is a valid accepted recreation of a retired linked replacement.
+      await activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.b, authority: 'direct_user' });
+      const retried = await reverseLearningClaim({
+        engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug,
+        identity: f.a, authority_event_id: authority!.event_id, root_reversal_id: 'reversal-successor',
+      });
+      const finalFence = parseLearningLoopFence(retried.canonical)!;
+      expect(retried.phase).toBe('committed');
+      expect(finalFence.value.reversal_attempts['reversal-successor:1']).toMatchObject({ phase: 'superseded', successor_id: 'reversal-successor:2' });
+      expect(finalFence.value.reversal_attempts['reversal-successor:2']).toMatchObject({ phase: 'committed', predecessor_id: 'reversal-successor:1' });
+      expect(finalFence.value.blocked_identities).not.toContain(learningBlockedClaimKey(f.a));
+      expect(parseFactsFence(retried.canonical).facts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ claim: 'A', active: false }),
+        expect.objectContaining({ claim: 'B', active: false }),
+      ]));
+      expect(parseFactsFence(retried.canonical).facts.filter(row => row.claim === 'A' && row.active)).toHaveLength(1);
+    }); } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }, 60_000);
 });
