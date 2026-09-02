@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   learningBlockedClaimKey,
+  learningLoopProtectedStateHash,
   reduceLearningLoopLineage,
   replacementSetFingerprint,
   type LearningLoopKnowledge,
@@ -251,6 +252,43 @@ describe('Phase 5 correction lineage reducer', () => {
         expect.objectContaining({ claim: 'B', active: false }),
       ]));
       expect(parseFactsFence(retried.canonical).facts.filter(row => row.claim === 'A' && row.active)).toHaveLength(1);
+    }); } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }, 60_000);
+
+  test('legacy reversal checkpoint without a watermark fails closed on accepted drift', async () => {
+    const f = await fixture('reversal-legacy-watermark');
+    try { await withEnv({ GBRAIN_HOME: f.root }, async () => {
+      await activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority: 'direct_user' });
+      await authorizeReplacement(f);
+      await correctLearningClaim(correctionInput(f));
+      const authority = readLearningLoopLedger({ config: f.config }).find(event => event.event_type === 'learning_authority' && event.identity.claim_fingerprint === f.a.claim_fingerprint);
+      expect(authority?.event_id).toBeTruthy();
+      await expect(reverseLearningClaim({
+        engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug,
+        identity: f.a, authority_event_id: authority!.event_id, root_reversal_id: 'reversal-legacy-watermark',
+        afterCommitIntent: () => { throw new Error('simulated after commit intent'); },
+      })).rejects.toThrow('simulated after commit intent');
+
+      const path = canonicalPath(f);
+      const canonical = readFileSync(path, 'utf8');
+      const parsed = parseLearningLoopFence(canonical)!;
+      const key = 'reversal-legacy-watermark:1';
+      const attempt = parsed.value.reversal_attempts[key] as any;
+      const { learning_event_sequence: _removed, ...legacyCheckpoint } = attempt.checkpoint;
+      const legacyState = {
+        ...parsed.value,
+        reversal_attempts: { ...parsed.value.reversal_attempts, [key]: { ...attempt, checkpoint: legacyCheckpoint } },
+      };
+      const protected_state_hash = learningLoopProtectedStateHash(legacyState, parseFactsFence(canonical).facts);
+      writeFileSync(path, canonical.replace(parsed.raw, renderLearningLoopFence({ ...legacyState, protected_state_hash })));
+
+      // The recreation changes the checkpoint lineage, but the legacy checkpoint has no safe watermark.
+      await activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.b, authority: 'direct_user' });
+      await expect(reverseLearningClaim({
+        engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug,
+        identity: f.a, authority_event_id: authority!.event_id, root_reversal_id: 'reversal-legacy-watermark',
+      })).rejects.toMatchObject({ code: 'assertion_mismatch' });
+      expect(readFileSync(path, 'utf8')).toContain('commit_intent');
     }); } finally { rmSync(f.root, { recursive: true, force: true }); }
   }, 60_000);
 });
