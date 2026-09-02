@@ -2,7 +2,7 @@
 
 > **Execution rule:** Use `spine:work`. Keep exactly one writer in this isolated worktree. Do not implement until the frozen plan passes a new exact-hash native two-reviewer pressure test. Stop before PR 3.
 
-**Review status:** Implementation remains blocked. The latest exact-hash review found one raw-SQL authority-boundary ambiguity; this revision narrows and makes that boundary executable but has not received a post-revision exact-hash review.
+**Review status:** Implementation remains blocked. The latest exact-hash review found three undefined execution contracts: path-writer source identity, configured-root hashing/topology, and semantic sequencing. This revision defines them but has not received a post-revision exact-hash review.
 
 ## Objective
 
@@ -73,10 +73,36 @@ PR 2 does not change generic `query`, `search`, or `get_page` reads and does not
 - No mutation or recovery derives brain, source, corpus, or destination from cwd, mounts, environment, or caller paths.
 - Every pointer is `brain_id + source_id + canonical_slug + fact_row`.
 - Every operation recomputes the active brain from explicit config and compares it with the frozen run before transcript or destination discovery.
+- Every live canonical writer uses `SourceQualifiedCanonicalTarget = { brain_id, source_id, canonical_slug }`. The source ID is an explicit typed command/operation input; the writer resolves the configured root for that source, derives and confines `<root>/<canonical_slug>.md`, obtains the exact source lease, and runs expected-managed inspection before classification and again under the page lock immediately before rename. A caller path, `--dir`, `GBRAIN_SOURCE`, cwd, dotfile, or mount can never select or override this identity.
+- Path-oriented `takes`, `backlinks`, `frontmatter`, and `lint` commands have two disjoint lanes. The source-qualified lane requires explicit `--source` plus a slug for any registered canonical source and uses the shared boundary. The legacy standalone lane may preserve current arbitrary-path behavior only when a read-only inventory proves the target is outside every configured canonical source root and contains no valid Learning Loop metadata fence. The path comparison is rejection-only: it never chooses a source. A target inside one registered root without exact explicit source identity, inside overlapping roots, equal under symlink/realpath ambiguity, or unreadable during inventory fails before write. Missing/corrupt expected managed state inside a registered root is `managed_state_unavailable`, never standalone/unmanaged fallback.
+- `SourceQualifiedCanonicalTarget` is threaded through the command handler and content transform. `canonical-page-write.ts` returns exact canonical readback plus any derived-index permit; downstream code cannot substitute the original path or submitted bytes. Same slug in two sources can modify only the explicitly named source.
 
 ## Frozen root bindings
 
 PR 2 introduces V2 arm inputs while keeping V1 replay-compatible.
+
+`configured_root_hash` is SHA-256 of UTF-8 repository `canonicalJson` over one closed preimage. Configured values are exact strings after strict string, non-empty, absolute-path, and NUL rejection and before `realpath`; a plane or textual-value change therefore changes the hash even when it resolves to the same inode.
+
+```text
+CorpusConfiguredRootPreimageV1 = {
+  schema_version: 1,
+  binding_kind: corpus_codex,
+  root: { plane: db_config | file_config, key: learning_loop.corpus.codex.root, value },
+  source: { plane: db_config | file_config, key: learning_loop.corpus.codex.source_id, value }
+}
+
+DestinationConfiguredRootPreimageV1 = {
+  schema_version: 1,
+  binding_kind: destination,
+  source_id,
+  topology: source_local_path | sync_repo_path,
+  root: { plane: sources_row | db_config, key: sources.local_path | sync.repo_path, value }
+}
+```
+
+- Corpus precedence is resolved independently for `root` and `source_id`: a successful database read with a non-null valid value wins; null falls back to the valid file-config value; missing/invalid values reject. A database read error is `binding_unavailable`, not fallback. The selected plane is part of the preimage.
+- Destination resolution queries the explicitly armed `source_id`. A valid `sources.local_path` selects `source_local_path`. Otherwise only `source_id === default` may use valid database `sync.repo_path`, selecting `sync_repo_path`; every non-default source without a local path rejects. File config, environment, cwd, mounts, and the ambient source resolver are excluded.
+- After hashing the configured preimage, resolve and stat the directory to freeze `canonical_realpath`, device, and inode. Recompute the complete configured preimage, hash, realpath, device, and inode at every required binding check; any config-plane, value, topology, source-row, path, or inode difference fails closed.
 
 Each V2 `run_armed` event freezes:
 
@@ -104,6 +130,7 @@ destination_binding = {
 ```
 
 - `binding_hash` is SHA-256 of repository `canonicalJson` over the other normalized fields.
+- Golden tests freeze the complete canonical preimage JSON and SHA-256 bytes for database/file corpus precedence, `source_local_path`, and default-only `sync_repo_path`; they also prove input-key insertion order does not change canonical bytes.
 - Arming resolves each root twice, before and after baseline discovery, and fails if value, realpath, device, or inode changes.
 - Every transcript read re-resolves current corpus configuration and requires exact binding equality before opening a session file.
 - Every canonical read, lock, temp write, rebuild, and rename re-resolves current destination configuration and requires exact binding equality.
@@ -227,6 +254,25 @@ ModeTransitionIntentV1 = {
 
 The metadata fence contains `pending_delivery: null | ExactEventRecord`.
 
+`ExactEventRecordV1` is a V2-only canonical-delivery envelope:
+
+```text
+{
+  schema_version: 1,
+  event_id,
+  event_payload_canonical_json,
+  event_payload_sha256,
+  brain_id,
+  run_id,
+  occurred_at,
+  semantic_sequence
+}
+```
+
+- The strict decoder rejects unknown fields and non-JSON payload values, requires `semantic_sequence` to be a positive safe integer, reparses and byte-compares repository `canonicalJson`, checks the payload SHA-256 and existing event-ID derivation, and requires brain, run, timestamp, and sequence equality between envelope and payload.
+- Sequence scope is exact `(brain_id, run_id)`. The first V2 canonical transition is 1. Under source -> lifecycle -> page ownership, allocation is `max(last contiguous durable V2 exact record in replay, exact canonical pending_delivery) + 1`. Replay rejects gaps, duplicate sequences, sequence regression, different records at one sequence, or an envelope whose run/brain differs. Canonical pending is the durable sequence source after page rename and before ledger append; ledger replay is the source after durable append/readback. A non-null pending record blocks ordinary allocation, so recovery appends or acknowledges the frozen record and never allocates it again. The sole exception is abort/off: while freezing an intent it may reserve exactly predecessor sequence + 1, stores both complete records atomically in the intent, and makes intent presence block every other allocator before predecessor delivery begins.
+- The mode-transition intent freezes the exact next `run_aborted` envelope and its exact predecessor. V1 ledger events retain their current event-ID/hash/JSONL replay behavior and have no semantic sequence. A V1 armed run cannot produce a V2 exact record or canonical mutation; it must abort under its legacy path and re-arm as V2. V1 event order never contributes to the V2 sequence.
+
 - A canonical transition precomputes the complete versioned event bytes, `event_id`, payload hash, timestamp, and semantic sequence before mutation.
 - The atomic page rename stores the resulting canonical state and that exact record together.
 - While locks remain held, GBrain appends those exact bytes to the ledger and reads them back.
@@ -287,10 +333,11 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 **Work**
 
 1. Add golden canonical encoding/hash vectors for claim, scope, target, trigger, pointer, root binding, and replacement sets.
-2. Add V2 `run_armed` fields and replay validation while retaining V1 replay compatibility.
-3. Freeze corpus and destination bindings at arm; double-check them around baseline discovery.
-4. Make V1 runs fail closed for canonical mutation.
-5. Prove root/path/topology rebinding and inode replacement are rejected.
+2. Add the closed corpus/destination configured-root preimages, exact DB/file precedence and default-only legacy topology resolver, and golden canonical JSON/SHA-256 vectors.
+3. Add V2 `run_armed` fields, strict `ExactEventRecordV1`, contiguous per-brain/run semantic sequencing, and replay validation while retaining V1 replay compatibility.
+4. Freeze corpus and destination bindings at arm; double-check them around baseline discovery and every later V2 read/write.
+5. Make V1 runs fail closed for V2 exact delivery and canonical mutation.
+6. Prove config-plane/value/topology rebinding, path/inode replacement, sequence gap/duplicate/regression, and V1 fixture compatibility.
 
 ### Phase 2 — shared canonical write boundary and lock hardening
 
@@ -329,6 +376,7 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 6. Add structural tests generated from both filesystem-mutation and page-DB-mutation call sites. Detect direct page-row SQL and calls to `importFromContent`, `importFromFile`, `withImportTransaction`, `putPage`, `deletePage(s)`, `softDeletePage`, `restorePage`, `purgeDeletedPages`, `revertToVersion`, `updateSlug`, and body/type replacement helpers. Every site must use the shared boundary/preflight or appear in an exact checked-in file + symbol + classification allowlist with a reason and allowed column set. A new or moved unclassified filesystem or page-DB mutation fails CI.
 7. Replace the managed form of every DB-to-Markdown caller with one canonical-first flow. `put_page`, brainstorm, and sync re-export call the same expected-managed preflight keyed by exact brain/source/slug before any import or unmanaged classification. The preflight uses canonical inspection plus replayed transition history, the active frozen destination, and derived managed-row markers only as fail-closed expectation hints; absence, corruption, hash mismatch, lookup failure, or disagreement rejects without mutation. For a valid managed `put_page` or brainstorm target, atomically write the submitted ordinary-content merge before `importFromContent`, then reconcile the database from exact canonical readback. `writePageThrough` remains an after-DB renderer only for a target proven unmanaged. Sync re-export must never synthesize protected state from the DB. Add barrier tests that delete or corrupt the metadata fence or managed rows after the first preflight and prove the pre-rename recheck still rejects. Unmanaged callers retain existing behavior.
 8. Route canonical import/reindex/quarantine paths through verified canonical readback for managed targets. Reject managed `revert_version`, output-writer replacements, enrichment replacement, soft delete, restore, purge, rename, retype, refresh-body, DB migration reconstruction, and any generated writer whose namespace can collide. Keep only the explicit derived-column allowlist unchanged. Prove every rejection leaves canonical bytes and the complete page row unchanged.
+9. Add explicit source/slug inputs to the source-qualified lanes for takes, backlinks, frontmatter, and lint. Preserve their legacy standalone-path lanes only after rejection-only registered-root inventory proves the target is outside every canonical source and contains no valid Learning Loop fence. Prove unqualified registered-root, overlapping-root, symlink-ambiguous, unreadable, and missing/corrupt managed targets fail before write.
 
 ### Phase 4 — candidate, authority, and activation
 
@@ -421,6 +469,8 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 - Managed canonical import/reindex reconciles only exact canonical readback. Quarantine, sync delete/rename, version restore, output/frontmatter/enrichment replacement, soft delete, restore, purge, retype, refresh-body, and engine migration reconstruction reject managed targets without changing canonical bytes or any page-row field.
 - Existing DB-owned/generated writers remain allowed only for a new slug whose checked namespace/owner cannot collide with an expected managed pointer; collision and ambiguous ownership reject.
 - Root rebinding, directory inode replacement, traversal, absolute slug, and symlink escape visible before final validation fail closed; every GBrain-owned root swap waits on the source boundary.
+- Corpus root/source DB-over-file precedence, null-only fallback, DB-read failure, exact selected-plane/value hashing, destination local-path preference, default-only sync-repo fallback, and ambient-signal non-effect match the frozen golden vectors.
+- Path-based writers require explicit source plus slug for registered roots; an unqualified, overlapping, symlink-ambiguous, or unreadable registered-root target cannot enter the standalone lane. Same slug in two sources modifies only the explicit source.
 - Two processes cannot enter the same brain/source/slug mutation; a non-holder cannot refresh/release.
 - Nested sync/recovery writes reuse only their exact source-bound lease and do not reacquire or deadlock; wrong-source and forged leases fail.
 - Managed rename orders temp-file `fsync`, atomic rename, and parent-directory `fsync`; process-kill and simulated power-loss seams have separate assertions.
@@ -448,6 +498,7 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 - Crash after `retired_checkpointed` resumes with an empty active set.
 - Crash after canonical rename/before ledger append recovers the exact event once.
 - Crash after ledger append/before canonical acknowledgement does not double-count.
+- V2 exact records allocate positive contiguous sequence only within one brain/run; first/next, gap, duplicate, regression, same-sequence different-record, pending-before-append, append-before-clear, and V1-no-sequence fixtures all replay deterministically.
 - Crash after `commit_intent` reconciles committed marker, retries exact checkpoint, or creates accepted-drift successor.
 - Later accepted mutation after immutable commit marker recovers the attempt as committed before replaying later state.
 - Unexplained third-state drift leaves the block enforced and fails closed.
