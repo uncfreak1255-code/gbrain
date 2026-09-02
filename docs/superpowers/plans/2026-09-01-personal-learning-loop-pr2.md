@@ -108,7 +108,7 @@ All live writers below must route through `canonical-page-write.ts` or explicitl
 
 | Writer | Existing owner | PR 2 adapter behavior |
 |---|---|---|
-| DB-to-Markdown write-through used by `put_page`, brainstorm, and sync re-export | `src/core/write-through.ts` | Ordinary-content mode; preserve both protected fences or reject |
+| DB-to-Markdown write-through used by `put_page`, brainstorm, and sync re-export | `src/core/write-through.ts` | Unmanaged pages retain the current DB-first path. For an existing managed canonical page, `put_page` and brainstorm must instead merge ordinary content with the exact protected fences, commit through the shared boundary, read back the exact canonical bytes, and only then import/reconcile the database. Managed sync re-export is refused when canonical bytes are missing or invalid; it must never recreate managed state from a DB row. |
 | Fact append/stub | `src/core/facts/fence-write.ts` | Non-lineage-fact mode; managed rows immutable |
 | Fact forget/strike | `src/core/facts/forget.ts` | Reject managed row; allow non-managed row through shared boundary |
 | Takes add/edit/revisit | `src/commands/takes.ts` | Preserve protected fences for takes mutations; refuse interactive revisit on a managed page |
@@ -279,7 +279,7 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 4. Reject managed interactive editor entry, phantom redirect, destructive migration rewrite, unsupported delete/rename, and active-V2 source checkout replacement/removal.
 5. Make whole-checkout recovery carry and validate protected fences before publish, and refuse it during an active V2 run.
 6. Add a structural test generated from filesystem-mutation call sites. Every live-canonical site must import the shared boundary or appear in a narrow reviewed rejection adapter; non-live sites are classified in the test fixture with a reason. A new unclassified filesystem mutation fails CI.
-7. Add managed `put_page` canonical-first flow: validate and atomically write the merged canonical body before `importFromContent`, then reconcile the database from exact readback. Boundary rejection or canonical failure leaves database and file unchanged. Unmanaged pages retain existing behavior.
+7. Replace the managed form of every DB-to-Markdown caller with one canonical-first flow. For `put_page` and brainstorm, validate and atomically write the submitted ordinary-content merge before `importFromContent`, then reconcile the database from exact canonical readback. Boundary rejection or canonical failure leaves database and file unchanged. `writePageThrough` remains an after-DB renderer only for unmanaged pages. Sync re-export must refuse a missing, malformed, or mismatched managed canonical page and must never synthesize protected state from the DB. Unmanaged callers retain existing behavior.
 
 ### Phase 4 — candidate, authority, and activation
 
@@ -364,7 +364,7 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 
 - Every inventoried live writer preserves both protected fences on a managed page or rejects the operation.
 - Ordinary `put_page`, write-through, takes, backlinks, frontmatter, lint, pattern/synthesis, fact append/forget, phantom redirect, migration, and checkout recovery cannot remove or alter managed state.
-- Managed `put_page` canonical rejection leaves database and canonical bytes unchanged; successful managed writes import the exact canonical readback afterward.
+- Managed `put_page` and brainstorm rejection leaves database and canonical bytes unchanged; successful managed writes import the exact canonical readback afterward. Managed sync re-export refuses absent or invalid canonical bytes and never reconstructs protected state from a DB row.
 - A newly introduced direct live-page writer fails the structural bypass test.
 - Root rebinding, directory inode replacement, traversal, absolute slug, and symlink escape visible before final validation fail closed; every GBrain-owned root swap waits on the source boundary.
 - Two processes cannot enter the same brain/source/slug mutation; a non-holder cannot refresh/release.
