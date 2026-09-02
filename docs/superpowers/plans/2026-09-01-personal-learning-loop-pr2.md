@@ -2,7 +2,7 @@
 
 > **Execution rule:** Use `spine:work`. Keep exactly one writer in this isolated worktree. Do not implement until the frozen plan passes a new exact-hash native two-reviewer pressure test. Stop before PR 3.
 
-**Review status:** Implementation remains blocked. The latest exact-hash review found three undefined execution contracts: path-writer source identity, configured-root hashing/topology, and semantic sequencing. This revision defines them but has not received a post-revision exact-hash review.
+**Review status:** Implementation remains blocked. Pressure-test round 1 found one admission-versus-intent serialization gap. This revision defines the missing lifecycle primitive and requires a final round-2 exact-hash pass.
 
 ## Objective
 
@@ -209,6 +209,8 @@ source sync/write boundary
 - The source-boundary callback receives a branded, source-bound `SourceWriteLease`. Nested writers such as sync re-export and recovery refresh pass that lease into `canonical-page-write.ts`; the helper validates the source and does not reacquire the same non-reentrant database lock. Callers without the exact lease acquire the boundary normally. There is no boolean `skipLock` escape hatch.
 - `src/commands/sync.ts` owns the outer lease for `performSyncInner` and passes it to nested `writePageThrough` calls. `src/core/recovery-source-refresh.ts` does the same for staged checkout work. Wrong-source, stale, forged, or missing leases fail closed in managed-page mode.
 - Under the lifecycle lock, every Learning Loop transition replays the ledger and rechecks mode, active run, terminal state, frozen bindings, and destination immediately before page rename.
+- Every Learning Loop admission that can append a session, candidate, authority, or other non-canonical event uses one `withLearningLoopAdmission` primitive. It acquires lifecycle before ledger, replays current state, reads `learning_loop.mode` and `learning_loop.mode_transition_intent_v1` together on one transaction-scoped engine, and checks mode/run/terminal/admission predicates. After that read transaction commits, it retains the lifecycle lock through exact ledger append, `fsync`, and readback, so a mode-transition intent cannot commit between the final check and append. The primitive never acquires a source boundary while holding lifecycle; if an accepted admission later needs canonical work, it releases and re-enters through source -> lifecycle -> page -> ledger.
+- Intent creation uses the same lifecycle exclusion. An admission already holding lifecycle finishes and becomes visible to abort replay before intent creation; an admission scheduled after intent commit waits, then observes the intent and rejects. No direct `appendEvent` call may bypass `withLearningLoopAdmission` except canonical pending-delivery recovery already holding source, lifecycle, and page ownership.
 - Ledger append occurs only after canonical rename and while lifecycle/page ownership is still held.
 - Database index reconciliation happens after ledger delivery and canonical acknowledgement. Reconciliation failure leaves canonical truth intact and is retried from canonical state.
 
@@ -394,8 +396,9 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 2. Parse authoritative transcript rows into stable line/message locators and hashes.
 3. Add trusted-local, `localOnly` owner operations. Every handler independently rejects `ctx.remote !== false`; HTTP and stdio omit/deny them.
 4. Implement class predicates and GBrain-owned two-distinct-eligible-session repetition.
-5. Activate through one canonical transition with exact pending delivery and derived-index reconciliation.
-6. Keep verified-outcome producer unavailable until PR 5.
+5. Route session evaluation, candidate, authority, and every other non-canonical ledger append through `withLearningLoopAdmission`; keep lifecycle held from the final transaction-consistent mode/intent check through durable append/readback.
+6. Activate through one canonical transition with exact pending delivery and derived-index reconciliation.
+7. Keep verified-outcome producer unavailable until PR 5.
 
 ### Phase 5 — correction block and common lineage guard
 
@@ -458,6 +461,7 @@ All phases remain on one draft PR 2 branch. Do not open PR 3. Freeze each phase 
 - Off, capture, unarmed, terminal, V1 run, wrong brain/source/slug/root/topology cannot mutate canonical state.
 - Ineligible sessions and duplicate observations from one session cannot satisfy repetition.
 - Class predicates match ADR section 9 exactly.
+- A barrier race proves admission holding lifecycle appends before abort replay and is ordered before the terminal event, while admission arriving after intent commit waits, rechecks the same transaction-scoped mode/intent state, and rejects without ledger bytes. Structural coverage rejects a direct non-recovery `appendEvent` bypass.
 
 ### Canonical writer and rebuild safety
 
