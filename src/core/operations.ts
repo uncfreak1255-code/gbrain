@@ -5423,17 +5423,62 @@ const learning_loop_submit_session_v1: Operation = {
       asserted_size_bytes: p.asserted_size_bytes as number | undefined,
       asserted_content_hash: p.asserted_content_hash as string | undefined,
     });
-    return mod.withLearningLoopLifecycleLock(ctx.engine, async () => {
-      const currentMode = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
-      if (currentMode === 'off') return { status: 'disabled' as const, mode: currentMode };
-      return mod.recordSessionEvaluation({
-        engine: ctx.engine,
-        mode,
-        adapter,
-        receipt,
-      }, { config: ctx.config });
+    const currentMode = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
+    if (currentMode === 'off') return { status: 'disabled' as const, mode: currentMode };
+    return mod.recordSessionEvaluation({
+      engine: ctx.engine,
+      mode,
+      adapter,
+      receipt,
     }, { config: ctx.config });
   }),
+};
+
+const learning_loop_candidate: Operation = {
+  name: 'learning_loop_candidate', description: 'Record a locally-derived Learning Loop candidate.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, locators: { type: 'array', required: true } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_candidate');
+    if ('evidence' in p) throw new OperationError('permission_denied', 'Candidate evidence is server-derived and cannot be supplied by the caller');
+    return learningLoopCall((mod) => mod.recordLearningCandidate({
+      engine: ctx.engine,
+      config: ctx.config,
+      run_id: p.run_id as string,
+      source_id: p.source_id as string,
+      identity: p.identity as import('./learning-loop-knowledge.ts').LearningClaimIdentity,
+      locators: p.locators as import('./learning-loop.ts').TranscriptMessageLocator[],
+    }));
+  },
+};
+
+const learning_loop_authority: Operation = {
+  name: 'learning_loop_authority', description: 'Record locally-derived direct-user or repetition authority.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, authority: { type: 'string', required: true }, locators: { type: 'array', required: true } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_authority');
+    if ('evidence' in p) throw new OperationError('permission_denied', 'Authority evidence is server-derived and cannot be supplied by the caller');
+    return learningLoopCall((mod) => mod.recordLearningAuthority({
+      engine: ctx.engine,
+      config: ctx.config,
+      run_id: p.run_id as string,
+      source_id: p.source_id as string,
+      identity: p.identity as import('./learning-loop-knowledge.ts').LearningClaimIdentity,
+      authority: p.authority as 'direct_user' | 'repetition',
+      locators: p.locators as import('./learning-loop.ts').TranscriptMessageLocator[],
+    }));
+  },
+};
+
+const learning_loop_activate: Operation = {
+  name: 'learning_loop_activate', description: 'Activate one exactly authorized Learning Loop claim through the canonical personal page.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, canonical_slug: { type: 'string', required: true }, identity: { type: 'object', required: true }, authority: { type: 'string', required: true, enum: ['direct_user', 'repetition'] } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_activate');
+    return learningLoopCall((mod) => mod.activateLearningClaim({ engine: ctx.engine, config: ctx.config, run_id: p.run_id as string, source_id: p.source_id as string, canonical_slug: p.canonical_slug as string, identity: p.identity as never, authority: p.authority as 'direct_user' | 'repetition' }));
+  },
 };
 
 export const operations: Operation[] = [
@@ -5522,6 +5567,7 @@ export const operations: Operation[] = [
   learning_loop_get_mode, learning_loop_set_mode, learning_loop_inspect,
   learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript, learning_loop_bind_session,
   learning_loop_submit_session_v1,
+  learning_loop_candidate, learning_loop_authority, learning_loop_activate,
 ];
 
 export const operationsByName = Object.fromEntries(

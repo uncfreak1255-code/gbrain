@@ -34,6 +34,13 @@ import { VERSION } from '../version.ts';
 import { LockUnavailableError, withRefreshingLock } from './db-lock.ts';
 import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
 import { isPathContained } from './path-confine.ts';
+import { parseLearningLoopFence, renderLearningLoopFence, createLearningTransitionPermit, type LearningLoopKnowledge } from './learning-loop-knowledge.ts';
+import { parseFactsFence, upsertFactRow } from './facts-fence.ts';
+import { inspectExpectedManagedState, writeCanonicalPage, reconcileCanonicalReadback, withCanonicalSourceBoundary, type SourceQualifiedCanonicalTarget } from './canonical-page-write.ts';
+import { importFromContent } from './import-file.ts';
+import { learningClaimFingerprint, normalizeLearningClaim, parseAuthoritativeUserRows } from './learning-loop-knowledge.ts';
+import type { LearningClaimIdentity, TranscriptUserRow } from './learning-loop-knowledge.ts';
+export { parseAuthoritativeUserRows } from './learning-loop-knowledge.ts';
 
 export type LearningLoopMode = 'off' | 'capture' | 'canary';
 export const LEARNING_LOOP_SCHEMA_VERSION = 1 as const;
@@ -218,7 +225,11 @@ export interface SessionEvaluatedEvent extends EventBase {
   cohort_sealed: boolean;
 }
 
-export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent;
+export interface LearningCandidateEvent extends EventBase { event_type: 'learning_candidate'; candidate_version: 1; run_id: string; identity: LearningClaimIdentity; evidence: TranscriptUserRow[]; eligible_session_ids: string[]; }
+export interface LearningAuthorityEvent extends EventBase { event_type: 'learning_authority'; authority_version: 1; run_id: string; identity: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; evidence: TranscriptUserRow[]; session_ids: [string, string] | [string]; }
+export interface LearningTransitionEvent extends EventBase { event_type: 'learning_transition'; transition_version: 1; brain_id: string; run_id: string; semantic_sequence: number; source_id: string; canonical_slug: string; transition: 'activate'; identity: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; fact_row: number; }
+
+export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent | LearningCandidateEvent | LearningAuthorityEvent | LearningTransitionEvent;
 export type EligibilityReason =
   | 'eligible'
   | 'transcript_too_small'
@@ -276,6 +287,8 @@ export interface LedgerOptions {
   lifecycleLock?: <T>(work: () => Promise<T>) => Promise<T>;
   /** Test seam for real-lock contention coverage. */
   beforeMutation?: () => Promise<void>;
+  /** Set only after a caller's post-discovery mode check. */
+  precheckedMode?: LearningLoopMode;
 }
 
 function ledgerScopeId(opts: LedgerOptions): string {
@@ -630,11 +643,302 @@ export async function resolveAuthoritativeTranscript(input: {
   };
 }
 
+export type TranscriptMessageLocator = {
+  provider_session_id: string;
+  line: number;
+  message_index: number;
+  message_hash: string;
+};
+
+/** Re-open the authoritative transcript and derive one exact user message. */
+export async function resolveAuthoritativeUserRow(input: {
+  engine: Pick<BrainEngine, 'getConfig'>;
+  config?: GBrainConfig;
+  expected_corpus_binding: CorpusBindingV1;
+  source_id: string;
+  locator: TranscriptMessageLocator;
+}): Promise<{ receipt: TranscriptReceipt; row: TranscriptUserRow }> {
+  const receipt = await resolveAuthoritativeTranscript({
+    engine: input.engine,
+    config: input.config,
+    expected_corpus_binding: input.expected_corpus_binding,
+    provider: 'codex',
+    provider_session_id: input.locator.provider_session_id,
+    source_id: input.source_id,
+  });
+  const currentBinding = await resolveCodexCorpusBinding(input.engine, input.source_id, input.config);
+  assertRootBindingUnchanged(input.expected_corpus_binding, currentBinding);
+  const opened = readConfinedFileOnce(currentBinding.canonical_realpath, join(currentBinding.canonical_realpath, receipt.relative_path));
+  const currentHash = createHash('sha256').update(opened.bytes).digest('hex');
+  if (currentHash !== receipt.content_hash) throw new LearningLoopError('transcript_conflict', 'Authoritative transcript changed during evidence resolution');
+  const rows = parseAuthoritativeUserRows(opened.bytes.toString('utf8'), receipt.provider_session_id, currentHash);
+  const row = rows.find(candidate => candidate.line === input.locator.line && candidate.message_index === input.locator.message_index);
+  if (!row || row.message_hash !== input.locator.message_hash) {
+    throw new LearningLoopError('assertion_mismatch', 'Authoritative user-message locator does not match GBrain transcript bytes');
+  }
+  return { receipt, row };
+}
+
 export function classifyTranscript(receipt: TranscriptReceipt): { eligible: boolean; reason: EligibilityReason } {
   if (receipt.size_bytes < MIN_TRANSCRIPT_BYTES) return { eligible: false, reason: 'transcript_too_small' };
   if (receipt.user_turn_count < 2) return { eligible: false, reason: 'insufficient_user_turns' };
   if (receipt.assistant_turn_count < 2) return { eligible: false, reason: 'insufficient_assistant_turns' };
   return { eligible: true, reason: 'eligible' };
+}
+
+export function isActivatableClass(kind: import('./learning-loop-knowledge.ts').LearningClass): boolean {
+  return kind === 'constraint' || kind === 'preference' || kind === 'goal' || kind === 'lesson' || kind === 'open_loop';
+}
+export function isCandidateOnlyClass(kind: import('./learning-loop-knowledge.ts').LearningClass): boolean {
+  return kind === 'friction' || kind === 'business_candidate';
+}
+export function validateLearningClaimIdentity(value: unknown): asserts value is LearningClaimIdentity {
+  if (!validIdentity(value)) throw new LearningLoopError('invalid_input', 'Learning Loop claim identity is not canonical or its fingerprint does not match');
+}
+export function qualifiesByRepetition(rows: readonly { identity_hash: string; provider_session_id: string; eligible: boolean }[]): boolean {
+  const sessionsByIdentity = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!row.eligible) continue;
+    const sessions = sessionsByIdentity.get(row.identity_hash) ?? new Set<string>();
+    sessions.add(row.provider_session_id);
+    sessionsByIdentity.set(row.identity_hash, sessions);
+  }
+  return [...sessionsByIdentity.values()].some(sessions => sessions.size >= 2);
+}
+
+function activeV2AdmissionRun(state: LearningLoopProjection, runId: string): RunProjection & { armed: RunArmedEventV2 } {
+  const run = state.runs.get(runId);
+  if (!run || run.terminal || state.active_run_id !== runId || run.armed.contract_version !== 2) {
+    throw new LearningLoopError('no_active_run', 'Learning admission requires the active V2 run');
+  }
+  return run as RunProjection & { armed: RunArmedEventV2 };
+}
+
+async function deriveLearningEvidence(input: {
+  engine: BrainEngine;
+  config?: GBrainConfig;
+  state: LearningLoopProjection;
+  run: RunProjection & { armed: RunArmedEventV2 };
+  source_id: string;
+  identity: LearningClaimIdentity;
+  locators: readonly TranscriptMessageLocator[];
+}): Promise<{ rows: TranscriptUserRow[]; session_ids: string[]; occurred_at: string }> {
+  if (input.source_id !== input.run.armed.authorized_adapter.source_id || input.source_id !== input.run.armed.corpus_binding.source_id) {
+    throw new LearningLoopError('assertion_mismatch', 'Evidence source does not match the frozen run');
+  }
+  if (!Array.isArray(input.locators) || input.locators.length === 0 || input.locators.length > 2) {
+    throw new LearningLoopError('invalid_input', 'Learning evidence requires one or two exact message locators');
+  }
+  const rows: TranscriptUserRow[] = [];
+  const completed: string[] = [];
+  for (const locator of input.locators) {
+    if (!locator || !SESSION_ID_RE.test(locator.provider_session_id) || !Number.isSafeInteger(locator.line) || locator.line < 1
+      || !Number.isSafeInteger(locator.message_index) || locator.message_index < 0 || !/^[a-f0-9]{64}$/.test(locator.message_hash)
+      || Object.keys(locator).some(key => !['provider_session_id', 'line', 'message_index', 'message_hash'].includes(key))) {
+      throw new LearningLoopError('invalid_input', 'Learning evidence locator is invalid');
+    }
+    const resolved = await resolveAuthoritativeUserRow({
+      engine: input.engine,
+      config: input.config,
+      expected_corpus_binding: input.run.armed.corpus_binding,
+      source_id: input.source_id,
+      locator,
+    });
+    const accepted = input.state.session_events.get(`codex\u0000${locator.provider_session_id}`);
+    if (!accepted?.eligible || accepted.run_id !== input.run.run_id || accepted.authoritative.content_hash !== resolved.receipt.content_hash) {
+      throw new LearningLoopError('forbidden', 'Evidence session is not an accepted eligible session with unchanged transcript bytes');
+    }
+    if (normalizeLearningClaim(resolved.row.text) !== input.identity.claim) {
+      throw new LearningLoopError('forbidden', 'Authoritative user message does not exactly state the normalized learning claim');
+    }
+    rows.push(resolved.row);
+    completed.push(resolved.receipt.completed_at);
+  }
+  const session_ids = [...new Set(rows.map(row => row.provider_session_id))];
+  return { rows, session_ids, occurred_at: completed.sort(compareUtf8).at(-1)! };
+}
+
+export async function recordLearningCandidate(input: {
+  engine: BrainEngine;
+  config?: GBrainConfig;
+  run_id: string;
+  source_id: string;
+  identity: LearningClaimIdentity;
+  locators: readonly TranscriptMessageLocator[];
+}): Promise<LearningCandidateEvent> {
+  validateLearningClaimIdentity(input.identity);
+  return withLearningLoopAdmission(input.engine, { config: input.config }, async (state, mode) => {
+    if (mode !== 'canary') throw new LearningLoopError('mode_off', 'Learning candidate admission requires canary mode');
+    const run = activeV2AdmissionRun(state, input.run_id);
+    const evidence = await deriveLearningEvidence({ ...input, state, run });
+    const body = {
+      schema_version: LEARNING_LOOP_SCHEMA_VERSION,
+      event_type: 'learning_candidate' as const,
+      candidate_version: 1 as const,
+      occurred_at: evidence.occurred_at,
+      run_id: input.run_id,
+      identity: input.identity,
+      evidence: evidence.rows,
+      eligible_session_ids: evidence.session_ids,
+    };
+    const event = completeEvent(body) as LearningCandidateEvent;
+    const prior = state.events.find(item => item.event_id === event.event_id);
+    return prior ? { value: prior as LearningCandidateEvent } : { value: event, event };
+  });
+}
+
+export async function recordLearningAuthority(input: {
+  engine: BrainEngine;
+  config?: GBrainConfig;
+  run_id: string;
+  source_id: string;
+  identity: LearningClaimIdentity;
+  authority: 'direct_user' | 'repetition';
+  locators: readonly TranscriptMessageLocator[];
+}): Promise<LearningAuthorityEvent> {
+  validateLearningClaimIdentity(input.identity);
+  return withLearningLoopAdmission(input.engine, { config: input.config }, async (state, mode) => {
+    if (mode !== 'canary') throw new LearningLoopError('mode_off', 'Learning authority admission requires canary mode');
+    const run = activeV2AdmissionRun(state, input.run_id);
+    const evidence = await deriveLearningEvidence({ ...input, state, run });
+    if (input.authority === 'direct_user' && evidence.session_ids.length !== 1) throw new LearningLoopError('forbidden', 'Direct user authority requires one exact session');
+    if (input.authority === 'repetition' && !qualifiesByRepetition(evidence.session_ids.map(provider_session_id => ({ identity_hash: input.identity.claim_fingerprint!, provider_session_id, eligible: true })))) {
+      throw new LearningLoopError('forbidden', 'Repetition authority requires two distinct eligible sessions');
+    }
+    if (input.authority !== 'direct_user' && input.authority !== 'repetition') throw new LearningLoopError('invalid_input', 'Learning authority kind is invalid');
+    const candidate = state.events.find((event): event is LearningCandidateEvent => event.event_type === 'learning_candidate'
+      && event.run_id === input.run_id && canonicalJson(event.identity) === canonicalJson(input.identity));
+    if (!candidate) throw new LearningLoopError('forbidden', 'Authority requires an exact accepted candidate');
+    const body = {
+      schema_version: LEARNING_LOOP_SCHEMA_VERSION,
+      event_type: 'learning_authority' as const,
+      authority_version: 1 as const,
+      occurred_at: evidence.occurred_at,
+      run_id: input.run_id,
+      identity: input.identity,
+      authority: input.authority,
+      evidence: evidence.rows,
+      session_ids: evidence.session_ids as [string] | [string, string],
+    };
+    const event = completeEvent(body) as LearningAuthorityEvent;
+    const prior = state.events.find(item => item.event_id === event.event_id);
+    return prior ? { value: prior as LearningAuthorityEvent } : { value: event, event };
+  });
+}
+
+export interface ActivateLearningClaimInput {
+  engine: BrainEngine;
+  config?: GBrainConfig;
+  run_id: string;
+  source_id: string;
+  canonical_slug: string;
+  identity: LearningClaimIdentity;
+  authority: 'direct_user' | 'repetition';
+  /** Optional test seam for the canonical source lock. */
+  mutationLock?: <T>(work: () => Promise<T>) => Promise<T>;
+  /** Test-only crash seams around the canonical delivery protocol. */
+  afterCanonicalStage?: () => void;
+  afterLedgerAppend?: () => void;
+  afterCanonicalClear?: () => void;
+}
+
+/** Activate one already-authorized claim. All checks happen before the page rename. */
+export async function activateLearningClaim(input: ActivateLearningClaimInput): Promise<{ event: LearningTransitionEvent; canonical: string; row_num: number }> {
+  validateLearningClaimIdentity(input.identity);
+  if (!isActivatableClass(input.identity.class) || input.identity.class === 'friction' || input.identity.class === 'business_candidate') {
+    throw new LearningLoopError('forbidden', 'Learning class is not activatable');
+  }
+  if (input.identity.class === 'lesson' && input.authority !== 'repetition') throw new LearningLoopError('forbidden', 'Lessons require repeated eligible sessions');
+  if ((input.identity.class === 'constraint' || input.identity.class === 'preference' || input.identity.class === 'goal' || input.identity.class === 'open_loop') && input.authority !== 'direct_user') throw new LearningLoopError('forbidden', 'This class requires direct user authority');
+  if (input.identity.class === 'open_loop' && !input.identity.trigger) throw new LearningLoopError('forbidden', 'Open loops require an exact pending trigger');
+  const snapshotBinding = activeV2DestinationBinding({ config: input.config });
+  if (!snapshotBinding || snapshotBinding.source_id !== input.source_id || snapshotBinding.canonical_slug !== input.canonical_slug) throw new LearningLoopError('assertion_mismatch', 'Activation target is not the active frozen destination');
+  const snapshotTarget: SourceQualifiedCanonicalTarget = { brain_id: snapshotBinding.brain_id, source_id: snapshotBinding.source_id, canonical_slug: snapshotBinding.canonical_slug, configured_root: snapshotBinding.canonical_realpath };
+  return withCanonicalSourceBoundary(input.engine, snapshotTarget, async lease => withLearningLoopLifecycleLock(input.engine, async () => {
+    const admissionState = typeof input.engine.transaction === 'function'
+      ? await input.engine.transaction(async tx => ({ mode: await resolveLearningLoopMode(tx, input.config), intent: await tx.getConfig('learning_loop.mode_transition_intent_v1') }))
+      : { mode: await resolveLearningLoopMode(input.engine, input.config), intent: await input.engine.getConfig('learning_loop.mode_transition_intent_v1') };
+    const mode = admissionState.mode;
+    if (mode !== 'canary') throw new LearningLoopError('mode_off', 'Learning Loop activation requires canary mode');
+    if (admissionState.intent !== null) throw new LearningLoopError('forbidden', 'Learning Loop activation is blocked by a mode transition intent');
+    const state = replayLearningLoop(readLearningLoopLedger({ config: input.config }));
+    const run = state.runs.get(input.run_id);
+    if (!run || run.terminal || run.armed.contract_version !== 2) throw new LearningLoopError('no_active_run', 'Activation requires an active V2 run');
+    const binding = run.armed.destination_binding;
+    if (binding.brain_id !== computeBrainIdFromConfig(input.config ?? {}) || binding.source_id !== input.source_id || binding.canonical_slug !== input.canonical_slug) throw new LearningLoopError('assertion_mismatch', 'Activation destination does not match the frozen run');
+    const currentCorpus = await resolveCodexCorpusBinding(input.engine, run.armed.corpus_binding.source_id, input.config);
+    const currentDestination = await resolveLearningLoopDestinationBinding(input.engine, binding.brain_id, binding.source_id, binding.canonical_slug);
+    assertRootBindingUnchanged(run.armed.corpus_binding, currentCorpus);
+    assertRootBindingUnchanged(binding, currentDestination);
+    const target: SourceQualifiedCanonicalTarget = { brain_id: binding.brain_id, source_id: binding.source_id, canonical_slug: binding.canonical_slug, configured_root: binding.canonical_realpath };
+    const inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+    const fence = parseLearningLoopFence(inspected.canonical);
+    if (!fence) throw new LearningLoopError('forbidden', 'Managed canonical state is unavailable');
+    if (fence.value.pending_delivery !== null) {
+      const pending = decodeExactEventRecordV1(fence.value.pending_delivery);
+      const pendingEvent = eventFromExactRecord(pending);
+      if (pendingEvent.event_type !== 'learning_transition' || pendingEvent.transition !== 'activate'
+        || pendingEvent.run_id !== input.run_id || pendingEvent.brain_id !== binding.brain_id
+        || pendingEvent.source_id !== input.source_id || pendingEvent.canonical_slug !== input.canonical_slug
+        || canonicalJson(pendingEvent.identity) !== canonicalJson(input.identity) || pendingEvent.authority !== input.authority) {
+        throw new LearningLoopError('ledger_corrupt', 'Canonical pending delivery does not match this exact activation');
+      }
+      const prior = state.events.find(event => event.event_id === pendingEvent.event_id);
+      if (prior && canonicalJson(prior) !== canonicalJson(pendingEvent)) throw new LearningLoopError('ledger_corrupt', 'Pending delivery conflicts with the durable ledger');
+      if (!prior) appendEvent(pending, { config: input.config });
+      const delivered = readLearningLoopLedger({ config: input.config }).find(event => event.event_id === pendingEvent.event_id);
+      if (!delivered || canonicalJson(delivered) !== canonicalJson(pendingEvent)) throw new LearningLoopError('ledger_corrupt', 'Pending delivery was not read back exactly');
+      const clearedState = { ...fence.value, pending_delivery: null };
+      const clearPermit = createLearningTransitionPermit(fence.value, clearedState);
+      const clearedBody = inspected.canonical.replace(fence.raw, renderLearningLoopFence(clearedState));
+      const clearedCanonical = await writeCanonicalPage(target, clearedBody, { mode: 'learning_transition', sourceLease: lease, transitionPermit: clearPermit, expectedManaged: 'expected' });
+      const clearReadback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      if (clearReadback.canonical !== clearedCanonical) throw new LearningLoopError('assertion_mismatch', 'Recovered canonical readback changed before derived reconciliation');
+      await importFromContent(input.engine, input.canonical_slug, clearReadback.canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: clearReadback.permit, canonicalReadback: clearReadback.canonical });
+      return { event: pendingEvent, canonical: clearReadback.canonical, row_num: pendingEvent.fact_row };
+    }
+    const priorTransition = state.events.find((e): e is LearningTransitionEvent => e.event_type === 'learning_transition' && e.run_id === input.run_id && e.source_id === input.source_id && e.canonical_slug === input.canonical_slug && e.identity.claim_fingerprint === input.identity.claim_fingerprint);
+    if (priorTransition) {
+      const path = join(binding.canonical_realpath, `${input.canonical_slug}.md`);
+      const canonical = readFileSync(path, 'utf8');
+      const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      if (readback.canonical !== canonical) throw new LearningLoopError('assertion_mismatch', 'Idempotent canonical readback changed');
+      await importFromContent(input.engine, input.canonical_slug, canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: canonical });
+      return { event: priorTransition, canonical, row_num: priorTransition.fact_row };
+    }
+    const candidate = state.events.find((e): e is LearningCandidateEvent => e.event_type === 'learning_candidate' && e.run_id === input.run_id && e.identity.claim_fingerprint === input.identity.claim_fingerprint);
+    const authority = state.events.find((e): e is LearningAuthorityEvent => e.event_type === 'learning_authority' && e.run_id === input.run_id && e.authority === input.authority && e.identity.claim_fingerprint === input.identity.claim_fingerprint);
+    if (!candidate || !authority || canonicalJson(candidate.identity) !== canonicalJson(input.identity) || canonicalJson(authority.identity) !== canonicalJson(input.identity)) throw new LearningLoopError('forbidden', 'Candidate and authority must exactly match the activation identity');
+      if (fence.value.blocked_identities.includes(input.identity.claim_fingerprint!)) throw new LearningLoopError('forbidden', 'Claim is correction-blocked');
+      const factKind = input.identity.class === 'constraint' ? 'belief' : input.identity.class === 'preference' ? 'preference' : input.identity.class === 'goal' || input.identity.class === 'open_loop' ? 'commitment' : 'fact';
+      const appended = upsertFactRow(inspected.canonical, { claim: input.identity.claim, kind: factKind, confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `learning_class:${input.identity.class}`, active: true });
+      const next: LearningLoopKnowledge = { ...fence.value, managed_rows: { ...fence.value.managed_rows, [input.identity.claim_fingerprint!]: { claim: input.identity.claim, class: input.identity.class, row_num: appended.rowNum, active: true, run_id: input.run_id } }, pending_delivery: null };
+      const sequence = state.events.filter(e => e.event_type === 'learning_transition' && e.brain_id === binding.brain_id && e.run_id === input.run_id).length + 1;
+      const occurred_at = new Date().toISOString();
+      const payload = { schema_version: 1 as const, event_type: 'learning_transition' as const, transition_version: 1 as const, brain_id: binding.brain_id, run_id: input.run_id, semantic_sequence: sequence, source_id: input.source_id, canonical_slug: input.canonical_slug, transition: 'activate' as const, identity: input.identity, authority: input.authority, fact_row: appended.rowNum, occurred_at };
+      const event = completeEvent(payload) as LearningTransitionEvent;
+      const pending = makeExactEventRecordV1({ event_payload: payload, brain_id: binding.brain_id, run_id: input.run_id, occurred_at, semantic_sequence: sequence });
+      const pendingState = { ...next, pending_delivery: pending };
+      const permit = createLearningTransitionPermit(fence.value, pendingState);
+      const staged = renderLearningLoopFence(pendingState);
+      const withFence = appended.body.replace(fence.raw, staged);
+      const canonical = await writeCanonicalPage(target, withFence, { mode: 'learning_transition', sourceLease: lease, transitionPermit: permit, expectedManaged: 'expected' });
+      input.afterCanonicalStage?.();
+      appendEvent(pending, { config: input.config });
+      input.afterLedgerAppend?.();
+      const delivered = readLearningLoopLedger({ config: input.config }).find(item => item.event_id === event.event_id);
+      if (!delivered || canonicalJson(delivered) !== canonicalJson(event)) {
+        throw new LearningLoopError('ledger_corrupt', 'Canonical pending delivery was not read back exactly from the durable ledger');
+      }
+      const cleared = canonical.replace(staged, renderLearningLoopFence({ ...next, pending_delivery: null }));
+      const clearPermit = createLearningTransitionPermit(parseLearningLoopFence(canonical)!.value, { ...next, pending_delivery: null });
+      const clearedCanonical = await writeCanonicalPage(target, cleared, { mode: 'learning_transition', sourceLease: lease, transitionPermit: clearPermit, expectedManaged: 'expected' });
+      input.afterCanonicalClear?.();
+      const clearReadback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      if (clearReadback.canonical !== clearedCanonical) throw new LearningLoopError('assertion_mismatch', 'Canonical clear readback changed before derived reconciliation');
+      await importFromContent(input.engine, input.canonical_slug, clearReadback.canonical, { sourceId: input.source_id, noEmbed: true, canonicalPermit: clearReadback.permit, canonicalReadback: clearReadback.canonical });
+    return { event, canonical: clearReadback.canonical, row_num: appended.rowNum };
+  }, { config: input.config, mutationLock: input.mutationLock }));
 }
 
 interface BaselineManifestEntry extends BaselineCandidate {
@@ -756,6 +1060,30 @@ function validAdapter(value: unknown): value is AdapterIdentity {
   if (!value || typeof value !== 'object') return false;
   const adapter = value as Partial<AdapterIdentity>;
   return adapter.provider === 'codex' && nonEmpty(adapter.client_id) && nonEmpty(adapter.source_id);
+}
+
+function validIdentity(value: unknown): value is LearningClaimIdentity {
+  if (!value || typeof value !== 'object') return false;
+  const x = value as LearningClaimIdentity;
+  if (typeof x.claim !== 'string' || x.claim.length === 0 || x.claim.length > 4096 || /[\r\n\u0000-\u001f\u007f]/.test(x.claim) || x.claim.normalize('NFC') !== x.claim || normalizeLearningClaim(x.claim) !== x.claim || !isLearningClass(x.class) || !x.scope || typeof x.target !== 'string' && x.target !== null || !('trigger' in x)) return false;
+  if (Object.keys(x).some(k => !['claim','class','scope','target','trigger','claim_fingerprint'].includes(k))) return false;
+  if (x.scope.kind === 'global' && (x.target !== null || Object.keys(x.scope).length !== 1)) return false;
+  if (x.scope.kind === 'repository' && (Object.keys(x.scope).length !== 2 || !/^repo:[^/\s:]+\/[^/\s]+\/[^/\s]+$/.test(x.scope.target) || x.target !== x.scope.target)) return false;
+  if (x.scope.kind === 'project' && (Object.keys(x.scope).length !== 2 || !x.scope.target || x.target !== x.scope.target || /[\r\n\u0000-\u001f\u007f]/.test(x.scope.target))) return false;
+  if (!['global', 'repository', 'project'].includes(x.scope.kind)) return false;
+  if (x.class === 'open_loop' && (!x.trigger || typeof x.trigger !== 'object' || Object.keys(x.trigger).length !== 3 || Object.keys(x.trigger).some(k => !['kind','id','state'].includes(k)) || !/^[a-z][a-z0-9_-]{0,31}$/.test(x.trigger.kind) || !x.trigger.id || /[\r\n\u0000-\u001f\u007f]/.test(x.trigger.id) || x.trigger.state !== 'pending')) return false;
+  if (x.class !== 'open_loop' && x.trigger !== null) return false;
+  if (x.scope.kind !== 'global' && (typeof x.scope.target !== 'string' || !x.scope.target)) return false;
+  return x.claim_fingerprint === learningClaimFingerprint({ claim: x.claim, class: x.class, scope: x.scope, target: x.target, trigger: x.trigger });
+}
+function isLearningClass(value: unknown): value is LearningClaimIdentity['class'] {
+  return ['constraint','preference','goal','lesson','friction','open_loop','business_candidate'].includes(value as string);
+}
+function validEvidence(rows: unknown): rows is TranscriptUserRow[] {
+  return Array.isArray(rows) && rows.length > 0 && rows.every(row => {
+    if (!row || typeof row !== 'object') return false; const x = row as TranscriptUserRow;
+    return x.provider === 'codex' && x.role === 'user' && SESSION_ID_RE.test(x.provider_session_id) && Number.isSafeInteger(x.line) && x.line > 0 && Number.isSafeInteger(x.message_index) && x.message_index >= 0 && typeof x.text === 'string' && x.text.trim() !== '' && /^[a-f0-9]{64}$/.test(x.message_hash) && /^[a-f0-9]{64}$/.test(x.transcript_hash);
+  });
 }
 
 function validCandidate(value: unknown): value is BaselineCandidate {
@@ -900,6 +1228,31 @@ function assertEventShape(event: LearningLoopEvent): void {
     }
     return;
   }
+  if (event.event_type === 'learning_candidate' || event.event_type === 'learning_authority') {
+    const value = event as LearningCandidateEvent | LearningAuthorityEvent;
+    if (!nonEmpty(value.run_id) || !validIdentity(value.identity) || !validEvidence(value.evidence)
+      || Object.keys(value).some(k => !['schema_version','event_id','occurred_at','event_type','candidate_version','authority_version','run_id','identity','evidence','eligible_session_ids','authority','session_ids'].includes(k))) {
+      throw new LearningLoopError('ledger_corrupt', 'Learning Loop learning event has an invalid exact shape');
+    }
+    if (event.event_type === 'learning_candidate' && ((value as LearningCandidateEvent).candidate_version !== 1 || !Array.isArray((value as LearningCandidateEvent).eligible_session_ids) || (value as LearningCandidateEvent).eligible_session_ids.some(id => !SESSION_ID_RE.test(id)) || 'authority' in value || 'session_ids' in value)) throw new LearningLoopError('ledger_corrupt', 'Learning Loop candidate variant is invalid');
+    if (event.event_type === 'learning_authority' && ((value as LearningAuthorityEvent).authority_version !== 1 || 'candidate_version' in value || ((value as LearningAuthorityEvent).authority !== 'direct_user' && (value as LearningAuthorityEvent).authority !== 'repetition') || !Array.isArray((value as LearningAuthorityEvent).session_ids) || (value as LearningAuthorityEvent).session_ids.length < 1 || (value as LearningAuthorityEvent).session_ids.length > 2)) {
+      throw new LearningLoopError('ledger_corrupt', 'Learning Loop authority event has an invalid authority');
+    }
+    return;
+  }
+  if (event.event_type === 'learning_transition') {
+    const value = event as LearningTransitionEvent;
+    if (Object.keys(value).some(key => !['schema_version','event_id','occurred_at','event_type','transition_version','brain_id','run_id','semantic_sequence','source_id','canonical_slug','transition','identity','authority','fact_row'].includes(key))) {
+      throw new LearningLoopError('ledger_corrupt', 'Learning Loop transition event has an unknown field');
+    }
+    if (value.transition_version !== 1 || value.transition !== 'activate' || !nonEmpty(value.brain_id) || !nonEmpty(value.run_id)
+      || !Number.isSafeInteger(value.semantic_sequence) || value.semantic_sequence < 1 || !nonEmpty(value.source_id)
+      || !nonEmpty(value.canonical_slug) || !validIdentity(value.identity)
+      || (value.authority !== 'direct_user' && value.authority !== 'repetition') || !Number.isSafeInteger(value.fact_row) || value.fact_row < 1) {
+      throw new LearningLoopError('ledger_corrupt', 'Learning Loop transition event has an invalid shape');
+    }
+    return;
+  }
   throw new LearningLoopError('ledger_corrupt', 'Learning Loop ledger contains an unknown event type');
 }
 
@@ -964,6 +1317,40 @@ export function replayLearningLoop(records: LearningLoopLedgerRecord[]): Learnin
         throw new LearningLoopError('ledger_corrupt', 'A provider session has more than one adapter binding');
       }
       projection.session_bindings.set(key, event);
+    } else if (event.event_type === 'learning_candidate' || event.event_type === 'learning_authority') {
+      const run = projection.runs.get(event.run_id);
+      if (!run || run.terminal) throw new LearningLoopError('ledger_corrupt', 'Learning event references a missing or terminal run');
+      const sessions = [...new Set(event.evidence.map(row => row.provider_session_id))];
+      for (const row of event.evidence) {
+        const session = projection.session_events.get(`codex\u0000${row.provider_session_id}`);
+        const expectedMessageHash = createHash('sha256').update(row.text.normalize('NFKC').trim()).digest('hex');
+        if (!session?.eligible || session.run_id !== event.run_id || session.authoritative.content_hash !== row.transcript_hash
+          || expectedMessageHash !== row.message_hash || normalizeLearningClaim(row.text) !== event.identity.claim) {
+          throw new LearningLoopError('ledger_corrupt', 'Learning evidence does not match its accepted authoritative session and exact claim');
+        }
+      }
+      if (event.event_type === 'learning_candidate') {
+        if (canonicalJson(event.eligible_session_ids) !== canonicalJson(sessions)) throw new LearningLoopError('ledger_corrupt', 'Candidate session identities do not exactly equal its evidence sessions');
+        for (const id of event.eligible_session_ids) {
+          const session = projection.session_events.get(`codex\u0000${id}`);
+          if (!session?.eligible) throw new LearningLoopError('ledger_corrupt', 'Candidate evidence is not an eligible session');
+        }
+      } else {
+        if (event.authority === 'direct_user' && sessions.length !== 1) throw new LearningLoopError('ledger_corrupt', 'Direct authority requires one session');
+        if (event.authority === 'repetition' && sessions.length < 2) throw new LearningLoopError('ledger_corrupt', 'Repetition authority requires two sessions');
+        if (sessions.some(id => !projection.session_events.get(`codex\u0000${id}`)?.eligible)) throw new LearningLoopError('ledger_corrupt', 'Authority evidence is not eligible');
+        if (canonicalJson(event.session_ids) !== canonicalJson(sessions)) throw new LearningLoopError('ledger_corrupt', 'Authority session identities do not exactly equal its evidence sessions');
+      }
+      projection.events.push(event);
+      continue;
+    } else if (event.event_type === 'learning_transition') {
+      const run = projection.runs.get(event.run_id);
+      if (!run || run.terminal || run.armed.contract_version !== 2 || run.armed.destination_binding.brain_id !== event.brain_id
+        || run.armed.destination_binding.source_id !== event.source_id || run.armed.destination_binding.canonical_slug !== event.canonical_slug) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning transition does not match the active V2 destination');
+      }
+      projection.events.push(event);
+      continue;
     } else {
       const key = `${event.provider}\u0000${event.provider_session_id}`;
       const binding = projection.session_bindings.get(key);
@@ -1053,10 +1440,12 @@ export function activeV2DestinationBinding(opts: LedgerOptions = {}): Destinatio
   return armed?.contract_version === 2 ? armed.destination_binding : undefined;
 }
 
-function appendEvent(event: LearningLoopEvent, opts: LedgerOptions): void {
-  verifyEvent(event);
+function appendEvent(event: LearningLoopEvent | ExactEventRecordV1, opts: LedgerOptions): void {
+  if (isExactEventRecord(event)) decodeExactEventRecordV1(event); else verifyEvent(event);
   const path = learningLoopLedgerPath(opts);
-  mkdirSync(dirname(path), { recursive: true });
+  const parent = dirname(path);
+  const created = !existsSync(path);
+  mkdirSync(parent, { recursive: true });
   const fd = openSync(path, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY, 0o600);
   try {
     appendFileSync(fd, JSON.stringify(event) + '\n', 'utf8');
@@ -1064,17 +1453,22 @@ function appendEvent(event: LearningLoopEvent, opts: LedgerOptions): void {
   } finally {
     closeSync(fd);
   }
+  if (created) {
+    const parentFd = openSync(parent, constants.O_RDONLY);
+    try { fsyncSync(parentFd); } finally { closeSync(parentFd); }
+  }
 }
 
 async function withLedgerMutation<T>(
   engine: BrainEngine,
   opts: LedgerOptions,
-  fn: (state: LearningLoopProjection) => { value: T; event?: LearningLoopEvent },
+  fn: (state: LearningLoopProjection) => { value: T; event?: LearningLoopEvent } | Promise<{ value: T; event?: LearningLoopEvent }>,
 ): Promise<T> {
   const work = async (): Promise<T> => {
     await opts.beforeMutation?.();
     const state = replayLearningLoop(readLearningLoopLedger(opts));
-    const result = fn(state);
+    const pending = fn(state);
+    const result = pending instanceof Promise ? await pending : pending;
     if (result.event) appendEvent(result.event, opts);
     return result.value;
   };
@@ -1093,12 +1487,62 @@ export async function withLearningLoopLifecycleLock<T>(
   opts: LedgerOptions = {},
 ): Promise<T> {
   if (opts.lifecycleLock) return opts.lifecycleLock(work);
+  // Lightweight test/fake engines may provide only the ledger lock seam.
+  // Reuse that explicit seam rather than attempting a driver lock on an
+  // engine-shaped object with no kind.
+  if (opts.mutationLock && (!('kind' in engine) || !engine.kind)) return opts.mutationLock(work);
   try {
     return await withRefreshingLock(engine, `learning-loop:lifecycle-v1:${ledgerScopeId(opts)}`, work, { ttlMinutes: 5 });
   } catch (error) {
     if (error instanceof LockUnavailableError) throw new LearningLoopError('ledger_busy', 'Learning Loop lifecycle is locked');
     throw error;
   }
+}
+
+/** One admission gate for every non-canonical Learning Loop ledger event. */
+export async function withLearningLoopAdmission<T>(
+  engine: BrainEngine,
+  opts: LedgerOptions,
+  admit: (state: LearningLoopProjection, mode: LearningLoopMode, intent: string | null) => { value: T; event?: LearningLoopEvent } | Promise<{ value: T; event?: LearningLoopEvent }>,
+): Promise<T> {
+  return withLearningLoopLifecycleLock(engine, async () => withLearningLoopAdmissionHeld(engine, opts, admit), opts);
+}
+
+/** Admission variant for callers that already own the lifecycle lock. */
+async function withLearningLoopAdmissionHeld<T>(
+  engine: BrainEngine,
+  opts: LedgerOptions,
+  admit: (state: LearningLoopProjection, mode: LearningLoopMode, intent: string | null) => { value: T; event?: LearningLoopEvent } | Promise<{ value: T; event?: LearningLoopEvent }>,
+): Promise<T> {
+    const read = async (tx: Pick<BrainEngine, 'getConfig'>) => ({
+      mode: opts.precheckedMode ?? (typeof tx.getConfig === 'function' ? await resolveLearningLoopMode(tx, opts.config as GBrainConfig | undefined) : ((opts.config as GBrainConfig | undefined)?.learning_loop?.mode ?? 'off') as LearningLoopMode),
+      intent: typeof tx.getConfig === 'function' ? await tx.getConfig('learning_loop.mode_transition_intent_v1') : null,
+    });
+    const { mode, intent } = typeof engine.transaction === 'function'
+      ? await engine.transaction(async tx => typeof tx.getConfig === 'function' ? read(tx) : read(engine))
+      : await read(engine);
+    if (intent !== null) throw new LearningLoopError('forbidden', 'Learning Loop admission is blocked by a mode transition intent');
+    let appended: LearningLoopEvent | undefined;
+    const result = await withLedgerMutation(engine, opts, state => {
+      const decision = admit(state, mode, intent);
+      if (decision instanceof Promise) {
+        return decision.then(resolved => {
+          appended = resolved.event;
+          return resolved;
+        });
+      }
+      appended = decision.event;
+      return decision;
+    });
+    // Readback is part of the admission critical section. A caller never gets
+    // a success result for an event that is not durable and replay-visible.
+    if (appended) {
+      const events = readLearningLoopLedger(opts);
+      if (!events.some(event => event.event_id === appended!.event_id && canonicalJson(event) === canonicalJson(appended))) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning Loop admission append failed exact readback');
+      }
+    }
+    return result;
 }
 
 export function compareUtf8(a: string, b: string): number {
@@ -1148,7 +1592,7 @@ export function bindLearningLoopSession(
     throw new LearningLoopError('invalid_input', 'Invalid adapter session binding');
   }
   const payloadHash = commandPayloadHash({ adapter, provider_session_id: providerSessionId });
-  return withLedgerMutation<AdapterSessionBoundEvent>(engine, opts, (state) => {
+  return withLearningLoopAdmission<AdapterSessionBoundEvent>(engine, opts, (state) => {
     const priorCommand = state.events.find(
       (event): event is AdapterSessionBoundEvent => event.event_type === 'adapter_session_bound' && event.command_id === commandId,
     );
@@ -1202,7 +1646,8 @@ async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOp
     destination,
     ...(v2 ? { contract_version: 2 } : {}),
   });
-  const existing = await withLedgerMutation<RunArmedEvent | RunArmedEventV2 | null>(input.engine, opts, (state) => {
+  const existing = await withLearningLoopAdmissionHeld<RunArmedEvent | RunArmedEventV2 | null>(input.engine, opts, (state, mode) => {
+    if (mode !== 'canary') throw new LearningLoopError('mode_off', 'Set mode to canary before arming');
     const prior = state.events.find((event): event is RunArmedEvent | RunArmedEventV2 => event.event_type === 'run_armed' && event.command_id === input.command_id);
     if (!prior) return { value: null };
     if (prior.command_payload_hash !== payloadHash) throw new LearningLoopError('command_conflict', 'Arm command id was reused with a different payload');
@@ -1222,7 +1667,8 @@ async function armLearningLoopLocked(input: ArmLearningLoopInput, opts: LedgerOp
     assertRootBindingUnchanged(corpusBinding!, corpusAfter);
     assertRootBindingUnchanged(destinationBinding!, destinationAfter);
   }
-  return withLedgerMutation<RunArmedEvent | RunArmedEventV2>(input.engine, opts, (state) => {
+  return withLearningLoopAdmissionHeld<RunArmedEvent | RunArmedEventV2>(input.engine, opts, (state, mode) => {
+    if (mode !== 'canary') throw new LearningLoopError('mode_off', 'Set mode to canary before arming');
     const prior = state.events.find((event): event is RunArmedEvent | RunArmedEventV2 => event.event_type === 'run_armed' && event.command_id === input.command_id);
     if (prior) {
       if (prior.command_payload_hash !== payloadHash) throw new LearningLoopError('command_conflict', 'Arm command id was reused with a different payload');
@@ -1284,7 +1730,9 @@ export async function setLearningLoopMode(
       const state = replayLearningLoop(readLearningLoopLedger(scopedOpts));
       if (state.active_run_id !== null) {
         try {
-          await abortLearningLoop(engine, `mode-change:${state.active_run_id}`, 'mode_changed', scopedOpts);
+          const commandId = `mode-change:${state.active_run_id}`;
+          const payloadHash = commandPayloadHash({ reason: 'mode_changed' });
+          await withLearningLoopAdmissionHeld(engine, scopedOpts, lockedState => abortLearningLoopFromState(lockedState, commandId, 'mode_changed', payloadHash, scopedOpts));
         } catch (error) {
           if (!(error instanceof LearningLoopError) || error.code !== 'no_active_run') throw error;
         }
@@ -1295,6 +1743,32 @@ export async function setLearningLoopMode(
   }, scopedOpts);
 }
 
+function abortLearningLoopFromState(
+  state: LearningLoopProjection,
+  commandId: string,
+  reason: RunAbortedEvent['reason'],
+  payloadHash: string,
+  opts: LedgerOptions,
+): { value: RunAbortedEvent; event?: RunAbortedEvent } {
+  const prior = state.events.find((event): event is RunAbortedEvent => event.event_type === 'run_aborted' && event.command_id === commandId);
+  if (prior) {
+    if (prior.command_payload_hash !== payloadHash) throw new LearningLoopError('command_conflict', 'Abort command id was reused with a different payload');
+    return { value: prior };
+  }
+  if (state.active_run_id === null) throw new LearningLoopError('no_active_run', 'No Learning Loop run is active');
+  const body = {
+    schema_version: LEARNING_LOOP_SCHEMA_VERSION,
+    event_type: 'run_aborted' as const,
+    command_id: commandId,
+    command_payload_hash: payloadHash,
+    occurred_at: (opts.now ?? (() => new Date()))().toISOString(),
+    run_id: state.active_run_id,
+    reason,
+  };
+  const event = completeEvent(body) as RunAbortedEvent;
+  return { value: event, event };
+}
+
 export function abortLearningLoop(
   engine: BrainEngine,
   commandId: string,
@@ -1303,25 +1777,7 @@ export function abortLearningLoop(
 ): Promise<RunAbortedEvent> {
   if (!COMMAND_ID_RE.test(commandId)) throw new LearningLoopError('invalid_input', 'Invalid abort command id');
   const payloadHash = commandPayloadHash({ reason });
-  return withLedgerMutation<RunAbortedEvent>(engine, opts, (state) => {
-    const prior = state.events.find((event): event is RunAbortedEvent => event.event_type === 'run_aborted' && event.command_id === commandId);
-    if (prior) {
-      if (prior.command_payload_hash !== payloadHash) throw new LearningLoopError('command_conflict', 'Abort command id was reused with a different payload');
-      return { value: prior };
-    }
-    if (state.active_run_id === null) throw new LearningLoopError('no_active_run', 'No Learning Loop run is active');
-    const body = {
-      schema_version: LEARNING_LOOP_SCHEMA_VERSION,
-      event_type: 'run_aborted' as const,
-      command_id: commandId,
-      command_payload_hash: payloadHash,
-      occurred_at: (opts.now ?? (() => new Date()))().toISOString(),
-      run_id: state.active_run_id,
-      reason,
-    };
-    const event = completeEvent(body) as RunAbortedEvent;
-    return { value: event, event };
-  });
+  return withLearningLoopAdmission<RunAbortedEvent>(engine, opts, state => abortLearningLoopFromState(state, commandId, reason, payloadHash, opts));
 }
 
 function requireSessionBinding(
@@ -1365,9 +1821,13 @@ export function recordSessionEvaluation(input: {
   receipt: TranscriptReceipt;
 }, opts: LedgerOptions = {}): Promise<{ status: 'recorded' | 'idempotent'; event: SessionEvaluatedEvent }> {
   if (input.mode === 'off') throw new LearningLoopError('mode_off', 'Learning Loop mode is off');
-  return withLedgerMutation<{ status: 'recorded' | 'idempotent'; event: SessionEvaluatedEvent }>(input.engine, opts, (state) => {
+  const admissionOpts = opts.root && !opts.config ? { ...opts, precheckedMode: input.mode } : opts;
+  return withLearningLoopAdmission<{ status: 'recorded' | 'idempotent'; event: SessionEvaluatedEvent }>(input.engine, admissionOpts, (state, admissionMode) => {
+    if (admissionMode === 'off') throw new LearningLoopError('mode_off', 'Learning Loop mode changed to off before admission');
+    if (input.mode === 'canary' && admissionMode !== 'canary') throw new LearningLoopError('mode_off', 'Canary admission is no longer active');
+    const effectiveMode = input.mode === 'capture' ? 'capture' : admissionMode;
     let run: RunProjection | undefined;
-    if (input.mode === 'canary') {
+    if (effectiveMode === 'canary') {
       if (state.active_run_id === null) throw new LearningLoopError('no_active_run', 'Canary mode has no armed run');
       run = state.runs.get(state.active_run_id)!;
       const expected = run.armed.authorized_adapter;
