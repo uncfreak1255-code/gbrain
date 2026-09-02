@@ -13,6 +13,58 @@ export interface CorrectionLineage {
   replacement_set_fingerprint: string;
   lineage_generation: number;
 }
+
+/**
+ * Durable state for one explicit direct-user reversal.  These values are
+ * canonical-page metadata, not a second queue or an in-memory workflow.
+ * Every phase is monotonic and can be replayed after a process interruption.
+ */
+export type LearningReversalPhase =
+  | 'started'
+  | 'retired_checkpointed'
+  | 'rebuild_verified'
+  | 'commit_intent'
+  | 'committed'
+  | 'superseded'
+  | 'failed';
+
+export interface LearningReversalCheckpoint {
+  lineage_generation: number;
+  replacement_set_fingerprint: string;
+  active_replacements: readonly LearningPointer[];
+}
+
+export interface LearningReversalAttempt {
+  root_reversal_id: string;
+  attempt_no: number;
+  phase: LearningReversalPhase;
+  blocked_identity: BlockedClaimKey;
+  authority_event_id: string;
+  predecessor_generation: number;
+  predecessor_set_fingerprint: string;
+  predecessor_replacements: readonly LearningPointer[];
+  /** Every obligation that still has to be retired by this attempt. */
+  inherited_replacements?: readonly LearningPointer[];
+  checkpoint?: LearningReversalCheckpoint;
+  rebuild_proof?: { proof_id: string; checkpoint_hash: string };
+  commit_intent?: {
+    checkpoint_hash: string;
+    final_state_hash: string;
+    reinstated: LearningPointer;
+  };
+  successor_id?: string;
+  predecessor_id?: string;
+  failure_code?: string;
+}
+
+export type LearningReversalCommand =
+  | { kind: 'start'; attempt: LearningReversalAttempt }
+  | { kind: 'retired_checkpointed'; checkpoint: LearningReversalCheckpoint }
+  | { kind: 'rebuild_verified'; proof_id: string; checkpoint_hash: string }
+  | { kind: 'commit_intent'; checkpoint_hash: string; final_state_hash: string; reinstated: LearningPointer }
+  | { kind: 'committed'; marker: string }
+  | { kind: 'failed'; code: string }
+  | { kind: 'supersede'; successor: LearningReversalAttempt };
 export function learningBlockedClaimKey(identity: LearningClaimIdentity): BlockedClaimKey {
   const normalized = makeLearningClaimIdentity({
     claim: identity.claim,
@@ -41,6 +93,192 @@ export function learningClaimFingerprint(identity: Omit<LearningClaimIdentity, '
 export function makeLearningClaimIdentity(input: Omit<LearningClaimIdentity, 'claim_fingerprint'>): LearningClaimIdentity {
   const normalized = { ...input, claim: normalizeLearningClaim(input.claim) };
   return { ...normalized, claim_fingerprint: learningClaimFingerprint(normalized) };
+}
+
+function reversalAttemptKey(attempt: LearningReversalAttempt): string {
+  return `${attempt.root_reversal_id}:${attempt.attempt_no}`;
+}
+
+function validReversalPointer(value: unknown): value is LearningPointer {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const pointer = value as Partial<LearningPointer>;
+  return /^[a-f0-9]{64}$/.test(String(pointer.identity ?? ''))
+    && typeof pointer.canonical_slug === 'string'
+    && pointer.canonical_slug.length > 0
+    && Number.isSafeInteger(pointer.row_num)
+    && Number(pointer.row_num) > 0
+    && Object.keys(pointer).every(key => ['identity', 'canonical_slug', 'row_num'].includes(key));
+}
+
+function validReversalCheckpoint(value: unknown): value is LearningReversalCheckpoint {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const checkpoint = value as Partial<LearningReversalCheckpoint>;
+  if (!Number.isSafeInteger(checkpoint.lineage_generation) || Number(checkpoint.lineage_generation) < 1
+    || !/^[a-f0-9]{64}$/.test(String(checkpoint.replacement_set_fingerprint ?? ''))
+    || !Array.isArray(checkpoint.active_replacements)
+    || !checkpoint.active_replacements.every(validReversalPointer)
+    || Object.keys(checkpoint).some(key => !['lineage_generation', 'replacement_set_fingerprint', 'active_replacements'].includes(key))) return false;
+  return replacementSetFingerprint(checkpoint.active_replacements) === checkpoint.replacement_set_fingerprint;
+}
+
+function reversalCheckpointHash(value: LearningReversalCheckpoint): string {
+  return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
+}
+
+function sameJson(a: unknown, b: unknown): boolean {
+  return canonicalJson(a) === canonicalJson(b);
+}
+
+function assertReversalStart(attempt: LearningReversalAttempt): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(attempt.root_reversal_id)
+    || attempt.phase !== 'started'
+    || !Number.isSafeInteger(attempt.attempt_no)
+    || attempt.attempt_no < 1
+    || !/^[a-f0-9]{64}$/.test(attempt.blocked_identity)
+    || typeof attempt.authority_event_id !== 'string'
+    || attempt.authority_event_id.length === 0
+    || !Number.isSafeInteger(attempt.predecessor_generation)
+    || attempt.predecessor_generation < 1
+    || !/^[a-f0-9]{64}$/.test(attempt.predecessor_set_fingerprint)
+    || !Array.isArray(attempt.predecessor_replacements)
+    || !attempt.predecessor_replacements.every(validReversalPointer)
+    || (attempt.inherited_replacements !== undefined && (!Array.isArray(attempt.inherited_replacements) || !attempt.inherited_replacements.every(validReversalPointer)))
+    || Object.keys(attempt).some(key => !['root_reversal_id', 'attempt_no', 'phase', 'blocked_identity', 'authority_event_id', 'predecessor_generation', 'predecessor_set_fingerprint', 'predecessor_replacements', 'inherited_replacements', 'checkpoint', 'rebuild_proof', 'commit_intent', 'successor_id', 'predecessor_id', 'failure_code'].includes(key))) {
+    throw new Error('learning-loop metadata: invalid reversal start');
+  }
+  if (replacementSetFingerprint(attempt.predecessor_replacements) !== attempt.predecessor_set_fingerprint) {
+    throw new Error('learning-loop metadata: reversal predecessor set fingerprint mismatch');
+  }
+}
+
+/**
+ * Common reducer for reversal metadata. It is intentionally the only place
+ * that advances a persisted attempt phase. Callers may retry a byte-identical
+ * command, but cannot skip, rewind, or rewrite an attempt.
+ */
+export function reduceLearningLoopReversal(
+  previous: LearningLoopKnowledge,
+  command: LearningReversalCommand,
+): { next: LearningLoopKnowledge; attempt: LearningReversalAttempt } {
+  const attempts = { ...previous.reversal_attempts } as Record<string, LearningReversalAttempt>;
+  if (command.kind === 'start') {
+    assertReversalStart(command.attempt);
+    const key = reversalAttemptKey(command.attempt);
+    const prior = attempts[key];
+    if (prior) {
+      if (!sameJson(prior, command.attempt)) throw new Error('learning-loop metadata: reversal attempt identity conflict');
+      return { next: previous, attempt: prior };
+    }
+    // A root may have only one non-terminal attempt. A successor is created
+    // through the atomic supersede command below, never by a second root start.
+    for (const existing of Object.values(attempts)) {
+      if (existing.root_reversal_id === command.attempt.root_reversal_id
+        && !['committed', 'superseded', 'failed'].includes(existing.phase)) {
+        throw new Error('learning-loop metadata: reversal root already has an active attempt');
+      }
+    }
+    attempts[key] = command.attempt;
+    return { next: { ...previous, reversal_attempts: attempts }, attempt: command.attempt };
+  }
+
+  if (command.kind === 'supersede') {
+    assertReversalStart(command.successor);
+    const successorKey = reversalAttemptKey(command.successor);
+    const existingSuccessor = attempts[successorKey];
+    const predecessorKey = command.successor.predecessor_id;
+    const predecessor = predecessorKey ? attempts[predecessorKey] : undefined;
+    if (existingSuccessor || predecessor?.phase === 'superseded') {
+      if (existingSuccessor && predecessor?.phase === 'superseded'
+        && predecessor.successor_id === successorKey && sameJson(existingSuccessor, command.successor)) {
+        return { next: previous, attempt: existingSuccessor };
+      }
+      throw new Error('learning-loop metadata: reversal successor identity conflict');
+    }
+  }
+
+  const activeEntries = Object.entries(attempts).filter(([, value]) => !['committed', 'superseded', 'failed'].includes(value.phase));
+  if (activeEntries.length !== 1) throw new Error('learning-loop metadata: reversal active attempt is ambiguous or missing');
+  const [activeKey, current] = activeEntries[0];
+
+  if (command.kind === 'supersede') {
+    if (current.phase === 'committed' || current.phase === 'failed' || current.phase === 'superseded'
+      || command.successor.root_reversal_id !== current.root_reversal_id
+      || command.successor.attempt_no <= current.attempt_no
+      || command.successor.predecessor_id !== activeKey) {
+      throw new Error('learning-loop metadata: invalid reversal successor');
+    }
+    attempts[activeKey] = { ...current, phase: 'superseded', successor_id: reversalAttemptKey(command.successor) };
+    attempts[reversalAttemptKey(command.successor)] = command.successor;
+    return { next: { ...previous, reversal_attempts: attempts }, attempt: command.successor };
+  }
+
+  if (command.kind === 'failed') {
+    if (['committed', 'superseded', 'failed'].includes(current.phase) || !command.code || command.code.length > 160) {
+      throw new Error('learning-loop metadata: invalid reversal failure');
+    }
+    const nextAttempt = { ...current, phase: 'failed' as const, failure_code: command.code };
+    attempts[activeKey] = nextAttempt;
+    return { next: { ...previous, reversal_attempts: attempts }, attempt: nextAttempt };
+  }
+
+  const expectedPrevious: Record<Exclude<LearningReversalPhase, 'started' | 'superseded' | 'failed'>, LearningReversalPhase> = {
+    retired_checkpointed: 'started',
+    rebuild_verified: 'retired_checkpointed',
+    commit_intent: 'rebuild_verified',
+    committed: 'commit_intent',
+  };
+  if (current.phase === command.kind) {
+    const matches = command.kind === 'retired_checkpointed'
+      ? sameJson(current.checkpoint, command.checkpoint)
+      : command.kind === 'rebuild_verified'
+        ? sameJson(current.rebuild_proof, { proof_id: command.proof_id, checkpoint_hash: command.checkpoint_hash })
+        : command.kind === 'commit_intent'
+          ? sameJson(current.commit_intent, { checkpoint_hash: command.checkpoint_hash, final_state_hash: command.final_state_hash, reinstated: command.reinstated })
+          : false;
+    if (!matches) throw new Error('learning-loop metadata: reversal phase retry conflicts with the durable payload');
+    return { next: previous, attempt: current };
+  }
+  if (current.phase !== expectedPrevious[command.kind]) {
+    throw new Error('learning-loop metadata: invalid reversal phase transition');
+  }
+
+  let nextAttempt: LearningReversalAttempt;
+  if (command.kind === 'retired_checkpointed') {
+    if (!validReversalCheckpoint(command.checkpoint)
+      || command.checkpoint.lineage_generation <= current.predecessor_generation) {
+      throw new Error('learning-loop metadata: invalid reversal checkpoint');
+    }
+    nextAttempt = { ...current, phase: command.kind, checkpoint: command.checkpoint };
+  } else if (command.kind === 'rebuild_verified') {
+    if (!current.checkpoint || !command.proof_id || command.proof_id.length > 160
+      || command.checkpoint_hash !== reversalCheckpointHash(current.checkpoint)) {
+      throw new Error('learning-loop metadata: invalid reversal rebuild proof');
+    }
+    nextAttempt = { ...current, phase: command.kind, rebuild_proof: { proof_id: command.proof_id, checkpoint_hash: command.checkpoint_hash } };
+  } else if (command.kind === 'commit_intent') {
+    if (!current.checkpoint || command.checkpoint_hash !== reversalCheckpointHash(current.checkpoint)
+      || !validReversalPointer(command.reinstated)
+      || command.reinstated.identity !== current.blocked_identity
+      || !/^[a-f0-9]{64}$/.test(command.final_state_hash)) {
+      throw new Error('learning-loop metadata: invalid reversal commit intent');
+    }
+    nextAttempt = { ...current, phase: command.kind, commit_intent: { checkpoint_hash: command.checkpoint_hash, final_state_hash: command.final_state_hash, reinstated: command.reinstated } };
+  } else {
+    if (!current.commit_intent || !command.marker || command.marker.length > 256) throw new Error('learning-loop metadata: missing reversal commit intent');
+    const existingMarker = previous.immutable_commit_markers.find(marker => marker === command.marker);
+    if (existingMarker === undefined && previous.immutable_commit_markers.some(marker => marker.startsWith(`${activeKey}:`))) {
+      throw new Error('learning-loop metadata: immutable reversal commit marker conflict');
+    }
+    nextAttempt = { ...current, phase: 'committed' };
+  }
+  attempts[activeKey] = nextAttempt;
+  const markers = command.kind === 'committed' && !previous.immutable_commit_markers.includes(command.marker)
+    ? [...previous.immutable_commit_markers, command.marker].sort()
+    : [...previous.immutable_commit_markers];
+  const blocked = command.kind === 'committed'
+    ? previous.blocked_identities.filter(key => key !== current.blocked_identity)
+    : [...previous.blocked_identities];
+  return { next: { ...previous, reversal_attempts: attempts, immutable_commit_markers: markers, blocked_identities: blocked }, attempt: nextAttempt };
 }
 function transcriptText(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -141,6 +379,38 @@ function validateLineages(value: Record<string, unknown>): void {
     if (canonicalJson(encodings) !== canonicalJson(sorted) || new Set(encodings).size !== encodings.length || replacementSetFingerprint(pointers as LearningPointer[]) !== row.replacement_set_fingerprint) fail('replacement set is not complete, sorted, or correctly fingerprinted');
   }
 }
+function validateReversalAttempts(value: Record<string, unknown>): void {
+  for (const [key, raw] of Object.entries(value)) {
+    const attempt = object(raw, 'reversal attempt') as Partial<LearningReversalAttempt>;
+    if (key !== `${attempt.root_reversal_id}:${attempt.attempt_no}`) fail('reversal attempt key mismatch');
+    if (typeof attempt.root_reversal_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(attempt.root_reversal_id)
+      || !Number.isSafeInteger(attempt.attempt_no) || Number(attempt.attempt_no) < 1
+      || !['started','retired_checkpointed','rebuild_verified','commit_intent','committed','superseded','failed'].includes(String(attempt.phase))
+      || !/^[a-f0-9]{64}$/.test(String(attempt.blocked_identity ?? ''))
+      || typeof attempt.authority_event_id !== 'string' || !attempt.authority_event_id
+      || !Number.isSafeInteger(attempt.predecessor_generation) || Number(attempt.predecessor_generation) < 1
+      || !/^[a-f0-9]{64}$/.test(String(attempt.predecessor_set_fingerprint ?? ''))
+      || !Array.isArray(attempt.predecessor_replacements) || !attempt.predecessor_replacements.every(validReversalPointer)
+      || replacementSetFingerprint(attempt.predecessor_replacements) !== attempt.predecessor_set_fingerprint) {
+      fail('reversal attempt fields invalid');
+    }
+    if (attempt.inherited_replacements !== undefined && (!Array.isArray(attempt.inherited_replacements) || !attempt.inherited_replacements.every(validReversalPointer))) fail('reversal inherited obligations invalid');
+    if (attempt.checkpoint !== undefined && !validReversalCheckpoint(attempt.checkpoint)) fail('reversal checkpoint invalid');
+    if (attempt.rebuild_proof !== undefined && (typeof attempt.rebuild_proof !== 'object' || !attempt.rebuild_proof || typeof attempt.rebuild_proof.proof_id !== 'string' || !attempt.rebuild_proof.proof_id || !/^[a-f0-9]{64}$/.test(attempt.rebuild_proof.checkpoint_hash ?? ''))) fail('reversal proof invalid');
+    if (attempt.commit_intent !== undefined && (typeof attempt.commit_intent !== 'object' || !attempt.commit_intent || !/^[a-f0-9]{64}$/.test(attempt.commit_intent.checkpoint_hash ?? '') || !/^[a-f0-9]{64}$/.test(attempt.commit_intent.final_state_hash ?? '') || !validReversalPointer(attempt.commit_intent.reinstated) || attempt.commit_intent.reinstated.identity !== attempt.blocked_identity)) fail('reversal commit intent invalid');
+    if (attempt.phase === 'retired_checkpointed' || attempt.phase === 'rebuild_verified' || attempt.phase === 'commit_intent' || attempt.phase === 'committed') {
+      if (!attempt.checkpoint) fail('non-started reversal attempt missing checkpoint');
+    }
+    if (attempt.phase === 'rebuild_verified' || attempt.phase === 'commit_intent' || attempt.phase === 'committed') {
+      if (!attempt.rebuild_proof) fail('verified reversal attempt missing proof');
+    }
+    if (attempt.phase === 'commit_intent' || attempt.phase === 'committed') {
+      if (!attempt.commit_intent) fail('committing reversal attempt missing intent');
+    }
+    if (attempt.phase === 'superseded' && (!attempt.successor_id || typeof attempt.successor_id !== 'string')) fail('superseded reversal attempt missing successor');
+    if (attempt.phase === 'failed' && (!attempt.failure_code || typeof attempt.failure_code !== 'string')) fail('failed reversal attempt missing failure code');
+  }
+}
 export function encodeLearningLoopKnowledge(value: LearningLoopKnowledge): string {
   const obj = object(value, 'value');
   for (const key of Object.keys(obj)) if (!KEYS.has(key)) fail(`unknown field ${key}`);
@@ -151,7 +421,7 @@ export function encodeLearningLoopKnowledge(value: LearningLoopKnowledge): strin
   if (!Array.isArray(obj.immutable_commit_markers) || !obj.immutable_commit_markers.every(x => typeof x === 'string')) fail('immutable_commit_markers must be strings');
   object(obj.managed_rows, 'managed_rows');
   validateLineages(object(obj.correction_lineages, 'correction_lineages'));
-  object(obj.reversal_attempts, 'reversal_attempts');
+  validateReversalAttempts(object(obj.reversal_attempts, 'reversal_attempts'));
   if (typeof obj.protected_state_hash !== 'undefined' && !/^[0-9a-f]{64}$/.test(String(obj.protected_state_hash))) fail('protected_state_hash must be sha256');
   return canonicalJson(value);
 }

@@ -34,9 +34,9 @@ import { VERSION } from '../version.ts';
 import { LockUnavailableError, withRefreshingLock } from './db-lock.ts';
 import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
 import { isPathContained } from './path-confine.ts';
-import { parseLearningLoopFence, renderLearningLoopFence, createLearningTransitionPermit, reduceLearningLoopLineage, learningBlockedClaimKey, type LearningLoopKnowledge } from './learning-loop-knowledge.ts';
+import { parseLearningLoopFence, renderLearningLoopFence, createLearningTransitionPermit, reduceLearningLoopLineage, reduceLearningLoopReversal, replacementSetFingerprint, learningBlockedClaimKey, type LearningLoopKnowledge, type LearningPointer, type LearningReversalAttempt, type LearningReversalCheckpoint } from './learning-loop-knowledge.ts';
 import { parseFactsFence, renderFactsTable, upsertFactRow } from './facts-fence.ts';
-import { inspectExpectedManagedState, writeCanonicalPage, reconcileCanonicalReadback, withCanonicalSourceBoundary, type SourceQualifiedCanonicalTarget } from './canonical-page-write.ts';
+import { inspectExpectedManagedState, writeCanonicalPage, reconcileCanonicalReadback, withCanonicalSourceBoundary, type SourceQualifiedCanonicalTarget, type SourceWriteLease } from './canonical-page-write.ts';
 import { importFromContent } from './import-file.ts';
 import { learningClaimFingerprint, normalizeLearningClaim, parseAuthoritativeUserRows } from './learning-loop-knowledge.ts';
 import type { LearningClaimIdentity, TranscriptUserRow } from './learning-loop-knowledge.ts';
@@ -198,6 +198,11 @@ export interface RunAbortedEvent extends EventBase {
   command_payload_hash: string;
   run_id: string;
   reason: 'owner_abort' | 'mode_changed';
+  /** Present on an exact mode-transition delivery record. */
+  brain_id?: string;
+  semantic_sequence?: number;
+  source_id?: string;
+  canonical_slug?: string;
 }
 
 export interface AdapterSessionBoundEvent extends EventBase {
@@ -288,8 +293,65 @@ export interface LedgerOptions {
   lifecycleLock?: <T>(work: () => Promise<T>) => Promise<T>;
   /** Test seam for real-lock contention coverage. */
   beforeMutation?: () => Promise<void>;
+  /** Test seam for a process exit immediately after the mode intent is durable. */
+  afterIntentPersist?: () => void | Promise<void>;
   /** Set only after a caller's post-discovery mode check. */
   precheckedMode?: LearningLoopMode;
+}
+
+/**
+ * One bounded, crash-recoverable mode transition. It is deliberately stored
+ * in the existing config plane and contains only exact delivery bytes; it is
+ * not a learning queue or a source of authority.
+ */
+export interface ModeTransitionIntentV1 {
+  schema_version: 1;
+  run_id: string;
+  command_id: string;
+  requested_mode: 'off' | 'capture';
+  reason: 'mode_changed';
+  event: ExactEventRecordV1;
+  brain_id: string;
+  source_id: string;
+  canonical_slug: string;
+  corpus_binding?: CorpusBindingV1;
+  destination_binding?: DestinationBindingV1;
+  expected_prior_pending: ExactEventRecordV1 | null;
+  intent_hash: string;
+}
+
+function modeTransitionIntentHash(value: Omit<ModeTransitionIntentV1, 'intent_hash'>): string {
+  return canonicalSha256(value);
+}
+
+function decodeModeTransitionIntent(raw: string | null): ModeTransitionIntentV1 | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new LearningLoopError('ledger_corrupt', 'Learning Loop mode transition intent is not JSON'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new LearningLoopError('ledger_corrupt', 'Learning Loop mode transition intent must be an object');
+  const value = parsed as Record<string, unknown>;
+  const allowed = ['schema_version', 'run_id', 'command_id', 'requested_mode', 'reason', 'event', 'brain_id', 'source_id', 'canonical_slug', 'corpus_binding', 'destination_binding', 'expected_prior_pending', 'intent_hash'];
+  if (Object.keys(value).some(key => !allowed.includes(key)) || value.schema_version !== 1 || typeof value.run_id !== 'string' || !value.run_id
+    || !COMMAND_ID_RE.test(String(value.command_id)) || (value.requested_mode !== 'off' && value.requested_mode !== 'capture') || value.reason !== 'mode_changed'
+    || typeof value.brain_id !== 'string' || !value.brain_id || typeof value.source_id !== 'string' || !value.source_id
+    || typeof value.canonical_slug !== 'string' || !value.canonical_slug || !/^[a-f0-9]{64}$/.test(String(value.intent_hash))) {
+    throw new LearningLoopError('ledger_corrupt', 'Learning Loop mode transition intent has an invalid shape');
+  }
+  const event = decodeExactEventRecordV1(value.event);
+  const payload = JSON.parse(event.event_payload_canonical_json) as Record<string, unknown>;
+  if (payload.event_type !== 'run_aborted' || payload.run_id !== value.run_id || payload.reason !== 'mode_changed'
+    || payload.brain_id !== value.brain_id || payload.source_id !== value.source_id || payload.canonical_slug !== value.canonical_slug
+    || event.brain_id !== value.brain_id || event.run_id !== value.run_id) {
+    throw new LearningLoopError('ledger_corrupt', 'Mode transition event does not match its frozen identity');
+  }
+  const pending = value.expected_prior_pending === null ? null : decodeExactEventRecordV1(value.expected_prior_pending);
+  if (pending && (pending.brain_id !== value.brain_id || pending.run_id !== value.run_id)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor does not match its frozen identity');
+  if (value.corpus_binding !== undefined && !validCorpusBinding(value.corpus_binding)) throw new LearningLoopError('ledger_corrupt', 'Mode transition corpus binding is invalid');
+  if (value.destination_binding !== undefined && !validDestinationBinding(value.destination_binding)) throw new LearningLoopError('ledger_corrupt', 'Mode transition destination binding is invalid');
+  const withoutHash = { ...value } as Omit<ModeTransitionIntentV1, 'intent_hash'>;
+  delete (withoutHash as Record<string, unknown>).intent_hash;
+  if (modeTransitionIntentHash(withoutHash) !== value.intent_hash) throw new LearningLoopError('ledger_corrupt', 'Mode transition intent hash mismatch');
+  return value as unknown as ModeTransitionIntentV1;
 }
 
 function ledgerScopeId(opts: LedgerOptions): string {
@@ -1032,6 +1094,259 @@ export async function correctLearningClaim(input: CorrectLearningClaimInput): Pr
   }, { config: input.config, mutationLock: input.mutationLock }));
 }
 
+export interface ReverseLearningClaimInput {
+  engine: BrainEngine;
+  config?: GBrainConfig;
+  run_id: string;
+  source_id: string;
+  canonical_slug: string;
+  /** Exact blocked identity to reinstate. No field may be inferred. */
+  identity: LearningClaimIdentity;
+  /** A durable direct-user authority event already present in the ledger. */
+  authority_event_id: string;
+  /** Stable retry identity. Defaults to the authority event identity. */
+  root_reversal_id?: string;
+  mutationLock?: <T>(work: () => Promise<T>) => Promise<T>;
+  /** Test seams. Each hook runs after the corresponding canonical phase is durable. */
+  afterRetirement?: () => void;
+  afterRebuild?: () => void;
+  afterCommitIntent?: () => void;
+  afterCanonicalStage?: () => void;
+  afterLedgerAppend?: () => void;
+  afterCanonicalClear?: () => void;
+}
+
+function learningFactKind(identity: LearningClaimIdentity): 'belief' | 'preference' | 'commitment' | 'fact' {
+  if (identity.class === 'constraint') return 'belief';
+  if (identity.class === 'preference') return 'preference';
+  if (identity.class === 'goal' || identity.class === 'open_loop') return 'commitment';
+  return 'fact';
+}
+
+function reversalAttemptValues(knowledge: LearningLoopKnowledge, rootId: string, blocked: string): LearningReversalAttempt[] {
+  return Object.values(knowledge.reversal_attempts).filter((value): value is LearningReversalAttempt => {
+    if (!value || typeof value !== 'object') return false;
+    const attempt = value as Partial<LearningReversalAttempt>;
+    return attempt.root_reversal_id === rootId && attempt.blocked_identity === blocked;
+  });
+}
+
+function mergePointers(a: readonly LearningPointer[], b: readonly LearningPointer[]): LearningPointer[] {
+  const out = [...a];
+  for (const pointer of b) if (!out.some(existing => canonicalJson(existing) === canonicalJson(pointer))) out.push(pointer);
+  out.sort((left, right) => compareUtf8(canonicalJson(left), canonicalJson(right)));
+  return out;
+}
+
+function reversalTarget(binding: DestinationBindingV1): SourceQualifiedCanonicalTarget {
+  return {
+    brain_id: binding.brain_id,
+    source_id: binding.source_id,
+    canonical_slug: binding.canonical_slug,
+    configured_root: binding.canonical_realpath,
+  };
+}
+
+/**
+ * Deliver one pre-existing canonical pending event before beginning a
+ * reversal. This is the same exact-byte recovery rule used by activation and
+ * correction; a reversal never regenerates a pending event.
+ */
+async function recoverPendingBeforeReversal(
+  input: ReverseLearningClaimInput,
+  target: SourceQualifiedCanonicalTarget,
+  lease: Parameters<typeof withCanonicalSourceBoundary>[2] extends (value: infer T) => unknown ? T : never,
+): Promise<string> {
+  const inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+  const fence = parseLearningLoopFence(inspected.canonical);
+
+  if (!fence || fence.value.pending_delivery === null) return inspected.canonical;
+  const pending = decodeExactEventRecordV1(fence.value.pending_delivery);
+  const event = eventFromExactRecord(pending);
+  if (event.event_type !== 'learning_transition' && event.event_type !== 'learning_correction') {
+    throw new LearningLoopError('ledger_corrupt', 'Reversal found an unsupported canonical pending event');
+  }
+  const prior = readLearningLoopLedger({ config: input.config }).find(item => item.event_id === event.event_id);
+  if (prior && canonicalJson(prior) !== canonicalJson(event)) throw new LearningLoopError('ledger_corrupt', 'Canonical pending event conflicts with the ledger');
+  if (!prior) appendEvent(pending, { config: input.config });
+  input.afterLedgerAppend?.();
+  const delivered = readLearningLoopLedger({ config: input.config }).find(item => item.event_id === event.event_id);
+  if (!delivered || canonicalJson(delivered) !== canonicalJson(event)) throw new LearningLoopError('ledger_corrupt', 'Canonical pending event failed exact readback');
+  const cleared = { ...fence.value, pending_delivery: null };
+  const clearedBody = inspected.canonical.replace(fence.raw, renderLearningLoopFence(cleared));
+  const clearedCanonical = await writeCanonicalPage(target, clearedBody, {
+    mode: 'learning_transition', sourceLease: lease,
+    transitionPermit: createLearningTransitionPermit(fence.value, cleared), expectedManaged: 'expected',
+  });
+  input.afterCanonicalClear?.();
+  const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+  if (readback.canonical !== clearedCanonical) throw new LearningLoopError('assertion_mismatch', 'Pending recovery canonical readback changed');
+  await importFromContent(input.engine, input.canonical_slug, readback.canonical, {
+    sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: readback.canonical,
+  });
+  return readback.canonical;
+}
+
+function writeReversalKnowledge(
+  target: SourceQualifiedCanonicalTarget,
+  lease: SourceWriteLease,
+  canonical: string,
+  previous: LearningLoopKnowledge,
+  next: LearningLoopKnowledge,
+): Promise<string> {
+  const parsed = parseLearningLoopFence(canonical);
+  if (!parsed) throw new LearningLoopError('forbidden', 'Managed canonical state is unavailable');
+  const body = canonical.replace(parsed.raw, renderLearningLoopFence(next));
+  return writeCanonicalPage(target, body, {
+    mode: 'learning_transition', sourceLease: lease,
+    transitionPermit: createLearningTransitionPermit(previous, next), expectedManaged: 'expected',
+  });
+}
+
+/**
+ * Reinstate one exact correction-blocked claim through the durable reversal
+ * state machine. Every phase is stored in the canonical fence, so retrying a
+ * process after any hook or import failure resumes from the last phase.
+ */
+export async function reverseLearningClaim(input: ReverseLearningClaimInput): Promise<{ phase: LearningReversalAttempt['phase']; root_reversal_id: string; canonical: string }> {
+  validateLearningClaimIdentity(input.identity);
+  if (!input.authority_event_id || !input.run_id || !input.source_id || !input.canonical_slug) throw new LearningLoopError('invalid_input', 'Reversal identity and authority are required');
+  const blocked = learningBlockedClaimKey(input.identity);
+  const rootId = input.root_reversal_id ?? `reversal:${input.authority_event_id}`;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(rootId)) throw new LearningLoopError('invalid_input', 'Invalid reversal root identity');
+  const snapshot = activeV2DestinationBinding({ config: input.config });
+  if (!snapshot || snapshot.source_id !== input.source_id || snapshot.canonical_slug !== input.canonical_slug) throw new LearningLoopError('assertion_mismatch', 'Reversal target is not the active frozen destination');
+  const snapshotTarget = reversalTarget(snapshot);
+  return withCanonicalSourceBoundary(input.engine, snapshotTarget, async lease => withLearningLoopLifecycleLock(input.engine, async () => {
+    const admission = typeof input.engine.transaction === 'function'
+      ? await input.engine.transaction(async tx => ({ mode: await resolveLearningLoopMode(tx, input.config), intent: await tx.getConfig('learning_loop.mode_transition_intent_v1') }))
+      : { mode: await resolveLearningLoopMode(input.engine, input.config), intent: await input.engine.getConfig('learning_loop.mode_transition_intent_v1') };
+    if (admission.mode !== 'canary') throw new LearningLoopError('mode_off', 'Learning Loop reversal requires canary mode');
+    if (admission.intent !== null) throw new LearningLoopError('forbidden', 'Learning Loop reversal is blocked by a mode transition intent');
+    let state = replayLearningLoop(readLearningLoopLedger({ config: input.config }));
+    const run = state.runs.get(input.run_id);
+    if (!run || run.terminal || state.active_run_id !== input.run_id || run.armed.contract_version !== 2) throw new LearningLoopError('no_active_run', 'Reversal requires an active V2 run');
+    const binding = run.armed.destination_binding;
+    if (binding.brain_id !== computeBrainIdFromConfig(input.config ?? {}) || binding.source_id !== input.source_id || binding.canonical_slug !== input.canonical_slug) throw new LearningLoopError('assertion_mismatch', 'Reversal destination does not match the frozen run');
+    const currentCorpus = await resolveCodexCorpusBinding(input.engine, run.armed.corpus_binding.source_id, input.config);
+    const currentDestination = await resolveLearningLoopDestinationBinding(input.engine, binding.brain_id, binding.source_id, binding.canonical_slug);
+    assertRootBindingUnchanged(run.armed.corpus_binding, currentCorpus);
+    assertRootBindingUnchanged(binding, currentDestination);
+    const target = reversalTarget(binding);
+    let canonical = await recoverPendingBeforeReversal(input, target, lease);
+    let inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+    if (inspected.canonical !== canonical) canonical = inspected.canonical;
+    let fence = parseLearningLoopFence(canonical);
+    if (!fence) throw new LearningLoopError('forbidden', 'Managed canonical state is unavailable');
+    const existingAttempts = reversalAttemptValues(fence.value, rootId, blocked);
+    const committedAttempt = existingAttempts.find(value => value.phase === 'committed');
+    if (committedAttempt && !fence.value.blocked_identities.includes(blocked)) return { phase: committedAttempt.phase, root_reversal_id: rootId, canonical };
+    if (!fence.value.blocked_identities.includes(blocked)) throw new LearningLoopError('forbidden', 'Reversal requires the exact correction-blocked identity');
+    const lineage = fence.value.correction_lineages[blocked];
+    if (!lineage || typeof lineage !== 'object' || !Array.isArray((lineage as Record<string, unknown>).active_replacements) || !Number.isSafeInteger((lineage as Record<string, unknown>).lineage_generation)) throw new LearningLoopError('ledger_corrupt', 'Correction lineage is unavailable for reversal');
+    const activeLineage = lineage as { active_replacements: LearningPointer[]; replacement_set_fingerprint: string; lineage_generation: number };
+    if (replacementSetFingerprint(activeLineage.active_replacements) !== activeLineage.replacement_set_fingerprint) throw new LearningLoopError('ledger_corrupt', 'Correction lineage fingerprint is invalid');
+    if (activeLineage.active_replacements.some(pointer => pointer.canonical_slug !== input.canonical_slug)) throw new LearningLoopError('assertion_mismatch', 'Reversal cannot cross canonical pages');
+    const authority = state.events.find((event): event is LearningAuthorityEvent => event.event_id === input.authority_event_id);
+    if (!authority || authority.event_type !== 'learning_authority' || authority.authority !== 'direct_user' || authority.run_id !== input.run_id || canonicalJson(authority.identity) !== canonicalJson(input.identity)) throw new LearningLoopError('forbidden', 'Reversal requires an exact direct-user authority event');
+
+    let attempts = reversalAttemptValues(fence.value, rootId, blocked);
+    let attempt = attempts.find(value => !['committed', 'failed'].includes(value.phase) && value.phase !== 'superseded');
+    if (!attempts.length) {
+      const started: LearningReversalAttempt = {
+        root_reversal_id: rootId, attempt_no: 1, phase: 'started', blocked_identity: blocked,
+        authority_event_id: input.authority_event_id, predecessor_generation: activeLineage.lineage_generation,
+        predecessor_set_fingerprint: activeLineage.replacement_set_fingerprint,
+        predecessor_replacements: activeLineage.active_replacements,
+        inherited_replacements: activeLineage.active_replacements,
+      };
+      const reduced = reduceLearningLoopReversal(fence.value, { kind: 'start', attempt: started });
+      canonical = await writeReversalKnowledge(target, lease, canonical, fence.value, reduced.next);
+      input.afterCanonicalStage?.();
+      inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      canonical = inspected.canonical;
+      fence = parseLearningLoopFence(canonical)!;
+      attempt = started;
+    } else if (!attempt) {
+      const terminal = attempts.find(value => value.phase === 'committed');
+      if (terminal) return { phase: terminal.phase, root_reversal_id: rootId, canonical };
+      throw new LearningLoopError('forbidden', 'Reversal attempt is terminal and cannot be retried');
+    }
+
+    const obligations = mergePointers(attempt.predecessor_replacements, attempt.inherited_replacements ?? []);
+    if (attempt.phase === 'started') {
+      const parsedFacts = parseFactsFence(canonical);
+      if (parsedFacts.warnings.some(warning => warning.includes('UNBALANCED'))) throw new LearningLoopError('forbidden', 'Facts fence is unavailable for reversal');
+      const rowNumbers = new Set(obligations.map(pointer => pointer.row_num));
+      if (obligations.some(pointer => !parsedFacts.facts.some(row => row.rowNum === pointer.row_num))) throw new LearningLoopError('forbidden', 'Reversal replacement set is not present in canonical facts');
+      const retiredFacts = parsedFacts.facts.map(row => rowNumbers.has(row.rowNum) ? { ...row, active: false, context: `reversal:${rootId}` } : row);
+      const currentActive = activeLineage.active_replacements.filter(pointer => !rowNumbers.has(pointer.row_num));
+      if (currentActive.length > 0) throw new LearningLoopError('assertion_mismatch', 'Reversal replacement set changed before retirement');
+      const checkpoint: LearningReversalCheckpoint = { lineage_generation: activeLineage.lineage_generation + 1, replacement_set_fingerprint: replacementSetFingerprint(currentActive), active_replacements: currentActive };
+      const retiredKnowledgeBase: LearningLoopKnowledge = {
+        ...fence.value,
+        managed_rows: Object.fromEntries(Object.entries(fence.value.managed_rows).map(([key, value]) => rowNumbers.has(Number((value as Record<string, unknown>)?.row_num)) ? [key, { ...(value as Record<string, unknown>), active: false }] : [key, value])),
+        correction_lineages: { ...fence.value.correction_lineages, [blocked]: { blocked_identity: blocked, active_replacements: currentActive, replacement_set_fingerprint: checkpoint.replacement_set_fingerprint, lineage_generation: checkpoint.lineage_generation } },
+      };
+      const reduced = reduceLearningLoopReversal(retiredKnowledgeBase, { kind: 'retired_checkpointed', checkpoint });
+      const body = canonical.replace(fence.raw, renderLearningLoopFence(reduced.next)).replace(/<!--- gbrain:facts:begin -->[\s\S]*?<!--- gbrain:facts:end -->/, renderFactsTable(retiredFacts));
+      const written = await writeCanonicalPage(target, body, { mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(fence.value, reduced.next), expectedManaged: 'expected' });
+      input.afterCanonicalStage?.(); input.afterRetirement?.();
+      const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      if (readback.canonical !== written) throw new LearningLoopError('assertion_mismatch', 'Retirement canonical readback changed');
+      await importFromContent(input.engine, input.canonical_slug, written, { sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: written });
+      canonical = written; inspected = readback; fence = parseLearningLoopFence(canonical)!; attempt = (fence.value.reversal_attempts[`${rootId}:1`] as LearningReversalAttempt);
+    }
+
+    if (attempt.phase === 'retired_checkpointed') {
+      const checkpoint = attempt.checkpoint!;
+      const proofId = canonicalSha256({ root_reversal_id: rootId, attempt_no: attempt.attempt_no, predecessor_replacements: attempt.predecessor_replacements, checkpoint, canonical: canonicalSha256(canonical) });
+      const reduced = reduceLearningLoopReversal(fence.value, { kind: 'rebuild_verified', proof_id: proofId, checkpoint_hash: canonicalSha256(checkpoint) });
+      canonical = await writeReversalKnowledge(target, lease, canonical, fence.value, reduced.next);
+      input.afterRebuild?.(); input.afterCanonicalStage?.();
+      inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' }); fence = parseLearningLoopFence(inspected.canonical)!; attempt = reduced.attempt;
+    }
+
+    if (attempt.phase === 'rebuild_verified') {
+      const checkpoint = attempt.checkpoint!;
+      const parsedFacts = parseFactsFence(canonical);
+      const rowNum = Math.max(0, ...parsedFacts.facts.map(row => row.rowNum)) + 1;
+      const reinstated: LearningPointer = { identity: blocked, canonical_slug: input.canonical_slug, row_num: rowNum };
+      const finalStateHash = canonicalSha256({ blocked_identity: blocked, reinstated, checkpoint });
+      const reduced = reduceLearningLoopReversal(fence.value, { kind: 'commit_intent', checkpoint_hash: canonicalSha256(checkpoint), final_state_hash: finalStateHash, reinstated });
+      canonical = await writeReversalKnowledge(target, lease, canonical, fence.value, reduced.next);
+      input.afterCommitIntent?.(); input.afterCanonicalStage?.();
+      inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' }); fence = parseLearningLoopFence(inspected.canonical)!; attempt = reduced.attempt;
+    }
+
+    if (attempt.phase === 'commit_intent') {
+      const intent = attempt.commit_intent!;
+      const checkpoint = attempt.checkpoint!;
+      const currentLineage = fence.value.correction_lineages[blocked] as { active_replacements: LearningPointer[]; replacement_set_fingerprint: string; lineage_generation: number };
+      if (currentLineage.lineage_generation !== checkpoint.lineage_generation || currentLineage.replacement_set_fingerprint !== checkpoint.replacement_set_fingerprint || canonicalJson(currentLineage.active_replacements) !== canonicalJson(checkpoint.active_replacements)) throw new LearningLoopError('assertion_mismatch', 'Reversal checkpoint changed before final commit');
+      const parsedFacts = parseFactsFence(canonical);
+      if (parsedFacts.facts.some(row => row.rowNum === intent.reinstated.row_num)) throw new LearningLoopError('assertion_mismatch', 'Reversal reinstatement row already exists with an unexpected state');
+      const appended = upsertFactRow(canonical, { claim: input.identity.claim, kind: learningFactKind(input.identity), confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `reversal:${rootId}`, rowNum: intent.reinstated.row_num, active: true });
+      if (appended.rowNum !== intent.reinstated.row_num) throw new LearningLoopError('assertion_mismatch', 'Reversal reinstatement row number changed');
+      const managedRows = { ...fence.value.managed_rows, [input.identity.claim_fingerprint!]: { claim: input.identity.claim, class: input.identity.class, row_num: appended.rowNum, active: true, run_id: input.run_id } };
+      const finalLineage = { blocked_identity: blocked, active_replacements: [intent.reinstated], replacement_set_fingerprint: replacementSetFingerprint([intent.reinstated]), lineage_generation: checkpoint.lineage_generation + 1 };
+      const finalBase: LearningLoopKnowledge = { ...fence.value, managed_rows: managedRows, correction_lineages: { ...fence.value.correction_lineages, [blocked]: finalLineage } };
+      const marker = `${rootId}:${attempt.attempt_no}:${intent.final_state_hash}`;
+      const reduced = reduceLearningLoopReversal(finalBase, { kind: 'committed', marker });
+      const written = await writeReversalKnowledge(target, lease, appended.body, fence.value, reduced.next);
+      input.afterCanonicalStage?.();
+      const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      if (readback.canonical !== written) throw new LearningLoopError('assertion_mismatch', 'Reversal final canonical readback changed');
+      await importFromContent(input.engine, input.canonical_slug, written, { sourceId: input.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: written });
+      input.afterCanonicalClear?.();
+      canonical = readback.canonical;
+      return { phase: 'committed', root_reversal_id: rootId, canonical };
+    }
+    if (attempt.phase === 'committed') return { phase: attempt.phase, root_reversal_id: rootId, canonical };
+    throw new LearningLoopError('forbidden', `Reversal ended in nonterminal phase ${attempt.phase}`);
+  }, { config: input.config, mutationLock: input.mutationLock }));
+}
+
 interface BaselineManifestEntry extends BaselineCandidate {
   relative_path: string;
   size_bytes: number;
@@ -1269,6 +1584,13 @@ function assertEventShape(event: LearningLoopEvent): void {
       || !COMMAND_ID_RE.test(event.command_id)
       || !/^[a-f0-9]{64}$/.test(event.command_payload_hash)
       || (event.reason !== 'owner_abort' && event.reason !== 'mode_changed')
+      || Object.keys(event).some(key => !['schema_version', 'event_id', 'occurred_at', 'event_type', 'command_id', 'command_payload_hash', 'run_id', 'reason', 'brain_id', 'semantic_sequence', 'source_id', 'canonical_slug'].includes(key))
+      || (event.brain_id !== undefined && !nonEmpty(event.brain_id))
+      || (event.semantic_sequence !== undefined && (!Number.isSafeInteger(event.semantic_sequence) || event.semantic_sequence < 1))
+      || ((event.brain_id === undefined) !== (event.semantic_sequence === undefined))
+      || (event.source_id !== undefined && !nonEmpty(event.source_id))
+      || (event.canonical_slug !== undefined && !nonEmpty(event.canonical_slug))
+      || ((event.source_id === undefined) !== (event.canonical_slug === undefined))
     ) {
       throw new LearningLoopError('ledger_corrupt', 'Learning Loop run_aborted event has an invalid shape');
     }
@@ -1859,39 +2181,303 @@ export async function armLearningLoop(
   }, scopedOpts);
 }
 
+async function configTransaction<T>(engine: BrainEngine, work: (tx: BrainEngine) => Promise<T>): Promise<T> {
+  return typeof engine.transaction === 'function' ? engine.transaction(work) : work(engine);
+}
+
+function exactRecordForIntent(intent: ModeTransitionIntentV1): LearningLoopEvent {
+  return eventFromExactRecord(intent.event);
+}
+
+async function persistModeTransitionIntent(engine: BrainEngine, intent: ModeTransitionIntentV1): Promise<void> {
+  const bytes = canonicalJson(intent);
+  await configTransaction(engine, async tx => {
+    const existing = await tx.getConfig('learning_loop.mode_transition_intent_v1');
+    if (existing !== null) {
+      const decoded = decodeModeTransitionIntent(existing);
+      if (!decoded || canonicalJson(decoded) !== bytes) throw new LearningLoopError('command_conflict', 'A different mode transition intent is already present');
+      return;
+    }
+    const holder = createLearningLoopLifecycleHolder();
+    const permit = createLearningLoopConfigMutationPermit({
+      key: 'learning_loop.mode_transition_intent_v1', operation: 'set', engine: tx, lifecycleHolder: holder, expectedOldValue: null,
+    });
+    await tx.setConfig('learning_loop.mode_transition_intent_v1', bytes, permit);
+  });
+}
+
+async function retainModeTransitionIntentWhileDisabled(engine: BrainEngine, intent: ModeTransitionIntentV1): Promise<void> {
+  await configTransaction(engine, async tx => {
+    const stored = await tx.getConfig('learning_loop.mode_transition_intent_v1');
+    const decoded = decodeModeTransitionIntent(stored);
+    if (!decoded || canonicalJson(decoded) !== canonicalJson(intent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition intent changed during disable fallback');
+    const current = await tx.getConfig('learning_loop.mode');
+    const holder = createLearningLoopLifecycleHolder();
+    if (current !== intent.requested_mode) {
+      const modePermit = createLearningLoopConfigMutationPermit({ key: 'learning_loop.mode', operation: 'set', engine: tx, lifecycleHolder: holder, expectedOldValue: current });
+      await tx.setConfig('learning_loop.mode', intent.requested_mode, modePermit);
+    }
+  });
+}
+
+function modeTransitionBindings(
+  run: RunProjection,
+  brainId: string,
+): { source_id: string; canonical_slug: string; corpus_binding?: CorpusBindingV1; destination_binding?: DestinationBindingV1 } {
+  if (run.armed.contract_version === 2) return {
+    source_id: run.armed.destination_binding.source_id,
+    canonical_slug: run.armed.destination_binding.canonical_slug,
+    corpus_binding: run.armed.corpus_binding,
+    destination_binding: run.armed.destination_binding,
+  };
+  return { source_id: run.armed.destination.source_id, canonical_slug: run.armed.destination.canonical_slug };
+}
+
+function createModeTransitionIntent(
+  state: LearningLoopProjection,
+  run: RunProjection,
+  next: 'off' | 'capture',
+  config: GBrainConfig,
+  expectedPriorPending: ExactEventRecordV1 | null,
+): ModeTransitionIntentV1 {
+  const binding = modeTransitionBindings(run, computeBrainIdFromConfig(config));
+  const brainId = run.armed.contract_version === 2 ? run.armed.destination_binding.brain_id : computeBrainIdFromConfig(config);
+  const observedSequence = Math.max(0, ...state.events
+    .filter(event => event.event_type === 'learning_transition' || event.event_type === 'learning_correction')
+    .filter(event => event.run_id === run.run_id)
+    .map(event => event.semantic_sequence)) + 1;
+  const semanticSequence = Math.max(observedSequence, (expectedPriorPending?.semantic_sequence ?? 0) + 1);
+  const occurredAt = new Date().toISOString();
+  const commandId = `mode-change:${run.run_id}`;
+  const payload = {
+    schema_version: LEARNING_LOOP_SCHEMA_VERSION,
+    event_type: 'run_aborted' as const,
+    command_id: commandId,
+    command_payload_hash: commandPayloadHash({ reason: 'mode_changed' }),
+    run_id: run.run_id,
+    reason: 'mode_changed' as const,
+    occurred_at: occurredAt,
+    brain_id: brainId,
+    semantic_sequence: semanticSequence,
+    source_id: binding.source_id,
+    canonical_slug: binding.canonical_slug,
+  };
+  const event = makeExactEventRecordV1({ event_payload: payload, brain_id: brainId, run_id: run.run_id, occurred_at: occurredAt, semantic_sequence: semanticSequence });
+  const body: Omit<ModeTransitionIntentV1, 'intent_hash'> = {
+    schema_version: 1,
+    run_id: run.run_id,
+    command_id: commandId,
+    requested_mode: next,
+    reason: 'mode_changed',
+    event,
+    brain_id: brainId,
+    source_id: binding.source_id,
+    canonical_slug: binding.canonical_slug,
+    ...(binding.corpus_binding ? { corpus_binding: binding.corpus_binding } : {}),
+    ...(binding.destination_binding ? { destination_binding: binding.destination_binding } : {}),
+    expected_prior_pending: expectedPriorPending,
+  };
+  return { ...body, intent_hash: modeTransitionIntentHash(body) };
+}
+
+async function clearCanonicalPending(
+  engine: BrainEngine,
+  target: SourceQualifiedCanonicalTarget,
+  lease: SourceWriteLease,
+): Promise<string> {
+  const inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+  const fence = parseLearningLoopFence(inspected.canonical);
+  if (!fence || fence.value.pending_delivery === null) return inspected.canonical;
+  const cleared = { ...fence.value, pending_delivery: null };
+  const written = await writeCanonicalPage(target, inspected.canonical.replace(fence.raw, renderLearningLoopFence(cleared)), {
+    mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(fence.value, cleared), expectedManaged: 'expected',
+  });
+  const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+  if (readback.canonical !== written) throw new LearningLoopError('assertion_mismatch', 'Mode transition canonical clear readback changed');
+  await importFromContent(engine, target.canonical_slug, readback.canonical, { sourceId: target.source_id, noEmbed: true, canonicalPermit: readback.permit, canonicalReadback: readback.canonical });
+  return readback.canonical;
+}
+
+async function recoverModeTransitionIntentLocked(
+  engine: BrainEngine,
+  intent: ModeTransitionIntentV1,
+  opts: LedgerOptions,
+  config: GBrainConfig,
+  lease?: SourceWriteLease,
+): Promise<void> {
+  const storedRaw = await engine.getConfig('learning_loop.mode_transition_intent_v1');
+  const stored = decodeModeTransitionIntent(storedRaw);
+  if (!stored || canonicalJson(stored) !== canonicalJson(intent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition intent is missing or changed');
+  const terminalEvent = exactRecordForIntent(intent);
+  let state = replayLearningLoop(readLearningLoopLedger(opts));
+  const run = state.runs.get(intent.run_id);
+  if (!run) throw new LearningLoopError('ledger_corrupt', 'Mode transition run is missing');
+  if (run.armed.contract_version === 2) {
+    if (!lease || !intent.destination_binding || !intent.corpus_binding) throw new LearningLoopError('binding_unavailable', 'Mode transition recovery lacks its frozen source binding');
+    const currentCorpus = await resolveCodexCorpusBinding(engine, intent.corpus_binding.source_id, config);
+    const currentDestination = await resolveLearningLoopDestinationBinding(engine, intent.destination_binding.brain_id, intent.destination_binding.source_id, intent.destination_binding.canonical_slug);
+    assertRootBindingUnchanged(intent.corpus_binding, currentCorpus);
+    assertRootBindingUnchanged(intent.destination_binding, currentDestination);
+    const target = reversalTarget(intent.destination_binding);
+    let inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+    let fence = parseLearningLoopFence(inspected.canonical);
+    if (!fence) throw new LearningLoopError('forbidden', 'Mode transition managed canonical state is unavailable');
+    const currentPending = fence.value.pending_delivery === null ? null : decodeExactEventRecordV1(fence.value.pending_delivery);
+    const expectedPrior = intent.expected_prior_pending;
+    if (currentPending && canonicalJson(currentPending) !== canonicalJson(intent.event)) {
+      if (!expectedPrior || canonicalJson(currentPending) !== canonicalJson(expectedPrior)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor bytes changed');
+      const priorEvent = eventFromExactRecord(expectedPrior);
+      const prior = state.events.find(event => event.event_id === priorEvent.event_id);
+      if (prior && canonicalJson(prior) !== canonicalJson(priorEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor conflicts with ledger');
+      if (!prior) appendEvent(expectedPrior, opts);
+      const read = readLearningLoopLedger(opts).find(event => event.event_id === priorEvent.event_id);
+      if (!read || canonicalJson(read) !== canonicalJson(priorEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor failed ledger readback');
+      await clearCanonicalPending(engine, target, lease);
+      inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      fence = parseLearningLoopFence(inspected.canonical)!;
+    } else if (!currentPending && expectedPrior) {
+      const priorEvent = eventFromExactRecord(expectedPrior);
+      const prior = state.events.find(event => event.event_id === priorEvent.event_id);
+      if (!prior || canonicalJson(prior) !== canonicalJson(priorEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor is missing after canonical clear');
+    }
+    const pendingNow = fence.value.pending_delivery === null ? null : decodeExactEventRecordV1(fence.value.pending_delivery);
+    if (pendingNow && canonicalJson(pendingNow) !== canonicalJson(intent.event)) throw new LearningLoopError('ledger_corrupt', 'Mode transition terminal predecessor is unexpected');
+    state = replayLearningLoop(readLearningLoopLedger(opts));
+    if (expectedPrior) {
+      const priorEvent = eventFromExactRecord(expectedPrior);
+      const prior = state.events.find(event => event.event_id === priorEvent.event_id);
+      if (prior && canonicalJson(prior) !== canonicalJson(priorEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor conflicts with ledger');
+      if (!prior) {
+        // A terminal record can survive a process exit before its predecessor
+        // append. Restore the frozen predecessor bytes before appending the
+        // terminal record; any other missing-predecessor state is corruption.
+        if (!currentPending || canonicalJson(currentPending) !== canonicalJson(intent.event)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor is missing before terminal delivery');
+        appendEvent(expectedPrior, opts);
+        const read = readLearningLoopLedger(opts).find(event => event.event_id === priorEvent.event_id);
+        if (!read || canonicalJson(read) !== canonicalJson(priorEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition predecessor failed ledger readback');
+      }
+    }
+    if (!pendingNow) {
+      const staged = { ...fence.value, pending_delivery: intent.event };
+      await writeCanonicalPage(target, inspected.canonical.replace(fence.raw, renderLearningLoopFence(staged)), {
+        mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(fence.value, staged), expectedManaged: 'expected',
+      });
+      inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      fence = parseLearningLoopFence(inspected.canonical)!;
+    }
+    state = replayLearningLoop(readLearningLoopLedger(opts));
+    const priorTerminal = state.events.find(event => event.event_id === terminalEvent.event_id);
+    if (priorTerminal && canonicalJson(priorTerminal) !== canonicalJson(terminalEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition terminal event conflicts with ledger');
+    if (!priorTerminal) appendEvent(intent.event, opts);
+    const delivered = readLearningLoopLedger(opts).find(event => event.event_id === terminalEvent.event_id);
+    if (!delivered || canonicalJson(delivered) !== canonicalJson(terminalEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition terminal event failed ledger readback');
+    await clearCanonicalPending(engine, target, lease);
+  } else {
+    state = replayLearningLoop(readLearningLoopLedger(opts));
+    const priorTerminal = state.events.find(event => event.event_id === terminalEvent.event_id);
+    if (priorTerminal && canonicalJson(priorTerminal) !== canonicalJson(terminalEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition terminal event conflicts with ledger');
+    if (!priorTerminal) appendEvent(intent.event, opts);
+    const delivered = readLearningLoopLedger(opts).find(event => event.event_id === terminalEvent.event_id);
+    if (!delivered || canonicalJson(delivered) !== canonicalJson(terminalEvent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition terminal event failed ledger readback');
+  }
+  await configTransaction(engine, async tx => {
+    const currentIntent = decodeModeTransitionIntent(await tx.getConfig('learning_loop.mode_transition_intent_v1'));
+    if (!currentIntent || canonicalJson(currentIntent) !== canonicalJson(intent)) throw new LearningLoopError('ledger_corrupt', 'Mode transition intent changed before finalization');
+    const currentMode = await tx.getConfig('learning_loop.mode');
+    const holder = createLearningLoopLifecycleHolder();
+    if (currentMode !== intent.requested_mode) {
+      const modePermit = createLearningLoopConfigMutationPermit({ key: 'learning_loop.mode', operation: 'set', engine: tx, lifecycleHolder: holder, expectedOldValue: currentMode });
+      await tx.setConfig('learning_loop.mode', intent.requested_mode, modePermit);
+    }
+    const clearPermit = createLearningLoopConfigMutationPermit({ key: 'learning_loop.mode_transition_intent_v1', operation: 'unset', engine: tx, lifecycleHolder: holder, expectedOldValue: canonicalJson(intent) });
+    await tx.unsetConfig('learning_loop.mode_transition_intent_v1', clearPermit);
+  });
+}
+
+async function recoverModeTransitionIntent(
+  engine: BrainEngine,
+  intent: ModeTransitionIntentV1,
+  opts: LedgerOptions,
+  config: GBrainConfig,
+): Promise<void> {
+  if (intent.destination_binding) {
+    const target = reversalTarget(intent.destination_binding);
+    return withCanonicalSourceBoundary(engine, target, lease => withLearningLoopLifecycleLock(engine, () => recoverModeTransitionIntentLocked(engine, intent, opts, config, lease), opts));
+  }
+  return withLearningLoopLifecycleLock(engine, () => recoverModeTransitionIntentLocked(engine, intent, opts, config), opts);
+}
+
+async function setLearningLoopModeLocked(
+  engine: BrainEngine,
+  config: GBrainConfig,
+  next: LearningLoopMode,
+  opts: LedgerOptions,
+  lease?: SourceWriteLease,
+): Promise<{ previous_mode: LearningLoopMode; mode: LearningLoopMode }> {
+  const current = await resolveLearningLoopMode(engine, config);
+  const existing = decodeModeTransitionIntent(await engine.getConfig('learning_loop.mode_transition_intent_v1'));
+  if (existing) {
+    await recoverModeTransitionIntentLocked(engine, existing, opts, config, lease);
+    const mode = await resolveLearningLoopMode(engine, config);
+    if (mode !== next) throw new LearningLoopError('assertion_mismatch', 'Requested mode disagrees with the recovered transition intent');
+    return { previous_mode: current, mode };
+  }
+  const state = replayLearningLoop(readLearningLoopLedger(opts));
+  const active = state.active_run_id === null ? undefined : state.runs.get(state.active_run_id);
+  if (current === 'canary' && next !== 'canary' && active && !active.terminal) {
+    if (active.armed.contract_version === 2 && !lease) throw new LearningLoopError('binding_unavailable', 'Mode transition requires the frozen canonical source lease');
+    let expectedPending: ExactEventRecordV1 | null = null;
+    if (active.armed.contract_version === 2 && lease) {
+      const target = reversalTarget(active.armed.destination_binding);
+      const inspected = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+      const fence = parseLearningLoopFence(inspected.canonical);
+      if (!fence) throw new LearningLoopError('forbidden', 'Mode transition managed canonical state is unavailable');
+      expectedPending = fence.value.pending_delivery === null ? null : decodeExactEventRecordV1(fence.value.pending_delivery);
+    }
+    const intent = createModeTransitionIntent(state, active, next, config, expectedPending);
+    await persistModeTransitionIntent(engine, intent);
+    await opts.afterIntentPersist?.();
+    try {
+      await recoverModeTransitionIntentLocked(engine, intent, opts, config, lease);
+    } catch (error) {
+      await retainModeTransitionIntentWhileDisabled(engine, intent);
+      throw error;
+    }
+    return { previous_mode: current, mode: next };
+  }
+  let persistedCurrent: string | null = null;
+  try { persistedCurrent = await engine.getConfig('learning_loop.mode'); } catch { /* file fallback */ }
+  const holder = createLearningLoopLifecycleHolder();
+  const permit = createLearningLoopConfigMutationPermit({ key: 'learning_loop.mode', operation: 'set', engine, lifecycleHolder: holder, expectedOldValue: persistedCurrent });
+  await engine.setConfig('learning_loop.mode', next, permit);
+  return { previous_mode: current, mode: next };
+}
+
 export async function setLearningLoopMode(
   engine: BrainEngine,
   config: GBrainConfig,
   next: LearningLoopMode,
   opts: LedgerOptions = {},
 ): Promise<{ previous_mode: LearningLoopMode; mode: LearningLoopMode }> {
+  if (next !== 'off' && next !== 'capture' && next !== 'canary') throw new LearningLoopError('invalid_input', 'Invalid Learning Loop mode');
   const scopedOpts = opts.root || opts.config ? opts : { ...opts, config };
-  return withLearningLoopLifecycleLock(engine, async () => {
-    // Keep the persisted preimage distinct from the normalized mode. A missing
-    // row resolves to `off`, but its guarded write must still compare against
-    // the database's actual NULL value.
-    let persistedCurrent: string | null = null;
-    try { persistedCurrent = await engine.getConfig('learning_loop.mode'); } catch { /* resolveLearningLoopMode applies the file fallback */ }
-    const current = await resolveLearningLoopMode(engine, config);
-    if (current === 'canary' && next !== 'canary') {
-      const state = replayLearningLoop(readLearningLoopLedger(scopedOpts));
-      if (state.active_run_id !== null) {
-        try {
-          const commandId = `mode-change:${state.active_run_id}`;
-          const payloadHash = commandPayloadHash({ reason: 'mode_changed' });
-          await withLearningLoopAdmissionHeld(engine, scopedOpts, lockedState => abortLearningLoopFromState(lockedState, commandId, 'mode_changed', payloadHash, scopedOpts));
-        } catch (error) {
-          if (!(error instanceof LearningLoopError) || error.code !== 'no_active_run') throw error;
-        }
-      }
-    }
-    const lifecycleHolder = createLearningLoopLifecycleHolder();
-    const permit = createLearningLoopConfigMutationPermit({
-      key: 'learning_loop.mode', operation: 'set', engine, lifecycleHolder, expectedOldValue: persistedCurrent,
-    });
-    await engine.setConfig('learning_loop.mode', next, permit);
-    return { previous_mode: current, mode: next };
-  }, scopedOpts);
+  const rawIntent = await engine.getConfig('learning_loop.mode_transition_intent_v1').catch(() => null);
+  const intent = decodeModeTransitionIntent(rawIntent);
+  const activeDestination = !intent && next !== 'canary'
+    ? activeV2DestinationBinding({ config: scopedOpts.config ?? config })
+    : undefined;
+  if (intent?.destination_binding || activeDestination) {
+    const target = reversalTarget(intent?.destination_binding ?? activeDestination!);
+    return withCanonicalSourceBoundary(engine, target, lease => withLearningLoopLifecycleLock(engine, () => setLearningLoopModeLocked(engine, config, next, scopedOpts, lease), scopedOpts));
+  }
+  // Preserve the existing race-test seam: the snapshot barrier runs before
+  // lifecycle acquisition, so an owner abort that wins during discovery is
+  // observed as a terminal run rather than being stranded behind this call.
+  if (!intent && next !== 'canary' && await resolveLearningLoopMode(engine, config) === 'canary') {
+    const snapshot = replayLearningLoop(readLearningLoopLedger(scopedOpts));
+    if (snapshot.active_run_id !== null) await scopedOpts.beforeMutation?.();
+  }
+  return withLearningLoopLifecycleLock(engine, () => setLearningLoopModeLocked(engine, config, next, scopedOpts), scopedOpts);
 }
 
 function abortLearningLoopFromState(

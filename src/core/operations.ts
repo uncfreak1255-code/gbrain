@@ -5492,6 +5492,36 @@ const learning_loop_correct: Operation = {
   },
 };
 
+const learning_loop_reverse: Operation = {
+  name: 'learning_loop_reverse',
+  description: 'Reinstate one exact correction-blocked claim through the trusted-local reversal protocol.',
+  params: {
+    run_id: { type: 'string', required: true },
+    source_id: { type: 'string', required: true },
+    canonical_slug: { type: 'string', required: true },
+    identity: { type: 'object', required: true },
+    authority_event_id: { type: 'string', required: true },
+    root_reversal_id: { type: 'string', required: false },
+  },
+  mutating: true,
+  scope: 'write',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_reverse');
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'Learning Loop reversal requires trusted local execution');
+    return learningLoopCall((mod) => mod.reverseLearningClaim({
+      engine: ctx.engine,
+      config: ctx.config,
+      run_id: p.run_id as string,
+      source_id: p.source_id as string,
+      canonical_slug: p.canonical_slug as string,
+      identity: p.identity as never,
+      authority_event_id: p.authority_event_id as string,
+      root_reversal_id: p.root_reversal_id as string | undefined,
+    }));
+  },
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5579,6 +5609,7 @@ export const operations: Operation[] = [
   learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript, learning_loop_bind_session,
   learning_loop_submit_session_v1,
   learning_loop_candidate, learning_loop_authority, learning_loop_activate, learning_loop_correct,
+  learning_loop_reverse,
 ];
 
 export const operationsByName = Object.fromEntries(

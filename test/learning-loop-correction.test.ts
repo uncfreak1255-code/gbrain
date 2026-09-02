@@ -11,7 +11,7 @@ import {
 } from '../src/core/learning-loop-knowledge.ts';
 import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { armLearningLoop, bindLearningLoopSession, correctLearningClaim, activateLearningClaim, recordLearningAuthority, recordLearningCandidate, recordSessionEvaluation, resolveAuthoritativeTranscript, parseAuthoritativeUserRows, setLearningLoopMode, readLearningLoopLedger, type AdapterIdentity } from '../src/core/learning-loop.ts';
+import { armLearningLoop, bindLearningLoopSession, correctLearningClaim, activateLearningClaim, reverseLearningClaim, recordLearningAuthority, recordLearningCandidate, recordSessionEvaluation, resolveAuthoritativeTranscript, parseAuthoritativeUserRows, setLearningLoopMode, readLearningLoopLedger, type AdapterIdentity } from '../src/core/learning-loop.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
 import { importFromFile } from '../src/core/import-file.ts';
@@ -161,6 +161,34 @@ describe('Phase 5 correction lineage reducer', () => {
       const rebuiltFence = parseLearningLoopFence(canonical)!;
       expect(rebuiltFence.value.blocked_identities).toContain(learningBlockedClaimKey(f.a));
       await expect(activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority: 'direct_user' })).rejects.toMatchObject({ code: 'forbidden' });
+    }); } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }, 60_000);
+
+  test('PGLite reversal retires the replacement, rebuilds, and reinstates exact direct authority', async () => {
+    const f = await fixture('reversal');
+    try { await withEnv({ GBRAIN_HOME: f.root }, async () => {
+      await activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority: 'direct_user' });
+      await authorizeReplacement(f);
+      await correctLearningClaim(correctionInput(f));
+      const authority = readLearningLoopLedger({ config: f.config }).find(event => event.event_type === 'learning_authority' && event.identity.claim_fingerprint === f.a.claim_fingerprint);
+      expect(authority?.event_id).toBeTruthy();
+      const reversed = await reverseLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority_event_id: authority!.event_id, root_reversal_id: 'reversal-test' });
+      const finalFence = parseLearningLoopFence(reversed.canonical)!;
+      const blocked = learningBlockedClaimKey(f.a);
+      const lineage = finalFence.value.correction_lineages[blocked] as any;
+      expect(reversed.phase).toBe('committed');
+      expect(finalFence.value.blocked_identities).not.toContain(blocked);
+      expect(lineage.active_replacements).toHaveLength(1);
+      expect(lineage.active_replacements[0]).toMatchObject({ identity: blocked, canonical_slug: f.slug });
+      expect(parseFactsFence(reversed.canonical).facts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ claim: 'A', active: false }),
+        expect.objectContaining({ claim: 'B', active: false }),
+        expect.objectContaining({ claim: 'A', active: true }),
+      ]));
+      expect(finalFence.value.reversal_attempts['reversal-test:1']).toMatchObject({ phase: 'committed' });
+      const retry = await reverseLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority_event_id: authority!.event_id, root_reversal_id: 'reversal-test' });
+      expect(retry.phase).toBe('committed');
+      expect(retry.canonical).toBe(reversed.canonical);
     }); } finally { rmSync(f.root, { recursive: true, force: true }); }
   }, 60_000);
 });
