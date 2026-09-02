@@ -995,7 +995,9 @@ export async function activateLearningClaim(input: ActivateLearningClaimInput): 
       if (!delivered || canonicalJson(delivered) !== canonicalJson(event)) {
         throw new LearningLoopError('ledger_corrupt', 'Canonical pending delivery was not read back exactly from the durable ledger');
       }
-      const cleared = canonical.replace(staged, renderLearningLoopFence({ ...next, pending_delivery: null }));
+      const currentFence = parseLearningLoopFence(canonical);
+      if (!currentFence) throw new LearningLoopError('ledger_corrupt', 'Activation canonical fence disappeared before clear');
+      const cleared = canonical.replace(currentFence.raw, renderLearningLoopFence({ ...next, pending_delivery: null }));
       const clearPermit = createLearningTransitionPermit(parseLearningLoopFence(canonical)!.value, { ...next, pending_delivery: null });
       const clearedCanonical = await writeCanonicalPage(target, cleared, { mode: 'learning_transition', sourceLease: lease, transitionPermit: clearPermit, expectedManaged: 'expected' });
       input.afterCanonicalClear?.();
@@ -1085,7 +1087,9 @@ export async function correctLearningClaim(input: CorrectLearningClaimInput): Pr
     const delivered = readLearningLoopLedger({ config: input.config }).find(item => item.event_id === event.event_id);
     if (!delivered || canonicalJson(delivered) !== canonicalJson(event)) throw new LearningLoopError('ledger_corrupt', 'Correction event was not read back exactly');
     const clearedState = { ...next, pending_delivery: null };
-    const cleared = await writeCanonicalPage(target, canonical.replace(renderLearningLoopFence(pendingState), renderLearningLoopFence(clearedState)), { mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(pendingState, clearedState), expectedManaged: 'expected' });
+    const currentFence = parseLearningLoopFence(canonical);
+    if (!currentFence) throw new LearningLoopError('ledger_corrupt', 'Correction canonical fence disappeared before clear');
+    const cleared = await writeCanonicalPage(target, canonical.replace(currentFence.raw, renderLearningLoopFence(clearedState)), { mode: 'learning_transition', sourceLease: lease, transitionPermit: createLearningTransitionPermit(pendingState, clearedState), expectedManaged: 'expected' });
     input.afterCanonicalClear?.();
     const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
     if (readback.canonical !== cleared) throw new LearningLoopError('assertion_mismatch', 'Correction canonical clear readback changed before derived reconciliation');
@@ -1244,7 +1248,7 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
     if (!fence.value.blocked_identities.includes(blocked)) throw new LearningLoopError('forbidden', 'Reversal requires the exact correction-blocked identity');
     const lineage = fence.value.correction_lineages[blocked];
     if (!lineage || typeof lineage !== 'object' || !Array.isArray((lineage as Record<string, unknown>).active_replacements) || !Number.isSafeInteger((lineage as Record<string, unknown>).lineage_generation)) throw new LearningLoopError('ledger_corrupt', 'Correction lineage is unavailable for reversal');
-    const activeLineage = lineage as { active_replacements: LearningPointer[]; replacement_set_fingerprint: string; lineage_generation: number };
+    let activeLineage = lineage as { active_replacements: LearningPointer[]; replacement_set_fingerprint: string; lineage_generation: number };
     if (replacementSetFingerprint(activeLineage.active_replacements) !== activeLineage.replacement_set_fingerprint) throw new LearningLoopError('ledger_corrupt', 'Correction lineage fingerprint is invalid');
     if (activeLineage.active_replacements.some(pointer => pointer.canonical_slug !== input.canonical_slug)) throw new LearningLoopError('assertion_mismatch', 'Reversal cannot cross canonical pages');
     const authority = state.events.find((event): event is LearningAuthorityEvent => event.event_id === input.authority_event_id);
@@ -1273,7 +1277,8 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
       throw new LearningLoopError('forbidden', 'Reversal attempt is terminal and cannot be retried');
     }
 
-    const obligations = mergePointers(attempt.predecessor_replacements, attempt.inherited_replacements ?? []);
+    for (;;) {
+      const obligations = mergePointers(attempt.predecessor_replacements, attempt.inherited_replacements ?? []);
     if (attempt.phase === 'started') {
       const parsedFacts = parseFactsFence(canonical);
       if (parsedFacts.warnings.some(warning => warning.includes('UNBALANCED'))) throw new LearningLoopError('forbidden', 'Facts fence is unavailable for reversal');
@@ -1282,7 +1287,15 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
       const retiredFacts = parsedFacts.facts.map(row => rowNumbers.has(row.rowNum) ? { ...row, active: false, context: `reversal:${rootId}` } : row);
       const currentActive = activeLineage.active_replacements.filter(pointer => !rowNumbers.has(pointer.row_num));
       if (currentActive.length > 0) throw new LearningLoopError('assertion_mismatch', 'Reversal replacement set changed before retirement');
-      const checkpoint: LearningReversalCheckpoint = { lineage_generation: activeLineage.lineage_generation + 1, replacement_set_fingerprint: replacementSetFingerprint(currentActive), active_replacements: currentActive };
+      const checkpoint: LearningReversalCheckpoint = {
+        lineage_generation: activeLineage.lineage_generation + 1,
+        replacement_set_fingerprint: replacementSetFingerprint(currentActive),
+        active_replacements: currentActive,
+        learning_event_sequence: Math.max(0, ...state.events
+          .filter((event): event is LearningTransitionEvent | LearningCorrectionEvent => (event.event_type === 'learning_transition' || event.event_type === 'learning_correction')
+            && event.brain_id === binding.brain_id && event.run_id === input.run_id)
+          .map(event => event.semantic_sequence)),
+      };
       const retiredKnowledgeBase: LearningLoopKnowledge = {
         ...fence.value,
         managed_rows: Object.fromEntries(Object.entries(fence.value.managed_rows).map(([key, value]) => rowNumbers.has(Number((value as Record<string, unknown>)?.row_num)) ? [key, { ...(value as Record<string, unknown>), active: false }] : [key, value])),
@@ -1323,7 +1336,53 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
       const intent = attempt.commit_intent!;
       const checkpoint = attempt.checkpoint!;
       const currentLineage = fence.value.correction_lineages[blocked] as { active_replacements: LearningPointer[]; replacement_set_fingerprint: string; lineage_generation: number };
-      if (currentLineage.lineage_generation !== checkpoint.lineage_generation || currentLineage.replacement_set_fingerprint !== checkpoint.replacement_set_fingerprint || canonicalJson(currentLineage.active_replacements) !== canonicalJson(checkpoint.active_replacements)) throw new LearningLoopError('assertion_mismatch', 'Reversal checkpoint changed before final commit');
+      const checkpointMatches = currentLineage.lineage_generation === checkpoint.lineage_generation
+        && currentLineage.replacement_set_fingerprint === checkpoint.replacement_set_fingerprint
+        && canonicalJson(currentLineage.active_replacements) === canonicalJson(checkpoint.active_replacements);
+      if (!checkpointMatches) {
+        const checkpointSequence = checkpoint.learning_event_sequence ?? 0;
+        const acceptedDrift = state.events
+          .filter((event): event is LearningTransitionEvent | LearningCorrectionEvent => event.event_type === 'learning_transition' || event.event_type === 'learning_correction')
+          .filter(event => event.run_id === input.run_id
+            && event.source_id === input.source_id
+            && event.canonical_slug === input.canonical_slug
+            && event.semantic_sequence > checkpointSequence)
+          .filter(event => {
+            const pointerIdentity = event.event_type === 'learning_correction'
+              ? event.replacement.claim_fingerprint
+              : event.identity.claim_fingerprint;
+            const rowNum = event.event_type === 'learning_correction' ? event.replacement_fact_row : event.fact_row;
+            return currentLineage.active_replacements.some(pointer => pointer.identity === pointerIdentity
+              && pointer.canonical_slug === event.canonical_slug && pointer.row_num === rowNum);
+          })
+          .sort((left, right) => right.semantic_sequence - left.semantic_sequence)[0];
+        if (!acceptedDrift) throw new LearningLoopError('assertion_mismatch', 'Reversal checkpoint changed before final commit');
+        const predecessorKey = `${rootId}:${attempt.attempt_no}`;
+        const successor: LearningReversalAttempt = {
+          root_reversal_id: rootId,
+          attempt_no: attempt.attempt_no + 1,
+          phase: 'started',
+          blocked_identity: blocked as LearningReversalAttempt['blocked_identity'],
+          authority_event_id: input.authority_event_id,
+          predecessor_generation: currentLineage.lineage_generation,
+          predecessor_set_fingerprint: currentLineage.replacement_set_fingerprint,
+          predecessor_replacements: currentLineage.active_replacements,
+          inherited_replacements: mergePointers(attempt.inherited_replacements ?? attempt.predecessor_replacements, currentLineage.active_replacements),
+          predecessor_id: predecessorKey,
+        };
+        const reduced = reduceLearningLoopReversal(fence.value, { kind: 'supersede', successor });
+        const written = await writeReversalKnowledge(target, lease, canonical, fence.value, reduced.next);
+        input.afterCanonicalStage?.();
+        const readback = inspectExpectedManagedState(target, lease, { expected: 'expected' });
+        if (readback.canonical !== written) throw new LearningLoopError('assertion_mismatch', 'Reversal successor canonical readback changed');
+        canonical = readback.canonical;
+        inspected = readback;
+        fence = parseLearningLoopFence(canonical)!;
+        activeLineage = fence.value.correction_lineages[blocked] as { active_replacements: LearningPointer[]; replacement_set_fingerprint: string; lineage_generation: number };
+        attempt = reduced.attempt;
+        state = replayLearningLoop(readLearningLoopLedger({ config: input.config }));
+        continue;
+      }
       const parsedFacts = parseFactsFence(canonical);
       if (parsedFacts.facts.some(row => row.rowNum === intent.reinstated.row_num)) throw new LearningLoopError('assertion_mismatch', 'Reversal reinstatement row already exists with an unexpected state');
       const appended = upsertFactRow(canonical, { claim: input.identity.claim, kind: learningFactKind(input.identity), confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `reversal:${rootId}`, rowNum: intent.reinstated.row_num, active: true });
@@ -1343,7 +1402,8 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
       return { phase: 'committed', root_reversal_id: rootId, canonical };
     }
     if (attempt.phase === 'committed') return { phase: attempt.phase, root_reversal_id: rootId, canonical };
-    throw new LearningLoopError('forbidden', `Reversal ended in nonterminal phase ${attempt.phase}`);
+      throw new LearningLoopError('forbidden', `Reversal ended in nonterminal phase ${attempt.phase}`);
+    }
   }, { config: input.config, mutationLock: input.mutationLock }));
 }
 

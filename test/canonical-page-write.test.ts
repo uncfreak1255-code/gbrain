@@ -13,14 +13,19 @@ import {
   type SourceWriteLease,
 } from '../src/core/canonical-page-write.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
-import { renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
+import { learningLoopProtectedStateHash, renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
+import { parseFactsFence, renderFactsTable } from '../src/core/facts-fence.ts';
 
-const facts = '<!--- gbrain:facts:begin -->\n| Fact | Value |\n|---|---|\n| Managed | yes |\n<!--- gbrain:facts:end -->';
-const knowledge = (generation = 1): LearningLoopKnowledge => ({
-  brain_id: 'b', source_id: 's', canonical_slug: 'x',
-  managed_rows: { generation }, blocked_identities: [], correction_lineages: {},
-  reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
-});
+const managedFact = { rowNum: 1, claim: 'Managed', kind: 'preference' as const, confidence: 1, visibility: 'private' as const, notability: 'high' as const, active: true };
+const facts = renderFactsTable([managedFact]);
+const knowledge = (generation = 1): LearningLoopKnowledge => {
+  const value: LearningLoopKnowledge = {
+    brain_id: 'b', source_id: 's', canonical_slug: 'x',
+    managed_rows: { generation: { claim: 'Managed', row_num: 1, active: true, generation } }, blocked_identities: [], correction_lineages: {},
+    reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
+  };
+  return { ...value, protected_state_hash: learningLoopProtectedStateHash(value, parseFactsFence(facts).facts) };
+};
 const managedPage = (generation = 1) => `# X\n\n${facts}\n\n${renderLearningLoopFence(knowledge(generation))}\n`;
 
 async function inRoot<T>(fn: (ctx: { base: string; root: string; target: SourceQualifiedCanonicalTarget; path: string; locks: string }) => Promise<T>): Promise<T> {
@@ -92,7 +97,7 @@ describe('canonical page write boundary', () => {
   test('rejects changed, malformed, and duplicate protected fences', async () => inRoot(async ({ target, path, locks }) => {
     writeFileSync(path, managedPage());
     await withSourceWriteLease(target, async lease => {
-      await expect(writeCanonicalPage(target, managedPage().replace('Managed | yes', 'Managed | no'), { mode: 'ordinary_content', lockRoot: locks, sourceLease: lease })).rejects.toThrow('protected fence changed');
+      await expect(writeCanonicalPage(target, managedPage().replace('Managed', 'Changed'), { mode: 'ordinary_content', lockRoot: locks, sourceLease: lease })).rejects.toThrow('protected fence changed');
       await expect(writeCanonicalPage(target, `${managedPage()}\n${facts}\n`, { mode: 'ordinary_content', lockRoot: locks, sourceLease: lease })).rejects.toThrow('malformed or duplicate');
       await expect(writeCanonicalPage(target, managedPage().replace('<!-- gbrain:learning-loop:v1:end -->', ''), { mode: 'ordinary_content', lockRoot: locks, sourceLease: lease })).rejects.toThrow('malformed or duplicate');
     }, { sourceLock });
@@ -140,6 +145,27 @@ describe('canonical page write boundary', () => {
       })).rejects.toThrow('expected managed state is absent');
     }, { sourceLock });
     expect(readFileSync(path, 'utf8')).toBe('# unmanaged replacement\n');
+  }));
+
+  test('binds protected state to managed rows and rejects a valid-looking tamper', async () => inRoot(async ({ target, path, locks }) => {
+    const blocked = 'a'.repeat(64);
+    const fact = { rowNum: 1, claim: 'Managed', kind: 'preference' as const, confidence: 1, visibility: 'private' as const, notability: 'high' as const, active: true };
+    const state: LearningLoopKnowledge = {
+      brain_id: target.brain_id, source_id: target.source_id, canonical_slug: target.canonical_slug,
+      managed_rows: { [blocked]: { claim: 'Managed', row_num: 1, active: true } }, blocked_identities: [blocked],
+      correction_lineages: {}, reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
+    };
+    const factsFence = renderFactsTable([fact]);
+    const protected_state_hash = learningLoopProtectedStateHash(state, parseFactsFence(factsFence).facts);
+    const page = `# X\n\n${factsFence}\n\n${renderLearningLoopFence({ ...state, protected_state_hash })}\n`;
+    writeFileSync(path, page);
+    await withSourceWriteLease(target, async lease => {
+      expect(inspectExpectedManagedState(target, lease, { expected: 'expected' }).managed).toBe(true);
+      const ordinary = await writeCanonicalPage(target, page.replace('# X', '# Changed'), { mode: 'ordinary_content', lockRoot: locks, sourceLease: lease, expectedManaged: 'expected' });
+      expect(inspectExpectedManagedState(target, lease, { expected: 'expected' }).canonical).toBe(ordinary);
+      writeFileSync(path, ordinary.replace('Managed', 'Changed'));
+      expect(() => inspectExpectedManagedState(target, lease, { expected: 'expected' })).toThrow('protected state hash mismatch');
+    }, { sourceLock });
   }));
 
   test('rejects traversal before consulting a lease', async () => inRoot(async ({ root, locks }) => {

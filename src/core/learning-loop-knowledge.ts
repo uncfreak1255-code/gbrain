@@ -32,6 +32,8 @@ export interface LearningReversalCheckpoint {
   lineage_generation: number;
   replacement_set_fingerprint: string;
   active_replacements: readonly LearningPointer[];
+  /** Highest accepted V2 learning event sequence included in this snapshot. */
+  learning_event_sequence?: number;
 }
 
 export interface LearningReversalAttempt {
@@ -117,7 +119,9 @@ function validReversalCheckpoint(value: unknown): value is LearningReversalCheck
     || !/^[a-f0-9]{64}$/.test(String(checkpoint.replacement_set_fingerprint ?? ''))
     || !Array.isArray(checkpoint.active_replacements)
     || !checkpoint.active_replacements.every(validReversalPointer)
-    || Object.keys(checkpoint).some(key => !['lineage_generation', 'replacement_set_fingerprint', 'active_replacements'].includes(key))) return false;
+    || (checkpoint.learning_event_sequence !== undefined
+      && (!Number.isSafeInteger(checkpoint.learning_event_sequence) || Number(checkpoint.learning_event_sequence) < 0))
+    || Object.keys(checkpoint).some(key => !['lineage_generation', 'replacement_set_fingerprint', 'active_replacements', 'learning_event_sequence'].includes(key))) return false;
   return replacementSetFingerprint(checkpoint.active_replacements) === checkpoint.replacement_set_fingerprint;
 }
 
@@ -331,6 +335,47 @@ export type LearningLoopKnowledge = {
   protected_state_hash?: string;
 };
 
+/**
+ * Return the stable preimage for the protected canonical state.  The hash is
+ * deliberately independent of `pending_delivery` (which is a delivery
+ * journal) and of the hash field itself.  Callers pass only the parsed fact
+ * rows whose row numbers are named by `managed_rows`; ordinary facts remain
+ * legal to edit without changing the protected-state identity.
+ */
+export function learningLoopProtectedStateHash(
+  value: LearningLoopKnowledge,
+  managedFactRows: readonly unknown[] = [],
+): string {
+  const managedRowNumbers = new Set(Object.values(value.managed_rows).flatMap(raw => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    const rowNum = Number((raw as Record<string, unknown>).row_num);
+    return Number.isSafeInteger(rowNum) && rowNum > 0 ? [rowNum] : [];
+  }));
+  const facts = managedFactRows
+    .filter(raw => raw && typeof raw === 'object' && !Array.isArray(raw))
+    .filter(raw => managedRowNumbers.has(Number((raw as Record<string, unknown>).rowNum ?? (raw as Record<string, unknown>).row_num)))
+    .map(raw => raw as Record<string, unknown>)
+    .sort((left, right) => Number(left.rowNum ?? left.row_num) - Number(right.rowNum ?? right.row_num));
+  const preimage = {
+    managed_fact_rows: facts,
+    managed_rows: value.managed_rows,
+    blocked_identities: value.blocked_identities,
+    correction_lineages: value.correction_lineages,
+    reversal_attempts: value.reversal_attempts,
+    immutable_commit_markers: value.immutable_commit_markers,
+  };
+  return createHash('sha256').update(canonicalJson(preimage), 'utf8').digest('hex');
+}
+
+export function learningLoopHasProtectedState(value: LearningLoopKnowledge): boolean {
+  return Object.keys(value.managed_rows).length > 0
+    || value.blocked_identities.length > 0
+    || Object.keys(value.correction_lineages).length > 0
+    || Object.keys(value.reversal_attempts).length > 0
+    || value.immutable_commit_markers.length > 0
+    || value.pending_delivery !== null;
+}
+
 export type LearningLineageCommand =
   | { kind: 'activate'; identity: LearningClaimIdentity; pointer: LearningPointer }
   | { kind: 'correct'; predecessor: LearningClaimIdentity; replacement: LearningPointer };
@@ -341,8 +386,8 @@ export function reduceLearningLoopLineage(previous: LearningLoopKnowledge, comma
   const existing = (previous.correction_lineages[key] ?? {}) as Partial<CorrectionLineage>;
   const pointers = [...(existing.active_replacements ?? [])] as LearningPointer[];
   const replacement = command.kind === 'activate' ? command.pointer : command.replacement;
+  const predecessorKey = learningBlockedClaimKey(command.kind === 'activate' ? command.identity : command.predecessor);
   if (command.kind === 'correct') {
-    const predecessorKey = learningBlockedClaimKey(command.predecessor);
     // Retire the predecessor pointer, then add the complete successor set.
     for (let i = pointers.length - 1; i >= 0; i--) if (pointers[i].identity === predecessorKey) pointers.splice(i, 1);
   }
@@ -355,7 +400,37 @@ export function reduceLearningLoopLineage(previous: LearningLoopKnowledge, comma
     lineage_generation: alreadyPresent && command.kind === 'correct' ? (existing.lineage_generation ?? 0) : (existing.lineage_generation ?? 0) + 1,
   };
   const blocked = command.kind === 'correct' && !previous.blocked_identities.includes(key) ? [...previous.blocked_identities, key].sort() : [...previous.blocked_identities];
-  const next: LearningLoopKnowledge = { ...previous, blocked_identities: blocked, correction_lineages: { ...previous.correction_lineages, [key]: lineage } };
+  const lineages: Record<string, CorrectionLineage> = { ...previous.correction_lineages, [key]: lineage } as Record<string, CorrectionLineage>;
+
+  // A correction of a linked replacement changes every ancestor's complete
+  // active obligation set.  An active reversal also retains retired rows as
+  // obligations, so a later accepted correction or recreation must reappear
+  // in that ancestor lineage and make its checkpoint stale.
+  if (command.kind === 'correct' || command.kind === 'activate') {
+    for (const [lineageKey, raw] of Object.entries(lineages)) {
+      if (lineageKey === key || !raw || !Array.isArray(raw.active_replacements)) continue;
+      const attemptObligations = Object.values(previous.reversal_attempts)
+        .filter((attempt): attempt is Partial<LearningReversalAttempt> => Boolean(attempt && typeof attempt === 'object' && !Array.isArray(attempt)))
+        .filter(attempt => attempt.blocked_identity === lineageKey && !['committed', 'superseded', 'failed'].includes(String(attempt.phase)))
+        .flatMap(attempt => [...(attempt.predecessor_replacements ?? []), ...(attempt.inherited_replacements ?? [])]);
+      const tracksPointer = raw.active_replacements.some(pointer => pointer.identity === predecessorKey && pointer.canonical_slug === replacement.canonical_slug)
+        || attemptObligations.some(pointer => pointer.identity === predecessorKey && pointer.canonical_slug === replacement.canonical_slug);
+      if (!tracksPointer) continue;
+      const propagated = raw.active_replacements
+        .filter(pointer => !(pointer.identity === predecessorKey && pointer.canonical_slug === replacement.canonical_slug))
+        .concat(replacement);
+      const unique = propagated.filter((pointer, index, all) => all.findIndex(candidate => canonicalJson(candidate) === canonicalJson(pointer)) === index)
+        .sort((left, right) => Buffer.from(replacementPointerEncoding(left)).compare(Buffer.from(replacementPointerEncoding(right))));
+      if (canonicalJson(unique) === canonicalJson(raw.active_replacements)) continue;
+      lineages[lineageKey] = {
+        ...raw,
+        active_replacements: unique,
+        replacement_set_fingerprint: replacementSetFingerprint(unique),
+        lineage_generation: (raw.lineage_generation ?? 0) + 1,
+      };
+    }
+  }
+  const next: LearningLoopKnowledge = { ...previous, blocked_identities: blocked, correction_lineages: lineages };
   return { next, permit: createLearningTransitionPermit(previous, next) };
 }
 const KEYS = new Set(['brain_id','source_id','canonical_slug','managed_rows','blocked_identities','correction_lineages','reversal_attempts','immutable_commit_markers','pending_delivery','protected_state_hash']);
@@ -445,4 +520,7 @@ export function parseLearningLoopFence(markdown: string): { value: LearningLoopK
   if (encodeLearningLoopKnowledge(value) !== matches[0][1]) fail('non-canonical JSON');
   const raw = matches[0][0]; return { value, raw };
 }
-export function learningLoopKnowledgeHash(value: LearningLoopKnowledge): string { return createHash('sha256').update(encodeLearningLoopKnowledge(value)).digest('hex'); }
+export function learningLoopKnowledgeHash(value: LearningLoopKnowledge): string {
+  const { protected_state_hash: _protectedStateHash, ...transitionState } = value;
+  return createHash('sha256').update(encodeLearningLoopKnowledge(transitionState), 'utf8').digest('hex');
+}

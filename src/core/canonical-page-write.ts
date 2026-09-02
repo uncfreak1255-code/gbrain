@@ -2,7 +2,8 @@ import { accessSync, closeSync, constants, fsyncSync, mkdirSync, openSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { acquirePageLock } from './page-lock.ts';
-import { parseLearningLoopFence, isLearningTransitionPermit, type LearningTransitionPermit } from './learning-loop-knowledge.ts';
+import { parseLearningLoopFence, renderLearningLoopFence, isLearningTransitionPermit, learningLoopHasProtectedState, learningLoopProtectedStateHash, type LearningTransitionPermit } from './learning-loop-knowledge.ts';
+import { parseFactsFence } from './facts-fence.ts';
 import type { BrainEngine } from './engine.ts';
 import { syncLockId, withRefreshingLock } from './db-lock.ts';
 import { activeV2DestinationBinding } from './learning-loop.ts';
@@ -133,6 +134,37 @@ function atomic(
 function contained(p:string,r:string):boolean { const rel=relative(resolve(r),resolve(p)); return rel===''||(!rel.startsWith('..')&&!isAbsolute(rel)); }
 
 function sha256(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
+
+function assertManagedFactRowsPresent(
+  value: Parameters<typeof learningLoopProtectedStateHash>[0],
+  facts: ReturnType<typeof parseFactsFence>['facts'],
+): void {
+  const factRows = new Set(facts.map(row => row.rowNum));
+  for (const raw of Object.values(value.managed_rows)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('managed_state_unavailable: managed fact row mapping is malformed');
+    }
+    const rowNum = Number((raw as Record<string, unknown>).row_num);
+    if (!Number.isSafeInteger(rowNum) || rowNum < 1) {
+      throw new Error('managed_state_unavailable: managed fact row mapping is malformed');
+    }
+    if (!factRows.has(rowNum)) {
+      throw new Error('managed_state_unavailable: managed fact row is absent from canonical facts');
+    }
+  }
+}
+
+function withDerivedProtectedStateHash(content: string): string {
+  const parsed = parseLearningLoopFence(content);
+  if (!parsed) return content;
+  const facts = parseFactsFence(content);
+  if (facts.warnings.length > 0 && learningLoopHasProtectedState(parsed.value)) {
+    throw new Error('managed_state_unavailable: protected facts fence is malformed');
+  }
+  assertManagedFactRowsPresent(parsed.value, facts.facts);
+  const protected_state_hash = learningLoopProtectedStateHash(parsed.value, facts.facts);
+  return content.replace(parsed.raw, renderLearningLoopFence({ ...parsed.value, protected_state_hash }));
+}
 function targetPath(target: SourceQualifiedCanonicalTarget, lease: SourceWriteLease): string {
   return join(lease.root_realpath, `${target.canonical_slug}.md`);
 }
@@ -213,7 +245,15 @@ export function inspectExpectedManagedState(
       if (identity.brain_id !== target.brain_id || identity.source_id !== target.source_id || identity.canonical_slug !== target.canonical_slug) {
         throw new Error('managed_state_unavailable: metadata target mismatch');
       }
-      if (options.protectedStateHash && options.protectedStateHash !== sha256(parsed.raw)) {
+      const facts = parseFactsFence(canonical);
+      if (facts.warnings.length > 0 && learningLoopHasProtectedState(identity)) {
+        throw new Error('managed_state_unavailable: protected facts fence is malformed');
+      }
+      assertManagedFactRowsPresent(identity, facts.facts);
+      const expectedProtectedStateHash = learningLoopProtectedStateHash(identity, facts.facts);
+      if ((identity.protected_state_hash !== undefined && identity.protected_state_hash !== expectedProtectedStateHash)
+        || (learningLoopHasProtectedState(identity) && identity.protected_state_hash === undefined)
+        || (options.protectedStateHash !== undefined && options.protectedStateHash !== null && options.protectedStateHash !== expectedProtectedStateHash)) {
         throw new Error('managed_state_unavailable: protected state hash mismatch');
       }
     }
@@ -489,7 +529,8 @@ export async function writeCanonicalPage(target: SourceQualifiedCanonicalTarget,
     if (currentKnowledge && (currentKnowledge.brain_id !== target.brain_id || currentKnowledge.source_id !== target.source_id || currentKnowledge.canonical_slug !== target.canonical_slug)) {
       throw new Error('managed_state_unavailable: metadata target mismatch');
     }
-    const staged = prepare(content, current, options.mode, options.transitionPermit);
+    const candidate = options.mode === 'learning_transition' ? withDerivedProtectedStateHash(content) : content;
+    const staged = prepare(candidate, current, options.mode, options.transitionPermit);
     atomic(path, staged, root, () => {
       checkLease(target, options.sourceLease);
       // Repeat the expectation check after all caller barriers and immediately

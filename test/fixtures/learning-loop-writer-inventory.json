@@ -1820,7 +1820,7 @@
       "primitive": "fs:renameSync",
       "count": 1,
       "lines": [
-        123
+        124
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -1832,7 +1832,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        129
+        130
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -1844,7 +1844,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        113
+        114
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -2497,15 +2497,80 @@
     },
     {
       "file": "src/core/learning-loop.ts",
+      "symbol": "activateLearningClaim",
+      "primitive": "db:importFromContent",
+      "count": 3,
+      "lines": [
+        960,
+        971,
+        1006
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
       "symbol": "appendEvent",
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        1062
+        1975
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
       "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "clearCanonicalPending",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        2357
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "correctLearningClaim",
+      "primitive": "db:importFromContent",
+      "count": 3,
+      "lines": [
+        1056,
+        1060,
+        1096
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "recoverPendingBeforeReversal",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        1188
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "reverseLearningClaim",
+      "primitive": "db:importFromContent",
+      "count": 2,
+      "lines": [
+        1310,
+        1399
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
     },
     {
       "file": "src/core/migrate.ts",
@@ -2867,7 +2932,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        5575
+        5586
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -3010,7 +3075,7 @@
       "primitive": "sql:delete_from:pages",
       "count": 1,
       "lines": [
-        1098
+        1099
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -3022,7 +3087,7 @@
       "primitive": "sql:delete_from:pages",
       "count": 1,
       "lines": [
-        1116
+        1117
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -3034,7 +3099,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        2632
+        2633
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -3049,7 +3114,7 @@
       "primitive": "sql:insert_into:pages",
       "count": 1,
       "lines": [
-        1068
+        1069
       ],
       "classification": "db_first_content",
       "boundary": "engine_collision_guard",
@@ -3061,7 +3126,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        1197
+        1198
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -3073,7 +3138,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        1170
+        1171
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -3085,8 +3150,8 @@
       "primitive": "sql:update:pages",
       "count": 2,
       "lines": [
-        4795,
-        4806
+        4796,
+        4807
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -3098,7 +3163,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        5602
+        5614
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -3114,7 +3179,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        2380
+        2381
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -3129,7 +3194,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        1156
+        1157
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -3141,7 +3206,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        1220
+        1221
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -3157,7 +3222,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        4981
+        4982
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",

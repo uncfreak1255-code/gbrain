@@ -29,17 +29,18 @@ afterAll(async () => { await engine?.disconnect(); }, 60_000);
 
 async function fixture(suffix: string) {
   const root = mkdtempSync(join(tmpdir(), `learning-correction-${suffix}-`));
-  const canonicalRoot = join(root, 'canonical'); const corpusRoot = join(root, 'corpus'); mkdirSync(join(canonicalRoot, 'topics'), { recursive: true }); mkdirSync(corpusRoot, { recursive: true });
-  const config = { database_path: join(root, 'brain') } as never; const brainId = computeBrainIdFromConfig(config); const slug = 'topics/correction';
-  process.env.GBRAIN_HOME = root;
-  const initial: LearningLoopKnowledge = { brain_id: brainId, source_id: 'default', canonical_slug: slug, managed_rows: {}, blocked_identities: [], correction_lineages: {}, reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null };
-  writeFileSync(join(canonicalRoot, `${slug}.md`), `---\ntype: concept\ntitle: Correction\nslug: ${slug}\n---\n\n# Correction\n\n${renderLearningLoopFence(initial)}\n`);
-  await engine.executeRaw('DELETE FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]); await engine.executeRaw('UPDATE sources SET local_path = $1 WHERE id = $2', [canonicalRoot, 'default']); await setLearningLoopMode(engine, config, 'canary', { config }); await engine.setConfig('learning_loop.corpus.codex.root', corpusRoot); await engine.setConfig('learning_loop.corpus.codex.source_id', 'default');
-  const session = `correction-${suffix}`; const at = '2026-08-31T00:00:00.000Z'; const body = [{ timestamp: at, type: 'session_meta', payload: { id: session } }, ...['A','B'].flatMap(claim => [{ timestamp: at, type: 'response_item', payload: { role: 'user', content: [{ type: 'input_text', text: claim }] } }, { timestamp: at, type: 'response_item', payload: { role: 'assistant', content: [{ type: 'output_text', text: 'x'.repeat(180) }] } }]), { timestamp: at, type: 'event_msg', payload: { type: 'task_complete', completed_at: at } }].map(row => JSON.stringify(row)).join('\n') + '\n'; writeFileSync(join(corpusRoot, `${session}.jsonl`), body);
-  const adapter: AdapterIdentity = { client_id: 'correction-test', source_id: 'default', provider: 'codex' }; const armed = await armLearningLoop({ command_id: `arm:${suffix}`, engine, config, authorized_adapter: adapter, destination: { source_id: 'default', canonical_slug: slug }, contract_version: 2 }); await bindLearningLoopSession(engine, `bind:${suffix}`, adapter, session, { config }); const receipt = await resolveAuthoritativeTranscript({ engine, config, provider: 'codex', provider_session_id: session, source_id: 'default' }); await recordSessionEvaluation({ engine, mode: 'canary', adapter, receipt }, { config }); const rows = parseAuthoritativeUserRows(body, session, receipt.content_hash);
-  const make = (claim: string, row: typeof rows[number]) => makeLearningClaimIdentity({ claim, class: 'preference', scope: { kind: 'global' }, target: null, trigger: null }); const a = make('A', rows[0]); const b = make('B', rows[1]); const loc = (row: typeof rows[number]) => ({ provider_session_id: session, line: row.line, message_index: row.message_index, message_hash: row.message_hash });
-  await recordLearningCandidate({ engine, config, run_id: armed.run_id, source_id: 'default', identity: a, locators: [loc(rows[0])] }); await recordLearningAuthority({ engine, config, run_id: armed.run_id, source_id: 'default', identity: a, authority: 'direct_user', locators: [loc(rows[0])] });
-  return { root, config, canonicalRoot, slug, armed, a, b, bLocator: loc(rows[1]) };
+  return withEnv({ GBRAIN_HOME: root }, async () => {
+    const canonicalRoot = join(root, 'canonical'); const corpusRoot = join(root, 'corpus'); mkdirSync(join(canonicalRoot, 'topics'), { recursive: true }); mkdirSync(corpusRoot, { recursive: true });
+    const config = { database_path: join(root, 'brain') } as never; const brainId = computeBrainIdFromConfig(config); const slug = 'topics/correction';
+    const initial: LearningLoopKnowledge = { brain_id: brainId, source_id: 'default', canonical_slug: slug, managed_rows: {}, blocked_identities: [], correction_lineages: {}, reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null };
+    writeFileSync(join(canonicalRoot, `${slug}.md`), `---\ntype: concept\ntitle: Correction\nslug: ${slug}\n---\n\n# Correction\n\n${renderLearningLoopFence(initial)}\n`);
+    await engine.executeRaw('DELETE FROM pages WHERE source_id = $1 AND slug = $2', ['default', slug]); await engine.executeRaw('UPDATE sources SET local_path = $1 WHERE id = $2', [canonicalRoot, 'default']); await setLearningLoopMode(engine, config, 'canary', { config }); await engine.setConfig('learning_loop.corpus.codex.root', corpusRoot); await engine.setConfig('learning_loop.corpus.codex.source_id', 'default');
+    const session = `correction-${suffix}`; const at = '2026-08-31T00:00:00.000Z'; const body = [{ timestamp: at, type: 'session_meta', payload: { id: session } }, ...['A','B'].flatMap(claim => [{ timestamp: at, type: 'response_item', payload: { role: 'user', content: [{ type: 'input_text', text: claim }] } }, { timestamp: at, type: 'response_item', payload: { role: 'assistant', content: [{ type: 'output_text', text: 'x'.repeat(180) }] } }]), { timestamp: at, type: 'event_msg', payload: { type: 'task_complete', completed_at: at } }].map(row => JSON.stringify(row)).join('\n') + '\n'; writeFileSync(join(corpusRoot, `${session}.jsonl`), body);
+    const adapter: AdapterIdentity = { client_id: 'correction-test', source_id: 'default', provider: 'codex' }; const armed = await armLearningLoop({ command_id: `arm:${suffix}`, engine, config, authorized_adapter: adapter, destination: { source_id: 'default', canonical_slug: slug }, contract_version: 2 }); await bindLearningLoopSession(engine, `bind:${suffix}`, adapter, session, { config }); const receipt = await resolveAuthoritativeTranscript({ engine, config, provider: 'codex', provider_session_id: session, source_id: 'default' }); await recordSessionEvaluation({ engine, mode: 'canary', adapter, receipt }, { config }); const rows = parseAuthoritativeUserRows(body, session, receipt.content_hash);
+    const make = (claim: string, row: typeof rows[number]) => makeLearningClaimIdentity({ claim, class: 'preference', scope: { kind: 'global' }, target: null, trigger: null }); const a = make('A', rows[0]); const b = make('B', rows[1]); const loc = (row: typeof rows[number]) => ({ provider_session_id: session, line: row.line, message_index: row.message_index, message_hash: row.message_hash });
+    await recordLearningCandidate({ engine, config, run_id: armed.run_id, source_id: 'default', identity: a, locators: [loc(rows[0])] }); await recordLearningAuthority({ engine, config, run_id: armed.run_id, source_id: 'default', identity: a, authority: 'direct_user', locators: [loc(rows[0])] });
+    return { root, config, canonicalRoot, slug, armed, a, b, bLocator: loc(rows[1]) };
+  });
 }
 
 type CorrectionFixture = Awaited<ReturnType<typeof fixture>>;
@@ -96,6 +97,33 @@ describe('Phase 5 correction lineage reducer', () => {
     expect(lineage.replacement_set_fingerprint).toBe(replacementSetFingerprint(lineage.active_replacements));
     expect(lineage.lineage_generation).toBe(2);
     expect(corrected.next.blocked_identities).toEqual([aKey]);
+  });
+
+  test('linked replacement correction propagates through ancestor lineages', () => {
+    const a = identity('A');
+    const b = identity('B');
+    const c = identity('C');
+    const aKey = learningBlockedClaimKey(a);
+    const bKey = learningBlockedClaimKey(b);
+    const cKey = learningBlockedClaimKey(c);
+    const activated = reduceLearningLoopLineage(base, {
+      kind: 'activate', identity: a,
+      pointer: { identity: aKey, canonical_slug: base.canonical_slug, row_num: 1 },
+    });
+    const correctedAB = reduceLearningLoopLineage(activated.next, {
+      kind: 'correct', predecessor: a,
+      replacement: { identity: bKey, canonical_slug: base.canonical_slug, row_num: 2 },
+    });
+    const correctedBC = reduceLearningLoopLineage(correctedAB.next, {
+      kind: 'correct', predecessor: b,
+      replacement: { identity: cKey, canonical_slug: base.canonical_slug, row_num: 3 },
+    });
+    const aLineage = correctedBC.next.correction_lineages[aKey] as any;
+    const bLineage = correctedBC.next.correction_lineages[bKey] as any;
+    expect(aLineage.active_replacements).toEqual([{ identity: cKey, canonical_slug: base.canonical_slug, row_num: 3 }]);
+    expect(aLineage.lineage_generation).toBe(3);
+    expect(bLineage.active_replacements).toEqual([{ identity: cKey, canonical_slug: base.canonical_slug, row_num: 3 }]);
+    expect(bLineage.lineage_generation).toBe(1);
   });
 
   test('PGLite activate A then correct A to an authorized B', async () => {
