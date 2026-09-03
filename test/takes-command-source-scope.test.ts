@@ -150,12 +150,19 @@ describe('gbrain takes CLI source scoping', () => {
     expect(added).toEqual([]);
   });
 
-  test('mutation rejects when explicit source identity is omitted', async () => {
-    const { engine, added } = makeEngine();
-    await expect(runTakes(engine, [
-      'add', 'shared/page', '--claim', 'No ambient source', '--kind', 'take', '--who', 'self',
-    ])).rejects.toThrow('explicit --source-id');
-    expect(added).toEqual([]);
+  test('omitted --source-id uses GBRAIN_SOURCE instead of requiring the flag', async () => {
+    const sourceDir = mkdtempSync(join(tmpdir(), 'gbrain-takes-dept-'));
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-takes-home-'));
+    tmpRoots.push(sourceDir, home);
+    const { engine, added, pageLookups } = makeEngine({ sourcePaths: { dept: sourceDir } });
+    await withEnv({ GBRAIN_SOURCE: 'dept', GBRAIN_HOME: home }, async () => {
+      await runTakes(engine, [
+        'add', 'shared/page', '--claim', 'Ambient source', '--kind', 'take', '--who', 'self',
+      ]);
+    });
+    expect(pageLookups.some(params => params[0] === 'shared/page' && params[1] === 'dept')).toBe(true);
+    expect(added[0]![0]!.page_id).toBe(22);
+    expect(readFileSync(join(sourceDir, 'shared/page.md'), 'utf-8')).toContain('Ambient source');
   });
 
   test('selected source controls both the markdown path and the DB page', async () => {

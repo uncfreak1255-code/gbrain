@@ -31,7 +31,7 @@ import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
-import { assertManagedPageMutationAllowed, assertManagedPagesMutationAllowed } from './canonical-page-write.ts';
+import { assertManagedPageMutationAllowed, assertManagedPagesMutationAllowed, assertManagedSlugMutationAllowed } from './canonical-page-write.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
@@ -1274,7 +1274,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async softDeletePage(slug: string, opts?: { sourceId?: string }): Promise<{ slug: string } | null> {
-    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'active');
     // Idempotent-as-null: only flip rows currently active. Source filter is
     // optional; without it the first matching row across sources gets soft-deleted.
     const sourceId = opts?.sourceId;
@@ -1293,7 +1293,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
-    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'deleted');
     const sourceId = opts?.sourceId;
     const where: string[] = ['slug = $1', 'deleted_at IS NOT NULL'];
     const params: unknown[] = [slug];

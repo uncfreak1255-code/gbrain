@@ -178,18 +178,6 @@
       "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
     },
     {
-      "file": "src/commands/backlinks.ts",
-      "symbol": "fixBacklinkGaps",
-      "primitive": "fs:writeFileSync",
-      "count": 1,
-      "lines": [
-        207
-      ],
-      "classification": "live_path_writer",
-      "boundary": "managed_target_reject",
-      "reason": "Legacy path lane rejects Learning Loop metadata before mutation."
-    },
-    {
       "file": "src/commands/bench-publish.ts",
       "symbol": "runBenchPublish",
       "primitive": "fs:writeFileSync",
@@ -544,19 +532,6 @@
       "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
     },
     {
-      "file": "src/commands/frontmatter.ts",
-      "symbol": "writeFrontmatterMutation",
-      "primitive": "fs:writeFileSync",
-      "count": 2,
-      "lines": [
-        188,
-        202
-      ],
-      "classification": "live_path_writer",
-      "boundary": "managed_target_reject",
-      "reason": "Legacy path lane rejects Learning Loop metadata before mutation."
-    },
-    {
       "file": "src/commands/import.ts",
       "symbol": "processFile",
       "primitive": "db:importFile",
@@ -738,18 +713,6 @@
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
       "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
-    },
-    {
-      "file": "src/commands/lint.ts",
-      "symbol": "runLintCore",
-      "primitive": "fs:writeFileSync",
-      "count": 1,
-      "lines": [
-        502
-      ],
-      "classification": "live_path_writer",
-      "boundary": "managed_target_reject",
-      "reason": "Legacy path lane rejects Learning Loop metadata before mutation."
     },
     {
       "file": "src/commands/migrate-engine.ts",
@@ -1333,18 +1296,6 @@
       "reason": "Managed imports require exact canonical readback under the source lease."
     },
     {
-      "file": "src/commands/takes.ts",
-      "symbol": "writeBody",
-      "primitive": "fs:writeFileSync",
-      "count": 1,
-      "lines": [
-        155
-      ],
-      "classification": "live_path_writer",
-      "boundary": "managed_target_reject",
-      "reason": "Legacy path lane rejects Learning Loop metadata before mutation or editor entry."
-    },
-    {
       "file": "src/commands/upgrade.ts",
       "symbol": "recordUpgradeError",
       "primitive": "fs:appendFileSync",
@@ -1849,6 +1800,19 @@
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
       "reason": "Owns the locked fsync and atomic rename implementation."
+    },
+    {
+      "file": "src/core/canonical-page-write.ts",
+      "symbol": "writeCanonicalPathMutation",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        589,
+        595
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Unmanaged path lane rejects Learning Loop metadata before mutation; registered roots use the source-qualified canonical write."
     },
     {
       "file": "src/core/claw-test/transcript-capture.ts",

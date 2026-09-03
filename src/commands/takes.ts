@@ -18,7 +18,7 @@
  *   6. releases the lock (auto via withPageLock)
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { BrainEngine, TakeKind } from '../core/engine.ts';
 import {
@@ -29,8 +29,8 @@ import {
 } from '../core/takes-fence.ts';
 import { withPageLock } from '../core/page-lock.ts';
 import {
-  assertLegacyPathMutationAllowed,
   assertUnmanagedPathMutation,
+  writeCanonicalPathMutation,
   writeSourceQualifiedCanonicalPage,
 } from '../core/canonical-page-write.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
@@ -127,9 +127,7 @@ async function getPageId(engine: BrainEngine, slug: string, sourceId?: string): 
 }
 
 async function resolveTakesSourceId(engine: BrainEngine, args: string[]): Promise<string> {
-  const sourceId = flagValue(args, '--source-id');
-  if (!sourceId) throw new Error('takes mutation requires explicit --source-id <id>');
-  return resolveSourceId(engine, sourceId);
+  return resolveSourceId(engine, flagValue(args, '--source-id'));
 }
 
 function readBodyOrEmpty(path: string): string {
@@ -145,14 +143,8 @@ async function writeBody(
   body: string,
   standalone: boolean,
 ): Promise<void> {
-  if (!standalone) {
-    await writeSourceQualifiedCanonicalPage({ engine, sourceId, slug }, body);
-    return;
-  }
-  await assertLegacyPathMutationAllowed({ engine, sourceId, slug }, path);
-  assertUnmanagedPathMutation(path, body);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, body, 'utf-8');
+  await writeCanonicalPathMutation(engine, path, body, standalone ? { slug } : { sourceId, slug });
 }
 
 // --- Subcommands ---

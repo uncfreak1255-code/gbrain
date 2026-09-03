@@ -15,7 +15,7 @@
  * validate. Pass an explicit path to validate a non-source-registered tree.
  */
 
-import { readFileSync, writeFileSync, existsSync, lstatSync, readdirSync, realpathSync } from 'fs';
+import { readFileSync, existsSync, lstatSync, readdirSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { join, relative, resolve } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
@@ -32,10 +32,7 @@ import {
 } from '../core/brain-writer.ts';
 import { isSyncable, pruneDir, slugifyPath } from '../core/sync.ts';
 import {
-  assertLegacyPathMutationAllowed,
-  assertUnmanagedPathMutation,
-  resolveEffectiveCanonicalRoot,
-  writeSourceQualifiedCanonicalPage,
+  writeCanonicalPathMutation,
 } from '../core/canonical-page-write.ts';
 
 export async function runFrontmatter(args: string[]): Promise<void> {
@@ -183,23 +180,7 @@ async function writeFrontmatterMutation(
   file: string,
   content: string,
 ): Promise<void> {
-  if (!engine) {
-    assertUnmanagedPathMutation(file, content);
-    writeFileSync(file, content, 'utf8');
-    return;
-  }
-  if (sourceId) {
-    const root = await resolveEffectiveCanonicalRoot(engine, sourceId);
-    if (!root) throw new Error(`managed_state_unavailable: source ${sourceId} has no canonical root`);
-    const rel = relative(realpathSync(root), realpathSync(file));
-    if (rel && !rel.startsWith('..') && !rel.startsWith('/')) {
-      await writeSourceQualifiedCanonicalPage({ engine, sourceId, slug: rel.replace(/\.md$/, '') }, content);
-      return;
-    }
-  }
-  await assertLegacyPathMutationAllowed({ engine, sourceId: sourceId ?? '', slug: '' }, file);
-  assertUnmanagedPathMutation(file, content);
-  writeFileSync(file, content, 'utf8');
+  await writeCanonicalPathMutation(engine, file, content, { sourceId });
 }
 
 async function runValidate(rest: string[], engine?: BrainEngine): Promise<void> {

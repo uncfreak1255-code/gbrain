@@ -410,6 +410,37 @@ export async function assertManagedPageMutationAllowed(
   }
 }
 
+/**
+ * Guard a slug mutation whose SQL may be unscoped. When sourceId is omitted,
+ * assert every source that currently holds a matching row — the same set the
+ * unscoped UPDATE would touch.
+ */
+export async function assertManagedSlugMutationAllowed(
+  engine: Pick<BrainEngine, 'executeRaw' | 'getConfig' | 'learningLoopLedgerConfig'>,
+  slug: string,
+  sourceId: string | undefined,
+  mutationClass: PageDbMutationClass,
+  rowState: 'active' | 'deleted' = 'active',
+): Promise<void> {
+  if (sourceId) {
+    await assertManagedPageMutationAllowed(engine, slug, sourceId, mutationClass);
+    return;
+  }
+  const deletedClause = rowState === 'deleted' ? 'IS NOT NULL' : 'IS NULL';
+  const rows = await engine.executeRaw<{ source_id: string }>(
+    `SELECT DISTINCT source_id FROM pages WHERE slug = $1 AND deleted_at ${deletedClause}`,
+    [slug],
+  );
+  const sourceIds = [...new Set((Array.isArray(rows) ? rows : []).map(row => row.source_id).filter(Boolean))];
+  if (sourceIds.length === 0) {
+    await assertManagedPageMutationAllowed(engine, slug, 'default', mutationClass);
+    return;
+  }
+  for (const id of sourceIds) {
+    await assertManagedPageMutationAllowed(engine, slug, id, mutationClass);
+  }
+}
+
 /** Batch form of assertManagedPageMutationAllowed for delete/sync loops. */
 export async function assertManagedPagesMutationAllowed(
   engine: Pick<BrainEngine, 'executeRaw' | 'getConfig' | 'learningLoopLedgerConfig'>,
@@ -456,22 +487,19 @@ export async function assertManagedPagesMutationAllowed(
   }
 }
 
-/**
- * Rejection-only inventory for legacy path lanes. A path inside any
- * registered source root must carry the exact source identity; overlapping or
- * ambiguous realpaths fail closed before a writer can choose a source.
- */
-export async function assertLegacyPathMutationAllowed(
-  mutation: SourceQualifiedMutation,
+interface RegisteredSourceMatch { id: string; root: string }
+
+async function matchRegisteredSourceRoots(
+  engine: Pick<BrainEngine, 'executeRaw' | 'getConfig'>,
   path: string,
-): Promise<void> {
-  const rawRows = await mutation.engine.executeRaw<{ id: string; local_path: string | null }>(
+): Promise<RegisteredSourceMatch[]> {
+  const rawRows = await engine.executeRaw<{ id: string; local_path: string | null }>(
     'SELECT id, local_path FROM sources ORDER BY id',
   );
   const rows = Array.isArray(rawRows) ? rawRows : [];
   const configuredRoots = rows.flatMap(row => row.local_path ? [{ id: row.id, path: row.local_path }] : []);
   if (rows.length === 1 && rows[0]?.id === 'default' && !rows[0].local_path) {
-    const fallback = await mutation.engine.getConfig('sync.repo_path');
+    const fallback = await engine.getConfig('sync.repo_path');
     if (fallback) configuredRoots.push({ id: 'default', path: fallback });
   }
   const lexicalCandidate = resolve(path);
@@ -493,7 +521,7 @@ export async function assertLegacyPathMutationAllowed(
       }
     }
   }
-  const matches: Array<{ id: string; root: string }> = [];
+  const matches: RegisteredSourceMatch[] = [];
   for (const configured of configuredRoots) {
     const lexicalRoot = resolve(configured.path);
     let root: string;
@@ -509,12 +537,66 @@ export async function assertLegacyPathMutationAllowed(
     }
     if (lexicalMatch) matches.push({ id: configured.id, root });
   }
+  return matches;
+}
+
+function selectRegisteredSourceMatch(
+  matches: RegisteredSourceMatch[],
+  sourceId?: string,
+): RegisteredSourceMatch | null {
+  if (matches.length === 0) return null;
+  if (sourceId) {
+    const exact = matches.filter(match => match.id === sourceId);
+    if (exact.length !== 1) {
+      throw new Error('managed_state_unavailable: canonical path requires explicit unambiguous source identity');
+    }
+    return exact[0]!;
+  }
+  if (matches.length === 1) return matches[0]!;
+  throw new Error('managed_state_unavailable: canonical path requires explicit unambiguous source identity');
+}
+
+/**
+ * Rejection-only inventory for legacy path lanes. A path inside any
+ * registered source root must carry the exact source identity; overlapping or
+ * ambiguous realpaths fail closed before a writer can choose a source.
+ */
+export async function assertLegacyPathMutationAllowed(
+  mutation: SourceQualifiedMutation,
+  path: string,
+): Promise<void> {
+  const matches = await matchRegisteredSourceRoots(mutation.engine, path);
   if (matches.length === 0) return;
   const exact = matches.filter(match => match.id === mutation.sourceId);
   if (matches.length !== 1 || exact.length !== 1) {
     throw new Error('managed_state_unavailable: canonical path requires explicit unambiguous source identity');
   }
   throw new Error('managed_state_unavailable: registered canonical path cannot use legacy path lane');
+}
+
+/**
+ * Route a CLI/path write: unique registered root → source-qualified canonical
+ * write; no registered root → unmanaged path write. Ambiguous roots fail closed.
+ */
+export async function writeCanonicalPathMutation(
+  engine: BrainEngine | undefined,
+  path: string,
+  content: string,
+  opts: { sourceId?: string; slug?: string } = {},
+): Promise<void> {
+  if (!engine) {
+    assertUnmanagedPathMutation(path, content);
+    writeFileSync(path, content, 'utf8');
+    return;
+  }
+  const selected = selectRegisteredSourceMatch(await matchRegisteredSourceRoots(engine, path), opts.sourceId);
+  if (!selected) {
+    assertUnmanagedPathMutation(path, content);
+    writeFileSync(path, content, 'utf8');
+    return;
+  }
+  const slug = opts.slug ?? relative(selected.root, resolve(path)).replace(/\.md$/, '');
+  await writeSourceQualifiedCanonicalPage({ engine, sourceId: selected.id, slug }, content);
 }
 
 /** Write one explicitly source-qualified page through the canonical boundary. */
@@ -613,6 +695,13 @@ export async function writeCanonicalPage(target: SourceQualifiedCanonicalTarget,
     }
     const candidate = options.mode === 'learning_transition' ? withDerivedProtectedStateHash(content) : content;
     const staged = prepare(candidate, current, options.mode, options.transitionPermit);
+    if (currentKnowledge && options.mode === 'non_lineage_fact') {
+      const facts = parseFactsFence(staged);
+      if (facts.warnings.length > 0 && learningLoopHasProtectedState(currentKnowledge)) {
+        throw new Error('managed_state_unavailable: protected facts fence is malformed');
+      }
+      assertManagedFactRowsPresent(currentKnowledge, facts.facts);
+    }
     atomic(path, staged, root, () => {
       checkLease(target, options.sourceLease);
       // Repeat the expectation check after all caller barriers and immediately

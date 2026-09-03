@@ -63,7 +63,7 @@ import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, b
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { purgeDeletedPagesSafely } from './purge-deleted-pages.ts';
-import { assertManagedPageMutationAllowed, assertManagedPagesMutationAllowed } from './canonical-page-write.ts';
+import { assertManagedPageMutationAllowed, assertManagedPagesMutationAllowed, assertManagedSlugMutationAllowed } from './canonical-page-write.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -1148,7 +1148,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async softDeletePage(slug: string, opts?: { sourceId?: string }): Promise<{ slug: string } | null> {
-    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'active');
     const sql = this.sql;
     const sourceId = opts?.sourceId;
     // Idempotent-as-null contract: only flip rows that are currently active.
@@ -1164,7 +1164,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
-    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'deleted');
     const sql = this.sql;
     const sourceId = opts?.sourceId;
     const sourceCondition = sourceId ? sql`AND source_id = ${sourceId}` : sql``;

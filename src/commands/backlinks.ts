@@ -10,16 +10,13 @@
  *   gbrain check-backlinks fix --dry-run                  # preview fixes
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, realpathSync } from 'fs';
+import { readFileSync, readdirSync, statSync, lstatSync, existsSync } from 'fs';
 import { join, relative, basename } from 'path';
 import { extractEntityRefs as canonicalExtractEntityRefs } from '../core/link-extraction.ts';
 import { createProgress, startHeartbeat } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import {
-  assertLegacyPathMutationAllowed,
-  assertUnmanagedPathMutation,
-  resolveEffectiveCanonicalRoot,
-  writeSourceQualifiedCanonicalPage,
+  writeCanonicalPathMutation,
 } from '../core/canonical-page-write.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, toEngineConfig } from '../core/config.ts';
@@ -195,17 +192,10 @@ export async function fixBacklinkGaps(
 
     if (!dryRun) {
       const slug = targetPage.replace(/\.md$/, '');
-      const root = mutation?.sourceId
-        ? await resolveEffectiveCanonicalRoot(mutation.engine, mutation.sourceId)
-        : null;
-      const qualified = Boolean(root && realpathSync(root!) === realpathSync(brainDir));
-      if (mutation?.sourceId && qualified) {
-        await writeSourceQualifiedCanonicalPage({ engine: mutation.engine, sourceId: mutation.sourceId, slug }, content);
-      } else {
-        if (mutation) await assertLegacyPathMutationAllowed({ engine: mutation.engine, sourceId: mutation.sourceId ?? '', slug }, targetPath);
-        assertUnmanagedPathMutation(targetPath, content);
-        writeFileSync(targetPath, content);
-      }
+      await writeCanonicalPathMutation(mutation?.engine, targetPath, content, {
+        sourceId: mutation?.sourceId,
+        slug,
+      });
     }
   }
 

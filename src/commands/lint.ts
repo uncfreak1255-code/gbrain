@@ -16,7 +16,7 @@
  *   gbrain lint <file.md>          # lint single file
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, realpathSync } from 'fs';
+import { readFileSync, readdirSync, statSync, lstatSync, existsSync } from 'fs';
 import { join, relative } from 'path';
 import { isAborted } from '../core/abort-check.ts';
 import { parseMarkdown, type ParseValidationCode } from '../core/markdown.ts';
@@ -30,10 +30,7 @@ import { loadConfig, loadConfigWithEngine, gbrainPath, toEngineConfig } from '..
 import type { BrainEngine } from '../core/engine.ts';
 import { createEngine } from '../core/engine-factory.ts';
 import {
-  assertLegacyPathMutationAllowed,
-  assertUnmanagedPathMutation,
-  resolveEffectiveCanonicalRoot,
-  writeSourceQualifiedCanonicalPage,
+  writeCanonicalPathMutation,
 } from '../core/canonical-page-write.ts';
 
 export interface LintIssue {
@@ -456,10 +453,6 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
   // (tests, Minion handler) to bypass the engine probe entirely.
   const contentSanity = opts.contentSanity ?? await resolveLintContentSanity(opts.engine);
   const lintOpts: LintContentOpts = { contentSanity };
-  const canonicalRoot = opts.engine && opts.sourceId
-    ? await resolveEffectiveCanonicalRoot(opts.engine, opts.sourceId)
-    : null;
-  const canonicalRootReal = canonicalRoot ? realpathSync(canonicalRoot) : null;
 
   let totalIssues = 0;
   let totalFixed = 0;
@@ -487,20 +480,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
         const fixCount = issues.filter(i => i.fixable).length;
         totalFixed += fixCount;
         if (!opts.dryRun) {
-          const pageReal = realpathSync(page);
-          const rel = canonicalRootReal ? relative(canonicalRootReal, pageReal) : '';
-          const qualified = Boolean(canonicalRootReal && rel && !rel.startsWith('..') && !rel.startsWith('/'));
-          if (qualified && opts.engine && opts.sourceId) {
-            await writeSourceQualifiedCanonicalPage({
-              engine: opts.engine,
-              sourceId: opts.sourceId,
-              slug: rel.replace(/\.md$/, ''),
-            }, fixed);
-          } else {
-            if (opts.engine) await assertLegacyPathMutationAllowed({ engine: opts.engine, sourceId: opts.sourceId ?? '', slug: '' }, page);
-            assertUnmanagedPathMutation(page, fixed);
-            writeFileSync(page, fixed);
-          }
+          await writeCanonicalPathMutation(opts.engine, page, fixed, { sourceId: opts.sourceId });
         }
       }
     }

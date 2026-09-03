@@ -8,8 +8,10 @@ import {
   inspectExpectedManagedState,
   assertLegacyPathMutationAllowed,
   writeSourceQualifiedCanonicalPage,
+  writeCanonicalPathMutation,
   assertUnmanagedPathMutation,
   assertManagedPagesMutationAllowed,
+  assertManagedSlugMutationAllowed,
   type CanonicalWriterMode,
   type SourceQualifiedCanonicalTarget,
   type SourceWriteLease,
@@ -45,9 +47,16 @@ function boundaryEngine(roots: Array<{ id: string; local_path: string | null }>,
   return {
     kind: 'pglite',
     db: { query: async (sql: string) => ({ rows: sql.includes('RETURNING id') ? [{ id: 'lock' }] : [] }) },
-    executeRaw: async (sql: string) => {
+    executeRaw: async (sql: string, params?: unknown[]) => {
       if (sql.includes('SELECT id, local_path FROM sources')) return roots;
-      if (sql.includes('SELECT compiled_truth, timeline FROM pages')) return managedBody ? [{ compiled_truth: managedBody, timeline: null }] : [];
+      if (sql.includes('SELECT DISTINCT source_id FROM pages')) {
+        return managedBody ? [{ source_id: roots[0]?.id ?? 's' }] : [];
+      }
+      if (sql.includes('SELECT compiled_truth, timeline FROM pages')) {
+        const sourceId = typeof params?.[1] === 'string' ? params[1] : undefined;
+        if (sourceId && roots.length > 0 && !roots.some(root => root.id === sourceId)) return [];
+        return managedBody ? [{ compiled_truth: managedBody, timeline: null }] : [];
+      }
       return [];
     },
     getConfig: async () => null,
@@ -75,6 +84,17 @@ describe('canonical page write boundary', () => {
       await expect(writeCanonicalPage(target, replacement, { mode: 'learning_transition', lockRoot: locks, sourceLease: lease })).rejects.toThrow('transition permit required');
     }, { sourceLock });
     expect(readFileSync(path, 'utf8')).toBe(managedPage(1));
+  }));
+
+  test('non_lineage_fact rejects dropping a managed fact row', async () => inRoot(async ({ target, path, locks }) => {
+    writeFileSync(path, managedPage());
+    const dropped = `# X\n\n${renderFactsTable([{ ...managedFact, rowNum: 2, claim: 'Other' }])}\n`;
+    await withSourceWriteLease(target, async lease => {
+      await expect(writeCanonicalPage(target, dropped, {
+        mode: 'non_lineage_fact', lockRoot: locks, sourceLease: lease, expectedManaged: 'expected',
+      })).rejects.toThrow('managed fact row is absent');
+    }, { sourceLock });
+    expect(readFileSync(path, 'utf8')).toBe(managedPage());
   }));
 
   test('non_lineage_fact appends a facts fence without restoring the previous table', async () => inRoot(async ({ target, path, locks }) => {
@@ -264,6 +284,26 @@ describe('source-qualified and standalone path lanes', () => {
       expect(readFileSync(planted, 'utf8')).toBe(plantedPage);
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
+
+  test('unique registered source writes without an explicit source id', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'canonical-unique-source-'));
+    try {
+      const root = join(base, 'root');
+      mkdirSync(root);
+      const page = join(root, 'note.md');
+      writeFileSync(page, '# Old\n');
+      const engine = boundaryEngine([{ id: 'host', local_path: root }]);
+      await writeCanonicalPathMutation(engine, page, '# New\n');
+      expect(readFileSync(page, 'utf8')).toBe('# New\n');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  test('unscoped slug assert rejects a managed page on a non-default source', async () => inRoot(async ({ root, path }) => {
+    writeFileSync(path, managedPage());
+    const engine = boundaryEngine([{ id: 's', local_path: root }], managedPage());
+    await expect(assertManagedSlugMutationAllowed(engine, 'x', undefined, 'destructive_admin', 'active'))
+      .rejects.toThrow('managed canonical page mutation rejected');
+  }));
 
   test('batched managed-page assert rejects one managed slug in a delete batch', async () => inRoot(async ({ root, path }) => {
     writeFileSync(path, managedPage());
