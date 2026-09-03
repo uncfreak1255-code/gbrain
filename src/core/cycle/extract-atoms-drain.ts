@@ -58,6 +58,8 @@ export interface ExtractAtomsDrainDeps {
   runBatch: (info: { deadlineMs: number }) => Promise<{
     extracted: number;
     skipped: number;
+    /** True when every attempted item failed in this batch. */
+    providerFailure?: boolean;
     failureCount?: number;
     firstError?: string;
     failures?: Array<{ source: string; reason: string }>;
@@ -79,15 +81,16 @@ export interface ExtractAtomsDrainOpts {
 
 export interface ExtractAtomsDrainResult {
   phase: 'extract_atoms';
-  status: 'ok';
+  /** Provider outage is distinct so protected jobs can retry. */
+  status: 'ok' | 'provider_failure';
   extracted: number;
   skipped: number;
   /** Eligible pages still pending after the window. null if the count errored. */
   remaining: number | null;
   /** Batches actually processed. */
   batches: number;
-  /** Why the loop stopped: drained | window | no_progress | max_batches. */
-  stopped: 'drained' | 'window' | 'no_progress' | 'max_batches';
+  /** Why the loop stopped, including a retryable provider outage. */
+  stopped: 'drained' | 'window' | 'no_progress' | 'max_batches' | 'provider_failure';
   /** Exact per-item failure total across all processed batches. */
   failure_count: number;
   /** Bounded, redacted failure records in batch order. */
@@ -109,6 +112,7 @@ export async function runExtractAtomsDrain(
     let skipped = 0;
     let batches = 0;
     let stopped: ExtractAtomsDrainResult['stopped'] = 'window';
+    let providerFailure = false;
     let failureCount = 0;
     const failures: ExtractAtomsDrainFailure[] = [];
     let lastError: string | null = null;
@@ -156,6 +160,15 @@ export async function runExtractAtomsDrain(
       }
       deps.onBatch?.({ batch: batches, extracted: r.extracted, remaining: before });
 
+      // A total provider outage must not complete a protected drain job as a
+      // clean no-progress result. Latch the state before the final recount so
+      // a concurrent cleanup cannot rewrite the stop reason to "drained".
+      if (r.providerFailure) {
+        providerFailure = true;
+        stopped = 'provider_failure';
+        break;
+      }
+
       if (deps.now() >= deadline) { stopped = 'window'; break; }
 
       // Stop if a batch made zero forward progress — extraction is failing or
@@ -165,10 +178,10 @@ export async function runExtractAtomsDrain(
     }
 
     const remaining = await deps.countRemaining();
-    if (remaining === 0) stopped = 'drained';
+    if (!providerFailure && remaining === 0) stopped = 'drained';
     return {
       phase: 'extract_atoms',
-      status: 'ok',
+      status: providerFailure ? 'provider_failure' : 'ok',
       extracted,
       skipped,
       remaining,
@@ -265,6 +278,8 @@ export async function runExtractAtomsDrainForSource(
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
+          providerFailure: typedFailures.length > 0
+            && Number(d.transcripts_processed ?? 0) + Number(d.pages_processed ?? 0) === 0,
           failureCount: typeof d.failure_count === 'number'
             ? d.failure_count
             : failures.length,

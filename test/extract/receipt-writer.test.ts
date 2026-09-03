@@ -195,7 +195,7 @@ describe('writeReceipt — frontmatter D-EXTRACT-19 belt+suspenders', () => {
       failure_count: 2,
       failures: [{
         source: 'pages/example host=db.example.com',
-        error: 'password=hunter2 provider timeout',
+        error: 'password=hunter2 Authorization: Bearer abc123DEF456ghi789 api_key=another-secret provider timeout',
         error_class: 'AITransientError password=hunter2',
         error_code: 'ETIMEDOUT',
       }],
@@ -207,6 +207,10 @@ describe('writeReceipt — frontmatter D-EXTRACT-19 belt+suspenders', () => {
     const failures = page.frontmatter?.failures as Array<Record<string, unknown>>;
     expect(failures[0]?.error).toContain('<REDACTED:password>');
     expect(failures[0]?.error).not.toContain('hunter2');
+    expect(failures[0]?.error).toContain('<REDACTED:bearer>');
+    expect(failures[0]?.error).toContain('<REDACTED:api_key>');
+    expect(failures[0]?.error).not.toContain('abc123DEF456ghi789');
+    expect(failures[0]?.error).not.toContain('another-secret');
     expect(failures[0]?.source).toContain('<REDACTED:host>');
     expect(failures[0]?.error_class).not.toContain('hunter2');
     expect(page.compiled_truth).toContain('Status: **warn**');

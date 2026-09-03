@@ -141,6 +141,60 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     expect(result.omitted_failure_count).toBe(MAX_DRAIN_FAILURE_RECORDS);
     expect(result.last_error).toBe('pages/a: <REDACTED:password> provider timeout');
   });
+
+  it('stops with provider_failure when every attempted item fails', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: async () => 5,
+        runBatch: async () => {
+          batches++;
+          return {
+            extracted: 0,
+            skipped: 0,
+            providerFailure: true,
+            failureCount: 1,
+            failures: [{ source: 'pages/a', reason: 'provider unavailable' }],
+          };
+        },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.status).toBe('provider_failure');
+    expect(result.stopped).toBe('provider_failure');
+    expect(result.remaining).toBe(5);
+    expect(batches).toBe(1);
+  });
+
+  it('does not rewrite provider_failure to drained after a zero final recount', async () => {
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: seq([3, 0]),
+        runBatch: async () => ({ extracted: 0, skipped: 0, providerFailure: true }),
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.status).toBe('provider_failure');
+    expect(result.stopped).toBe('provider_failure');
+    expect(result.remaining).toBe(0);
+  });
+});
+
+describe('extract-atoms-drain handler retry contract', () => {
+  const jobsSrc = readFileSync(join(import.meta.dir, '../src/commands/jobs.ts'), 'utf8');
+  const handlerBlock = jobsSrc.slice(
+    jobsSrc.indexOf("registerProviderHandler('extract-atoms-drain'"),
+    jobsSrc.indexOf("registerProviderHandler('extract-atoms-drain'") + 2600,
+  );
+
+  it('throws on provider_failure so the durable job retries', () => {
+    expect(handlerBlock).toContain("result.status === 'provider_failure'");
+    expect(handlerBlock).toMatch(/if \(result\.status === 'provider_failure'\) \{\s*throw new Error/);
+  });
 });
 
 // #1685 GAP D (CODEX #1) — the auto-drain Minion job burns Haiku, so it must be

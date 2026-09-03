@@ -66,6 +66,17 @@ describe('redactConnectionInfo: per-pattern coverage', () => {
     expect(out).toContain('<REDACTED:ipv4>');
     expect(out).not.toContain('192.168.1.42');
   });
+
+  it('case 7 — bearer and API-key credentials in provider errors', () => {
+    const out = redactConnectionInfo(
+      'Authorization: Bearer abc123DEF456ghi789 x-api-key: secret-api-key api_key=another-secret',
+    );
+    expect(out).toContain('<REDACTED:bearer>');
+    expect(out).toContain('<REDACTED:api_key>');
+    expect(out).not.toContain('abc123DEF456ghi789');
+    expect(out).not.toContain('secret-api-key');
+    expect(out).not.toContain('another-secret');
+  });
 });
 
 describe('redactConnectionInfo: false-positive defense', () => {
@@ -144,8 +155,8 @@ describe('redactConnectionInfo: real-world fixtures', () => {
 });
 
 describe('getRedactionKinds: pattern-set surface', () => {
-  it('exposes all 5 expected kinds for surface-stability tests', () => {
+  it('exposes all 7 expected kinds for surface-stability tests', () => {
     const kinds = getRedactionKinds();
-    expect(kinds).toEqual(['pg_url', 'password', 'user', 'host', 'ipv4']);
+    expect(kinds).toEqual(['pg_url', 'bearer', 'api_key', 'password', 'user', 'host', 'ipv4']);
   });
 });
