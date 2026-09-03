@@ -74,4 +74,9 @@ describe('autopilot auto-drain wiring', () => {
     expect(SRC).toContain('const PER_JOB_USD = PER_ATTEMPT_USD * AUTO_DRAIN_MAX_ATTEMPTS');
     expect(SRC).toContain('Math.floor(maxUsdPerDay / PER_JOB_USD)');
   });
+
+  test('daily cap reserves live jobs that cross the UTC-midnight boundary', () => {
+    expect(SRC).toContain('created_at < $1::timestamptz');
+    expect(SRC).toContain("status IN ('waiting','active','delayed','waiting-children','paused')");
+  });
 });

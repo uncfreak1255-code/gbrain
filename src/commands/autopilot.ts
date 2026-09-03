@@ -952,7 +952,16 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                 let submittedToday = 0;
                 try {
                   const rows = await engine.executeRaw<{ cnt: number }>(
-                    `SELECT count(*)::int AS cnt FROM minion_jobs WHERE name = 'extract-atoms-drain' AND created_at >= $1::timestamptz`,
+                    `SELECT count(*)::int AS cnt
+                     FROM minion_jobs
+                     WHERE name = 'extract-atoms-drain'
+                       AND (
+                         created_at >= $1::timestamptz
+                         OR (
+                           created_at < $1::timestamptz
+                           AND status IN ('waiting','active','delayed','waiting-children','paused')
+                         )
+                       )`,
                     [`${utcDay}T00:00:00Z`],
                   );
                   submittedToday = rows[0]?.cnt ?? 0;
