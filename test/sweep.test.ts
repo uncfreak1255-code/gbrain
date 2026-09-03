@@ -577,6 +577,20 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
     expect((ledger as { usd: number }).usd).toBeCloseTo(0.004001, 6);
   });
 
+  test('two peers reserving on a fresh row are both admitted while the day has room', async () => {
+    // Both miss the same-day row, both issue the same-day add first (0 rows),
+    // one INSERT wins; the loser must retry the add, not be refused.
+    const [a, b] = await Promise.all([
+      reserveSweepSpendToday(engine, 0.005, 0.01, utcDay()),
+      reserveSweepSpendToday(engine, 0.005, 0.01, utcDay()),
+    ]);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(await readSweepSpendLedger(engine)).toEqual({ day: utcDay(), usd: 0.01 });
+    // And the third peer is refused for the right reason: the cap is full.
+    expect(await reserveSweepSpendToday(engine, 0.005, 0.01, utcDay())).toBeNull();
+  });
+
   test('a run that started on an earlier day cannot clobber today\'s row', async () => {
     await engine.setConfig('facts.sweep_spend_ledger', JSON.stringify({ day: utcDay(), usd: 1 }));
     expect(await settleSweepSpendToday(engine, 0.5, 0.1, '2000-01-01')).toBeNull();
