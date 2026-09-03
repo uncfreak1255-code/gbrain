@@ -37,7 +37,9 @@ Flags:
   --source <id>      Source to sweep (default: GBRAIN_SOURCE or 'default').
   --budget-ms <n>    Wall-clock budget; sweep stops between items (default 5000).
   --batch-limit <n>  Max pages / corpus files per pass (default 20).
-  --max-usd <n>      Projected corpus-call ceiling. Otherwise reads facts.sweep_max_usd.
+  --max-usd <n>      Per-run projected corpus-call ceiling. Otherwise reads
+                     facts.sweep_max_usd. The per-day ceiling
+                     (facts.sweep_max_usd_per_day) is config-only and always applies.
   --json             Print the SweepReport as JSON on stdout.
 
 Exit codes: 0 = success or partial (see "skipped" in the report);
@@ -127,7 +129,13 @@ export async function runSweep(engine: BrainEngine, args: string[]): Promise<voi
     console.log(`  links removed:      ${report.linksRemoved}`);
     console.log(`  timeline extracted: ${report.timelineExtracted}`);
     console.log(`  corpus ingested:    ${report.corpusIngested}`);
-    console.log(`  corpus cost:        $${report.spentUsd.toFixed(6)}${report.maxCostUsd !== undefined ? ` / projected cap $${report.maxCostUsd.toFixed(2)}` : ''}`);
+    console.log(`  corpus cost:        $${report.spentUsd.toFixed(6)}${report.maxCostUsd !== undefined ? ` / run cap $${report.maxCostUsd.toFixed(2)}` : ''}`);
+    if (report.dailyCapUsd !== undefined) {
+      // dailySpentUsd is unset only when the ledger write failed (see the
+      // daily_ledger_write_failed:corpus skip) — say so instead of printing $0.
+      const today = report.dailySpentUsd === undefined ? 'unledgered' : `$${report.dailySpentUsd.toFixed(6)}`;
+      console.log(`  corpus today (UTC): ${today} / day cap $${report.dailyCapUsd.toFixed(2)}`);
+    }
     if (report.skipped.length > 0) {
       console.log('  skipped:');
       for (const s of report.skipped) {

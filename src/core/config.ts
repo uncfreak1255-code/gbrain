@@ -1377,7 +1377,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // own docstring tells operators to flip it with
   // `gbrain config set facts.extraction_enabled false` — which was rejected
   // as an unknown key until this registration.
-  'facts.extraction_enabled', 'facts.sweep_max_usd', // required projected USD ceiling for sweep corpus calls
+  'facts.extraction_enabled', 'facts.sweep_max_usd', 'facts.sweep_max_usd_per_day', 'facts.sweep_spend_ledger', // sweep corpus spend caps (both required) + sweep-owned day ledger — sweep.ts
   // Open-loop engine kill switch: LLM commitment/decision extraction over
   // google-source email pages (default ON for google sources; deterministic
   // thread detection is unaffected). `gbrain config set loops.extraction_enabled false`.

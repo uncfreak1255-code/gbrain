@@ -114,12 +114,92 @@ export interface SweepReport {
   /** Stale sweep-owned edges reconciled away (#4196). */
   linksRemoved: number;
   timelineExtracted: number;
-  /** Projected pre-call ceiling applied to the corpus pass, when valid. */
+  /**
+   * Effective pre-call USD ceiling applied to this sweep's corpus pass:
+   * min(`facts.sweep_max_usd`, today's remaining per-day headroom). Set only
+   * when the pass ran.
+   */
   maxCostUsd?: number;
+  /** Configured per-UTC-day ceiling (`facts.sweep_max_usd_per_day`), when valid. */
+  dailyCapUsd?: number;
+  /**
+   * Today's (UTC) cumulative corpus spend across every sweep in every serve
+   * process, including this sweep — the `facts.sweep_spend_ledger` row.
+   */
+  dailySpentUsd?: number;
   /** Actual gateway-recorded cost for this sweep's corpus pass. */
   spentUsd: number;
   skipped: SweepSkip[];
   durationMs: number;
+}
+
+/** Per-run projected USD ceiling for the corpus pass: `gbrain config set facts.sweep_max_usd 0.5`. */
+export const SWEEP_RUN_CAP_CONFIG_KEY = 'facts.sweep_max_usd';
+/** Per-UTC-day USD ceiling across every sweep in every serve process: `gbrain config set facts.sweep_max_usd_per_day 2`. */
+export const SWEEP_DAILY_CAP_CONFIG_KEY = 'facts.sweep_max_usd_per_day';
+/** Sweep-owned ledger row `{"day":"YYYY-MM-DD","usd":n}`: today's corpus spend so far. Unset it to reset the day. */
+export const SWEEP_SPEND_LEDGER_CONFIG_KEY = 'facts.sweep_spend_ledger';
+
+/** Which ceiling produced the run's effective cap — names the skip reason when it trips. */
+export type SweepCapSource = 'run' | 'day';
+
+export interface SweepSpendLedger { day: string; usd: number; }
+
+/** UTC calendar day, the ledger's bucket (the budget audit rows are UTC too). */
+export function utcDay(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+function parsePositiveUsd(raw: string | null | undefined): number | undefined {
+  if (raw === null || raw === undefined || raw.trim() === '') return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function capExhaustedReason(source: SweepCapSource): string {
+  return source === 'day' ? 'daily_cap_exhausted:corpus' : 'cost_cap_exhausted:corpus';
+}
+
+/**
+ * Read the per-day spend ledger. `null` = no row yet (a fresh brain);
+ * `'invalid'` = a row that is not `{"day":"YYYY-MM-DD","usd":n>=0}` — the
+ * caller fails closed on it rather than reading a broken counter as zero.
+ */
+export async function readSweepSpendLedger(engine: BrainEngine): Promise<SweepSpendLedger | null | 'invalid'> {
+  const raw = await engine.getConfig(SWEEP_SPEND_LEDGER_CONFIG_KEY);
+  if (raw === null || raw === undefined || raw.trim() === '') return null;
+  try {
+    const parsed = JSON.parse(raw) as { day?: unknown; usd?: unknown } | null;
+    if (!parsed || typeof parsed !== 'object') return 'invalid';
+    if (typeof parsed.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.day)) return 'invalid';
+    if (typeof parsed.usd !== 'number' || !Number.isFinite(parsed.usd) || parsed.usd < 0) return 'invalid';
+    return { day: parsed.day, usd: parsed.usd };
+  } catch {
+    return 'invalid';
+  }
+}
+
+/** Today's ledgered corpus spend: 0 with no row or a row from another day. Throws on an invalid row. */
+export async function readSweepSpendToday(engine: BrainEngine, day: string = utcDay()): Promise<number> {
+  const ledger = await readSweepSpendLedger(engine);
+  if (ledger === 'invalid') throw new Error(`${SWEEP_SPEND_LEDGER_CONFIG_KEY} is not {"day","usd"}`);
+  return ledger && ledger.day === day ? ledger.usd : 0;
+}
+
+/**
+ * Add one sweep's recorded corpus spend to today's ledger; returns the new
+ * total. Read-modify-write on the config row: two serve processes ledgering
+ * at the same instant can lose one run's delta, which the per-run cap
+ * bounds — so the day ceiling's overshoot is at most one run cap per
+ * concurrent serve process, never unbounded. A row from a previous day is
+ * replaced, not summed.
+ */
+export async function addSweepSpendToday(engine: BrainEngine, usd: number, day: string = utcDay()): Promise<number> {
+  const before = await readSweepSpendToday(engine, day);
+  if (!(usd > 0)) return before;
+  const total = Math.round((before + usd) * 1e6) / 1e6;
+  await engine.setConfig(SWEEP_SPEND_LEDGER_CONFIG_KEY, JSON.stringify({ day, usd: total }));
+  return total;
 }
 
 /**
@@ -234,30 +314,71 @@ export async function runMaintenanceSweep(
       if (overBudget()) {
         skip('budget_exhausted:corpus');
       } else {
-        const configuredCap = opts.maxCostUsd ?? Number(await engine.getConfig('facts.sweep_max_usd'));
-        if (!Number.isFinite(configuredCap) || configuredCap <= 0) {
+        // Spend contract: the corpus pass never calls a paid provider without
+        // BOTH a per-run and a per-day USD ceiling. The per-run cap bounds one
+        // sweep; the per-day cap bounds the SUM of every sweep in every serve
+        // process (each `gbrain serve` fires an idle sweep every 10 minutes,
+        // so a per-run cap alone leaks cap × 6 × processes per hour). The
+        // run's tracker is capped at min(run cap, today's remaining headroom),
+        // which gives the day ceiling the same PRE-call reserve semantics as
+        // the run ceiling. Missing or invalid keys fail closed.
+        const runCap = opts.maxCostUsd ?? parsePositiveUsd(await engine.getConfig(SWEEP_RUN_CAP_CONFIG_KEY));
+        const dailyCap = parsePositiveUsd(await engine.getConfig(SWEEP_DAILY_CAP_CONFIG_KEY));
+        const day = utcDay();
+        const ledger = await readSweepSpendLedger(engine);
+        if (runCap === undefined) {
           skip('cost_cap_missing_or_invalid:corpus');
+        } else if (dailyCap === undefined) {
+          skip('daily_cap_missing_or_invalid:corpus');
+        } else if (ledger === 'invalid') {
+          // A counter the sweep cannot read is not zero: refuse, and leave the
+          // row for the operator (`gbrain config unset facts.sweep_spend_ledger`).
+          skip('daily_ledger_invalid:corpus');
+          log(`[sweep] ${SWEEP_SPEND_LEDGER_CONFIG_KEY} is not {"day","usd"} — corpus pass refused; unset the row to reset the day`);
         } else {
-          const { BudgetTracker, loadPricingOverrides } = await import('./budget/budget-tracker.ts');
-          const { withBudgetTracker } = await import('./ai/gateway.ts');
-          const tracker = new BudgetTracker({
-            maxCostUsd: configuredCap,
-            label: 'sweep:corpus',
-            pricingOverrides: await loadPricingOverrides(engine),
-          });
-          report.maxCostUsd = configuredCap;
-          await withBudgetTracker(tracker, () => runCorpusIngestPass(engine, {
-            sourceId,
-            batchLimit,
-            overBudget,
-            signal: budgetController.signal,
-            capabilities: opts.capabilities,
-            report,
-            skip,
-            log,
-            costTracker: tracker,
-          }));
-          report.spentUsd = tracker.snapshot().cumulativeCostUsd;
+          const spentToday = ledger && ledger.day === day ? ledger.usd : 0;
+          report.dailyCapUsd = dailyCap;
+          if (spentToday >= dailyCap) {
+            report.dailySpentUsd = spentToday;
+            skip('daily_cap_exhausted:corpus');
+          } else {
+            const headroom = dailyCap - spentToday;
+            const capSource: SweepCapSource = headroom < runCap ? 'day' : 'run';
+            const effectiveCap = Math.min(runCap, headroom);
+            const { BudgetTracker, loadPricingOverrides } = await import('./budget/budget-tracker.ts');
+            const { withBudgetTracker } = await import('./ai/gateway.ts');
+            const tracker = new BudgetTracker({
+              maxCostUsd: effectiveCap,
+              label: 'sweep:corpus',
+              pricingOverrides: await loadPricingOverrides(engine),
+            });
+            report.maxCostUsd = effectiveCap;
+            try {
+              await withBudgetTracker(tracker, () => runCorpusIngestPass(engine, {
+                sourceId,
+                batchLimit,
+                overBudget,
+                signal: budgetController.signal,
+                capabilities: opts.capabilities,
+                report,
+                skip,
+                log,
+                costTracker: tracker,
+                capSource,
+              }));
+            } finally {
+              // Ledger the run's spend on every exit path (cap hit, abort,
+              // error): a dollar the ledger never saw is a dollar the day
+              // cap cannot stop.
+              report.spentUsd = tracker.snapshot().cumulativeCostUsd;
+              try {
+                report.dailySpentUsd = await addSweepSpendToday(engine, report.spentUsd, day);
+              } catch (e) {
+                skip('daily_ledger_write_failed:corpus');
+                log(`[sweep] could not write ${SWEEP_SPEND_LEDGER_CONFIG_KEY}: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+          }
         }
       }
     } catch (e) {
@@ -581,9 +702,10 @@ async function runCorpusIngestPass(
     capabilities?: CapabilityReport;
     log: (msg: string) => void;
     costTracker: import('./budget/budget-tracker.ts').BudgetTracker;
+    capSource: SweepCapSource;
   },
 ): Promise<void> {
-  const { sourceId, batchLimit, overBudget, signal, report, skip, log, costTracker } = ctx;
+  const { sourceId, batchLimit, overBudget, signal, report, skip, log, costTracker, capSource } = ctx;
 
   // Corpus dir: dream's session corpus (transcripts.ts:66 precedent);
   // default ~/.gbrain/transcripts/corpus (GBRAIN_HOME-aware via configDir).
@@ -817,13 +939,13 @@ async function runCorpusIngestPass(
       );
       report.corpusIngested += 1;
       if (costTracker.snapshot().cumulativeCostUsd > (report.maxCostUsd ?? Number.POSITIVE_INFINITY)) {
-        skip('cost_cap_exhausted:corpus', candidates.length - i - 1);
+        skip(capExhaustedReason(capSource), candidates.length - i - 1);
         abortLoop = true;
       }
     } catch (e) {
       const budgetError = findBudgetError(e);
       if (budgetError) {
-        skip(budgetError.reason === 'no_pricing' ? 'cost_cap_no_pricing:corpus' : 'cost_cap_exhausted:corpus', candidates.length - i);
+        skip(budgetError.reason === 'no_pricing' ? 'cost_cap_no_pricing:corpus' : capExhaustedReason(capSource), candidates.length - i);
         abortLoop = true;
       } else if (e instanceof Error && e.name === 'AbortError') {
         skip('budget_exhausted:corpus', candidates.length - i);
