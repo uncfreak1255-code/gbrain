@@ -3839,18 +3839,16 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
           if (res) {
             const u = res.usage ?? ({} as Partial<ChatResult['usage']>);
             const charge = usageForBudgetRecord({ inputTokens: u.input_tokens as number, outputTokens: u.output_tokens as number, cacheReadTokens: u.cache_read_tokens, cacheCreationTokens: u.cache_creation_tokens }, { inputTokens: estimatedInputTokens, outputTokens: maxOutputTokens });
-            tracker.record({ modelId: res.model ?? modelStrEarly, inputTokens: charge.inputTokens, outputTokens: charge.outputTokens,
+            tracker.record({ modelId: res.model ?? modelStrEarly, pricingModelId: modelStrEarly, inputTokens: charge.inputTokens, outputTokens: charge.outputTokens,
               cacheReadTokens: charge.cacheReadTokens, cacheCreationTokens: charge.cacheCreationTokens, label: charge.unmetered ? 'gateway.chat.unmetered' : 'gateway.chat' });
           } else {
-            const usage = _extractUsageFromError(threw, {
-              inputTokens: estimatedInputTokens,
-              outputTokens: maxOutputTokens,
-            });
+            const projection = { inputTokens: estimatedInputTokens, outputTokens: maxOutputTokens };
+            const usage = usageForBudgetRecord(_extractUsageFromError(threw, projection), projection);
             tracker.record({
               modelId: modelStrEarly,
               inputTokens: usage.inputTokens,
               outputTokens: usage.outputTokens,
-              label: 'gateway.chat',
+              label: usage.unmetered ? 'gateway.chat.unmetered' : 'gateway.chat',
             });
           }
         } catch {
@@ -3955,6 +3953,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     try {
       tracker.record({
         modelId: modelLabel,
+        pricingModelId: modelStrEarly,
         inputTokens,
         outputTokens,
         cacheReadTokens, cacheCreationTokens,
@@ -4075,11 +4074,9 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   } catch (err) {
     // Pessimistic fallback (A3 amended): when err.usage isn't there, charge
     // the worst-case ceiling — better to overcount on failure than under.
-    const fallback = _extractUsageFromError(err, {
-      inputTokens: estimatedInputTokens,
-      outputTokens: maxOutputTokens,
-    });
-    _recordBudget(`${recipe.id}:${modelId}`, fallback.inputTokens, fallback.outputTokens);
+    const projection = { inputTokens: estimatedInputTokens, outputTokens: maxOutputTokens };
+    const fallback = usageForBudgetRecord(_extractUsageFromError(err, projection), projection);
+    _recordBudget(`${recipe.id}:${modelId}`, fallback.inputTokens, fallback.outputTokens, 0, 0, fallback.unmetered ? 'gateway.chat.unmetered' : 'gateway.chat');
     throw normalizeAIError(err, `chat(${recipe.id}:${modelId})`);
   }
 }

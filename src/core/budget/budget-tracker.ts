@@ -52,6 +52,12 @@ export interface BudgetEstimate {
 
 export interface BudgetActualUsage {
   modelId: string;
+  /**
+   * Model id to PRICE with when it differs from the audit label — the id the
+   * matching reserve() used (pre-alias), so an operator override keyed by the
+   * alias applies at record time too. Falls back to `modelId` when unpriced.
+   */
+  pricingModelId?: string;
   /** Uncached input tokens billed at the ordinary input rate. */
   inputTokens: number;
   outputTokens?: number;
@@ -72,6 +78,8 @@ export interface BudgetSnapshot {
   maxCostUsd?: number;
   maxRuntimeMs?: number;
   callsRecorded: number;
+  /** Calls charged at the pre-call projection because usage was unusable. */
+  unmeteredCalls: number;
 }
 
 export interface BudgetTrackerOpts {
@@ -380,6 +388,8 @@ export class BudgetTracker {
   /** FIFO of unsettled projections keyed `${modelId}|${kind}` (gateway pairs reserve→record 1:1). */
   private readonly outstandingByKey = new Map<string, number[]>();
   private callsRecorded = 0;
+  /** Records whose label ends in `.unmetered`: charged at the projection because the provider reported no usable usage. */
+  private unmeteredCalls = 0;
   private readonly startedAt: number;
   private readonly auditPath: string;
   private readonly onExhaustedCbs: Array<() => void> = [];
@@ -565,8 +575,9 @@ export class BudgetTracker {
       cacheCreationTokens: clampTokens(reported.cacheCreationTokens),
     };
     const kind: BudgetKind = actual.kind ?? 'chat';
-    const cost = costForUsage(
-      actual.modelId,
+    if (actual.label?.endsWith('.unmetered')) this.unmeteredCalls++;
+    const priceWith = (id: string): number | null => costForUsage(
+      id,
       actual.inputTokens,
       actual.outputTokens ?? 0,
       kind,
@@ -574,6 +585,10 @@ export class BudgetTracker {
       actual.cacheReadTokens ?? 0,
       actual.cacheCreationTokens ?? 0,
     );
+    // Price with the id reserve() used first (overrides keyed by an alias
+    // must not silently fall back to the shipped table for the canonical
+    // id), then the canonical id.
+    const cost = (actual.pricingModelId ? priceWith(actual.pricingModelId) : null) ?? priceWith(actual.modelId);
 
     if (cost === null) {
       // Unpriced model: record audit but skip cumulative math. Cap (if set)
@@ -634,6 +649,7 @@ export class BudgetTracker {
       maxCostUsd: this.opts.maxCostUsd,
       maxRuntimeMs: this.opts.maxRuntimeMs,
       callsRecorded: this.callsRecorded,
+      unmeteredCalls: this.unmeteredCalls,
     };
   }
 

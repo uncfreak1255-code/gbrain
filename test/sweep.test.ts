@@ -652,6 +652,79 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
     expect(await readSweepSpendLedger(engine)).toEqual({ day: utcDay(), usd: 0.100001 });
   });
 
+  test('an overshoot whose immediate settle fails once still reaches the row on the final settle', async () => {
+    await engine.setConfig('facts.sweep_max_usd', '0.005');
+    await engine.setConfig('pricing.overrides', JSON.stringify({
+      'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
+      'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
+    }));
+    writeFileSync(join(corpusDir, 'huge-transient.txt'), 'Far more output than projected, then a ledger blip.\n');
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({ facts: [] }), blocks: [], stopReason: 'end',
+      usage: { input_tokens: 1, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-haiku-4-5', providerId: 'anthropic',
+    }));
+
+    let settleAttempts = 0;
+    const flaky = ledgerFaultEngine((sql, params) => {
+      if (!(isLedgerStatement(sql, params) && sql.includes('GREATEST'))) return false;
+      settleAttempts += 1;
+      return settleAttempts === 1; // the overshoot's own settle dies; the final settle works
+    });
+    const r = await runMaintenanceSweep(flaky, { sourceId: 'default', capabilities: KEYED });
+    expect(settleAttempts).toBe(2);
+    expect(r.spentUsd).toBeCloseTo(0.100001, 6);
+    expect(r.skipped).toContainEqual({ reason: 'cost_cap_overshoot:corpus', count: 1 });
+    expect(r.skipped).toContainEqual({ reason: 'daily_ledger_settle_failed:corpus', count: 1 });
+    // The row holds the truth, not the $0.005 booking.
+    expect(await readSweepSpendLedger(engine)).toEqual({ day: utcDay(), usd: 0.100001 });
+    expect(r.dailySpentUsd).toBeCloseTo(0.100001, 6);
+  });
+
+  test('seam: input reported but output missing is charged the output projection', async () => {
+    await engine.setConfig('facts.sweep_max_usd', '0.006');
+    await engine.setConfig('pricing.overrides', JSON.stringify({
+      'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
+      'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
+    }));
+    for (const name of ['pa.txt', 'pb.txt', 'pc.txt']) writeFileSync(join(corpusDir, name), `Partial usage ${name}.\n`);
+    let chatCalls = 0;
+    __setChatTransportForTests(async (): Promise<ChatResult> => {
+      chatCalls += 1;
+      return {
+        text: JSON.stringify({ facts: [] }), blocks: [], stopReason: 'end',
+        usage: { input_tokens: 812, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'anthropic:claude-haiku-4-5', providerId: 'anthropic',
+      };
+    });
+    const r = await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED, batchLimit: 3 });
+    expect(chatCalls).toBe(1);
+    expect(r.spentUsd).toBeGreaterThan(0.004);
+    expect(r.skipped).toContainEqual({ reason: 'cost_cap_exhausted:corpus', count: 2 });
+    expect(r.skipped).toContainEqual({ reason: 'cost_unmetered_calls:corpus', count: 1 });
+  });
+
+  test('seam: a thrown provider error carrying zero usage is charged the projection', async () => {
+    await engine.setConfig('facts.sweep_max_usd', '0.006');
+    await engine.setConfig('pricing.overrides', JSON.stringify({
+      'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
+      'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
+    }));
+    for (const name of ['ea.txt', 'eb.txt', 'ec.txt']) writeFileSync(join(corpusDir, name), `Error usage ${name}.\n`);
+    let chatCalls = 0;
+    __setChatTransportForTests(async () => {
+      chatCalls += 1;
+      const e = new Error('provider 500 with zero usage') as Error & { usage?: unknown };
+      e.usage = { input_tokens: 0, output_tokens: 0 };
+      throw e;
+    });
+    const r = await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED, batchLimit: 3 });
+    expect(chatCalls).toBe(1);
+    expect(r.corpusIngested).toBe(0);
+    expect(r.spentUsd).toBeGreaterThan(0.004);
+    expect(r.skipped).toContainEqual({ reason: 'cost_cap_exhausted:corpus', count: 2 });
+  });
+
   test('keyless: skipped with reason keyless, sidecar NOT written', async () => {
     writeFileSync(join(corpusDir, 'session-1.txt'), 'User said something notable.\n');
 

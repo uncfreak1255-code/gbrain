@@ -99,11 +99,20 @@ Mechanics, in the order they run:
    day's row.
 
 What can still exceed the day cap: only a single call whose true cost beats
-its projection (the tracker records the true cost and names it,
-`*_cap_overshoot:corpus`). The bucket is a UTC calendar day, so a rolling
-24-hour window straddling midnight can reach 2× the day cap. A response with
-no usable token usage is charged at the projection (`gateway.chat.unmetered`
-in the audit), never at $0. The sweep loads `pricing.overrides` strictly: a
+its projection (the tracker records the true cost, names it
+`*_cap_overshoot:corpus`, and books it into the row immediately). The one way
+the row can sit *below* the truth is that immediate booking failing — and a
+ledger that cannot be written also refuses the next reservation, so it cannot
+compound. Never `config unset facts.sweep_spend_ledger` while a sweep is
+running: a run that booked into the old row settles against the new one. The bucket is a UTC calendar day, so a rolling
+24-hour window straddling midnight can reach 2× the day cap. A response whose
+usage is missing on either side (no `usage` at all, or `completion_tokens ?? 0`
+from an openai-compatible route) is charged the projection for that side
+(`gateway.chat.unmetered` in the audit, `cost_unmetered_calls:corpus` in the
+report), never $0; the same applies to a thrown provider error that carries
+zero usage. A `pricing.overrides` entry keyed by a model alias (for example
+`anthropic:claude-haiku-4-5` for the dated id) is honored at record time as
+well as at reserve time. The sweep loads `pricing.overrides` strictly: a
 row it cannot read as a complete rate table refuses the pass
 (`pricing_overrides_invalid:corpus`) rather than repricing at the shipped
 table — and a rate you set to `0` disables the guard for that model, by your

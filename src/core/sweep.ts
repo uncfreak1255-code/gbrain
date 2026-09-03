@@ -162,6 +162,14 @@ function parsePositiveUsd(raw: string | null | undefined): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/**
+ * Dollar amounts cross into SQL as decimal text with nine places: enough for
+ * any priced token, and it strips the float noise a JS subtraction leaves
+ * (0.004001 − 0.005 = −0.0009990000000000001), which the ceil-at-six-places
+ * storage would otherwise round up by a microdollar.
+ */
+const money = (n: number): string => n.toFixed(9);
+
 function capExhaustedReason(source: SweepCapSource): string {
   return source === 'day' ? 'daily_cap_exhausted:corpus' : 'cost_cap_exhausted:corpus';
 }
@@ -214,20 +222,20 @@ export async function reserveSweepSpendToday(
   if (!(Number.isFinite(usd) && usd > 0 && Number.isFinite(cap) && usd <= cap)) return null;
   const added = await engine.executeRaw<{ value: string }>(
     `UPDATE config
-        SET value = jsonb_build_object('day', $2::text, 'usd', round((value::jsonb->>'usd')::numeric + $3::numeric, 6))::text
+        SET value = jsonb_build_object('day', $2::text, 'usd', ceil(((value::jsonb->>'usd')::numeric + $3::numeric) * 1000000) / 1000000)::text
       WHERE key = $1
         AND value::jsonb->>'day' = $2::text
         AND (value::jsonb->>'usd')::numeric + $3::numeric <= $4::numeric
       RETURNING value`,
-    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, String(usd), String(cap)],
+    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, money(usd), money(cap)],
   );
   const rows = added.length === 1 ? added : await engine.executeRaw<{ value: string }>(
     `INSERT INTO config (key, value)
-       VALUES ($1, jsonb_build_object('day', $2::text, 'usd', round($3::numeric, 6))::text)
+       VALUES ($1, jsonb_build_object('day', $2::text, 'usd', ceil($3::numeric * 1000000) / 1000000)::text)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
          WHERE config.value::jsonb->>'day' < $2::text
       RETURNING value`,
-    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, String(usd)],
+    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, money(usd)],
   );
   if (rows.length !== 1) return null;
   const row = parseSweepSpendLedger(rows[0].value);
@@ -238,8 +246,9 @@ export async function reserveSweepSpendToday(
 }
 
 /**
- * Replace this run's reservation with what it actually spent: adds
- * (actual − reserved) to today's row, floored at 0, in one statement. Returns
+ * Move this run's booking from `reserved` to `actual`: adds (actual − reserved)
+ * to today's row, floored at 0, in one statement; stored values round UP at
+ * the sixth decimal so the row never sits below the truth by rounding. Returns
  * the row after the write, or `null` when today's row is no longer today's
  * (the run straddled UTC midnight: its reservation stays booked to the day
  * that authorized it — an over-count, never an under-count). Throws on DB
@@ -254,14 +263,14 @@ export async function settleSweepSpendToday(
   const delta = (Number.isFinite(actual) ? Math.max(0, actual) : reserved) - reserved;
   const rows = await engine.executeRaw<{ value: string }>(
     `UPDATE config
-        SET value = jsonb_build_object('day', $2::text, 'usd', round(GREATEST((value::jsonb->>'usd')::numeric + $3::numeric, 0), 6))::text
+        SET value = jsonb_build_object('day', $2::text, 'usd', ceil(GREATEST((value::jsonb->>'usd')::numeric + $3::numeric, 0) * 1000000) / 1000000)::text
       WHERE key = $1 AND value::jsonb->>'day' = $2::text
       RETURNING value`,
-    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, String(delta)],
+    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, money(delta)],
   );
   if (rows.length !== 1) return null;
   const row = parseSweepSpendLedger(rows[0].value);
-  return row === null || row === 'invalid' ? null : row;
+  return row === null || row === 'invalid' || row.day !== day ? null : row;
 }
 
 /**
@@ -301,6 +310,13 @@ type SweepSpendCtx =
       capSource: SweepCapSource;
       /** Books the run ceiling into the day ledger; throws when the ledger cannot be written. */
       reserveDaySpend: () => Promise<'reserved' | 'refused'>;
+      /**
+       * Moves the booking to `usd` right now (idempotent; the final settle
+       * in the caller's finally becomes a no-op when nothing changed). The
+       * pass calls it the moment a call's TRUE cost exceeds the booking, so
+       * an overshoot reaches the row before anything else can go wrong.
+       */
+      settleDaySpendTo: (usd: number) => Promise<void>;
     };
 
 type SweepSpendGate =
@@ -517,33 +533,51 @@ export async function runMaintenanceSweep(
           // day cap, and a ledger that cannot be written refuses the pass
           // instead of letting it run unmetered. Idle sweeps with nothing
           // to ingest never touch the row.
-          const booked: { row: SweepSpendLedger | null } = { row: null };
+          // `booked.usd` is what this run currently holds in the row: the
+          // reservation at first, then whatever the last successful settle
+          // moved it to — so settling twice never double-counts.
+          const booked: { row: SweepSpendLedger | null; usd: number } = { row: null, usd: 0 };
           const reserveDaySpend = async (): Promise<'reserved' | 'refused'> => {
             const row = await reserveSweepSpendToday(engine, gate.effectiveCap, gate.dailyCap, gate.day);
             if (row === null) return 'refused';
             booked.row = row;
+            booked.usd = gate.effectiveCap;
             report.dailySpentUsd = row.usd;
             return 'reserved';
+          };
+          const settleDaySpendTo = async (usd: number): Promise<void> => {
+            if (!booked.row || !(Number.isFinite(usd) && usd >= 0) || usd === booked.usd) return;
+            const settled = await settleSweepSpendToday(engine, booked.usd, usd, gate.day);
+            if (settled) {
+              booked.usd = usd;
+              report.dailySpentUsd = settled.usd;
+            } else {
+              // Today's row is gone or belongs to a newer day: the booking
+              // stays on the day that authorized it (over-count direction).
+              booked.usd = usd;
+            }
           };
           try {
             await withBudgetTracker(tracker, () => runCorpusIngestPass(engine, {
               ...passCtx,
-              spend: { costTracker: tracker, capSource: gate.capSource, reserveDaySpend },
+              spend: { costTracker: tracker, capSource: gate.capSource, reserveDaySpend, settleDaySpendTo },
             }));
           } finally {
-            // SETTLE on every exit path (cap hit, abort, error): replace
-            // the reservation with the actual. If this write fails the
-            // reservation stays booked — the day is over-counted, never
-            // under-counted.
-            report.spentUsd = tracker.snapshot().cumulativeCostUsd;
-            if (booked.row) {
-              try {
-                const settled = await settleSweepSpendToday(engine, gate.effectiveCap, report.spentUsd, gate.day);
-                if (settled) report.dailySpentUsd = settled.usd;
-              } catch (e) {
-                skip('daily_ledger_settle_failed:corpus');
-                log(`[sweep] could not settle ${SWEEP_SPEND_LEDGER_CONFIG_KEY} (reservation of $${gate.effectiveCap.toFixed(6)} stays booked): ${e instanceof Error ? e.message : String(e)}`);
-              }
+            // SETTLE on every exit path (cap hit, abort, error): move the
+            // booking to the actual. If this write fails the booking stays
+            // — the day is over-counted, never under-counted, except by an
+            // overshoot whose own immediate settle also failed (see the
+            // pass's overshoot branch).
+            const snap = tracker.snapshot();
+            report.spentUsd = snap.cumulativeCostUsd;
+            // Calls the provider did not meter were charged at the
+            // projection; say so, or a clean report would hide it.
+            if (snap.unmeteredCalls > 0) skip('cost_unmetered_calls:corpus', snap.unmeteredCalls);
+            try {
+              await settleDaySpendTo(report.spentUsd);
+            } catch (e) {
+              skip('daily_ledger_settle_failed:corpus');
+              log(`[sweep] could not settle ${SWEEP_SPEND_LEDGER_CONFIG_KEY} (booking of $${booked.usd.toFixed(6)} stays): ${e instanceof Error ? e.message : String(e)}`);
             }
           }
         }
@@ -967,7 +1001,7 @@ async function runCorpusIngestPass(
     skip(spend.refusal, candidates.length - retired.size);
     return;
   }
-  const { costTracker, capSource, reserveDaySpend } = spend;
+  const { costTracker, capSource, reserveDaySpend, settleDaySpendTo } = spend;
 
   // Day-ledger reservation: the last gate before money moves. A refusal
   // means another process took today's headroom since our read; a throw
@@ -1130,12 +1164,21 @@ async function runCorpusIngestPass(
         }) + '\n',
       );
       report.corpusIngested += 1;
-      if (costTracker.snapshot().cumulativeCostUsd > (report.maxCostUsd ?? Number.POSITIVE_INFINITY)) {
+      const cumulative = costTracker.snapshot().cumulativeCostUsd;
+      if (cumulative > (report.maxCostUsd ?? Number.POSITIVE_INFINITY)) {
         // The last call's TRUE cost exceeded what reserve() projected (TX1):
         // name it even when no file is left to skip, or the report would show
-        // a breached cap next to an empty skip list.
+        // a breached cap next to an empty skip list — and move the booking
+        // to the truth NOW, so the overshoot is in the row before the final
+        // settle (or a kill) can lose it.
         skip(capOvershootReason(capSource));
         skip(capExhaustedReason(capSource), candidates.length - i - 1);
+        try {
+          await settleDaySpendTo(cumulative);
+        } catch (e) {
+          skip('daily_ledger_settle_failed:corpus');
+          log(`[sweep] could not book an overshoot of $${cumulative.toFixed(6)} into ${SWEEP_SPEND_LEDGER_CONFIG_KEY}: ${e instanceof Error ? e.message : String(e)}`);
+        }
         abortLoop = true;
       }
     } catch (e) {
