@@ -12,6 +12,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 const SRC = readFileSync(join(import.meta.dir, '../src/commands/autopilot.ts'), 'utf8');
+const DRAIN_SUBMIT = SRC.indexOf("'extract-atoms-drain',");
+const DRAIN_BLOCK = DRAIN_SUBMIT >= 0 ? SRC.slice(DRAIN_SUBMIT, DRAIN_SUBMIT + 1800) : '';
 
 describe('autopilot auto-drain wiring', () => {
   test('CODEX #2: idempotency key includes a UTC-day time slot (not static)', () => {
@@ -21,7 +23,8 @@ describe('autopilot auto-drain wiring', () => {
   });
 
   test('CODEX #1: submits with allowProtectedSubmit', () => {
-    expect(SRC).toMatch(/extract-atoms-drain[\s\S]{0,800}allowProtectedSubmit: true/);
+    expect(DRAIN_SUBMIT).toBeGreaterThanOrEqual(0);
+    expect(DRAIN_BLOCK).toContain('allowProtectedSubmit: true');
   });
 
   test('CODEX #3: enumerates sources and counts backlog per source', () => {
@@ -53,8 +56,16 @@ describe('autopilot auto-drain wiring', () => {
     // maxWaiting would return source A's waiting job for source B's submit,
     // never queuing B and over-counting the cap. The per-source idempotency key
     // is the dedup; a pre-check on it avoids counting idempotency-hit re-submits.
-    const drainBlock = SRC.slice(SRC.indexOf("'extract-atoms-drain'"));
-    expect(drainBlock.slice(0, 900)).not.toContain('maxWaiting');
+    expect(DRAIN_SUBMIT).toBeGreaterThanOrEqual(0);
+    expect(DRAIN_BLOCK).not.toContain('maxWaiting');
     expect(SRC).toContain('WHERE idempotency_key = $1 LIMIT 1');
+  });
+
+  test('provider failures get one bounded retry with fixed backoff', () => {
+    expect(DRAIN_SUBMIT).toBeGreaterThanOrEqual(0);
+    expect(DRAIN_BLOCK).toMatch(/max_attempts:\s*2/);
+    expect(DRAIN_BLOCK).toMatch(/backoff_type:\s*'fixed'/);
+    expect(DRAIN_BLOCK).toMatch(/backoff_delay:\s*5000/);
+    expect(DRAIN_BLOCK).toMatch(/backoff_jitter:\s*0/);
   });
 });

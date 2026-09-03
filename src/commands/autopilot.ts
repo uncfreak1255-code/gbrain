@@ -1015,7 +1015,14 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                         {
                           queue: 'default',
                           idempotency_key: idemKey,
-                          max_attempts: 1,
+                          // Provider failures are surfaced by the drain handler
+                          // so Minions can retry them. Keep this bounded to one
+                          // retry with an explicit short fixed backoff; the
+                          // daily idempotency key still prevents hot-looping.
+                          max_attempts: 2,
+                          backoff_type: 'fixed',
+                          backoff_delay: 5000,
+                          backoff_jitter: 0,
                           timeout_ms: routineTimeoutMs,
                         },
                         { allowProtectedSubmit: true },

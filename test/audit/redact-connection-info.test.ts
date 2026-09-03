@@ -77,6 +77,18 @@ describe('redactConnectionInfo: per-pattern coverage', () => {
     expect(out).not.toContain('secret-api-key');
     expect(out).not.toContain('another-secret');
   });
+
+  it('case 7b — API-key credentials in URL query strings', () => {
+    const out = redactConnectionInfo(
+      'requests https://api.example/v1?api_key=query-secret&ok=1 ' +
+      'https://api.example/v1?foo=bar&api-key=amp-secret ' +
+      'https://api.example/v1?x-api-key=x-secret',
+    );
+    expect(out).toContain('<REDACTED:api_key>');
+    expect(out).not.toContain('query-secret');
+    expect(out).not.toContain('amp-secret');
+    expect(out).not.toContain('x-secret');
+  });
 });
 
 describe('redactConnectionInfo: false-positive defense', () => {

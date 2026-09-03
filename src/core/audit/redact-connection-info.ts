@@ -47,8 +47,9 @@ const PATTERNS: ReadonlyArray<RedactPattern> = [
   { kind: 'bearer', re: /(?:authorization\s*:\s*)?\bbearer\s+[A-Za-z0-9._~+\/-]{10,}=*/gi },
 
   // api_key=secret, api-key: secret, and x-api-key: secret. Anchor the key
-  // name at the start or after whitespace so arbitrary words are untouched.
-  { kind: 'api_key', re: /(?:^|\s)(?:api[_-]?key|x-api-key)\s*[:=]\s*[^\s"'&)]+/gi },
+  // name at the start, after whitespace, or after URL query delimiters so
+  // provider URLs cannot leak credentials through `?api_key=` / `&x-api-key=`.
+  { kind: 'api_key', re: /(?:^|[\s?&])(?:api[_-]?key|x-api-key)\s*[:=]\s*[^\s"'&)]+/gi },
 
   // password=secret OR pwd=secret. Both Postgres conninfo forms in
   // common use. Value terminates at whitespace, quote, or & (for
