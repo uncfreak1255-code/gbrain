@@ -160,17 +160,18 @@ function capExhaustedReason(source: SweepCapSource): string {
   return source === 'day' ? 'daily_cap_exhausted:corpus' : 'cost_cap_exhausted:corpus';
 }
 
-/**
- * Read the per-day spend ledger. `null` = no row yet (a fresh brain);
- * `'invalid'` = a row that is not `{"day":"YYYY-MM-DD","usd":n>=0}` — the
- * caller fails closed on it rather than reading a broken counter as zero.
- */
-export async function readSweepSpendLedger(engine: BrainEngine): Promise<SweepSpendLedger | null | 'invalid'> {
-  const raw = await engine.getConfig(SWEEP_SPEND_LEDGER_CONFIG_KEY);
-  if (raw === null || raw === undefined || raw.trim() === '') return null;
+function capOvershootReason(source: SweepCapSource): string {
+  return source === 'day' ? 'daily_cap_overshoot:corpus' : 'cost_cap_overshoot:corpus';
+}
+
+/** Parse one ledger row. `null` = no row; `'invalid'` = not `{"day":"YYYY-MM-DD","usd":n>=0}`. */
+export function parseSweepSpendLedger(raw: unknown): SweepSpendLedger | null | 'invalid' {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'string') return 'invalid';
+  if (raw.trim() === '') return null;
   try {
     const parsed = JSON.parse(raw) as { day?: unknown; usd?: unknown } | null;
-    if (!parsed || typeof parsed !== 'object') return 'invalid';
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'invalid';
     if (typeof parsed.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.day)) return 'invalid';
     if (typeof parsed.usd !== 'number' || !Number.isFinite(parsed.usd) || parsed.usd < 0) return 'invalid';
     return { day: parsed.day, usd: parsed.usd };
@@ -179,27 +180,111 @@ export async function readSweepSpendLedger(engine: BrainEngine): Promise<SweepSp
   }
 }
 
-/** Today's ledgered corpus spend: 0 with no row or a row from another day. Throws on an invalid row. */
-export async function readSweepSpendToday(engine: BrainEngine, day: string = utcDay()): Promise<number> {
-  const ledger = await readSweepSpendLedger(engine);
-  if (ledger === 'invalid') throw new Error(`${SWEEP_SPEND_LEDGER_CONFIG_KEY} is not {"day","usd"}`);
-  return ledger && ledger.day === day ? ledger.usd : 0;
+/**
+ * Read the per-day spend ledger. `null` = no row yet (a fresh brain);
+ * `'invalid'` = a row the sweep cannot read — the caller fails closed on it
+ * rather than reading a broken counter as zero.
+ */
+export async function readSweepSpendLedger(engine: BrainEngine): Promise<SweepSpendLedger | null | 'invalid'> {
+  return parseSweepSpendLedger(await engine.getConfig(SWEEP_SPEND_LEDGER_CONFIG_KEY));
 }
 
 /**
- * Add one sweep's recorded corpus spend to today's ledger; returns the new
- * total. Read-modify-write on the config row: two serve processes ledgering
- * at the same instant can lose one run's delta, which the per-run cap
- * bounds — so the day ceiling's overshoot is at most one run cap per
- * concurrent serve process, never unbounded. A row from a previous day is
- * replaced, not summed.
+ * Reserve `usd` of today's remaining headroom under `cap`, atomically, BEFORE
+ * any provider call. Each case is one conditional statement, so two serve
+ * processes cannot jointly exceed `cap` and a writer that started on an older
+ * day cannot clobber a newer day's row:
+ *   - a same-day row with room            → add `usd`;
+ *   - no row, or a row from an OLDER day  → today's row starts at `usd`;
+ *   - a same-day row without room, or a NEWER day → refused (`null`).
+ * Throws on any DB or row-parse failure — the caller fails closed.
  */
-export async function addSweepSpendToday(engine: BrainEngine, usd: number, day: string = utcDay()): Promise<number> {
-  const before = await readSweepSpendToday(engine, day);
-  if (!(usd > 0)) return before;
-  const total = Math.round((before + usd) * 1e6) / 1e6;
-  await engine.setConfig(SWEEP_SPEND_LEDGER_CONFIG_KEY, JSON.stringify({ day, usd: total }));
-  return total;
+export async function reserveSweepSpendToday(
+  engine: BrainEngine,
+  usd: number,
+  cap: number,
+  day: string = utcDay(),
+): Promise<SweepSpendLedger | null> {
+  if (!(Number.isFinite(usd) && usd > 0 && Number.isFinite(cap) && usd <= cap)) return null;
+  const added = await engine.executeRaw<{ value: string }>(
+    `UPDATE config
+        SET value = jsonb_build_object('day', $2::text, 'usd', round((value::jsonb->>'usd')::numeric + $3::numeric, 6))::text
+      WHERE key = $1
+        AND value::jsonb->>'day' = $2::text
+        AND (value::jsonb->>'usd')::numeric + $3::numeric <= $4::numeric
+      RETURNING value`,
+    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, String(usd), String(cap)],
+  );
+  const rows = added.length === 1 ? added : await engine.executeRaw<{ value: string }>(
+    `INSERT INTO config (key, value)
+       VALUES ($1, jsonb_build_object('day', $2::text, 'usd', round($3::numeric, 6))::text)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+         WHERE config.value::jsonb->>'day' < $2::text
+      RETURNING value`,
+    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, String(usd)],
+  );
+  if (rows.length !== 1) return null;
+  const row = parseSweepSpendLedger(rows[0].value);
+  if (row === null || row === 'invalid' || row.day !== day) {
+    throw new Error(`${SWEEP_SPEND_LEDGER_CONFIG_KEY} reservation wrote a row the sweep cannot read`);
+  }
+  return row;
+}
+
+/**
+ * Replace this run's reservation with what it actually spent: adds
+ * (actual − reserved) to today's row, floored at 0, in one statement. Returns
+ * the row after the write, or `null` when today's row is no longer today's
+ * (the run straddled UTC midnight: its reservation stays booked to the day
+ * that authorized it — an over-count, never an under-count). Throws on DB
+ * failure — the caller keeps the reservation in force.
+ */
+export async function settleSweepSpendToday(
+  engine: BrainEngine,
+  reserved: number,
+  actual: number,
+  day: string = utcDay(),
+): Promise<SweepSpendLedger | null> {
+  const delta = (Number.isFinite(actual) ? Math.max(0, actual) : reserved) - reserved;
+  const rows = await engine.executeRaw<{ value: string }>(
+    `UPDATE config
+        SET value = jsonb_build_object('day', $2::text, 'usd', round(GREATEST((value::jsonb->>'usd')::numeric + $3::numeric, 0), 6))::text
+      WHERE key = $1 AND value::jsonb->>'day' = $2::text
+      RETURNING value`,
+    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, String(delta)],
+  );
+  if (rows.length !== 1) return null;
+  const row = parseSweepSpendLedger(rows[0].value);
+  return row === null || row === 'invalid' ? null : row;
+}
+
+/**
+ * The sweep's pricing-override load is STRICT: the operator's declared rates
+ * are part of the guard, so a row that cannot be read (DB error → throws) or
+ * that does not parse as a complete rate table (`'invalid'`) refuses the pass
+ * instead of silently repricing calls at the shipped table. (The shared
+ * loadPricingOverrides is fail-open by design for non-guard callers.)
+ */
+async function loadSweepPricingOverrides(
+  engine: BrainEngine,
+): Promise<import('./budget/budget-tracker.ts').PricingOverrides | undefined | 'invalid'> {
+  const raw = await engine.getConfig('pricing.overrides');
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== 'string') return 'invalid';
+  if (raw.trim() === '') return undefined;
+  let declared: unknown;
+  try {
+    declared = JSON.parse(raw);
+  } catch {
+    return 'invalid';
+  }
+  if (!declared || typeof declared !== 'object' || Array.isArray(declared)) return 'invalid';
+  const { parsePricingOverrides } = await import('./budget/budget-tracker.ts');
+  const overrides = parsePricingOverrides(declared);
+  // Every declared entry must survive parsing: a dropped entry is a rate the
+  // operator meant to apply, and the shipped table would silently replace it.
+  if (!overrides || Object.keys(overrides).length !== Object.keys(declared as object).length) return 'invalid';
+  return overrides;
 }
 
 /**
@@ -322,19 +407,26 @@ export async function runMaintenanceSweep(
         // run's tracker is capped at min(run cap, today's remaining headroom),
         // which gives the day ceiling the same PRE-call reserve semantics as
         // the run ceiling. Missing or invalid keys fail closed.
-        const runCap = opts.maxCostUsd ?? parsePositiveUsd(await engine.getConfig(SWEEP_RUN_CAP_CONFIG_KEY));
+        const runCap = opts.maxCostUsd !== undefined
+          ? (Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0 ? opts.maxCostUsd : undefined)
+          : parsePositiveUsd(await engine.getConfig(SWEEP_RUN_CAP_CONFIG_KEY));
         const dailyCap = parsePositiveUsd(await engine.getConfig(SWEEP_DAILY_CAP_CONFIG_KEY));
         const day = utcDay();
         const ledger = await readSweepSpendLedger(engine);
+        const pricingOverrides = await loadSweepPricingOverrides(engine);
         if (runCap === undefined) {
           skip('cost_cap_missing_or_invalid:corpus');
         } else if (dailyCap === undefined) {
           skip('daily_cap_missing_or_invalid:corpus');
-        } else if (ledger === 'invalid') {
-          // A counter the sweep cannot read is not zero: refuse, and leave the
-          // row for the operator (`gbrain config unset facts.sweep_spend_ledger`).
+        } else if (ledger === 'invalid' || (ledger !== null && ledger.day > day)) {
+          // A counter the sweep cannot read — or one from a day this clock has
+          // not reached — is not zero: refuse, and leave the row for the
+          // operator (`gbrain config unset facts.sweep_spend_ledger`).
           skip('daily_ledger_invalid:corpus');
-          log(`[sweep] ${SWEEP_SPEND_LEDGER_CONFIG_KEY} is not {"day","usd"} — corpus pass refused; unset the row to reset the day`);
+          log(`[sweep] ${SWEEP_SPEND_LEDGER_CONFIG_KEY} is not a {"day","usd"} row for today or an earlier day — corpus pass refused; unset the row to reset the day`);
+        } else if (pricingOverrides === 'invalid') {
+          skip('pricing_overrides_invalid:corpus');
+          log('[sweep] pricing.overrides is not a readable rate table — corpus pass refused rather than repriced at the shipped table');
         } else {
           const spentToday = ledger && ledger.day === day ? ledger.usd : 0;
           report.dailyCapUsd = dailyCap;
@@ -345,14 +437,30 @@ export async function runMaintenanceSweep(
             const headroom = dailyCap - spentToday;
             const capSource: SweepCapSource = headroom < runCap ? 'day' : 'run';
             const effectiveCap = Math.min(runCap, headroom);
-            const { BudgetTracker, loadPricingOverrides } = await import('./budget/budget-tracker.ts');
+            const { BudgetTracker } = await import('./budget/budget-tracker.ts');
             const { withBudgetTracker } = await import('./ai/gateway.ts');
             const tracker = new BudgetTracker({
               maxCostUsd: effectiveCap,
               label: 'sweep:corpus',
-              pricingOverrides: await loadPricingOverrides(engine),
+              pricingOverrides,
             });
             report.maxCostUsd = effectiveCap;
+            report.dailySpentUsd = spentToday;
+            // WRITE-AHEAD: the pass calls this right before its first paid
+            // call (after it knows it has work), booking the whole run
+            // ceiling into today's row in one atomic, cap-checked statement.
+            // Concurrent serve processes therefore cannot jointly exceed the
+            // day cap, and a ledger that cannot be written refuses the pass
+            // instead of letting it run unmetered. Idle sweeps with nothing
+            // to ingest never touch the row.
+            const booked: { row: SweepSpendLedger | null } = { row: null };
+            const reserveDaySpend = async (): Promise<'reserved' | 'refused'> => {
+              const row = await reserveSweepSpendToday(engine, effectiveCap, dailyCap, day);
+              if (row === null) return 'refused';
+              booked.row = row;
+              report.dailySpentUsd = row.usd;
+              return 'reserved';
+            };
             try {
               await withBudgetTracker(tracker, () => runCorpusIngestPass(engine, {
                 sourceId,
@@ -365,17 +473,22 @@ export async function runMaintenanceSweep(
                 log,
                 costTracker: tracker,
                 capSource,
+                reserveDaySpend,
               }));
             } finally {
-              // Ledger the run's spend on every exit path (cap hit, abort,
-              // error): a dollar the ledger never saw is a dollar the day
-              // cap cannot stop.
+              // SETTLE on every exit path (cap hit, abort, error): replace
+              // the reservation with the actual. If this write fails the
+              // reservation stays booked — the day is over-counted, never
+              // under-counted.
               report.spentUsd = tracker.snapshot().cumulativeCostUsd;
-              try {
-                report.dailySpentUsd = await addSweepSpendToday(engine, report.spentUsd, day);
-              } catch (e) {
-                skip('daily_ledger_write_failed:corpus');
-                log(`[sweep] could not write ${SWEEP_SPEND_LEDGER_CONFIG_KEY}: ${e instanceof Error ? e.message : String(e)}`);
+              if (booked.row) {
+                try {
+                  const settled = await settleSweepSpendToday(engine, effectiveCap, report.spentUsd, day);
+                  if (settled) report.dailySpentUsd = settled.usd;
+                } catch (e) {
+                  skip('daily_ledger_settle_failed:corpus');
+                  log(`[sweep] could not settle ${SWEEP_SPEND_LEDGER_CONFIG_KEY} (reservation of $${effectiveCap.toFixed(6)} stays booked): ${e instanceof Error ? e.message : String(e)}`);
+                }
               }
             }
           }
@@ -703,9 +816,11 @@ async function runCorpusIngestPass(
     log: (msg: string) => void;
     costTracker: import('./budget/budget-tracker.ts').BudgetTracker;
     capSource: SweepCapSource;
+    /** Books the run ceiling into the day ledger; throws when the ledger cannot be written. */
+    reserveDaySpend: () => Promise<'reserved' | 'refused'>;
   },
 ): Promise<void> {
-  const { sourceId, batchLimit, overBudget, signal, report, skip, log, costTracker, capSource } = ctx;
+  const { sourceId, batchLimit, overBudget, signal, report, skip, log, costTracker, capSource, reserveDaySpend } = ctx;
 
   // Corpus dir: dream's session corpus (transcripts.ts:66 precedent);
   // default ~/.gbrain/transcripts/corpus (GBRAIN_HOME-aware via configDir).
@@ -788,6 +903,22 @@ async function runCorpusIngestPass(
   if (!(await isFactsExtractionEnabled(engine))) {
     const retired = await retireWbCandidatesIfOff();
     skip('extraction_disabled', candidates.length - retired.size);
+    return;
+  }
+
+  if (candidates.length === 0) return; // nothing to pay for: never touch the ledger
+
+  // Day-ledger reservation: the last gate before money moves. A refusal
+  // means another process took today's headroom since our read; a throw
+  // means the ledger is unwritable — both end the pass with zero calls.
+  try {
+    if ((await reserveDaySpend()) === 'refused') {
+      skip('daily_cap_exhausted:corpus', candidates.length);
+      return;
+    }
+  } catch (e) {
+    skip('daily_ledger_write_failed:corpus', candidates.length);
+    log(`[sweep] could not reserve in ${SWEEP_SPEND_LEDGER_CONFIG_KEY} — corpus pass refused: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
 
@@ -939,6 +1070,10 @@ async function runCorpusIngestPass(
       );
       report.corpusIngested += 1;
       if (costTracker.snapshot().cumulativeCostUsd > (report.maxCostUsd ?? Number.POSITIVE_INFINITY)) {
+        // The last call's TRUE cost exceeded what reserve() projected (TX1):
+        // name it even when no file is left to skip, or the report would show
+        // a breached cap next to an empty skip list.
+        skip(capOvershootReason(capSource));
         skip(capExhaustedReason(capSource), candidates.length - i - 1);
         abortLoop = true;
       }

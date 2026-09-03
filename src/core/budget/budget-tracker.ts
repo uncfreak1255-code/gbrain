@@ -547,8 +547,23 @@ export class BudgetTracker {
    * `outputTokens` defaults to 0 (embed/rerank). `embeddingDims` is audit-
    * only metadata.
    */
-  record(actual: BudgetActualUsage & { kind?: BudgetKind }): void {
+  record(reported: BudgetActualUsage & { kind?: BudgetKind }): void {
     this.callsRecorded++;
+    // Defense in depth for the spend guard: a non-finite or negative token
+    // count (a malformed provider response, or a test seam) must not push
+    // cumulative spend to NaN — where every later cap comparison is false —
+    // or negative, where the cap silently widens. Clamp to 0; the gateway
+    // already substitutes the pre-call projection for an unusable success
+    // usage before it reaches here.
+    const clampTokens = (n: number | undefined): number =>
+      typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0;
+    const actual: BudgetActualUsage & { kind?: BudgetKind } = {
+      ...reported,
+      inputTokens: clampTokens(reported.inputTokens),
+      outputTokens: clampTokens(reported.outputTokens),
+      cacheReadTokens: clampTokens(reported.cacheReadTokens),
+      cacheCreationTokens: clampTokens(reported.cacheCreationTokens),
+    };
     const kind: BudgetKind = actual.kind ?? 'chat';
     const cost = costForUsage(
       actual.modelId,

@@ -213,3 +213,39 @@ export function makeEngineChatUsageSink(engine: {
     );
   };
 }
+
+/**
+ * Spend-guard rule for a SUCCESS response whose usage is unusable: charge the
+ * same pessimistic ceiling the failure path charges. An openai-compatible
+ * route may omit `usage` entirely (the SDK types every count as
+ * `number | undefined`), and a tracked call settled at $0 turns every cap on
+ * that lane off. Negative or non-finite counts get the same treatment. The
+ * returned record is for the BUDGET only — the usage handed back to the
+ * caller and the durable usage ledger keep the provider's own numbers.
+ */
+export function usageForBudgetRecord(
+  actual: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number },
+  pessimistic: { inputTokens: number; outputTokens: number },
+): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; unmetered: boolean } {
+  const cacheRead = actual.cacheReadTokens ?? 0;
+  const cacheCreation = actual.cacheCreationTokens ?? 0;
+  const malformed = [actual.inputTokens, actual.outputTokens, cacheRead, cacheCreation]
+    .some((n) => typeof n !== 'number' || !Number.isFinite(n) || n < 0);
+  const empty = !(actual.inputTokens > 0) && !(actual.outputTokens > 0) && !(cacheRead > 0);
+  if (malformed || empty) {
+    return {
+      inputTokens: pessimistic.inputTokens,
+      outputTokens: pessimistic.outputTokens,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      unmetered: true,
+    };
+  }
+  return {
+    inputTokens: actual.inputTokens,
+    outputTokens: actual.outputTokens,
+    cacheReadTokens: cacheRead,
+    cacheCreationTokens: cacheCreation,
+    unmetered: false,
+  };
+}

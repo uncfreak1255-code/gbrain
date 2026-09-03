@@ -75,16 +75,40 @@ no API spend).
 The maintenance sweep's corpus pass (LLM fact extraction over
 `~/.gbrain/transcripts/corpus`) fires from every `gbrain serve` process on a
 10-minute idle timer, so a per-run cap alone is not a spend ceiling — it leaks
-`cap × 6 × processes` per hour. `facts.sweep_max_usd_per_day` is the ceiling:
-the sweep keeps today's cumulative corpus spend (UTC day) in the sweep-owned
-config row `facts.sweep_spend_ledger` (`{"day":"YYYY-MM-DD","usd":n}`) and
-gives each run a tracker capped at `min(run cap, day cap − ledger)`, so the
-day ceiling is enforced *before* each provider call, not after. The ledger is
-read-modify-write, so overshoot is bounded by one run cap per concurrent serve
-process. Reset a day with `gbrain config unset facts.sweep_spend_ledger`; a
-row the sweep cannot parse fails the pass closed
-(`daily_ledger_invalid:corpus`) until it is unset. `gbrain sweep --once`
-prints `corpus today (UTC)` under `corpus cost`.
+`cap × 6 × processes` per hour. `facts.sweep_max_usd_per_day` is the ceiling.
+Mechanics, in the order they run:
+
+1. The sweep reads today's cumulative corpus spend (UTC day) from the
+   sweep-owned config row `facts.sweep_spend_ledger`
+   (`{"day":"YYYY-MM-DD","usd":n}`) and refuses the pass if the row is
+   unreadable, from a day the clock has not reached, or already at the cap.
+2. **Write-ahead reservation.** Before any provider call it books the whole
+   run ceiling — `min(run cap, day cap − ledger)` — into the row with one
+   atomic, cap-checked SQL statement. Concurrent serve processes therefore
+   cannot jointly exceed the day cap, and a ledger that cannot be written
+   refuses the pass (`daily_ledger_write_failed:corpus`) instead of letting
+   it run unmetered.
+3. The run's `BudgetTracker` is capped at that reservation, so the day ceiling
+   is enforced by the pre-call reserve, not after the money is spent.
+4. **Settle.** On every exit path the reservation is replaced by the actual
+   spend. If that write fails the reservation stays booked — the day is
+   over-counted, never under-counted. A run that straddled UTC midnight keeps
+   its reservation on the day that authorized it; it never overwrites the new
+   day's row.
+
+What can still exceed the day cap: only a single call whose true cost beats
+its projection (the tracker records the true cost and names it,
+`*_cap_overshoot:corpus`). The bucket is a UTC calendar day, so a rolling
+24-hour window straddling midnight can reach 2× the day cap. A response with
+no usable token usage is charged at the projection (`gateway.chat.unmetered`
+in the audit), never at $0. The sweep loads `pricing.overrides` strictly: a
+row it cannot read as a complete rate table refuses the pass
+(`pricing_overrides_invalid:corpus`) rather than repricing at the shipped
+table — and a rate you set to `0` disables the guard for that model, by your
+choice.
+
+Reset a day with `gbrain config unset facts.sweep_spend_ledger`.
+`gbrain sweep --once` prints `corpus today (UTC)` under `corpus cost`.
 
 ### Sync inline-embed cost gate
 

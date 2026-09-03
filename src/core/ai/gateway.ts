@@ -47,7 +47,7 @@ import type {
   TouchpointKind,
 } from './types.ts';
 import { resolveRecipe, assertTouchpoint, parseModelId, embeddingDimsForModel } from './model-resolver.ts';
-import { normalizeChatUsageForBudget, recordChatUsage } from './chat-usage.ts';
+import { normalizeChatUsageForBudget, recordChatUsage, usageForBudgetRecord } from './chat-usage.ts';
 import {
   OPENROUTER_CACHE_HEADER,
   openrouterRequiresExplicitPromptCache,
@@ -3837,13 +3837,10 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       if (tracker) {
         try {
           if (res) {
-            tracker.record({
-              modelId: res.model ?? modelStrEarly,
-              inputTokens: res.usage.input_tokens,
-              outputTokens: res.usage.output_tokens,
-              cacheReadTokens: res.usage.cache_read_tokens, cacheCreationTokens: res.usage.cache_creation_tokens,
-              label: 'gateway.chat',
-            });
+            const u = res.usage ?? ({} as Partial<ChatResult['usage']>);
+            const charge = usageForBudgetRecord({ inputTokens: u.input_tokens as number, outputTokens: u.output_tokens as number, cacheReadTokens: u.cache_read_tokens, cacheCreationTokens: u.cache_creation_tokens }, { inputTokens: estimatedInputTokens, outputTokens: maxOutputTokens });
+            tracker.record({ modelId: res.model ?? modelStrEarly, inputTokens: charge.inputTokens, outputTokens: charge.outputTokens,
+              cacheReadTokens: charge.cacheReadTokens, cacheCreationTokens: charge.cacheCreationTokens, label: charge.unmetered ? 'gateway.chat.unmetered' : 'gateway.chat' });
           } else {
             const usage = _extractUsageFromError(threw, {
               inputTokens: estimatedInputTokens,
@@ -3952,7 +3949,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   }
 
   let _budgetRecorded = false;
-  const _recordBudget = (modelLabel: string, inputTokens: number, outputTokens: number, cacheReadTokens = 0, cacheCreationTokens = 0): void => {
+  const _recordBudget = (modelLabel: string, inputTokens: number, outputTokens: number, cacheReadTokens = 0, cacheCreationTokens = 0, label: 'gateway.chat' | 'gateway.chat.unmetered' = 'gateway.chat'): void => {
     if (!tracker || _budgetRecorded) return;
     _budgetRecorded = true;
     try {
@@ -3961,7 +3958,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
         inputTokens,
         outputTokens,
         cacheReadTokens, cacheCreationTokens,
-        label: 'gateway.chat',
+        label,
       });
     } catch {
       // BudgetExhausted (TX1) raised here; surface via next reserve()
@@ -4044,9 +4041,12 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
 
     const usage = (result as any).usage ?? {};
     const providerMetadata = (result as any).providerMetadata as Record<string, any> | undefined;
-    const { inputTokens: inTok, outputTokens: outTok, cacheReadTokens, cacheCreationTokens } =
-      normalizeChatUsageForBudget(usage, providerMetadata, recipe.id);
-    _recordBudget(`${recipe.id}:${modelId}`, inTok, outTok, cacheReadTokens, cacheCreationTokens);
+    const normalized = normalizeChatUsageForBudget(usage, providerMetadata, recipe.id);
+    const { inputTokens: inTok, outputTokens: outTok, cacheReadTokens, cacheCreationTokens } = normalized;
+    // Budget record only: no usable usage ⇒ charged at the pre-call projection,
+    // never $0 (usageForBudgetRecord). `usageOut` still reports the provider's numbers.
+    const charge = usageForBudgetRecord(normalized, { inputTokens: estimatedInputTokens, outputTokens: maxOutputTokens });
+    _recordBudget(`${recipe.id}:${modelId}`, charge.inputTokens, charge.outputTokens, charge.cacheReadTokens, charge.cacheCreationTokens, charge.unmetered ? 'gateway.chat.unmetered' : 'gateway.chat');
 
     const usageOut = {
       input_tokens: inTok,
