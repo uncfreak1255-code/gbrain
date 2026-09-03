@@ -51,6 +51,10 @@ beforeEach(async () => {
   corpusDir = mkdtempSync(join(tmpdir(), 'gbrain-sweep-wb-'));
   tmpDirs.push(corpusDir);
   await engine.setConfig('dream.synthesize.session_corpus_dir', corpusDir);
+  // Paid corpus ingest requires BOTH spend ceilings (fail-closed by design).
+  await engine.setConfig('facts.sweep_max_usd', '1');
+  await engine.setConfig('facts.sweep_max_usd_per_day', '5');
+  await engine.unsetConfig('facts.sweep_spend_ledger');
 });
 
 afterEach(async () => {
