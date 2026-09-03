@@ -81,7 +81,9 @@ Mechanics, in the order they run:
 1. The sweep reads today's cumulative corpus spend (UTC day) from the
    sweep-owned config row `facts.sweep_spend_ledger`
    (`{"day":"YYYY-MM-DD","usd":n}`) and refuses the pass if the row is
-   unreadable, from a day the clock has not reached, or already at the cap.
+   unreadable, from a day the clock has not reached, or already at the cap
+   (a refusal still lets the pass do its zero-LLM housekeeping; only paid
+   ingest stops, and `gbrain sweep --once` prints the refusal reason).
 2. **Write-ahead reservation.** Before any provider call it books the whole
    run ceiling — `min(run cap, day cap − ledger)` — into the row with one
    atomic, cap-checked SQL statement. Concurrent serve processes therefore

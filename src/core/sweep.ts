@@ -129,6 +129,12 @@ export interface SweepReport {
   dailySpentUsd?: number;
   /** Actual gateway-recorded cost for this sweep's corpus pass. */
   spentUsd: number;
+  /**
+   * `'ok'` when both ceilings, today's ledger and the rate table resolved and
+   * paid corpus ingest was allowed to run; otherwise the refusal reason (the
+   * pass still did its zero-LLM housekeeping).
+   */
+  spendGate?: string;
   skipped: SweepSkip[];
   durationMs: number;
 }
@@ -287,6 +293,74 @@ async function loadSweepPricingOverrides(
   return overrides;
 }
 
+/** What the corpus pass may spend: a capped tracker + day reservation, or a refusal it must honor before any paid call. */
+type SweepSpendCtx =
+  | { refusal: string }
+  | {
+      costTracker: import('./budget/budget-tracker.ts').BudgetTracker;
+      capSource: SweepCapSource;
+      /** Books the run ceiling into the day ledger; throws when the ledger cannot be written. */
+      reserveDaySpend: () => Promise<'reserved' | 'refused'>;
+    };
+
+type SweepSpendGate =
+  | {
+      ok: true;
+      dailyCap: number;
+      day: string;
+      effectiveCap: number;
+      capSource: SweepCapSource;
+      pricingOverrides: import('./budget/budget-tracker.ts').PricingOverrides | undefined;
+    }
+  | { ok: false; reason: string; log?: string };
+
+/**
+ * Resolve the spend gate for one sweep (fail-closed): BOTH ceilings, today's
+ * ledger row and the operator's rate table. Any missing or unreadable input
+ * is a refusal the pass enforces before its first paid call; the pass still
+ * runs for its zero-LLM housekeeping.
+ */
+async function resolveSweepSpendGate(engine: BrainEngine, opts: SweepOpts, report: SweepReport): Promise<SweepSpendGate> {
+  const runCap = opts.maxCostUsd !== undefined
+    ? (Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0 ? opts.maxCostUsd : undefined)
+    : parsePositiveUsd(await engine.getConfig(SWEEP_RUN_CAP_CONFIG_KEY));
+  const dailyCap = parsePositiveUsd(await engine.getConfig(SWEEP_DAILY_CAP_CONFIG_KEY));
+  const day = utcDay();
+  const ledger = await readSweepSpendLedger(engine);
+  const pricingOverrides = await loadSweepPricingOverrides(engine);
+  if (runCap === undefined) return { ok: false, reason: 'cost_cap_missing_or_invalid:corpus' };
+  if (dailyCap === undefined) return { ok: false, reason: 'daily_cap_missing_or_invalid:corpus' };
+  report.dailyCapUsd = dailyCap;
+  if (ledger === 'invalid' || (ledger !== null && ledger.day > day)) {
+    // A counter the sweep cannot read — or one from a day this clock has not
+    // reached — is not zero: refuse, and leave the row for the operator.
+    return {
+      ok: false,
+      reason: 'daily_ledger_invalid:corpus',
+      log: `[sweep] ${SWEEP_SPEND_LEDGER_CONFIG_KEY} is not a {"day","usd"} row for today or an earlier day — paid corpus ingest refused; unset the row to reset the day`,
+    };
+  }
+  if (pricingOverrides === 'invalid') {
+    return {
+      ok: false,
+      reason: 'pricing_overrides_invalid:corpus',
+      log: '[sweep] pricing.overrides is not a readable rate table — paid corpus ingest refused rather than repriced at the shipped table',
+    };
+  }
+  const spentToday = ledger && ledger.day === day ? ledger.usd : 0;
+  report.dailySpentUsd = spentToday;
+  if (spentToday >= dailyCap) return { ok: false, reason: 'daily_cap_exhausted:corpus' };
+  const headroom = dailyCap - spentToday;
+  return {
+    ok: true,
+    dailyCap,
+    day,
+    effectiveCap: Math.min(runCap, headroom),
+    capSource: headroom < runCap ? 'day' : 'run',
+    pricingOverrides,
+  };
+}
+
 /**
  * Run one bounded maintenance sweep. Never throws — failures land in
  * report.skipped with a per-pass reason.
@@ -407,88 +481,68 @@ export async function runMaintenanceSweep(
         // run's tracker is capped at min(run cap, today's remaining headroom),
         // which gives the day ceiling the same PRE-call reserve semantics as
         // the run ceiling. Missing or invalid keys fail closed.
-        const runCap = opts.maxCostUsd !== undefined
-          ? (Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0 ? opts.maxCostUsd : undefined)
-          : parsePositiveUsd(await engine.getConfig(SWEEP_RUN_CAP_CONFIG_KEY));
-        const dailyCap = parsePositiveUsd(await engine.getConfig(SWEEP_DAILY_CAP_CONFIG_KEY));
-        const day = utcDay();
-        const ledger = await readSweepSpendLedger(engine);
-        const pricingOverrides = await loadSweepPricingOverrides(engine);
-        if (runCap === undefined) {
-          skip('cost_cap_missing_or_invalid:corpus');
-        } else if (dailyCap === undefined) {
-          skip('daily_cap_missing_or_invalid:corpus');
-        } else if (ledger === 'invalid' || (ledger !== null && ledger.day > day)) {
-          // A counter the sweep cannot read — or one from a day this clock has
-          // not reached — is not zero: refuse, and leave the row for the
-          // operator (`gbrain config unset facts.sweep_spend_ledger`).
-          skip('daily_ledger_invalid:corpus');
-          log(`[sweep] ${SWEEP_SPEND_LEDGER_CONFIG_KEY} is not a {"day","usd"} row for today or an earlier day — corpus pass refused; unset the row to reset the day`);
-        } else if (pricingOverrides === 'invalid') {
-          skip('pricing_overrides_invalid:corpus');
-          log('[sweep] pricing.overrides is not a readable rate table — corpus pass refused rather than repriced at the shipped table');
+        // Spend gate (fail-closed): BOTH ceilings, today's ledger and the
+        // operator's rate table. A refusal still runs the pass for its
+        // zero-LLM housekeeping (writeback_off retirement) and is enforced
+        // at the pass's last gate before any paid call.
+        const gate = await resolveSweepSpendGate(engine, opts, report);
+        const passCtx = {
+          sourceId,
+          batchLimit,
+          overBudget,
+          signal: budgetController.signal,
+          capabilities: opts.capabilities,
+          report,
+          skip,
+          log,
+        };
+        if (!gate.ok) {
+          report.spendGate = gate.reason;
+          if (gate.log) log(gate.log);
+          await runCorpusIngestPass(engine, { ...passCtx, spend: { refusal: gate.reason } });
         } else {
-          const spentToday = ledger && ledger.day === day ? ledger.usd : 0;
-          report.dailyCapUsd = dailyCap;
-          if (spentToday >= dailyCap) {
-            report.dailySpentUsd = spentToday;
-            skip('daily_cap_exhausted:corpus');
-          } else {
-            const headroom = dailyCap - spentToday;
-            const capSource: SweepCapSource = headroom < runCap ? 'day' : 'run';
-            const effectiveCap = Math.min(runCap, headroom);
-            const { BudgetTracker } = await import('./budget/budget-tracker.ts');
-            const { withBudgetTracker } = await import('./ai/gateway.ts');
-            const tracker = new BudgetTracker({
-              maxCostUsd: effectiveCap,
-              label: 'sweep:corpus',
-              pricingOverrides,
-            });
-            report.maxCostUsd = effectiveCap;
-            report.dailySpentUsd = spentToday;
-            // WRITE-AHEAD: the pass calls this right before its first paid
-            // call (after it knows it has work), booking the whole run
-            // ceiling into today's row in one atomic, cap-checked statement.
-            // Concurrent serve processes therefore cannot jointly exceed the
-            // day cap, and a ledger that cannot be written refuses the pass
-            // instead of letting it run unmetered. Idle sweeps with nothing
-            // to ingest never touch the row.
-            const booked: { row: SweepSpendLedger | null } = { row: null };
-            const reserveDaySpend = async (): Promise<'reserved' | 'refused'> => {
-              const row = await reserveSweepSpendToday(engine, effectiveCap, dailyCap, day);
-              if (row === null) return 'refused';
-              booked.row = row;
-              report.dailySpentUsd = row.usd;
-              return 'reserved';
-            };
-            try {
-              await withBudgetTracker(tracker, () => runCorpusIngestPass(engine, {
-                sourceId,
-                batchLimit,
-                overBudget,
-                signal: budgetController.signal,
-                capabilities: opts.capabilities,
-                report,
-                skip,
-                log,
-                costTracker: tracker,
-                capSource,
-                reserveDaySpend,
-              }));
-            } finally {
-              // SETTLE on every exit path (cap hit, abort, error): replace
-              // the reservation with the actual. If this write fails the
-              // reservation stays booked — the day is over-counted, never
-              // under-counted.
-              report.spentUsd = tracker.snapshot().cumulativeCostUsd;
-              if (booked.row) {
-                try {
-                  const settled = await settleSweepSpendToday(engine, effectiveCap, report.spentUsd, day);
-                  if (settled) report.dailySpentUsd = settled.usd;
-                } catch (e) {
-                  skip('daily_ledger_settle_failed:corpus');
-                  log(`[sweep] could not settle ${SWEEP_SPEND_LEDGER_CONFIG_KEY} (reservation of $${effectiveCap.toFixed(6)} stays booked): ${e instanceof Error ? e.message : String(e)}`);
-                }
+          report.spendGate = 'ok';
+          const { BudgetTracker } = await import('./budget/budget-tracker.ts');
+          const { withBudgetTracker } = await import('./ai/gateway.ts');
+          const tracker = new BudgetTracker({
+            maxCostUsd: gate.effectiveCap,
+            label: 'sweep:corpus',
+            pricingOverrides: gate.pricingOverrides,
+          });
+          report.maxCostUsd = gate.effectiveCap;
+          // WRITE-AHEAD: the pass calls this right before its first paid
+          // call (after it knows it has work), booking the whole run
+          // ceiling into today's row in one atomic, cap-checked statement.
+          // Concurrent serve processes therefore cannot jointly exceed the
+          // day cap, and a ledger that cannot be written refuses the pass
+          // instead of letting it run unmetered. Idle sweeps with nothing
+          // to ingest never touch the row.
+          const booked: { row: SweepSpendLedger | null } = { row: null };
+          const reserveDaySpend = async (): Promise<'reserved' | 'refused'> => {
+            const row = await reserveSweepSpendToday(engine, gate.effectiveCap, gate.dailyCap, gate.day);
+            if (row === null) return 'refused';
+            booked.row = row;
+            report.dailySpentUsd = row.usd;
+            return 'reserved';
+          };
+          try {
+            await withBudgetTracker(tracker, () => runCorpusIngestPass(engine, {
+              ...passCtx,
+              spend: { costTracker: tracker, capSource: gate.capSource, reserveDaySpend },
+            }));
+          } finally {
+            // SETTLE on every exit path (cap hit, abort, error): replace
+            // the reservation with the actual. If this write fails the
+            // reservation stays booked — the day is over-counted, never
+            // under-counted.
+            report.spentUsd = tracker.snapshot().cumulativeCostUsd;
+            if (booked.row) {
+              try {
+                const settled = await settleSweepSpendToday(engine, gate.effectiveCap, report.spentUsd, gate.day);
+                if (settled) report.dailySpentUsd = settled.usd;
+              } catch (e) {
+                skip('daily_ledger_settle_failed:corpus');
+                log(`[sweep] could not settle ${SWEEP_SPEND_LEDGER_CONFIG_KEY} (reservation of $${gate.effectiveCap.toFixed(6)} stays booked): ${e instanceof Error ? e.message : String(e)}`);
               }
             }
           }
@@ -814,13 +868,10 @@ async function runCorpusIngestPass(
     signal: AbortSignal;
     capabilities?: CapabilityReport;
     log: (msg: string) => void;
-    costTracker: import('./budget/budget-tracker.ts').BudgetTracker;
-    capSource: SweepCapSource;
-    /** Books the run ceiling into the day ledger; throws when the ledger cannot be written. */
-    reserveDaySpend: () => Promise<'reserved' | 'refused'>;
+    spend: SweepSpendCtx;
   },
 ): Promise<void> {
-  const { sourceId, batchLimit, overBudget, signal, report, skip, log, costTracker, capSource, reserveDaySpend } = ctx;
+  const { sourceId, batchLimit, overBudget, signal, report, skip, log, spend } = ctx;
 
   // Corpus dir: dream's session corpus (transcripts.ts:66 precedent);
   // default ~/.gbrain/transcripts/corpus (GBRAIN_HOME-aware via configDir).
@@ -907,6 +958,16 @@ async function runCorpusIngestPass(
   }
 
   if (candidates.length === 0) return; // nothing to pay for: never touch the ledger
+
+  // Spend-gate refusal (no valid ceilings / unreadable ledger or rate table /
+  // day already at cap): zero-LLM housekeeping is done above and here;
+  // nothing paid runs.
+  if ('refusal' in spend) {
+    const retired = await retireWbCandidatesIfOff();
+    skip(spend.refusal, candidates.length - retired.size);
+    return;
+  }
+  const { costTracker, capSource, reserveDaySpend } = spend;
 
   // Day-ledger reservation: the last gate before money moves. A refusal
   // means another process took today's headroom since our read; a throw

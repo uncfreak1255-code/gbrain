@@ -130,6 +130,9 @@ export async function runSweep(engine: BrainEngine, args: string[]): Promise<voi
     console.log(`  timeline extracted: ${report.timelineExtracted}`);
     console.log(`  corpus ingested:    ${report.corpusIngested}`);
     console.log(`  corpus cost:        $${report.spentUsd.toFixed(6)}${report.maxCostUsd !== undefined ? ` / run cap $${report.maxCostUsd.toFixed(4)}` : ''}`);
+    if (report.spendGate && report.spendGate !== 'ok') {
+      console.log(`  corpus spend gate:  refused (${report.spendGate})`);
+    }
     if (report.dailyCapUsd !== undefined) {
       // dailySpentUsd is unset only when the ledger write failed (see the
       // daily_ledger_write_failed:corpus skip) — say so instead of printing $0.
