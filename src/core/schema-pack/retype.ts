@@ -28,6 +28,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../operations.ts';
 import { loadActivePackBestEffort } from './best-effort.ts';
 import { ALLOWED_SUBTYPE_FIELDS, type AllowedSubtypeField } from './manifest-v1.ts';
+import { assertManagedPageMutationAllowed } from '../canonical-page-write.ts';
 
 /** Sentinel: `from_type: '*unknown*'` matches every page whose type isn't
  *  declared in the pack's page_types AND isn't the target of any prior
@@ -215,6 +216,14 @@ async function applyRetypeRule(
       legacyTypePlaceholder,
       subtypeFieldLiteral: subtypeField,
     });
+
+    const candidates = await engine.executeRaw<{ slug: string; source_id: string }>(
+      `SELECT slug, source_id FROM pages WHERE ${winWhereParts.join(' AND ')} LIMIT ${limitPlaceholder}`,
+      winParams,
+    );
+    for (const candidate of candidates) {
+      await assertManagedPageMutationAllowed(engine, candidate.slug, candidate.source_id, 'destructive_admin');
+    }
 
     const sqlText = `
       WITH win AS (

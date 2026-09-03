@@ -1,4 +1,8 @@
 import { describe, test, expect } from 'bun:test';
+import { spawnSync } from 'child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { lintContent, fixContent } from '../src/commands/lint.ts';
 
 describe('lintContent', () => {
@@ -114,5 +118,28 @@ describe('fixContent', () => {
     expect(fixed).not.toContain('Sure');
     expect(fixed).not.toContain('Certainly');
     expect(fixed).toContain('# Title');
+  });
+});
+
+describe('lint CLI source scoping', () => {
+  test('accepts --source-id before or after the target path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-lint-source-order-'));
+    const file = join(dir, 'page.md');
+    writeFileSync(file, '# Page\n\nClean body.\n');
+    try {
+      for (const args of [
+        ['--source-id', 'dept', file, '--dry-run'],
+        [file, '--source-id', 'dept', '--dry-run'],
+      ]) {
+        const result = spawnSync(process.execPath, ['run', 'src/cli.ts', 'lint', ...args], {
+          cwd: process.cwd(),
+          encoding: 'utf8',
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('1 pages scanned');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

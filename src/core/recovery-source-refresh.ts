@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -14,15 +15,87 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { syncLockId, withRefreshingLock } from './db-lock.ts';
 import type { BrainEngine } from './engine.ts';
 import { serializeMarkdown } from './markdown.ts';
 import { renameDirectoryNoReplace } from './atomic-directory-publish.ts';
 import type { RawData } from './types.ts';
 import type { WriteThroughResult } from './write-through.ts';
+import { activeV2CorpusBinding, activeV2DestinationBinding } from './learning-loop.ts';
+import { withCanonicalCheckoutRebuildBoundary, withCanonicalSourceBoundary, type SourceWriteLease } from './canonical-page-write.ts';
+import { computeBrainIdFromConfig } from './upgrade-checkpoint.ts';
+import { parseLearningLoopFence } from './learning-loop-knowledge.ts';
 
 const MANIFEST_FILENAME = '.gbrain-export-manifest.json';
 const SCOPED_EXPORT_BATCH_SIZE = 5_000;
+const FACTS_FENCE = /<!--- gbrain:facts:begin -->[\s\S]*?<!--- gbrain:facts:end -->/g;
+const LEARNING_FENCE = /<!-- gbrain:learning-loop:v1:begin -->[\s\S]*?<!-- gbrain:learning-loop:v1:end -->/g;
+
+function assertNoActiveV2SourceReplacement(engine: BrainEngine, sourceId: string): void {
+  const config = engine.learningLoopLedgerConfig?.();
+  if (!config) throw new Error('managed_state_unavailable: Learning Loop brain scope is unavailable');
+  const corpus = activeV2CorpusBinding({ config });
+  const destination = activeV2DestinationBinding({ config });
+  if (corpus?.source_id === sourceId || destination?.source_id === sourceId) {
+    throw new Error(`managed_state_unavailable: active V2 run freezes source ${JSON.stringify(sourceId)}`);
+  }
+}
+
+function markdownFiles(root: string, relativeDir = ''): string[] {
+  const dir = join(root, relativeDir);
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const relativePath = join(relativeDir, entry.name);
+    if (entry.isSymbolicLink()) throw new Error(`recovery source contains symlink: ${relativePath}`);
+    if (entry.isDirectory()) files.push(...markdownFiles(root, relativePath));
+    else if (entry.isFile() && entry.name.endsWith('.md')) files.push(relativePath);
+  }
+  return files;
+}
+
+function singleFence(content: string, pattern: RegExp, label: string): string {
+  const matches = [...content.matchAll(pattern)];
+  if (matches.length > 1) throw new Error(`recovery source has duplicate ${label} fence`);
+  return matches[0]?.[0] ?? '';
+}
+
+function replaceOrAppendFence(content: string, current: string, canonical: string): string {
+  if (!canonical) return content;
+  return current
+    ? content.replace(current, canonical)
+    : `${content.trimEnd()}\n\n${canonical}\n`;
+}
+
+/** Carry source-owned protected bytes; never reconstruct them from the DB export. */
+function carryProtectedFences(activeRoot: string, freshRoot: string): void {
+  for (const relativePath of markdownFiles(activeRoot)) {
+    const activePath = join(activeRoot, relativePath);
+    const oldBody = readFileSync(activePath, 'utf8');
+    const oldFacts = singleFence(oldBody, FACTS_FENCE, 'facts');
+    const oldLearning = singleFence(oldBody, LEARNING_FENCE, 'Learning Loop');
+    if (oldLearning && !parseLearningLoopFence(oldLearning)) {
+      throw new Error(`recovery source has malformed Learning Loop fence: ${relativePath}`);
+    }
+    if (!oldFacts && !oldLearning) continue;
+
+    const freshPath = join(freshRoot, relativePath);
+    if (!existsSync(freshPath) || !lstatSync(freshPath).isFile()) {
+      throw new Error(`recovery export omitted protected page: ${relativePath}`);
+    }
+    let freshBody = readFileSync(freshPath, 'utf8');
+    const freshFacts = singleFence(freshBody, FACTS_FENCE, 'facts');
+    const freshLearning = singleFence(freshBody, LEARNING_FENCE, 'Learning Loop');
+    if (freshLearning) parseLearningLoopFence(freshLearning);
+    freshBody = replaceOrAppendFence(freshBody, freshFacts, oldFacts);
+    freshBody = replaceOrAppendFence(freshBody, freshLearning, oldLearning);
+    writeFileSync(freshPath, freshBody, 'utf8');
+
+    const readback = readFileSync(freshPath, 'utf8');
+    if (singleFence(readback, FACTS_FENCE, 'facts') !== oldFacts
+      || singleFence(readback, LEARNING_FENCE, 'Learning Loop') !== oldLearning) {
+      throw new Error(`recovery protected-fence readback mismatch: ${relativePath}`);
+    }
+  }
+}
 
 interface ExportManifestPage {
   slug: string;
@@ -761,9 +834,17 @@ export async function withRecoverySourceWriteBoundary<T>(
   sourceId: string,
   fn: (recovery: RecoveryBackedSourceCheckout | null) => Promise<T>,
 ): Promise<T> {
+  assertNoActiveV2SourceReplacement(engine, sourceId);
   const initial = await getRecoveryBackedSourceCheckout(engine, sourceId);
   if (!initial) return fn(null);
-  return withRefreshingLock(engine, syncLockId(sourceId), async () => {
+  const target = {
+    brain_id: computeBrainIdFromConfig(engine.learningLoopLedgerConfig?.() ?? {}),
+    source_id: sourceId,
+    canonical_slug: '_source-boundary',
+    configured_root: initial.repoPath,
+  };
+  return withCanonicalSourceBoundary(engine, target, async () => {
+    assertNoActiveV2SourceReplacement(engine, sourceId);
     const locked = await getRecoveryBackedSourceCheckout(engine, sourceId);
     if (!locked) {
       throw new Error(
@@ -780,7 +861,9 @@ export async function refreshRecoverySourceCheckout(
   sourceId: string,
   slug: string,
   recovery: RecoveryBackedSourceCheckout,
+  sourceLease?: SourceWriteLease,
 ): Promise<RecoveryRefreshResult> {
+  assertNoActiveV2SourceReplacement(engine, sourceId);
   if (!existsSync(recovery.repoPath) || !lstatSync(recovery.repoPath).isDirectory()) {
     return {
       written: false,
@@ -809,20 +892,30 @@ export async function refreshRecoverySourceCheckout(
 
   try {
     await exportRecoveryCheckout(engine, sourceId, freshPath);
+    carryProtectedFences(recovery.repoPath, freshPath);
     gitInitAndCommit(freshPath, recovery.remoteUrl);
     const { performSync } = await import('../commands/sync.ts');
     let proofResult:
       | { status: 'synced' | 'up_to_date' | 'first_sync' | 'dry_run' | 'blocked_by_failures' | 'partial' }
       | undefined;
     try {
-      proofResult = await performSync(engine, {
-        repoPath: freshPath,
-        sourceId,
-        noPull: true,
-        noEmbed: true,
-        noExtract: true,
-        skipLock: true,
-      });
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = $2`,
+        [freshPath, sourceId],
+      );
+      proofResult = await withCanonicalCheckoutRebuildBoundary({
+        brain_id: computeBrainIdFromConfig(engine.learningLoopLedgerConfig?.() ?? {}),
+        source_id: sourceId,
+        canonical_slug: '_source-boundary',
+        configured_root: freshPath,
+      }, () => performSync(engine, {
+          repoPath: freshPath,
+          sourceId,
+          noPull: true,
+          noEmbed: true,
+          noExtract: true,
+          skipLock: true,
+        }), sourceLease);
     } finally {
       await engine.executeRaw(
         `UPDATE sources SET local_path = $1 WHERE id = $2`,

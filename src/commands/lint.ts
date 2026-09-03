@@ -16,7 +16,7 @@
  *   gbrain lint <file.md>          # lint single file
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync } from 'fs';
+import { readFileSync, readdirSync, statSync, lstatSync, existsSync } from 'fs';
 import { join, relative } from 'path';
 import { isAborted } from '../core/abort-check.ts';
 import { parseMarkdown, type ParseValidationCode } from '../core/markdown.ts';
@@ -26,8 +26,12 @@ import {
   DEFAULT_BYTES_WARN,
 } from '../core/content-sanity.ts';
 import { loadOperatorLiterals } from '../core/content-sanity-literals.ts';
-import { loadConfig, loadConfigWithEngine, gbrainPath } from '../core/config.ts';
+import { loadConfig, loadConfigWithEngine, gbrainPath, toEngineConfig } from '../core/config.ts';
 import type { BrainEngine } from '../core/engine.ts';
+import { createEngine } from '../core/engine-factory.ts';
+import {
+  writeCanonicalPathMutation,
+} from '../core/canonical-page-write.ts';
 
 export interface LintIssue {
   file: string;
@@ -407,6 +411,8 @@ export interface LintOpts {
    *  create + disconnect a competing module-style engine that nulls the
    *  shared db singleton mid-cycle. */
   engine?: BrainEngine;
+  /** Required to mutate a registered canonical source. */
+  sourceId?: string;
   /**
    * #1972: cooperative-abort signal. lint's per-page work is synchronous, so
    * without a periodic yield the event loop can't deliver an abort and a
@@ -474,7 +480,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
         const fixCount = issues.filter(i => i.fixable).length;
         totalFixed += fixCount;
         if (!opts.dryRun) {
-          writeFileSync(page, fixed);
+          await writeCanonicalPathMutation(opts.engine, page, fixed, { sourceId: opts.sourceId });
         }
       }
     }
@@ -491,9 +497,12 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
 }
 
 export async function runLint(args: string[]) {
-  const target = args.find(a => !a.startsWith('--'));
   const doFix = args.includes('--fix');
   const dryRun = args.includes('--dry-run');
+  const sourceIdx = args.indexOf('--source-id');
+  const sourceId = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
+  const sourceValueIdx = sourceIdx >= 0 ? sourceIdx + 1 : -1;
+  const target = args.find((a, index) => !a.startsWith('--') && index !== sourceValueIdx);
 
   if (!target) {
     console.error('Usage: gbrain lint <dir|file.md> [--fix] [--dry-run]');
@@ -525,6 +534,15 @@ export async function runLint(args: string[]) {
   // the same rule firings.
   const contentSanity = await resolveLintContentSanity();
   const lintContentOpts: LintContentOpts = { contentSanity };
+  let mutationEngine: BrainEngine | undefined;
+  if (doFix && !dryRun) {
+    const config = loadConfig();
+    if (config) {
+      const engineConfig = toEngineConfig(config);
+      mutationEngine = await createEngine(engineConfig);
+      await mutationEngine.connect(engineConfig);
+    }
+  }
 
   for (const page of pages) {
     const content = readFileSync(page, 'utf-8');
@@ -543,9 +561,6 @@ export async function runLint(args: string[]) {
       const fixed = fixContent(content);
       if (fixed !== content) {
         const fixCount = issues.filter(i => i.fixable).length;
-        if (!dryRun) {
-          writeFileSync(page, fixed);
-        }
         console.log(`  ${dryRun ? '(dry run) ' : ''}Fixed ${fixCount} issue(s)`);
       }
     }
@@ -557,7 +572,19 @@ export async function runLint(args: string[]) {
   // produces canonical numbers for the summary line).
   // Pass contentSanity through so runLintCore skips its own resolve
   // (we already resolved once for the human-detail loop above).
-  const result = await runLintCore({ target, fix: doFix, dryRun, contentSanity });
+  let result: LintResult;
+  try {
+    result = await runLintCore({
+      target,
+      fix: doFix,
+      dryRun,
+      contentSanity,
+      engine: mutationEngine,
+      sourceId,
+    });
+  } finally {
+    await mutationEngine?.disconnect();
+  }
   console.log(`\n${result.pages_scanned} pages scanned. ${result.total_issues} issue(s) in ${result.pages_with_issues} page(s).`);
   if (doFix) {
     console.log(`${dryRun ? '(dry run) ' : ''}${result.total_fixed} auto-fixed.`);

@@ -137,6 +137,18 @@ describe('gbrain frontmatter CLI (B4)', () => {
     expect(existsSync(join(tmp, 'random.md.bak'))).toBe(false);
   });
 
+  test('generate accepts --source-id before or after the target path', () => {
+    writeFileSync(join(tmp, 'random.md'), '# Random\n\nbody');
+    for (const args of [
+      ['generate', '--source-id', 'dept', tmp, '--dry-run', '--json', '--include-catch-all'],
+      ['generate', tmp, '--source-id', 'dept', '--dry-run', '--json', '--include-catch-all'],
+    ]) {
+      const result = runCli(args);
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout).scanned).toBe(1);
+    }
+  });
+
   test('validate missing path errors clearly', () => {
     const { stderr, code } = runCli(['validate', join(tmp, 'does-not-exist.md')]);
     expect(code).toBe(1);

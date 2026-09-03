@@ -1,0 +1,4494 @@
+{
+  "schema_version": 2,
+  "sites": [
+    {
+      "file": "src/cli.ts",
+      "symbol": "maybeEmitUpdateMarker",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        162
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "attemptAutopilotSelfUpgrade",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        458
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "installCrontab",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        1769
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "installCrontab",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1767
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "installEphemeralContainer",
+      "primitive": "fs:writeFileSync",
+      "count": 3,
+      "lines": [
+        1702,
+        1743,
+        1745
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "installLaunchd",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1564
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "installSystemd",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1671
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "logError",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        208
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "migrateSystemdUnitToRestartAlways",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1654
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "runAutopilot",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        530
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "shutdown",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        639
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "uninstallDaemon",
+      "primitive": "fs:unlinkSync",
+      "count": 5,
+      "lines": [
+        1792,
+        1804,
+        1816,
+        1862,
+        1873
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "uninstallDaemon",
+      "primitive": "fs:writeFileSync",
+      "count": 3,
+      "lines": [
+        1842,
+        1843,
+        1860
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/autopilot.ts",
+      "symbol": "writeWrapperScript",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1484
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/bench-publish.ts",
+      "symbol": "runBenchPublish",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        341
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/budget.ts",
+      "symbol": "runBudget",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        152
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/claw-test.ts",
+      "symbol": "runClawTest",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        115
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/eval-code-retrieval.ts",
+      "symbol": "runEvalCodeRetrieval",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        169
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/eval-cross-modal.ts",
+      "symbol": "runBatchMode",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        819
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/eval-cross-modal.ts",
+      "symbol": "runBatchMode",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        800
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/eval-longmemeval.ts",
+      "symbol": "emitByTypeSummary",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1087
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/eval-longmemeval.ts",
+      "symbol": "runOneQuestion",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        838
+      ],
+      "classification": "non_live_test_only",
+      "boundary": "isolated_eval_database",
+      "reason": "Public benchmark imports into an isolated in-memory evaluation database."
+    },
+    {
+      "file": "src/commands/eval-run-all.ts",
+      "symbol": "persistRunRecord",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        176
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/eval-suspected-contradictions.ts",
+      "symbol": "runRun",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        365
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/export.ts",
+      "symbol": "cleanup",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        346
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/export.ts",
+      "symbol": "createPrivateScopedExportStaging",
+      "primitive": "fs:rmSync",
+      "count": 2,
+      "lines": [
+        245,
+        257
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/export.ts",
+      "symbol": "dispose",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        353
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/export.ts",
+      "symbol": "runExport",
+      "primitive": "fs:writeFile",
+      "count": 3,
+      "lines": [
+        740,
+        768,
+        809
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/export.ts",
+      "symbol": "runExport",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        744,
+        771
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/export.ts",
+      "symbol": "writeFile",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        321
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/features.ts",
+      "symbol": "saveOffers",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        71
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "findAndClean",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        601
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "mirrorFiles",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        432
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "redirectFiles",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        511
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "redirectFiles",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        510
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "restoreFiles",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        563
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "unmirrorFiles",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        443
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "uploadRaw",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        248
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "writeUnmanagedFile",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        648
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/frontmatter-install-hook.ts",
+      "symbol": "installHook",
+      "primitive": "fs:copyFileSync",
+      "count": 1,
+      "lines": [
+        184
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/frontmatter-install-hook.ts",
+      "symbol": "installHook",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        179,
+        187
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/frontmatter-install-hook.ts",
+      "symbol": "uninstallHook",
+      "primitive": "fs:copyFileSync",
+      "count": 1,
+      "lines": [
+        212
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/frontmatter-install-hook.ts",
+      "symbol": "uninstallHook",
+      "primitive": "fs:rmSync",
+      "count": 2,
+      "lines": [
+        210,
+        213
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/import.ts",
+      "symbol": "processFile",
+      "primitive": "db:importFile",
+      "count": 1,
+      "lines": [
+        282
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/init.ts",
+      "symbol": "installDefaultTemplates",
+      "primitive": "fs:copyFileSync",
+      "count": 1,
+      "lines": [
+        1434
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "appendRefreshLog",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        1130
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "installRecipeIntoHostRepo",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        1450
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "installRecipeIntoHostRepo",
+      "primitive": "fs:copyFileSync",
+      "count": 1,
+      "lines": [
+        1390
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "installRecipeIntoHostRepo",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1426
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "readHeartbeat",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        446
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "refreshRecipeIntoHostRepo",
+      "primitive": "fs:copyFileSync",
+      "count": 4,
+      "lines": [
+        1222,
+        1235,
+        1257,
+        1294
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "refreshRecipeIntoHostRepo",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        1279
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrations.ts",
+      "symbol": "refreshRecipeIntoHostRepo",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1323
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrity.ts",
+      "symbol": "appendProgress",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        177
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrity.ts",
+      "symbol": "appendReview",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        678
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrity.ts",
+      "symbol": "clearProgress",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        181
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/integrity.ts",
+      "symbol": "logSkip",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        692
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/jobs.ts",
+      "symbol": "registerBuiltinHandlers",
+      "primitive": "db:purgeDeletedPages",
+      "count": 1,
+      "lines": [
+        2253
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "clearManifest",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        405
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "clearMigrateCutoverJournal",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        500
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "restoreConfigFile",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        506
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "runMigrateEngineWithHostLock",
+      "primitive": "sql:delete_from:pages",
+      "count": 1,
+      "lines": [
+        1394
+      ],
+      "classification": "migration_only",
+      "boundary": "managed_target_reject",
+      "reason": "Migration page mutation is inventoried and must reject managed targets or use verified canonical rebuild."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "writePage",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        1458
+      ],
+      "classification": "migration_only",
+      "boundary": "managed_target_reject",
+      "reason": "Migration page mutation is inventoried and must reject managed targets or use verified canonical rebuild."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "writePrivateFileAtomic",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        370
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "writePrivateFileAtomic",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        373
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrate-engine.ts",
+      "symbol": "writePrivateFileAtomic",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        368
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_11_0.ts",
+      "symbol": "appendPendingHostWork",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        357
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_11_0.ts",
+      "symbol": "injectAgentsMdMarker",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        194,
+        201
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_11_0.ts",
+      "symbol": "rewriteCronManifest",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        312,
+        318
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_13_1.ts",
+      "symbol": "appendRollbackBatch",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        294
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_13_1.ts",
+      "symbol": "phaseCGrandfather",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        169
+      ],
+      "classification": "migration_only",
+      "boundary": "managed_target_reject",
+      "reason": "Migration page mutation is inventoried and must reject managed targets or use verified canonical rebuild."
+    },
+    {
+      "file": "src/commands/migrations/v0_14_0.ts",
+      "symbol": "phaseBHostWork",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        125
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_22_4.ts",
+      "symbol": "phaseBAudit",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        102
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_22_4.ts",
+      "symbol": "phaseCEmitTodo",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        163
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_28_0.ts",
+      "symbol": "phaseCRechunkTodo",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        168
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/commands/migrations/v0_32_2.ts",
+      "symbol": "phaseBFenceFacts",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        320
+      ],
+      "classification": "migration_only",
+      "boundary": "managed_target_reject",
+      "reason": "Historical fence migration rejects managed canonical files."
+    },
+    {
+      "file": "src/commands/migrations/v0_32_2.ts",
+      "symbol": "phaseBFenceFacts",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        312
+      ],
+      "classification": "migration_only",
+      "boundary": "managed_target_reject",
+      "reason": "Historical fence migration rejects managed canonical files."
+    },
+    {
+      "file": "src/commands/mounts.ts",
+      "symbol": "writeMountsFile",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        75
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/mounts.ts",
+      "symbol": "writeMountsFile",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        72
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/notability-eval.ts",
+      "symbol": "writeJsonlCases",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        302
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/pages.ts",
+      "symbol": "runPurgeDeleted",
+      "primitive": "db:purgeDeletedPages",
+      "count": 2,
+      "lines": [
+        38,
+        67
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/commands/publish.ts",
+      "symbol": "runPublish",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        370
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/quarantine.ts",
+      "symbol": "runClear",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        133
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback; unmanaged behavior remains compatible."
+    },
+    {
+      "file": "src/commands/quarantine.ts",
+      "symbol": "runScan",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        231
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback; unmanaged behavior remains compatible."
+    },
+    {
+      "file": "src/commands/reindex-multimodal.ts",
+      "symbol": "runReindexMultimodal",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        370
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/reindex-multimodal.ts",
+      "symbol": "saveCheckpoint",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        399
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/reindex.ts",
+      "symbol": "runReindex",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        242
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback; unmanaged behavior remains compatible."
+    },
+    {
+      "file": "src/commands/reindex.ts",
+      "symbol": "runReindex",
+      "primitive": "db:importFromFile",
+      "count": 1,
+      "lines": [
+        215
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback; unmanaged behavior remains compatible."
+    },
+    {
+      "file": "src/commands/reinit-pglite.ts",
+      "symbol": "runReinitPglite",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        124
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/report.ts",
+      "symbol": "runReport",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        80
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/schema.ts",
+      "symbol": "runDowngradeCmd",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        827
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/schema.ts",
+      "symbol": "runForkCmd",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        615
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/schema.ts",
+      "symbol": "runInitCmd",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        585
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/schema.ts",
+      "symbol": "runUse",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        363
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/skillpack.ts",
+      "symbol": "cmdRegistry",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        927
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/skillpack.ts",
+      "symbol": "cmdRegistry",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        926
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/sources.ts",
+      "symbol": "runAttach",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        837
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/sources.ts",
+      "symbol": "runDetach",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        848
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "importOnePath",
+      "primitive": "db:importFile",
+      "count": 1,
+      "lines": [
+        2617
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "manageGitignore",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        4980
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "performFullSync",
+      "primitive": "db:deletePage",
+      "count": 1,
+      "lines": [
+        3366
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "performFullSync",
+      "primitive": "db:deletePages",
+      "count": 1,
+      "lines": [
+        3360
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "performSyncInner",
+      "primitive": "db:deletePage",
+      "count": 3,
+      "lines": [
+        1985,
+        2295,
+        2322
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "performSyncInner",
+      "primitive": "db:deletePages",
+      "count": 1,
+      "lines": [
+        2280
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "performSyncInner",
+      "primitive": "db:importFile",
+      "count": 1,
+      "lines": [
+        2413
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/sync.ts",
+      "symbol": "performSyncInner",
+      "primitive": "db:updateSlug",
+      "count": 1,
+      "lines": [
+        2406
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/commands/upgrade.ts",
+      "symbol": "recordUpgradeError",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        239
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/commands/upgrade.ts",
+      "symbol": "saveUpgradeState",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        259
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/advisor/history.ts",
+      "symbol": "appendAdvisorRun",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        77
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/advisor/history.ts",
+      "symbol": "appendAdvisorRun",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        75
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/advisor/history.ts",
+      "symbol": "appendAdvisorRun",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        74
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit-quality-probe.ts",
+      "symbol": "logQualityProbeEvent",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        79
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit-skill-brain-first.ts",
+      "symbol": "logBrainFirstEvent",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        220
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit-skill-brain-first.ts",
+      "symbol": "writeSnapshotAtomically",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        187
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit-skill-brain-first.ts",
+      "symbol": "writeSnapshotAtomically",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        192
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit-skill-brain-first.ts",
+      "symbol": "writeSnapshotAtomically",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        186
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit-synopsis.ts",
+      "symbol": "logSynopsisFailure",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        120
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit/audit-writer.ts",
+      "symbol": "log",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        206
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit/batch-retry-audit.ts",
+      "symbol": "pruneOldBatchRetryAuditFiles",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        196
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/audit/lock-renewal-audit.ts",
+      "symbol": "pruneOldLockRenewalAuditFiles",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        235
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/autopilot-status.ts",
+      "symbol": "clearManualAutomationDisabledMarker",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        291
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/autopilot-status.ts",
+      "symbol": "writeManualAutomationDisabledMarker",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        286
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/backfill-base.ts",
+      "symbol": "runBackfill",
+      "primitive": "sql:dynamic_table:mutation",
+      "count": 1,
+      "lines": [
+        277
+      ],
+      "classification": "derived_only",
+      "boundary": "registered_backfill_spec",
+      "reason": "Registered backfill specs constrain the table and update columns; page specs are rebuildable derived fields.",
+      "allowed_columns": [
+        "effective_date",
+        "effective_date_source",
+        "emotional_weight",
+        "emotional_weight_recomputed_at"
+      ]
+    },
+    {
+      "file": "src/core/backfill-effective-date.ts",
+      "symbol": "backfillEffectiveDate",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        208
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "effective_date",
+        "effective_date_source"
+      ]
+    },
+    {
+      "file": "src/core/binary-self-update.ts",
+      "symbol": "defaultDownload",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        109
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/binary-self-update.ts",
+      "symbol": "runBinarySelfUpdate",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        182
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/binary-self-update.ts",
+      "symbol": "safeUnlink",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        193
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "ensureExcluded",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        305
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "installDurabilityCron",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        540
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "installHelper",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        397
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "installLocalHook",
+      "primitive": "fs:writeFileSync",
+      "count": 3,
+      "lines": [
+        320,
+        324,
+        328
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "patchResolverFile",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        273
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "removeDurabilityCron",
+      "primitive": "fs:rmSync",
+      "count": 2,
+      "lines": [
+        568,
+        582
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "uninstallLocalHook",
+      "primitive": "fs:rmSync",
+      "count": 2,
+      "lines": [
+        340,
+        341
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "uninstallLocalHook",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        341
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "wireRepoCredential",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        464
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-repo-durability.ts",
+      "symbol": "writeCronWrapper",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        514
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brain-writer.ts",
+      "symbol": "createFrontmatterBackup",
+      "primitive": "fs:copyFileSync",
+      "count": 1,
+      "lines": [
+        108
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Legacy path lane rejects Learning Loop metadata before mutation."
+    },
+    {
+      "file": "src/core/brain-writer.ts",
+      "symbol": "writeBrainPage",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        366
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Legacy path lane rejects Learning Loop metadata before mutation."
+    },
+    {
+      "file": "src/core/brainstorm/checkpoint.ts",
+      "symbol": "clearCheckpoint",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        203
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brainstorm/checkpoint.ts",
+      "symbol": "gcStaleCheckpoints",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        174
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brainstorm/checkpoint.ts",
+      "symbol": "saveCheckpoint",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        127
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/brainstorm/checkpoint.ts",
+      "symbol": "saveCheckpoint",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        126
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/budget/budget-tracker.ts",
+      "symbol": "appendAuditLine",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        141
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/canonical-page-write.ts",
+      "symbol": "atomic",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        128
+      ],
+      "classification": "canonical_boundary",
+      "boundary": "shared_canonical_boundary",
+      "reason": "Owns the locked fsync and atomic rename implementation."
+    },
+    {
+      "file": "src/core/canonical-page-write.ts",
+      "symbol": "atomic",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        134
+      ],
+      "classification": "canonical_boundary",
+      "boundary": "shared_canonical_boundary",
+      "reason": "Owns the locked fsync and atomic rename implementation."
+    },
+    {
+      "file": "src/core/canonical-page-write.ts",
+      "symbol": "atomic",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        118
+      ],
+      "classification": "canonical_boundary",
+      "boundary": "shared_canonical_boundary",
+      "reason": "Owns the locked fsync and atomic rename implementation."
+    },
+    {
+      "file": "src/core/canonical-page-write.ts",
+      "symbol": "writeCanonicalPathMutation",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        603,
+        623
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Unmanaged path lane rejects Learning Loop metadata before mutation; registered or explicit sources use the source-qualified canonical write."
+    },
+    {
+      "file": "src/core/claw-test/transcript-capture.ts",
+      "symbol": "createTranscriptSink",
+      "primitive": "fs:createWriteStream",
+      "count": 1,
+      "lines": [
+        41
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/config.ts",
+      "symbol": "ensureGitignore",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1061
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/config.ts",
+      "symbol": "saveConfig",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1008
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/connection-audit.ts",
+      "symbol": "logConnectionEvent",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        70
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/context/reflex.ts",
+      "symbol": "writeHeartbeat",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        256
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/context/resolve-ipc.ts",
+      "symbol": "cleanupStaleSocket",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        161
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/corpus.ts",
+      "symbol": "ingestCorpusInput",
+      "primitive": "fs:copyFileSync",
+      "count": 1,
+      "lines": [
+        162
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/corpus.ts",
+      "symbol": "writeFileEnsuringDir",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        955
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/cross-modal-eval/receipt-write.ts",
+      "symbol": "writeReceipt",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        16
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/cycle.ts",
+      "symbol": "acquireFileLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        640
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/cycle.ts",
+      "symbol": "acquireFileLock",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        626,
+        631
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/cycle.ts",
+      "symbol": "purgeOrphanClones",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        1276
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/cycle.ts",
+      "symbol": "runPhasePurge",
+      "primitive": "db:purgeDeletedPages",
+      "count": 1,
+      "lines": [
+        1298
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/cycle/budget-meter.ts",
+      "symbol": "writeLedgerLine",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        69
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/cycle/extract-atoms.ts",
+      "symbol": "runPhaseExtractAtoms",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        606
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/cycle/nightly-quality-probe.ts",
+      "symbol": "runNightlyQualityProbe",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        282
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/cycle/patterns.ts",
+      "symbol": "reverseWriteRefs",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        279
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Reverse writer rejects Learning Loop metadata before mutation."
+    },
+    {
+      "file": "src/core/cycle/phantom-redirect.ts",
+      "symbol": "appendPhantomFenceRowsToCanonical",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        290
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect materialization rejects managed canonical paths and uses guarded DB sinks."
+    },
+    {
+      "file": "src/core/cycle/phantom-redirect.ts",
+      "symbol": "appendPhantomFenceRowsToCanonical",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        282
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect materialization rejects managed canonical paths and uses guarded DB sinks."
+    },
+    {
+      "file": "src/core/cycle/phantom-redirect.ts",
+      "symbol": "materializeCanonicalToDisk",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        362,
+        378
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect materialization rejects managed canonical paths and uses guarded DB sinks."
+    },
+    {
+      "file": "src/core/cycle/phantom-redirect.ts",
+      "symbol": "tryRedirectPhantom",
+      "primitive": "db:refreshPageBody",
+      "count": 1,
+      "lines": [
+        469
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/cycle/phantom-redirect.ts",
+      "symbol": "tryRedirectPhantom",
+      "primitive": "db:softDeletePage",
+      "count": 1,
+      "lines": [
+        487
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/cycle/phantom-redirect.ts",
+      "symbol": "tryRedirectPhantom",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        495
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect materialization rejects managed canonical paths and uses guarded DB sinks."
+    },
+    {
+      "file": "src/core/cycle/synthesize-concepts.ts",
+      "symbol": "runPhaseSynthesizeConcepts",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        220
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/cycle/synthesize.ts",
+      "symbol": "reverseWriteRefs",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1613
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Reverse writer rejects Learning Loop metadata before mutation."
+    },
+    {
+      "file": "src/core/cycle/synthesize.ts",
+      "symbol": "writeSummaryPage",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        1701
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/cycle/synthesize.ts",
+      "symbol": "writeSummaryPage",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        1718
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Reverse writer rejects Learning Loop metadata before mutation."
+    },
+    {
+      "file": "src/core/dream-quality.ts",
+      "symbol": "writeDreamQualityReceipt",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        218
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/dry-fix.ts",
+      "symbol": "attemptFix",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        564
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/dry-fix.ts",
+      "symbol": "attemptInsertFix",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        457
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/enrichment-service.ts",
+      "symbol": "enrichEntity",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        98
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/extract-takes-from-pages.ts",
+      "symbol": "flush",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        181
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "takes_extracted_content_hash"
+      ]
+    },
+    {
+      "file": "src/core/extract/receipt-writer.ts",
+      "symbol": "writeReceipt",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        196
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/facts/fence-write.ts",
+      "symbol": "recordWriteFailure",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        110
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "shared_canonical_boundary",
+      "reason": "Fact append uses non-lineage canonical mode."
+    },
+    {
+      "file": "src/core/facts/forget.ts",
+      "symbol": "forgetFactInFence",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        204
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Managed fact rows reject before legacy or filesystem mutation."
+    },
+    {
+      "file": "src/core/facts/forget.ts",
+      "symbol": "forgetFactInFence",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        195
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Managed fact rows reject before legacy or filesystem mutation."
+    },
+    {
+      "file": "src/core/facts/stub-guard-audit.ts",
+      "symbol": "logStubGuardEvent",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        81
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/fail-improve.ts",
+      "symbol": "incrementCallCount",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        259
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/fail-improve.ts",
+      "symbol": "logFailure",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        156
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/fail-improve.ts",
+      "symbol": "logImprovement",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        231
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/fail-improve.ts",
+      "symbol": "rotateIfNeeded",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        284
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/friction.ts",
+      "symbol": "logFriction",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        146
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/import-checkpoint.ts",
+      "symbol": "clearCheckpoint",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        150
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/import-checkpoint.ts",
+      "symbol": "saveCheckpoint",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        112
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/import-checkpoint.ts",
+      "symbol": "saveCheckpoint",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        111
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/import-file.ts",
+      "symbol": "importCodeFile",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        1375
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/import-file.ts",
+      "symbol": "importFromContent",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        788
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/import-file.ts",
+      "symbol": "importFromFile",
+      "primitive": "db:importFromContent",
+      "count": 2,
+      "lines": [
+        1158,
+        1168
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/import-file.ts",
+      "symbol": "importImageFile",
+      "primitive": "db:withImportTransaction",
+      "count": 1,
+      "lines": [
+        1888
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/import-file.ts",
+      "symbol": "withImportTransaction",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        1555
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed imports require exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/ingestion/sources/inbox-folder.ts",
+      "symbol": "handleAdd",
+      "primitive": "fs:rename",
+      "count": 1,
+      "lines": [
+        243
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/ingestion/sources/markdown-greenfield.ts",
+      "symbol": "<module>",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        127
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/last-retrieved.ts",
+      "symbol": "bumpLastRetrievedAt",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        187
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "last_retrieved_at"
+      ]
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "activateLearningClaim",
+      "primitive": "db:importFromContent",
+      "count": 3,
+      "lines": [
+        960,
+        971,
+        1006
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "appendEvent",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        1996
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "clearCanonicalPending",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        2378
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "correctLearningClaim",
+      "primitive": "db:importFromContent",
+      "count": 3,
+      "lines": [
+        1056,
+        1060,
+        1096
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "recoverPendingBeforeReversal",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        1188
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/learning-loop.ts",
+      "symbol": "reverseLearningClaim",
+      "primitive": "db:importFromContent",
+      "count": 2,
+      "lines": [
+        1310,
+        1405
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback under the source lease."
+    },
+    {
+      "file": "src/core/migrate.ts",
+      "symbol": "<module>",
+      "primitive": "db:updateSlug",
+      "count": 1,
+      "lines": [
+        128
+      ],
+      "classification": "migration_only",
+      "boundary": "managed_target_reject",
+      "reason": "Migration page mutation is inventoried and must reject managed targets or use verified canonical rebuild."
+    },
+    {
+      "file": "src/core/minions/agent-audit.ts",
+      "symbol": "logAgentSubmission",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        81
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/minions/backpressure-audit.ts",
+      "symbol": "logBackpressureCoalesce",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        72
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/minions/handlers/ingest-capture.ts",
+      "symbol": "makeIngestCaptureHandler",
+      "primitive": "db:importFromContent",
+      "count": 1,
+      "lines": [
+        116
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback; unmanaged behavior remains compatible."
+    },
+    {
+      "file": "src/core/minions/handlers/subagent-audit.ts",
+      "symbol": "append",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        75
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/minions/supervisor.ts",
+      "symbol": "start",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        536
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/minions/supervisor.ts",
+      "symbol": "tryAtomicCreate",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        783
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/minions/worker-registry.ts",
+      "symbol": "readWorkers",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        206
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/minions/worker-registry.ts",
+      "symbol": "registerWorker",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        118
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/minions/worker-registry.ts",
+      "symbol": "registerWorker",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        108
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/mounts-cache.ts",
+      "symbol": "clearMountsCache",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        455
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/mounts-cache.ts",
+      "symbol": "writeMountsCache",
+      "primitive": "fs:renameSync",
+      "count": 2,
+      "lines": [
+        445,
+        446
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/mounts-cache.ts",
+      "symbol": "writeMountsCache",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        441,
+        442
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/operations.ts",
+      "symbol": "<module>",
+      "primitive": "db:purgeDeletedPages",
+      "count": 1,
+      "lines": [
+        1415
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/operations.ts",
+      "symbol": "<module>",
+      "primitive": "db:restorePage",
+      "count": 1,
+      "lines": [
+        1389
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/operations.ts",
+      "symbol": "<module>",
+      "primitive": "db:revertToVersion",
+      "count": 1,
+      "lines": [
+        2645
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/operations.ts",
+      "symbol": "<module>",
+      "primitive": "db:softDeletePage",
+      "count": 1,
+      "lines": [
+        1361
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/outlook-collector.ts",
+      "symbol": "saveToken",
+      "primitive": "fs:writeFile",
+      "count": 1,
+      "lines": [
+        464
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/output/post-write.ts",
+      "symbol": "writeLocalLintLog",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        137
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/output/writer.ts",
+      "symbol": "createEntity",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        156
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/output/writer.ts",
+      "symbol": "setCompiledTruth",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        175
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/output/writer.ts",
+      "symbol": "setFrontmatterField",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        189
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "deletePage",
+      "primitive": "sql:delete_from:pages",
+      "count": 1,
+      "lines": [
+        1227
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "deletePages",
+      "primitive": "sql:delete_from:pages",
+      "count": 1,
+      "lines": [
+        1247
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "markPagesExtractedBatch",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        2694
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "links_extracted_at"
+      ]
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "putPage",
+      "primitive": "sql:insert_into:pages",
+      "count": 1,
+      "lines": [
+        1197
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "refreshPageBody",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1330
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "restorePage",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1305
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "revertToVersion",
+      "primitive": "sql:update:pages",
+      "count": 2,
+      "lines": [
+        4906,
+        4918
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "setEmotionalWeightBatch",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        5586
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "emotional_weight",
+        "salience_touched_at"
+      ]
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "setPageEmbeddingSignature",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        2453
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "embedding_signature"
+      ]
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "softDeletePage",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1288
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "updatePageContextualRetrievalState",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1351
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "contextual_retrieval_mode",
+        "corpus_generation"
+      ]
+    },
+    {
+      "file": "src/core/pglite-engine.ts",
+      "symbol": "updateSlug",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        5091
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/pglite-lock.ts",
+      "symbol": "acquireLock",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        155
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/pglite-lock.ts",
+      "symbol": "acquireLock",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        180
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/pglite-lock.ts",
+      "symbol": "releaseLock",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        245
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/pglite-lock.ts",
+      "symbol": "startHeartbeat",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        90
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/pglite-lock.ts",
+      "symbol": "startHeartbeat",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        92
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/pglite-lock.ts",
+      "symbol": "startHeartbeat",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        89
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "deletePage",
+      "primitive": "sql:delete_from:pages",
+      "count": 1,
+      "lines": [
+        1099
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "deletePages",
+      "primitive": "sql:delete_from:pages",
+      "count": 1,
+      "lines": [
+        1117
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "markPagesExtractedBatch",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        2633
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "links_extracted_at"
+      ]
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "putPage",
+      "primitive": "sql:insert_into:pages",
+      "count": 1,
+      "lines": [
+        1069
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "refreshPageBody",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1198
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "restorePage",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1171
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "revertToVersion",
+      "primitive": "sql:update:pages",
+      "count": 2,
+      "lines": [
+        4796,
+        4807
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "setEmotionalWeightBatch",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        5614
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "emotional_weight",
+        "salience_touched_at"
+      ]
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "setPageEmbeddingSignature",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        2381
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "embedding_signature"
+      ]
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "softDeletePage",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1157
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "updatePageContextualRetrievalState",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        1221
+      ],
+      "classification": "derived_only",
+      "boundary": "exact_column_allowlist",
+      "reason": "Updates only the listed rebuildable derived page columns.",
+      "allowed_columns": [
+        "contextual_retrieval_mode",
+        "corpus_generation"
+      ]
+    },
+    {
+      "file": "src/core/postgres-engine.ts",
+      "symbol": "updateSlug",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        4982
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/preferences.ts",
+      "symbol": "appendCompletedMigration",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        166
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/preferences.ts",
+      "symbol": "savePreferences",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        129
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/preferences.ts",
+      "symbol": "savePreferences",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        131
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/preferences.ts",
+      "symbol": "savePreferences",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        127
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/purge-deleted-pages.ts",
+      "symbol": "<module>",
+      "primitive": "sql:delete_from:pages",
+      "count": 1,
+      "lines": [
+        111
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/recall-cursor-state.ts",
+      "symbol": "writeCursor",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        107
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/recall-cursor-state.ts",
+      "symbol": "writeCursor",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        111
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/recall-cursor-state.ts",
+      "symbol": "writeCursor",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        101
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "carryProtectedFences",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        90
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "cleanup",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        446
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "createPrivateScopedExportStaging",
+      "primitive": "fs:rmSync",
+      "count": 2,
+      "lines": [
+        346,
+        358
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "dispose",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        453
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "exportRecoveryCheckout",
+      "primitive": "fs:writeFile",
+      "count": 3,
+      "lines": [
+        733,
+        744,
+        769
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "refreshRecoverySourceCheckout",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        948
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "switchRecoveryCheckout",
+      "primitive": "fs:renameSync",
+      "count": 3,
+      "lines": [
+        678,
+        680,
+        684
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/recovery-source-refresh.ts",
+      "symbol": "writeFile",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        421
+      ],
+      "classification": "checkout_rebuild",
+      "boundary": "active_v2_source_reject",
+      "reason": "Recovery rebuild runs under the source boundary and rejects active V2 roots."
+    },
+    {
+      "file": "src/core/remediation-checkpoint.ts",
+      "symbol": "clearRemediationCheckpoint",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        119
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/remediation-checkpoint.ts",
+      "symbol": "saveRemediationCheckpoint",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        68
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/remediation-checkpoint.ts",
+      "symbol": "saveRemediationCheckpoint",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        65
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-events.ts",
+      "symbol": "logSchemaEvent",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        45
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/candidate-audit.ts",
+      "symbol": "logCandidate",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        107
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/mutate-audit.ts",
+      "symbol": "appendBestEffort",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        142
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/mutate.ts",
+      "symbol": "writeAtomic",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        272
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/mutate.ts",
+      "symbol": "writeAtomic",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        277
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/pack-lock.ts",
+      "symbol": "acquirePackLock",
+      "primitive": "fs:unlinkSync",
+      "count": 2,
+      "lines": [
+        206,
+        219
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/pack-lock.ts",
+      "symbol": "refreshLock",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        249
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/pack-lock.ts",
+      "symbol": "releasePackLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        262
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/pack-lock.ts",
+      "symbol": "writeLockRecord",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        124
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/page-to-alias.ts",
+      "symbol": "runPageToAliasCore",
+      "primitive": "db:softDeletePage",
+      "count": 1,
+      "lines": [
+        227
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/schema-pack/page-to-link.ts",
+      "symbol": "runPageToLinkCore",
+      "primitive": "db:softDeletePage",
+      "count": 1,
+      "lines": [
+        211
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/schema-pack/retype.ts",
+      "symbol": "applyRetypeRule",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        228
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/schema-pack/review.ts",
+      "symbol": "runReviewCandidates",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        79
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/scaffold-extractable.ts",
+      "symbol": "scaffoldExtractable",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        276,
+        284
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/schema-pack/sync.ts",
+      "symbol": "applyTypeAssignment",
+      "primitive": "sql:update:pages",
+      "count": 1,
+      "lines": [
+        135
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Content, identity, type, lifecycle, or deletion mutation must preflight and reject managed targets."
+    },
+    {
+      "file": "src/core/self-upgrade.ts",
+      "symbol": "atomicWrite",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        290
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/self-upgrade.ts",
+      "symbol": "atomicWrite",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        286
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/self-upgrade.ts",
+      "symbol": "clearSnooze",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        380
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/self-upgrade.ts",
+      "symbol": "clearUpdateCache",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        318
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/self-upgrade.ts",
+      "symbol": "releaseRefreshLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        409
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillify/generator.ts",
+      "symbol": "applyScaffold",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        182,
+        188
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillopt/apply-edits.ts",
+      "symbol": "atomicWrite",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        320
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillopt/apply-edits.ts",
+      "symbol": "atomicWrite",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        315
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillopt/batch.ts",
+      "symbol": "runFleet",
+      "primitive": "fs:copyFileSync",
+      "count": 1,
+      "lines": [
+        210
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillopt/checkpoint.ts",
+      "symbol": "deleteCheckpoint",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        81
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillopt/checkpoint.ts",
+      "symbol": "gcStaleCheckpoints",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        101
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillopt/held-out.ts",
+      "symbol": "appendCapture",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        84
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillopt/version-store.ts",
+      "symbol": "revertAllPending",
+      "primitive": "fs:unlinkSync",
+      "count": 2,
+      "lines": [
+        214,
+        226
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/audit.ts",
+      "symbol": "logSkillpackEvent",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        82
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/copy.ts",
+      "symbol": "copyArtifacts",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        177
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/doctor.ts",
+      "symbol": "applyAutoFixes",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        309
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/endorse.ts",
+      "symbol": "runEndorse",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        178
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/endorse.ts",
+      "symbol": "runEndorse",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        177
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/harvest.ts",
+      "symbol": "addToBundleManifest",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        267
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/harvest.ts",
+      "symbol": "rollbackHarvest",
+      "primitive": "fs:rmSync",
+      "count": 2,
+      "lines": [
+        236,
+        241
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/init-scaffold.ts",
+      "symbol": "applyWritePlan",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        82
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/installer.ts",
+      "symbol": "acquireLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        226
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/installer.ts",
+      "symbol": "applyInstall",
+      "primitive": "fs:writeFileSync",
+      "count": 2,
+      "lines": [
+        384,
+        392
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/installer.ts",
+      "symbol": "applyUninstall",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        794
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/installer.ts",
+      "symbol": "releaseLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        249
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/installer.ts",
+      "symbol": "writeAtomic",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        345
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/installer.ts",
+      "symbol": "writeAtomic",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        344
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/migrate-fence.ts",
+      "symbol": "runMigrateFence",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        295
+      ],
+      "classification": "migration_only",
+      "boundary": "checked_inventory",
+      "reason": "Migration or upgrade filesystem state; not a live canonical Markdown owner."
+    },
+    {
+      "file": "src/core/skillpack/nag-state.ts",
+      "symbol": "saveNagState",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        99
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/nag-state.ts",
+      "symbol": "saveNagState",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        102
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/nag-state.ts",
+      "symbol": "saveNagState",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        98
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/reference.ts",
+      "symbol": "applyOne",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        274
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/registry-client.ts",
+      "symbol": "writeCache",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        158
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/registry-client.ts",
+      "symbol": "writeCache",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        153
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/remote-source.ts",
+      "symbol": "resolveGitSource",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        261
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/remote-source.ts",
+      "symbol": "resolveGitSource",
+      "primitive": "fs:rmSync",
+      "count": 3,
+      "lines": [
+        223,
+        243,
+        257
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/remote-source.ts",
+      "symbol": "resolveTarballSource",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        328
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/remote-source.ts",
+      "symbol": "resolveTarballSource",
+      "primitive": "fs:rmSync",
+      "count": 2,
+      "lines": [
+        317,
+        324
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/scrub-legacy.ts",
+      "symbol": "runScrubLegacy",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        104
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/state.ts",
+      "symbol": "saveState",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        138
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/state.ts",
+      "symbol": "saveState",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        141
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/state.ts",
+      "symbol": "saveState",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        137
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/tarball.ts",
+      "symbol": "packTarball",
+      "primitive": "fs:rmSync",
+      "count": 3,
+      "lines": [
+        199,
+        213,
+        216
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/skillpack/tarball.ts",
+      "symbol": "packTarball",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        212
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/sources-ops.ts",
+      "symbol": "addSource",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        431
+      ],
+      "classification": "source_lifecycle",
+      "boundary": "active_v2_source_reject",
+      "reason": "Source removal and replacement reject active V2 bindings."
+    },
+    {
+      "file": "src/core/sources-ops.ts",
+      "symbol": "addSource",
+      "primitive": "fs:rmSync",
+      "count": 3,
+      "lines": [
+        382,
+        411,
+        433
+      ],
+      "classification": "source_lifecycle",
+      "boundary": "active_v2_source_reject",
+      "reason": "Source removal and replacement reject active V2 bindings."
+    },
+    {
+      "file": "src/core/sources-ops.ts",
+      "symbol": "recloneIfMissing",
+      "primitive": "fs:renameSync",
+      "count": 3,
+      "lines": [
+        829,
+        831,
+        836
+      ],
+      "classification": "source_lifecycle",
+      "boundary": "active_v2_source_reject",
+      "reason": "Source removal and replacement reject active V2 bindings."
+    },
+    {
+      "file": "src/core/sources-ops.ts",
+      "symbol": "recloneIfMissing",
+      "primitive": "fs:rmSync",
+      "count": 5,
+      "lines": [
+        793,
+        804,
+        822,
+        841,
+        856
+      ],
+      "classification": "source_lifecycle",
+      "boundary": "active_v2_source_reject",
+      "reason": "Source removal and replacement reject active V2 bindings."
+    },
+    {
+      "file": "src/core/sources-ops.ts",
+      "symbol": "removeSource",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        684
+      ],
+      "classification": "source_lifecycle",
+      "boundary": "active_v2_source_reject",
+      "reason": "Source removal and replacement reject active V2 bindings."
+    },
+    {
+      "file": "src/core/storage/local.ts",
+      "symbol": "delete",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        39
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/storage/local.ts",
+      "symbol": "upload",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        28
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/sync-failure-ledger.ts",
+      "symbol": "_acquireLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        359
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/sync-failure-ledger.ts",
+      "symbol": "_writeAll",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        398
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/sync-failure-ledger.ts",
+      "symbol": "_writeAll",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        397
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/sync-failure-ledger.ts",
+      "symbol": "withLedgerLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        387
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/takes-quality-eval/receipt-write.ts",
+      "symbol": "writeReceiptArtifact",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        76
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/thin-client-upgrade-prompt.ts",
+      "symbol": "acquirePromptLock",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        212
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/thin-client-upgrade-prompt.ts",
+      "symbol": "release",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        202
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/thin-client-upgrade-prompt.ts",
+      "symbol": "savePromptState",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        163
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/thin-client-upgrade-prompt.ts",
+      "symbol": "savePromptState",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        162
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/think/index.ts",
+      "symbol": "persistSynthesis",
+      "primitive": "db:putPage",
+      "count": 1,
+      "lines": [
+        565
+      ],
+      "classification": "db_first_content",
+      "boundary": "engine_collision_guard",
+      "reason": "Engine sink rejects existing, derived, or active-destination managed collisions without a canonical permit."
+    },
+    {
+      "file": "src/core/transcription.ts",
+      "symbol": "appendTranscriptionSpendAudit",
+      "primitive": "fs:appendFileSync",
+      "count": 1,
+      "lines": [
+        62
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/transcription.ts",
+      "symbol": "transcribeLargeFile",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        319
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/upgrade-checkpoint.ts",
+      "symbol": "clearCheckpoint",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        119
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/upgrade-checkpoint.ts",
+      "symbol": "writeCheckpoint",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        110
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/write-through.ts",
+      "symbol": "importAndWriteCanonicalPage",
+      "primitive": "db:importFromContent",
+      "count": 3,
+      "lines": [
+        145,
+        162,
+        183
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "expected_managed_preflight",
+      "reason": "Managed page reconciliation requires exact canonical readback; unmanaged behavior remains compatible."
+    },
+    {
+      "file": "src/core/write-through.ts",
+      "symbol": "writePageThrough",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        328
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "shared_canonical_boundary",
+      "reason": "Renders only proven unmanaged rows; managed writes use canonical-first reconciliation."
+    },
+    {
+      "file": "src/core/write-through.ts",
+      "symbol": "writePageThrough",
+      "primitive": "fs:unlinkSync",
+      "count": 1,
+      "lines": [
+        331
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "shared_canonical_boundary",
+      "reason": "Renders only proven unmanaged rows; managed writes use canonical-first reconciliation."
+    },
+    {
+      "file": "src/core/write-through.ts",
+      "symbol": "writePageThrough",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        327
+      ],
+      "classification": "canonical_reconciliation",
+      "boundary": "shared_canonical_boundary",
+      "reason": "Renders only proven unmanaged rows; managed writes use canonical-first reconciliation."
+    },
+    {
+      "file": "src/core/writeback-suppression.ts",
+      "symbol": "saveWritebackSuppressionState",
+      "primitive": "fs:renameSync",
+      "count": 1,
+      "lines": [
+        55
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/writeback-suppression.ts",
+      "symbol": "saveWritebackSuppressionState",
+      "primitive": "fs:rmSync",
+      "count": 1,
+      "lines": [
+        58
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/writeback-suppression.ts",
+      "symbol": "saveWritebackSuppressionState",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        54
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    }
+  ]
+}

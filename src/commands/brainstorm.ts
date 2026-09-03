@@ -25,8 +25,7 @@ import {
 import { loadConfig } from '../core/config.ts';
 import { StructuredAgentError } from '../core/errors.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
-import { importFromContent } from '../core/import-file.ts';
-import { writePageThrough, type WriteThroughResult } from '../core/write-through.ts';
+import { importAndWriteCanonicalPage, type WriteThroughResult } from '../core/write-through.ts';
 import { randomBytes } from 'crypto';
 
 export interface BrainstormCliArgs {
@@ -360,34 +359,30 @@ export async function persistSavedIdea(
   args: { slug: string; content: string; sourceId?: string; provenanceVia: string },
 ): Promise<SaveOutcome> {
   const sourceId = args.sourceId ?? 'default';
-  const { withRecoverySourceWriteBoundary } = await import('../core/recovery-source-refresh.ts');
-  return withRecoverySourceWriteBoundary(engine, sourceId, async (recovery) => {
-    let dbSaved = false;
-    let dbError: string | undefined;
-    try {
-      await importFromContent(engine, args.slug, args.content, {
+  try {
+    const persisted = await importAndWriteCanonicalPage(engine, args.slug, {
+      sourceId,
+      content: args.content,
+      frontmatterOverrides: {
+        source_kind: args.provenanceVia,
+        ingested_via: args.provenanceVia,
+      },
+      importOptions: {
         noEmbed: true,
         sourceId,
         sourcePath: `${args.slug}.md`,
         source_kind: args.provenanceVia,
         ingested_via: args.provenanceVia,
-      });
-      dbSaved = true;
-    } catch (err) {
-      dbError = err instanceof Error ? err.message : String(err);
-    }
-    const writeThrough: WriteThroughResult = dbSaved
-      ? await writePageThrough(engine, args.slug, {
-          sourceId,
-          recoveryCheckout: recovery,
-          frontmatterOverrides: {
-            source_kind: args.provenanceVia,
-            ingested_via: args.provenanceVia,
-          },
-        })
-      : { written: false, skipped: 'page_not_found_after_write' };
-    return { dbSaved, dbError, writeThrough };
-  });
+      },
+    });
+    return { dbSaved: persisted.result.status !== 'error', writeThrough: persisted.writeThrough };
+  } catch (err) {
+    return {
+      dbSaved: false,
+      dbError: err instanceof Error ? err.message : String(err),
+      writeThrough: { written: false, skipped: 'page_not_found_after_write' },
+    };
+  }
 }
 
 /**

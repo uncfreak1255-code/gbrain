@@ -26,6 +26,7 @@ import { MinionQueue } from '../minions/queue.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
 import type { MinionJobInput, SubagentHandlerData } from '../minions/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
+import { assertUnmanagedPathMutation } from '../canonical-page-write.ts';
 import type { Page, PageType } from '../types.ts';
 
 export interface PatternsPhaseOpts {
@@ -274,6 +275,7 @@ async function reverseWriteRefs(
         ? join(brainDir, `${slug}.md`)
         : join(brainDir, '.sources', source_id, `${slug}.md`);
       mkdirSync(dirname(filePath), { recursive: true });
+      assertUnmanagedPathMutation(filePath, md);
       writeFileSync(filePath, md, 'utf8');
       count++;
     } catch (e) {

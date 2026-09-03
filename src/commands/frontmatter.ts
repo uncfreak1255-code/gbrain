@@ -15,7 +15,7 @@
  * validate. Pass an explicit path to validate a non-source-registered tree.
  */
 
-import { readFileSync, writeFileSync, existsSync, lstatSync, readdirSync } from 'fs';
+import { readFileSync, existsSync, lstatSync, readdirSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { join, relative, resolve } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
@@ -31,6 +31,9 @@ import {
   type AuditFix,
 } from '../core/brain-writer.ts';
 import { isSyncable, pruneDir, slugifyPath } from '../core/sync.ts';
+import {
+  writeCanonicalPathMutation,
+} from '../core/canonical-page-write.ts';
 
 export async function runFrontmatter(args: string[]): Promise<void> {
   const sub = args[0];
@@ -41,7 +44,11 @@ export async function runFrontmatter(args: string[]): Promise<void> {
   const rest = args.slice(1);
 
   if (sub === 'validate') {
-    await runValidate(rest);
+    let engine: BrainEngine | undefined;
+    try {
+      if (rest.includes('--fix') && !rest.includes('--dry-run')) engine = await connectEngineForMutationInventory();
+      await runValidate(rest, engine);
+    } finally { await engine?.disconnect(); }
     return;
   }
   if (sub === 'audit') {
@@ -54,7 +61,11 @@ export async function runFrontmatter(args: string[]): Promise<void> {
     return;
   }
   if (sub === 'generate') {
-    await runGenerate(rest);
+    let engine: BrainEngine | undefined;
+    try {
+      if (rest.includes('--fix') && !rest.includes('--dry-run')) engine = await connectEngineForMutationInventory();
+      await runGenerate(rest, engine);
+    } finally { await engine?.disconnect(); }
     return;
   }
   if (sub === 'install-hook') {
@@ -72,6 +83,15 @@ async function connectEngineForAudit(): Promise<BrainEngine> {
   if (!config) {
     throw new Error('No brain configured. Run: gbrain init');
   }
+  const engineConfig = toEngineConfig(config);
+  const engine = await createEngine(engineConfig);
+  await engine.connect(engineConfig);
+  return engine;
+}
+
+async function connectEngineForMutationInventory(): Promise<BrainEngine | undefined> {
+  const config = loadConfig();
+  if (!config) return undefined;
   const engineConfig = toEngineConfig(config);
   const engine = await createEngine(engineConfig);
   await engine.connect(engineConfig);
@@ -154,13 +174,25 @@ interface FileValidation {
   backupPath?: string;
 }
 
-async function runValidate(rest: string[]): Promise<void> {
+async function writeFrontmatterMutation(
+  engine: BrainEngine | undefined,
+  sourceId: string | undefined,
+  file: string,
+  content: string,
+): Promise<void> {
+  await writeCanonicalPathMutation(engine, file, content, { sourceId });
+}
+
+async function runValidate(rest: string[], engine?: BrainEngine): Promise<void> {
   const flags: ValidateFlags = { json: false, fix: false, dryRun: false };
   let target: string | null = null;
-  for (const a of rest) {
+  let sourceId: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
     if (a === '--json') flags.json = true;
     else if (a === '--fix') flags.fix = true;
     else if (a === '--dry-run') flags.dryRun = true;
+    else if (a === '--source-id') sourceId = rest[++i];
     else if (!a.startsWith('--')) target = a;
   }
   if (!target) {
@@ -195,7 +227,7 @@ async function runValidate(rest: string[]): Promise<void> {
       result.fixesApplied = fixes;
       if (fixes.length > 0 && !flags.dryRun) {
         result.backupPath = createFrontmatterBackup(file, { sourcePath: resolved, runId: backupRunId });
-        writeFileSync(file, fixed, 'utf8');
+        await writeFrontmatterMutation(engine, sourceId, file, fixed);
       }
     }
 
@@ -369,12 +401,15 @@ function printAuditHumanReport(report: AuditReport): void {
 // generate — synthesize frontmatter for files that have none
 // ---------------------------------------------------------------------------
 
-async function runGenerate(args: string[]): Promise<void> {
-  const targetPath = args.find(a => !a.startsWith('-'));
+async function runGenerate(args: string[], engine?: BrainEngine): Promise<void> {
   const doFix = args.includes('--fix');
   const dryRun = args.includes('--dry-run');
   const jsonOut = args.includes('--json');
   const includeCatchAll = args.includes('--include-catch-all') || args.includes('--allow-catch-all');
+  const sourceIdx = args.indexOf('--source-id');
+  const sourceId = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
+  const sourceValueIdx = sourceIdx >= 0 ? sourceIdx + 1 : -1;
+  const targetPath = args.find((a, index) => !a.startsWith('-') && index !== sourceValueIdx);
 
   if (!targetPath) {
     console.error('error: gbrain frontmatter generate requires a <path> argument');
@@ -424,7 +459,7 @@ async function runGenerate(args: string[]): Promise<void> {
   let written = 0;
   const backupRunId = makeFrontmatterBackupRunId();
 
-  function processFile(absPath: string, relPath: string) {
+  async function processFile(absPath: string, relPath: string) {
     scanned++;
     if (!isSyncable(relPath, { strategy: 'markdown' })) return;
 
@@ -458,18 +493,18 @@ async function runGenerate(args: string[]): Promise<void> {
       const newContent = fm + '\n' + content;
       // Safety: write a centralized backup first.
       createFrontmatterBackup(absPath, { sourcePath: brainRoot, runId: backupRunId });
-      writeFileSync(absPath, newContent, 'utf-8');
+      await writeFrontmatterMutation(engine, sourceId, absPath, newContent);
       written++;
     }
   }
 
   if (isDir) {
     for (const absPath of collectFiles(rootPath)) {
-      processFile(absPath, relative(brainRoot, absPath));
+      await processFile(absPath, relative(brainRoot, absPath));
     }
   } else {
     const relPath = relative(brainRoot, rootPath) || basename(rootPath);
-    processFile(rootPath, relPath);
+    await processFile(rootPath, relPath);
   }
 
   // Output

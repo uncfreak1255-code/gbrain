@@ -10,7 +10,7 @@ import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import type { EvalReplaySurface, PageType } from './types.ts';
 import { importFromContent } from './import-file.ts';
-import { writePageThrough } from './write-through.ts';
+import { importAndWriteCanonicalPage } from './write-through.ts';
 import { parseMarkdown } from './markdown.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags } from './search/hybrid.ts';
 import { expandQuery } from './search/expansion.ts';
@@ -947,12 +947,14 @@ const put_page: Operation = {
     if (provenanceUri) {
       frontmatterOverrides.source_uri = provenanceUri;
     }
-    const { withRecoverySourceWriteBoundary } = await import('./recovery-source-refresh.ts');
-    const { result, writeThrough } = await withRecoverySourceWriteBoundary(
-      ctx.engine,
+    const { result, writeThrough } = await importAndWriteCanonicalPage(ctx.engine, slug, {
+      brainId: ctx.brainId,
       sourceId,
-      async (recovery) => {
-        const imported = await importFromContent(ctx.engine, slug, content, {
+      content,
+      skipWriteThrough: isSandboxSubagent,
+      frontmatterOverrides,
+      logger: ctx.logger,
+      importOptions: {
           noEmbed,
           // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
           // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
@@ -970,24 +972,9 @@ const put_page: Operation = {
           source_kind: provenanceKind,
           source_uri: provenanceUri,
           ingested_via: provenanceVia,
-        });
-
-        let writeThrough: { written: boolean; path?: string; skipped?: string; error?: string } | undefined;
-        if (!ctx.dryRun && imported.status !== 'error' && !isSandboxSubagent) {
-          writeThrough = await writePageThrough(ctx.engine, imported.slug, {
-            sourceId,
-            recoveryCheckout: recovery,
-            frontmatterOverrides,
-            logger: ctx.logger,
-          });
-        } else if (isSandboxSubagent) {
-          writeThrough = { written: false, skipped: 'subagent_sandbox' };
-        } else if (ctx.dryRun) {
-          writeThrough = { written: false, skipped: 'dry_run' };
-        }
-        return { result: imported, writeThrough };
       },
-    );
+    });
+    const effectiveWriteThrough = writeThrough;
 
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
@@ -1166,7 +1153,7 @@ const put_page: Operation = {
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
       ...(writerLint ? { writer_lint: writerLint } : {}),
       ...(factsQueued ? { facts_backstop: factsQueued } : {}),
-      ...(writeThrough ? { write_through: writeThrough } : {}),
+      ...(effectiveWriteThrough ? { write_through: effectiveWriteThrough } : {}),
     };
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
@@ -5288,6 +5275,7 @@ const learning_loop_arm: Operation = {
     authorized_source_id: { type: 'string', required: true },
     source_id: { type: 'string', required: true },
     canonical_slug: { type: 'string', required: true },
+    contract_version: { type: 'string', required: false, enum: ['1', '2'] },
   },
   mutating: true,
   scope: 'admin',
@@ -5295,7 +5283,8 @@ const learning_loop_arm: Operation = {
   handler: async (ctx, p) => {
     assertTrustedLocal(ctx, 'learning_loop_arm');
     return learningLoopCall(async (mod) => {
-      return mod.armLearningLoop({
+      const arm = mod.armLearningLoop as (input: import('./learning-loop.ts').ArmLearningLoopInput) => Promise<unknown>;
+      return arm({
         command_id: p.command_id as string,
         engine: ctx.engine,
         config: ctx.config,
@@ -5308,6 +5297,7 @@ const learning_loop_arm: Operation = {
           source_id: p.source_id as string,
           canonical_slug: p.canonical_slug as string,
         },
+        contract_version: p.contract_version === undefined ? 1 : Number(p.contract_version) as 1 | 2,
       });
     });
   },
@@ -5345,6 +5335,7 @@ const learning_loop_resolve_transcript: Operation = {
     return learningLoopCall((mod) => mod.resolveAuthoritativeTranscript({
       engine: ctx.engine,
       config: ctx.config,
+      expected_corpus_binding: mod.activeV2CorpusBinding({ config: ctx.config }),
       provider: 'codex',
       provider_session_id: p.provider_session_id as string,
       source_id: p.source_id as string,
@@ -5372,6 +5363,7 @@ const learning_loop_bind_session: Operation = {
       await mod.resolveAuthoritativeTranscript({
         engine: ctx.engine,
         config: ctx.config,
+        expected_corpus_binding: mod.activeV2CorpusBinding({ config: ctx.config }),
         provider: 'codex',
         provider_session_id: providerSessionId,
         source_id: sourceId,
@@ -5422,6 +5414,7 @@ const learning_loop_submit_session_v1: Operation = {
     const receipt = await mod.resolveAuthoritativeTranscript({
       engine: ctx.engine,
       config: ctx.config,
+      expected_corpus_binding: mod.activeV2CorpusBinding({ config: ctx.config }),
       provider: 'codex',
       provider_session_id: p.provider_session_id as string,
       source_id: sourceId,
@@ -5430,17 +5423,103 @@ const learning_loop_submit_session_v1: Operation = {
       asserted_size_bytes: p.asserted_size_bytes as number | undefined,
       asserted_content_hash: p.asserted_content_hash as string | undefined,
     });
-    return mod.withLearningLoopLifecycleLock(ctx.engine, async () => {
-      const currentMode = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
-      if (currentMode === 'off') return { status: 'disabled' as const, mode: currentMode };
-      return mod.recordSessionEvaluation({
-        engine: ctx.engine,
-        mode,
-        adapter,
-        receipt,
-      }, { config: ctx.config });
+    const currentMode = await mod.resolveLearningLoopMode(ctx.engine, ctx.config);
+    if (currentMode === 'off') return { status: 'disabled' as const, mode: currentMode };
+    return mod.recordSessionEvaluation({
+      engine: ctx.engine,
+      mode,
+      adapter,
+      receipt,
     }, { config: ctx.config });
   }),
+};
+
+const learning_loop_candidate: Operation = {
+  name: 'learning_loop_candidate', description: 'Record a locally-derived Learning Loop candidate.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, locators: { type: 'array', required: true, items: { type: 'object' } } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_candidate');
+    if ('evidence' in p) throw new OperationError('permission_denied', 'Candidate evidence is server-derived and cannot be supplied by the caller');
+    return learningLoopCall((mod) => mod.recordLearningCandidate({
+      engine: ctx.engine,
+      config: ctx.config,
+      run_id: p.run_id as string,
+      source_id: p.source_id as string,
+      identity: p.identity as import('./learning-loop-knowledge.ts').LearningClaimIdentity,
+      locators: p.locators as import('./learning-loop.ts').TranscriptMessageLocator[],
+    }));
+  },
+};
+
+const learning_loop_authority: Operation = {
+  name: 'learning_loop_authority', description: 'Record locally-derived direct-user or repetition authority.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, authority: { type: 'string', required: true }, locators: { type: 'array', required: true, items: { type: 'object' } } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_authority');
+    if ('evidence' in p) throw new OperationError('permission_denied', 'Authority evidence is server-derived and cannot be supplied by the caller');
+    return learningLoopCall((mod) => mod.recordLearningAuthority({
+      engine: ctx.engine,
+      config: ctx.config,
+      run_id: p.run_id as string,
+      source_id: p.source_id as string,
+      identity: p.identity as import('./learning-loop-knowledge.ts').LearningClaimIdentity,
+      authority: p.authority as 'direct_user' | 'repetition',
+      locators: p.locators as import('./learning-loop.ts').TranscriptMessageLocator[],
+    }));
+  },
+};
+
+const learning_loop_activate: Operation = {
+  name: 'learning_loop_activate', description: 'Activate one exactly authorized Learning Loop claim through the canonical personal page.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, canonical_slug: { type: 'string', required: true }, identity: { type: 'object', required: true }, authority: { type: 'string', required: true, enum: ['direct_user', 'repetition'] } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_activate');
+    return learningLoopCall((mod) => mod.activateLearningClaim({ engine: ctx.engine, config: ctx.config, run_id: p.run_id as string, source_id: p.source_id as string, canonical_slug: p.canonical_slug as string, identity: p.identity as never, authority: p.authority as 'direct_user' | 'repetition' }));
+  },
+};
+
+const learning_loop_correct: Operation = {
+  name: 'learning_loop_correct', description: 'Apply a trusted-local correction that blocks the predecessor and activates its exact replacement.',
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, canonical_slug: { type: 'string', required: true }, predecessor: { type: 'object', required: true }, replacement: { type: 'object', required: true }, authority: { type: 'string', required: true, enum: ['direct_user', 'repetition'] } },
+  mutating: true, scope: 'write', localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_correct');
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'Learning Loop correction requires trusted local execution');
+    return learningLoopCall((mod) => mod.correctLearningClaim({ engine: ctx.engine, config: ctx.config, run_id: p.run_id as string, source_id: p.source_id as string, canonical_slug: p.canonical_slug as string, predecessor: p.predecessor as never, replacement: p.replacement as never, authority: p.authority as 'direct_user' | 'repetition' }));
+  },
+};
+
+const learning_loop_reverse: Operation = {
+  name: 'learning_loop_reverse',
+  description: 'Reinstate one exact correction-blocked claim through the trusted-local reversal protocol.',
+  params: {
+    run_id: { type: 'string', required: true },
+    source_id: { type: 'string', required: true },
+    canonical_slug: { type: 'string', required: true },
+    identity: { type: 'object', required: true },
+    authority_event_id: { type: 'string', required: true },
+    root_reversal_id: { type: 'string', required: false },
+  },
+  mutating: true,
+  scope: 'write',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    assertTrustedLocal(ctx, 'learning_loop_reverse');
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'Learning Loop reversal requires trusted local execution');
+    return learningLoopCall((mod) => mod.reverseLearningClaim({
+      engine: ctx.engine,
+      config: ctx.config,
+      run_id: p.run_id as string,
+      source_id: p.source_id as string,
+      canonical_slug: p.canonical_slug as string,
+      identity: p.identity as never,
+      authority_event_id: p.authority_event_id as string,
+      root_reversal_id: p.root_reversal_id as string | undefined,
+    }));
+  },
 };
 
 export const operations: Operation[] = [
@@ -5529,6 +5608,8 @@ export const operations: Operation[] = [
   learning_loop_get_mode, learning_loop_set_mode, learning_loop_inspect,
   learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript, learning_loop_bind_session,
   learning_loop_submit_session_v1,
+  learning_loop_candidate, learning_loop_authority, learning_loop_activate, learning_loop_correct,
+  learning_loop_reverse,
 ];
 
 export const operationsByName = Object.fromEntries(

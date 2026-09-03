@@ -38,6 +38,7 @@ import type {
 import type { BrainEngine } from '../../core/engine.ts';
 import { loadConfig, toEngineConfig } from '../../core/config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
+import { assertUnmanagedPathMutation } from '../../core/canonical-page-write.ts';
 import { upsertFactRow, parseFactsFence } from '../../core/facts-fence.ts';
 
 let testEngineOverride: BrainEngine | null = null;
@@ -307,6 +308,7 @@ async function phaseBFenceFacts(
         }
 
         // Atomic write: .tmp + parse + rename.
+        assertUnmanagedPathMutation(filePath, body);
         writeFileSync(tmpPath, body, 'utf-8');
         const tmpBody = readFileSync(tmpPath, 'utf-8');
         const parsed = parseFactsFence(tmpBody);

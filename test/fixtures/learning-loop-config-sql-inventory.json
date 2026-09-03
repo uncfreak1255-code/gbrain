@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "reserved_keys": [
+    "learning_loop.mode",
+    "learning_loop.mode_transition_intent_v1"
+  ],
+  "sites": [
+    {"file":"src/core/postgres-engine.ts","symbol":"PostgresEngine.setConfig","operation":"config_write","shape":"parameterized INSERT ON CONFLICT","namespace":"typed_sink_and_unrelated_keys"},
+    {"file":"src/core/postgres-engine.ts","symbol":"PostgresEngine.unsetConfig","operation":"config_delete","shape":"parameterized DELETE","namespace":"typed_sink_and_unrelated_keys"},
+    {"file":"src/core/pglite-engine.ts","symbol":"PGLiteEngine.setConfig","operation":"config_write","shape":"parameterized INSERT ON CONFLICT","namespace":"typed_sink_and_unrelated_keys"},
+    {"file":"src/core/pglite-engine.ts","symbol":"PGLiteEngine.unsetConfig","operation":"config_delete","shape":"parameterized DELETE","namespace":"typed_sink_and_unrelated_keys"},
+    {"file":"src/core/backfill-base.ts","symbol":"clearBackfillCheckpoint","operation":"config_delete","shape":"raw parameterized DELETE","namespace":"checkpoint.*"},
+    {"file":"src/core/backfill-base.ts","symbol":"setCheckpoint","operation":"config_write","shape":"raw parameterized INSERT ON CONFLICT","namespace":"checkpoint.*"}
+  ]
+}

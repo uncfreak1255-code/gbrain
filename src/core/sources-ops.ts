@@ -53,6 +53,7 @@ import {
 import { gbrainPath } from './config.ts';
 import { isValidSourceId } from './source-id.ts';
 import { resolveSourceWithTier, type SourceTier } from './source-resolver.ts';
+import { activeV2CorpusBinding, activeV2DestinationBinding } from './learning-loop.ts';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,16 @@ export class SourceOpError extends Error {
   ) {
     super(message);
     this.name = 'SourceOpError';
+  }
+}
+
+function assertNoActiveV2SourceReplacement(engine: BrainEngine, sourceId: string): void {
+  const config = engine.learningLoopLedgerConfig?.();
+  if (!config) throw new SourceOpError('protected_id', 'Learning Loop brain scope is unavailable.');
+  const corpus = activeV2CorpusBinding({ config });
+  const destination = activeV2DestinationBinding({ config });
+  if (corpus?.source_id === sourceId || destination?.source_id === sourceId) {
+    throw new SourceOpError('protected_id', `Source ${JSON.stringify(sourceId)} is frozen by an active Learning Loop V2 run.`);
   }
 }
 
@@ -638,6 +649,8 @@ export async function removeSource(
     };
   }
 
+  assertNoActiveV2SourceReplacement(engine, opts.id);
+
   // Confirmation gate (caller should usually have already shown the impact
   // preview from destructive-guard.ts).
   if (pageCount > 0 && !opts.confirmDestructive && !opts.yes) {
@@ -756,6 +769,7 @@ export async function recloneIfMissing(
 
   const state = validateRepoState(src.local_path, remoteUrl);
   if (state === 'healthy') return false;
+  assertNoActiveV2SourceReplacement(engine, id);
 
   // #1881 ownership guard — abort BEFORE any filesystem op. recloneIfMissing
   // deletes local_path; gbrain may only do that to a clone it created, never a

@@ -32,6 +32,7 @@ import { readdirSync } from 'fs';
 import { runSources } from '../src/commands/sources.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { armLearningLoop, setLearningLoopMode } from '../src/core/learning-loop.ts';
 
 // Tier 3: every PGLite spinup path needs the snapshot env unset (test
 // infrastructure detail; matches bootstrap.test.ts pattern).
@@ -301,6 +302,36 @@ describe('listSources', () => {
 // ---------------------------------------------------------------------------
 
 describe('removeSource — clone-cleanup', () => {
+  test('active V2 binding rejects removal before the source row or root changes', async () => {
+    await withEnv2(async () => {
+      const sourceRoot = join(FAKE_GIT_DIR, 'active-v2-source');
+      const corpusRoot = join(FAKE_GIT_DIR, 'active-v2-corpus');
+      const config = { engine: 'pglite' as const };
+      mkdirSync(sourceRoot, { recursive: true });
+      mkdirSync(corpusRoot, { recursive: true });
+      await addSource(engine, { id: 'active-v2', localPath: sourceRoot });
+      await setLearningLoopMode(engine, config, 'canary');
+      await engine.setConfig('learning_loop.corpus.codex.root', corpusRoot);
+      await engine.setConfig('learning_loop.corpus.codex.source_id', 'active-v2');
+      await armLearningLoop({
+        command_id: 'source-remove-active-v2', contract_version: 2, engine, config,
+        authorized_adapter: { client_id: 'codex-test', source_id: 'active-v2', provider: 'codex' },
+        destination: { source_id: 'active-v2', canonical_slug: 'notes/frozen' },
+      });
+      const before = await engine.executeRaw<{ local_path: string | null }>(
+        `SELECT local_path FROM sources WHERE id = 'active-v2'`,
+      );
+
+      await expect(removeSource(engine, {
+        id: 'active-v2', confirmDestructive: true, keepStorage: true,
+      })).rejects.toMatchObject({ code: 'protected_id' });
+      expect(await engine.executeRaw<{ local_path: string | null }>(
+        `SELECT local_path FROM sources WHERE id = 'active-v2'`,
+      )).toEqual(before);
+      expect(existsSync(sourceRoot)).toBe(true);
+    });
+  });
+
   test('removes clone IFF managed (local_path under $GBRAIN_HOME/clones/ + remote_url set)', async () => {
     await withEnv2(async () => {
       const row = await addSource(engine, {

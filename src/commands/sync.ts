@@ -73,6 +73,8 @@ import {
 } from '../core/console-prefix.ts';
 import { loadStorageConfig } from '../core/storage-config.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
+import { resolveEffectiveCanonicalRoot, withCanonicalSourceBoundary } from '../core/canonical-page-write.ts';
+import { computeBrainIdFromConfig } from '../core/upgrade-checkpoint.ts';
 import { loadAllSources, parseSourceConfig } from '../core/sources-load.ts';
 // v0.41.32.0: stamp the durable newest-COMMIT timestamp at sync time so the
 // remote staleness path reads a column instead of shelling out to git.
@@ -1211,7 +1213,17 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   // alive (the import loop's event-loop yields ensure the timer fires), and the
   // heartbeat-aware takeover refuses to steal a live, refreshing holder.
   try {
-    return await withRefreshingLock(engine, lockKey, () => performSyncInner(engine, opts));
+    const sourceId = opts.sourceId ?? 'default';
+    const configuredRoot = opts.repoPath ?? await resolveEffectiveCanonicalRoot(engine, sourceId);
+    if (lockKey !== syncLockId(sourceId) || !configuredRoot) {
+      return await withRefreshingLock(engine, lockKey, () => performSyncInner(engine, opts));
+    }
+    return await withCanonicalSourceBoundary(engine, {
+      brain_id: computeBrainIdFromConfig(engine.learningLoopLedgerConfig?.() ?? {}),
+      source_id: sourceId,
+      canonical_slug: '_source-boundary',
+      configured_root: configuredRoot,
+    }, () => performSyncInner(engine, opts));
   } catch (err) {
     if (err instanceof LockUnavailableError) {
       throw new SyncLockBusyError(await formatLockBusyMessage(engine, lockKey), lockKey);
