@@ -1807,12 +1807,12 @@
       "primitive": "fs:writeFileSync",
       "count": 2,
       "lines": [
-        589,
-        595
+        603,
+        623
       ],
       "classification": "live_path_writer",
       "boundary": "managed_target_reject",
-      "reason": "Unmanaged path lane rejects Learning Loop metadata before mutation; registered roots use the source-qualified canonical write."
+      "reason": "Unmanaged path lane rejects Learning Loop metadata before mutation; registered or explicit sources use the source-qualified canonical write."
     },
     {
       "file": "src/core/claw-test/transcript-capture.ts",
@@ -2479,7 +2479,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        1988
+        1996
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2491,7 +2491,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        2370
+        2378
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",

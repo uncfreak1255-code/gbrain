@@ -1427,6 +1427,15 @@ interface BaselineManifestError {
   error: 'invalid_or_unreadable' | 'duplicate_session_identity';
 }
 
+/** Skip an unreadable child tree; a denied corpus root must not arm empty. */
+function handleBaselineWalkError(error: unknown, dir: string, root: string): void {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code !== 'EACCES' && code !== 'EPERM') throw error;
+  if (dir === root) {
+    throw new LearningLoopError('binding_unavailable', 'Baseline corpus root is unreadable');
+  }
+}
+
 export async function discoverBaselineSnapshot(input: {
   engine: Pick<BrainEngine, 'getConfig'>;
   config?: GBrainConfig;
@@ -1449,9 +1458,8 @@ export async function discoverBaselineSnapshot(input: {
     let entries;
     try { entries = readdirSync(dir, { withFileTypes: true }); }
     catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'EACCES' || code === 'EPERM') return;
-      throw error;
+      handleBaselineWalkError(error, dir, root);
+      return;
     }
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
@@ -2688,4 +2696,5 @@ export const _testing = {
   ledgerScopeId,
   readConfinedFileOnce,
   normalizeRelativePath,
+  handleBaselineWalkError,
 };

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -13,6 +13,7 @@ import {
   armLearningLoop,
   bindLearningLoopSession,
   classifyTranscript,
+  discoverBaselineSnapshot,
   learningLoopLedgerPath,
   orderBaselineCandidates,
   readLearningLoopLedger,
@@ -686,6 +687,33 @@ describe('append-only run, replay, and cohort reducer', () => {
       expect(armed.baseline_discovery.candidate_count).toBe(count);
       expect(armed.baseline_discovery.status).toBe(count === 10 ? 'complete' : 'insufficient');
       expect(armed.baseline_discovery.selected_candidates).toHaveLength(count === 10 ? 10 : 0);
+    }
+  });
+
+  test('baseline walk fails closed on an unreadable corpus root and skips a denied child', async () => {
+    const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    expect(() => _testing.handleBaselineWalkError(denied, '/corpus', '/corpus'))
+      .toThrow(new LearningLoopError('binding_unavailable', 'Baseline corpus root is unreadable'));
+    expect(() => _testing.handleBaselineWalkError(denied, '/corpus/child', '/corpus')).not.toThrow();
+    expect(() => _testing.handleBaselineWalkError(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }), '/corpus/child', '/corpus'))
+      .toThrow(/ENOENT/);
+
+    const corpus = tempRoot('learning-loop-baseline-eacces-');
+    const child = join(corpus, 'denied');
+    mkdirSync(child);
+    writeFileSync(join(corpus, 'keep.jsonl'), codexTranscript('keep', undefined, '2026-08-01T00:00:00.000Z'));
+    writeFileSync(join(child, 'hidden.jsonl'), codexTranscript('hidden', undefined, '2026-08-02T00:00:00.000Z'));
+    chmodSync(child, 0);
+    try {
+      const childSkip = await discoverBaselineSnapshot({
+        engine: corpusEngine(corpus),
+        source_id: 'personal',
+        cutoff_at: '2026-09-01T00:00:00.000Z',
+      });
+      expect(childSkip.candidate_count).toBe(1);
+      expect(childSkip.status).toBe('insufficient');
+    } finally {
+      chmodSync(child, 0o755);
     }
   });
 

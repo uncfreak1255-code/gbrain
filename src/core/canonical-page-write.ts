@@ -137,6 +137,35 @@ function atomic(
 }
 function contained(p:string,r:string):boolean { const rel=relative(resolve(r),resolve(p)); return rel===''||(!rel.startsWith('..')&&!isAbsolute(rel)); }
 
+/** Realpath an existing path, or join realpathed parents onto missing leaves. */
+function realpathExistingOrJoin(path: string): string {
+  const lexical = resolve(path);
+  try { return realpathSync(lexical); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const missing: string[] = [];
+    let cursor = lexical;
+    while (true) {
+      const parent = dirname(cursor);
+      missing.unshift(basename(cursor));
+      try { return join(realpathSync(parent), ...missing); }
+      catch (parentError) {
+        if ((parentError as NodeJS.ErrnoException).code !== 'ENOENT' || parent === cursor) throw parentError;
+        cursor = parent;
+      }
+    }
+  }
+}
+
+/** Slug is the registered-root-relative path, never a caller --dir/cwd basename. */
+function canonicalSlugForRegisteredPath(root: string, path: string): string {
+  const rel = relative(root, realpathExistingOrJoin(path));
+  if (!rel || rel.startsWith('..') || isAbsolute(rel) || rel.includes('\0')) {
+    throw new Error('managed_state_unavailable: path is outside the registered source root');
+  }
+  return rel.replace(/\.md$/, '');
+}
+
 function sha256(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
 
 function assertManagedFactRowsPresent(
@@ -187,7 +216,7 @@ export async function resolveEffectiveCanonicalRoot(
   const sources = Array.isArray(rawSources) ? rawSources : [];
   const selected = sources.find(source => source.id === sourceId);
   if (selected?.local_path) return selected.local_path;
-  if (sourceId === 'default' && sources.length === 1 && sources[0]?.id === 'default') {
+  if (sourceId === 'default' && selected && !selected.local_path) {
     return engine.getConfig('sync.repo_path');
   }
   return null;
@@ -498,29 +527,12 @@ async function matchRegisteredSourceRoots(
   );
   const rows = Array.isArray(rawRows) ? rawRows : [];
   const configuredRoots = rows.flatMap(row => row.local_path ? [{ id: row.id, path: row.local_path }] : []);
-  if (rows.length === 1 && rows[0]?.id === 'default' && !rows[0].local_path) {
+  if (rows.some(row => row.id === 'default' && !row.local_path) && !configuredRoots.some(root => root.id === 'default')) {
     const fallback = await engine.getConfig('sync.repo_path');
     if (fallback) configuredRoots.push({ id: 'default', path: fallback });
   }
   const lexicalCandidate = resolve(path);
-  let realCandidate: string;
-  try { realCandidate = realpathSync(lexicalCandidate); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    const missing: string[] = [];
-    let cursor = lexicalCandidate;
-    while (true) {
-      const parent = dirname(cursor);
-      missing.unshift(basename(cursor));
-      try {
-        realCandidate = join(realpathSync(parent), ...missing);
-        break;
-      } catch (parentError) {
-        if ((parentError as NodeJS.ErrnoException).code !== 'ENOENT' || parent === cursor) throw parentError;
-        cursor = parent;
-      }
-    }
-  }
+  const realCandidate = realpathExistingOrJoin(lexicalCandidate);
   const matches: RegisteredSourceMatch[] = [];
   for (const configured of configuredRoots) {
     const lexicalRoot = resolve(configured.path);
@@ -575,8 +587,10 @@ export async function assertLegacyPathMutationAllowed(
 }
 
 /**
- * Route a CLI/path write: unique registered root → source-qualified canonical
- * write; no registered root → unmanaged path write. Ambiguous roots fail closed.
+ * Route a CLI/path write: unique registered root → source-qualified write
+ * using the root-relative path slug; explicit sourceId with no path match
+ * still uses the source-qualified sink. Unmanaged write only when no source
+ * is selected. Ambiguous roots fail closed.
  */
 export async function writeCanonicalPathMutation(
   engine: BrainEngine | undefined,
@@ -590,13 +604,23 @@ export async function writeCanonicalPathMutation(
     return;
   }
   const selected = selectRegisteredSourceMatch(await matchRegisteredSourceRoots(engine, path), opts.sourceId);
-  if (!selected) {
-    assertUnmanagedPathMutation(path, content);
-    writeFileSync(path, content, 'utf8');
+  if (selected) {
+    const slug = canonicalSlugForRegisteredPath(selected.root, path);
+    if (opts.slug !== undefined && opts.slug !== slug) {
+      throw new Error('managed_state_unavailable: path slug does not match the registered source root');
+    }
+    await writeSourceQualifiedCanonicalPage({ engine, sourceId: selected.id, slug }, content);
     return;
   }
-  const slug = opts.slug ?? relative(selected.root, resolve(path)).replace(/\.md$/, '');
-  await writeSourceQualifiedCanonicalPage({ engine, sourceId: selected.id, slug }, content);
+  if (opts.sourceId) {
+    if (!opts.slug) {
+      throw new Error('managed_state_unavailable: explicit source requires a source-qualified slug');
+    }
+    await writeSourceQualifiedCanonicalPage({ engine, sourceId: opts.sourceId, slug: opts.slug }, content);
+    return;
+  }
+  assertUnmanagedPathMutation(path, content);
+  writeFileSync(path, content, 'utf8');
 }
 
 /** Write one explicitly source-qualified page through the canonical boundary. */
