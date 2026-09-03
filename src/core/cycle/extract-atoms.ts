@@ -68,6 +68,7 @@ const SYNTHESIS_OUTPUT_TYPES = new Set<string>(['atom', 'concept']);
 const PAGE_DISCOVERY_BUDGET = 50;
 const MIN_PAGE_CHARS_FOR_EXTRACTION = 500;
 const MAX_FAILURE_ERROR_LENGTH = 200;
+const MAX_FAILURE_METADATA_LENGTH = 80;
 
 function extractErrorCode(err: unknown): string | undefined {
   if (err && typeof err === 'object' && 'code' in err) {
@@ -82,14 +83,20 @@ function summarizeFailureError(err: unknown): string {
   return redactConnectionInfo(raw).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_ERROR_LENGTH);
 }
 
+function summarizeFailureMetadata(value: string): string {
+  return redactConnectionInfo(value).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_METADATA_LENGTH);
+}
+
 function failureFromError(source: string, err: unknown): ExtractReceiptFailure {
-  const errorClass = err instanceof Error && err.name !== 'Error' ? err.name.slice(0, 80) : undefined;
+  const errorClass = err instanceof Error && err.name !== 'Error'
+    ? summarizeFailureMetadata(err.name)
+    : undefined;
   const errorCode = extractErrorCode(err);
   return {
     source,
     error: summarizeFailureError(err),
     ...(errorClass ? { error_class: errorClass } : {}),
-    ...(errorCode ? { error_code: errorCode } : {}),
+    ...(errorCode ? { error_code: summarizeFailureMetadata(errorCode) } : {}),
   };
 }
 
