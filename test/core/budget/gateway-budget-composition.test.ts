@@ -46,21 +46,26 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-function fakeChatTransport(usage = { input_tokens: 100, output_tokens: 50 }) {
+function fakeChatTransport(usage: {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+} = { input_tokens: 100, output_tokens: 50 }) {
   let calls = 0;
-  const fn = async (_opts: ChatOpts): Promise<ChatResult> => {
+  const fn = async (opts: ChatOpts): Promise<ChatResult> => {
     calls++;
     return {
       text: 'ok',
       blocks: [{ type: 'text', text: 'ok' }],
       stopReason: 'end',
-      model: 'claude-haiku-4-5-20251001',
-      providerId: 'anthropic',
+      model: opts.model ?? 'claude-haiku-4-5-20251001',
+      providerId: opts.model?.split(':')[0] ?? 'anthropic',
       usage: {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
-        cache_read_tokens: 0,
-        cache_creation_tokens: 0,
+        cache_read_tokens: usage.cache_read_tokens ?? 0,
+        cache_creation_tokens: usage.cache_creation_tokens ?? 0,
       },
     };
   };
@@ -88,6 +93,28 @@ describe('withBudgetTracker — scope semantics', () => {
     // Haiku: 1K in + 500 out → ($1/M × 1K) + ($5/M × 500) = $0.001 + $0.0025 = $0.0035
     expect(tracker.totalSpent).toBeCloseTo(0.0035, 6);
     expect(tracker.snapshot().callsRecorded).toBe(1);
+  });
+
+  test('Z.AI cached input is billed at the provider cache-read rate', async () => {
+    const tracker = new BudgetTracker({ maxCostUsd: 1.0, label: 'zai-cache', auditPath });
+    const transport = fakeChatTransport({
+      input_tokens: 800,
+      output_tokens: 500,
+      cache_read_tokens: 200,
+      cache_creation_tokens: 0,
+    });
+    __setChatTransportForTests(transport);
+
+    await withBudgetTracker(tracker, () => chat({
+      model: 'zai:glm-5.2',
+      messages: [{ role: 'user', content: 'hi' }],
+      maxTokens: 160,
+    }));
+
+    expect(tracker.totalSpent).toBeCloseTo(
+      (800 / 1_000_000) * 1.4 + (200 / 1_000_000) * 0.26 + (500 / 1_000_000) * 4.4,
+      10,
+    );
   });
 
   test('chat() OUTSIDE any scope is a budget no-op (back-compat)', async () => {

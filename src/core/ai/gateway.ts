@@ -47,7 +47,7 @@ import type {
   TouchpointKind,
 } from './types.ts';
 import { resolveRecipe, assertTouchpoint, parseModelId, embeddingDimsForModel } from './model-resolver.ts';
-import { recordChatUsage } from './chat-usage.ts';
+import { normalizeChatUsageForBudget, recordChatUsage } from './chat-usage.ts';
 import {
   OPENROUTER_CACHE_HEADER,
   openrouterRequiresExplicitPromptCache,
@@ -3851,7 +3851,6 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   }
   const estimatedInputTokens = estimateChatInputTokens(opts);
   const maxOutputTokens = opts.maxTokens ?? defaultMaxOutputTokens(modelStrEarly);
-
   // TX5: reserve BEFORE the provider call. Throws BudgetExhausted on cost,
   // runtime, or no_pricing (when cap is set). Pre-resolution model id is
   // fine here — resolveChatProvider would map aliases the same way for the
@@ -3898,6 +3897,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
               modelId: res.model ?? modelStrEarly,
               inputTokens: res.usage.input_tokens,
               outputTokens: res.usage.output_tokens,
+              cacheReadTokens: res.usage.cache_read_tokens, cacheCreationTokens: res.usage.cache_creation_tokens,
               label: 'gateway.chat',
             });
           } else {
@@ -4008,7 +4008,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   }
 
   let _budgetRecorded = false;
-  const _recordBudget = (modelLabel: string, inputTokens: number, outputTokens: number): void => {
+  const _recordBudget = (modelLabel: string, inputTokens: number, outputTokens: number, cacheReadTokens = 0, cacheCreationTokens = 0): void => {
     if (!tracker || _budgetRecorded) return;
     _budgetRecorded = true;
     try {
@@ -4016,6 +4016,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
         modelId: modelLabel,
         inputTokens,
         outputTokens,
+        cacheReadTokens, cacheCreationTokens,
         label: 'gateway.chat',
       });
     } catch {
@@ -4047,7 +4048,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       system: systemParam,
       messages: toModelMessages(repairToolPairing(opts.messages)) as any,
       tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
-      maxOutputTokens: opts.maxTokens ?? defaultMaxOutputTokens(modelStr),
+      maxOutputTokens,
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
       // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
@@ -4100,10 +4101,9 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
 
     const usage = (result as any).usage ?? {};
     const providerMetadata = (result as any).providerMetadata as Record<string, any> | undefined;
-    const anthropicCache = providerMetadata?.anthropic ?? {};
-
-    const { inputTokens: inTok, outputTokens: outTok } = normalizeSdkUsage(usage);
-    _recordBudget(`${recipe.id}:${modelId}`, inTok, outTok);
+    const { inputTokens: inTok, outputTokens: outTok, cacheReadTokens, cacheCreationTokens } =
+      normalizeChatUsageForBudget(usage, providerMetadata, recipe.id);
+    _recordBudget(`${recipe.id}:${modelId}`, inTok, outTok, cacheReadTokens, cacheCreationTokens);
 
     const usageOut = {
       input_tokens: inTok,
@@ -4111,8 +4111,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       // `usage.cachedInputTokens` is the AI SDK's provider-neutral cache-read
       // count — it's how OpenAI-compatible routes (OpenRouter's
       // prompt_tokens_details.cached_tokens) surface cache hits.
-      cache_read_tokens: Number(anthropicCache.cacheReadInputTokens ?? anthropicCache.cache_read_input_tokens ?? usage.cachedInputTokens ?? 0),
-      cache_creation_tokens: Number(anthropicCache.cacheCreationInputTokens ?? anthropicCache.cache_creation_input_tokens ?? 0),
+      cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens,
     };
     // #4218 success boundary: durable usage ledger (fire-and-forget, fail-open).
     recordChatUsage({
