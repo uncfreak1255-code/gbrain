@@ -220,7 +220,7 @@ export async function reserveSweepSpendToday(
   day: string = utcDay(),
 ): Promise<SweepSpendLedger | null> {
   if (!(Number.isFinite(usd) && usd > 0 && Number.isFinite(cap) && usd <= cap)) return null;
-  const added = await engine.executeRaw<{ value: string }>(
+  const addToSameDayRow = () => engine.executeRaw<{ value: string }>(
     `UPDATE config
         SET value = jsonb_build_object('day', $2::text, 'usd', ceil(((value::jsonb->>'usd')::numeric + $3::numeric) * 1000000) / 1000000)::text
       WHERE key = $1
@@ -229,14 +229,23 @@ export async function reserveSweepSpendToday(
       RETURNING value`,
     [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, money(usd), money(cap)],
   );
-  const rows = added.length === 1 ? added : await engine.executeRaw<{ value: string }>(
-    `INSERT INTO config (key, value)
-       VALUES ($1, jsonb_build_object('day', $2::text, 'usd', ceil($3::numeric * 1000000) / 1000000)::text)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-         WHERE config.value::jsonb->>'day' < $2::text
-      RETURNING value`,
-    [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, money(usd)],
-  );
+  let rows = await addToSameDayRow();
+  if (rows.length !== 1) {
+    rows = await engine.executeRaw<{ value: string }>(
+      `INSERT INTO config (key, value)
+         VALUES ($1, jsonb_build_object('day', $2::text, 'usd', ceil($3::numeric * 1000000) / 1000000)::text)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+           WHERE config.value::jsonb->>'day' < $2::text
+        RETURNING value`,
+      [SWEEP_SPEND_LEDGER_CONFIG_KEY, day, money(usd)],
+    );
+    // A peer can start today's row between our two statements (fresh
+    // brain, UTC rollover, a reset ledger): both saw no same-day row, one
+    // INSERT won, the other's conflict clause found today's row and did
+    // nothing. The same-day add is now the right statement again — run it
+    // once more, so a refusal always means the cap, never a lost race.
+    if (rows.length !== 1) rows = await addToSameDayRow();
+  }
   if (rows.length !== 1) return null;
   const row = parseSweepSpendLedger(rows[0].value);
   if (row === null || row === 'invalid' || row.day !== day) {
