@@ -191,10 +191,8 @@ export async function fixBacklinkGaps(
     }
 
     if (!dryRun) {
-      const slug = targetPage.replace(/\.md$/, '');
       await writeCanonicalPathMutation(mutation?.engine, targetPath, content, {
         sourceId: mutation?.sourceId,
-        slug,
       });
     }
   }

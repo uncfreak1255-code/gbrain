@@ -144,7 +144,7 @@ async function writeBody(
   standalone: boolean,
 ): Promise<void> {
   mkdirSync(dirname(path), { recursive: true });
-  await writeCanonicalPathMutation(engine, path, body, standalone ? { slug } : { sourceId, slug });
+  await writeCanonicalPathMutation(engine, path, body, standalone ? {} : { sourceId, slug });
 }
 
 // --- Subcommands ---

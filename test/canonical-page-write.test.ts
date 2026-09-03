@@ -298,6 +298,58 @@ describe('source-qualified and standalone path lanes', () => {
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 
+  test('path write uses the registered-root slug, not a nested --dir basename', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'canonical-nested-slug-'));
+    try {
+      const root = join(base, 'root');
+      mkdirSync(join(root, 'people'), { recursive: true });
+      const page = join(root, 'people', 'alice.md');
+      writeFileSync(page, '# Old\n');
+      const engine = boundaryEngine([{ id: 'host', local_path: root }]);
+      await writeCanonicalPathMutation(engine, page, '# New\n');
+      expect(readFileSync(page, 'utf8')).toBe('# New\n');
+      expect(existsSync(join(root, 'alice.md'))).toBe(false);
+      await expect(writeCanonicalPathMutation(engine, page, '# Nope\n', { slug: 'alice' }))
+        .rejects.toThrow('path slug does not match the registered source root');
+      expect(readFileSync(page, 'utf8')).toBe('# New\n');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  test('path write derives the slug through a symlinked source root', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'canonical-symlink-root-'));
+    try {
+      const real = join(base, 'real');
+      mkdirSync(real);
+      const link = join(base, 'link');
+      symlinkSync(real, link);
+      writeFileSync(join(link, 'note.md'), '# Old\n');
+      const engine = boundaryEngine([{ id: 'host', local_path: link }]);
+      await writeCanonicalPathMutation(engine, join(link, 'note.md'), '# New\n');
+      expect(readFileSync(join(real, 'note.md'), 'utf8')).toBe('# New\n');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  test('explicit source writes through the qualified sink when the path is outside every root', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'canonical-explicit-source-'));
+    try {
+      const root = join(base, 'default-root');
+      const wiki = join(base, 'wiki');
+      const scratch = join(base, 'scratch');
+      mkdirSync(root);
+      mkdirSync(wiki);
+      mkdirSync(scratch);
+      const scratchPage = join(scratch, 'note.md');
+      writeFileSync(scratchPage, '# Old\n');
+      const engine = {
+        ...boundaryEngine([{ id: 'default', local_path: null }, { id: 'wiki', local_path: wiki }]),
+        getConfig: async (key: string) => key === 'sync.repo_path' ? root : null,
+      } as unknown as BrainEngine;
+      await writeCanonicalPathMutation(engine, scratchPage, '# New\n', { sourceId: 'default', slug: 'note' });
+      expect(readFileSync(join(root, 'note.md'), 'utf8')).toBe('# New\n');
+      expect(readFileSync(scratchPage, 'utf8')).toBe('# Old\n');
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
   test('unscoped slug assert rejects a managed page on a non-default source', async () => inRoot(async ({ root, path }) => {
     writeFileSync(path, managedPage());
     const engine = boundaryEngine([{ id: 's', local_path: root }], managedPage());
