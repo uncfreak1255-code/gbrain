@@ -27,9 +27,9 @@ import {
   supersedeRow,
   type ParsedTake,
 } from '../core/takes-fence.ts';
-import { withPageLock } from '../core/page-lock.ts';
 import {
   assertUnmanagedPathMutation,
+  withSourceQualifiedCanonicalPageMutation,
   writeCanonicalPathMutation,
   writeSourceQualifiedCanonicalPage,
 } from '../core/canonical-page-write.ts';
@@ -228,7 +228,7 @@ async function cmdAdd(engine: BrainEngine, args: string[], sourceId: string): Pr
   const dirArg = flagValue(args, '--dir');
   const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
 
-  await withPageLock(slug, async () => {
+  await withSourceQualifiedCanonicalPageMutation({ engine, sourceId, slug, configuredRoot: brainDir }, async () => {
     const path = pageFilePath(brainDir, slug);
     const body = readBodyOrEmpty(path);
     const { body: nextBody, rowNum } = upsertTakeRow(body, {
@@ -264,7 +264,7 @@ async function cmdUpdate(engine: BrainEngine, args: string[], sourceId: string):
   const dirArg = flagValue(args, '--dir');
   const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
 
-  await withPageLock(slug, async () => {
+  await withSourceQualifiedCanonicalPageMutation({ engine, sourceId, slug, configuredRoot: brainDir }, async () => {
     const pageId = await getPageId(engine, slug, sourceId);
 
     // Canonical first: reject any protected-state problem before changing DB.
@@ -309,7 +309,7 @@ async function cmdSupersede(engine: BrainEngine, args: string[], sourceId: strin
   const dirArg = flagValue(args, '--dir');
   const brainDir = await resolveBrainDir(engine, dirArg ?? null, sourceId);
 
-  await withPageLock(slug, async () => {
+  await withSourceQualifiedCanonicalPageMutation({ engine, sourceId, slug, configuredRoot: brainDir }, async () => {
     const pageId = await getPageId(engine, slug, sourceId);
 
     // Read existing row to inherit kind/holder unless overridden
@@ -395,7 +395,7 @@ async function cmdResolve(engine: BrainEngine, args: string[], sourceId: string)
   // The renderer conditionally widens the table to 13 columns when at least one
   // row has resolution data; pages with no resolved rows keep the 7-col shape.
   // Round-trip via parseTakesFence + renderTakesFence preserves all rows.
-  await withPageLock(slug, async () => {
+  await withSourceQualifiedCanonicalPageMutation({ engine, sourceId, slug, configuredRoot: brainDir }, async () => {
     const path = pageFilePath(brainDir, slug);
     const body = readBodyOrEmpty(path);
     if (!body) {

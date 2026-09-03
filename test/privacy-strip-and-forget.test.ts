@@ -21,6 +21,9 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { chunkText } from '../src/core/chunkers/recursive.ts';
 import { forgetFactInFence } from '../src/core/facts/forget.ts';
 import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence } from '../src/core/facts-fence.ts';
+import { acquirePageLock } from '../src/core/page-lock.ts';
+import { gbrainPath } from '../src/core/config.ts';
+import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
 
 let engine: PGLiteEngine;
 let brainDir: string;
@@ -165,6 +168,31 @@ function seedFile(slug: string, rows: string): void {
 }
 
 describe('forgetFactInFence — fence path (happy)', () => {
+  test('the source-qualified page lock covers the fence and DB mutation', async () => {
+    const id = await seedV51Fact({
+      entity_slug: 'people/alice', source_markdown_slug: 'people/alice',
+      row_num: 1, fact: 'Serialized fact',
+    });
+    seedFile('people/alice', `| 1 | Serialized fact | fact | 1.0 | world | medium | 2026-01-01 |  | s |  |`);
+    const held = await acquirePageLock('people/alice', {
+      lockRoot: gbrainPath('page-locks'),
+      brainId: computeBrainIdFromConfig(engine.learningLoopLedgerConfig?.() ?? {}),
+      sourceId: 'default',
+    });
+    expect(held).not.toBeNull();
+
+    let settled = false;
+    const mutation = forgetFactInFence(engine, id, { reason: 'serialized' })
+      .then(() => { settled = true; });
+    await Bun.sleep(50);
+    expect(settled).toBe(false);
+    await held!.release();
+    await mutation;
+
+    const body = readFileSync(join(brainDir, 'people/alice.md'), 'utf-8');
+    expect(body).toContain('forgotten: serialized');
+  });
+
   test('rewrites the fence row with strikethrough + valid_until + forgotten context', async () => {
     const id = await seedV51Fact({
       entity_slug: 'people/alice', source_markdown_slug: 'people/alice',

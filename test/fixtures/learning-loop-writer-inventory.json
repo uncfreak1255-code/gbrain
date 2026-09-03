@@ -2233,7 +2233,7 @@
       "primitive": "fs:renameSync",
       "count": 1,
       "lines": [
-        204
+        208
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -2245,7 +2245,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        195
+        199
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",

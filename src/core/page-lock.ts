@@ -12,6 +12,7 @@ import { Database } from 'bun:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { gbrainPath } from './config.ts';
 
 export interface PageLockHandle {
@@ -26,6 +27,14 @@ export interface AcquirePageLockOpts {
   lockRoot?: string;
   brainId?: string;
   sourceId?: string;
+}
+
+const heldPageLocks = new AsyncLocalStorage<ReadonlyMap<string, object>>();
+const livePageLockScopes = new WeakSet<object>();
+
+function inheritedLiveScope(lockPath: string): object | undefined {
+  const scope = heldPageLocks.getStore()?.get(lockPath);
+  return scope && livePageLockScopes.has(scope) ? scope : undefined;
 }
 
 export function pageLockIdentity(brainId: string, sourceId: string, slug: string): string {
@@ -81,6 +90,9 @@ function tryAcquireOnce(slug: string, lockPath: string): PageLockHandle | null {
 
 export async function acquirePageLock(slug: string, opts: AcquirePageLockOpts = {}): Promise<PageLockHandle | null> {
   const lockPath = lockPathFor(slug, opts);
+  if (inheritedLiveScope(lockPath)) {
+    return { slug, refresh: async () => {}, release: async () => {} };
+  }
   const deadline = Date.now() + (opts.timeoutMs ?? 0);
   const pollMs = opts.pollMs ?? 200;
   let attempt = tryAcquireOnce(slug, lockPath);
@@ -94,8 +106,18 @@ export async function acquirePageLock(slug: string, opts: AcquirePageLockOpts = 
 }
 
 export async function withPageLock<T>(slug: string, fn: () => Promise<T>, opts: AcquirePageLockOpts = {}): Promise<T> {
+  const lockPath = lockPathFor(slug, opts);
+  const inherited = heldPageLocks.getStore();
+  if (inheritedLiveScope(lockPath)) return fn();
   const handle = await acquirePageLock(slug, { timeoutMs: 30_000, ...opts });
   if (!handle) throw new Error(`acquirePageLock: could not acquire lock for slug "${slug}" within ${opts.timeoutMs ?? 30_000}ms`);
-  try { return await fn(); }
-  finally { await handle.release(); }
+  const scope = {};
+  const owned = new Map(inherited ?? []);
+  owned.set(lockPath, scope);
+  livePageLockScopes.add(scope);
+  try { return await heldPageLocks.run(owned, fn); }
+  finally {
+    livePageLockScopes.delete(scope);
+    await handle.release();
+  }
 }

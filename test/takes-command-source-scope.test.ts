@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runTakes } from '../src/commands/takes.ts';
 import type { BrainEngine, TakeBatchInput } from '../src/core/engine.ts';
+import { acquirePageLock } from '../src/core/page-lock.ts';
+import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const tmpRoots: string[] = [];
@@ -91,6 +93,34 @@ function makeEngine(opts: {
 }
 
 describe('gbrain takes CLI source scoping', () => {
+  test('a source-qualified page lock covers the markdown and DB mutation', async () => {
+    const brainDir = mkdtempSync(join(tmpdir(), 'gbrain-takes-source-'));
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-takes-home-'));
+    tmpRoots.push(brainDir, home);
+    const { engine, added } = makeEngine();
+    const held = await acquirePageLock('shared/page', {
+      lockRoot: join(home, '.gbrain', 'page-locks'),
+      brainId: computeBrainIdFromConfig({}),
+      sourceId: 'dept',
+    });
+    expect(held).not.toBeNull();
+
+    let settled = false;
+    const mutation = withEnv({ GBRAIN_SOURCE: 'dept', GBRAIN_HOME: home }, async () => {
+      await runTakes(engine, [
+        'add', 'shared/page', '--claim', 'Serialized claim', '--kind', 'take', '--who', 'self',
+        '--source-id', 'dept', '--dir', brainDir,
+      ]);
+    }).then(() => { settled = true; });
+
+    await Bun.sleep(50);
+    expect(settled).toBe(false);
+    expect(added).toEqual([]);
+    await held!.release();
+    await mutation;
+    expect(added).toHaveLength(1);
+  });
+
   test('add mirrors to the page in GBRAIN_SOURCE, not an arbitrary same-slug page (#2684)', async () => {
     const brainDir = mkdtempSync(join(tmpdir(), 'gbrain-takes-source-'));
     const home = mkdtempSync(join(tmpdir(), 'gbrain-takes-home-'));
