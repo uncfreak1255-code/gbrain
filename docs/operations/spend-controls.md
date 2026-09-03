@@ -63,12 +63,28 @@ The USD-limit knobs accept `off`, `unlimited`, or `none` (case-insensitive) to m
 | `enrich` / `onboard --auto` | `--max-usd` (per-call) | — | refuse without a cap (non-TTY) | `--max-usd off` | runs uncapped (still ledgered) |
 | Image-OCR per-run ceiling | `embedding_image_ocr_max_images` / `embedding_image_ocr_max_usd` | `200` images / `$1.00` (estimated) | skips OCR over-cap (import continues; skips counted in `ocr_skipped_budget`, surfaced by doctor `ocr_health`) | `0` disables that cap | **not** bypassed (per-run cap, not a tracker gate) |
 | Dream `extract_atoms` phase budget | `cycle.extract_atoms.budget_usd` | `0.30` | caps the phase's budget tracker | — | **not** consulted (phase budget enforces regardless) |
+| Sweep corpus-ingest per-run cap | `facts.sweep_max_usd` | — (**required**) | refuses the corpus pass while missing/invalid; caps the run's tracker (pre-call reserve) | none — fail-closed by design | **not** consulted |
+| Sweep corpus-ingest per-day cap | `facts.sweep_max_usd_per_day` | — (**required**) | refuses the corpus pass while missing/invalid or once today's ledger is at the cap; the run's tracker is capped at the remaining UTC-day headroom | none — fail-closed by design | **not** consulted |
 
 The `extract_atoms` cap is enforced only for models in the pricing maps. A model
 the tracker cannot price — e.g. a local Ollama model selected via
 `models.dream.extract_atoms` — runs without a cost gate after a one-line stderr
 warning (a USD cap cannot be enforced on an unpriced model; local models incur
 no API spend).
+
+The maintenance sweep's corpus pass (LLM fact extraction over
+`~/.gbrain/transcripts/corpus`) fires from every `gbrain serve` process on a
+10-minute idle timer, so a per-run cap alone is not a spend ceiling — it leaks
+`cap × 6 × processes` per hour. `facts.sweep_max_usd_per_day` is the ceiling:
+the sweep keeps today's cumulative corpus spend (UTC day) in the sweep-owned
+config row `facts.sweep_spend_ledger` (`{"day":"YYYY-MM-DD","usd":n}`) and
+gives each run a tracker capped at `min(run cap, day cap − ledger)`, so the
+day ceiling is enforced *before* each provider call, not after. The ledger is
+read-modify-write, so overshoot is bounded by one run cap per concurrent serve
+process. Reset a day with `gbrain config unset facts.sweep_spend_ledger`; a
+row the sweep cannot parse fails the pass closed
+(`daily_ledger_invalid:corpus`) until it is unset. `gbrain sweep --once`
+prints `corpus today (UTC)` under `corpus cost`.
 
 ### Sync inline-embed cost gate
 
