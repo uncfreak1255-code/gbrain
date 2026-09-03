@@ -13,6 +13,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
   runExtractAtomsDrain,
+  MAX_DRAIN_FAILURE_RECORDS,
   type ExtractAtomsDrainDeps,
 } from '../src/core/cycle/extract-atoms-drain.ts';
 import { isProtectedJobName, PROTECTED_JOB_NAMES } from '../src/core/minions/protected-names.ts';
@@ -108,6 +109,91 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     );
     expect(result.stopped).toBe('max_batches');
     expect(batches).toBe(4);
+  });
+
+  it('surfaces upstream-compatible failure counts and bounded records', async () => {
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: async () => 5,
+        runBatch: async () => ({
+          extracted: 0,
+          skipped: 0,
+          failureCount: MAX_DRAIN_FAILURE_RECORDS + 2,
+          firstError: 'pages/a: password=hunter2 provider timeout',
+          failures: [
+            { source: 'pages/a', reason: 'password=hunter2 provider timeout' },
+            { source: 'pages/b', reason: 'second failure' },
+          ],
+        }),
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+
+    expect(result.status).toBe('ok');
+    expect(result.stopped).toBe('no_progress');
+    expect(result.failure_count).toBe(MAX_DRAIN_FAILURE_RECORDS + 2);
+    expect(result.failures).toEqual([
+      { batch: 1, source: 'pages/a', reason: '<REDACTED:password> provider timeout' },
+      { batch: 1, source: 'pages/b', reason: 'second failure' },
+    ]);
+    expect(result.omitted_failure_count).toBe(MAX_DRAIN_FAILURE_RECORDS);
+    expect(result.last_error).toBe('pages/a: <REDACTED:password> provider timeout');
+  });
+
+  it('stops with provider_failure when every attempted item fails', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: async () => 5,
+        runBatch: async () => {
+          batches++;
+          return {
+            extracted: 0,
+            skipped: 0,
+            providerFailure: true,
+            failureCount: 1,
+            failures: [{ source: 'pages/a', reason: 'provider unavailable' }],
+          };
+        },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.status).toBe('provider_failure');
+    expect(result.stopped).toBe('provider_failure');
+    expect(result.remaining).toBe(5);
+    expect(batches).toBe(1);
+  });
+
+  it('does not rewrite provider_failure to drained after a zero final recount', async () => {
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: seq([3, 0]),
+        runBatch: async () => ({ extracted: 0, skipped: 0, providerFailure: true }),
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.status).toBe('provider_failure');
+    expect(result.stopped).toBe('provider_failure');
+    expect(result.remaining).toBe(0);
+  });
+});
+
+describe('extract-atoms-drain handler retry contract', () => {
+  const jobsSrc = readFileSync(join(import.meta.dir, '../src/commands/jobs.ts'), 'utf8');
+  const handlerBlock = jobsSrc.slice(
+    jobsSrc.indexOf("registerProviderHandler('extract-atoms-drain'"),
+    jobsSrc.indexOf("registerProviderHandler('extract-atoms-drain'") + 2600,
+  );
+
+  it('throws on provider_failure so the durable job retries', () => {
+    expect(handlerBlock).toContain("result.status === 'provider_failure'");
+    expect(handlerBlock).toMatch(/if \(result\.status === 'provider_failure'\) \{\s*throw new Error/);
   });
 });
 

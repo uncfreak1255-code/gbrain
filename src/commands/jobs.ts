@@ -2330,11 +2330,15 @@ export async function registerBuiltinHandlers(
         ? job.data.repoPath
         : ((await engine.getConfig('sync.repo_path')) ?? undefined);
     try {
-      return await runExtractAtomsDrainForSource(engine, {
+      const result = await runExtractAtomsDrainForSource(engine, {
         sourceId,
         windowSeconds,
         brainDir: repoPath,
       });
+      if (result.status === 'provider_failure') {
+        throw new Error(result.last_error ?? 'extract-atoms drain provider failure');
+      }
+      return result;
     } catch (e) {
       if (e instanceof LockUnavailableError) {
         return { phase: 'extract_atoms', status: 'skipped', deferred: true, reason: 'cycle_already_running' };

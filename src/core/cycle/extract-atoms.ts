@@ -38,8 +38,13 @@ import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
 import { chat as gatewayChat } from '../ai/gateway.ts';
-import { writeReceipt } from '../extract/receipt-writer.ts';
+import {
+  buildExtractRunId,
+  writeReceipt,
+  type ExtractReceiptFailure,
+} from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
+import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 import { createHash } from 'crypto';
 import { slugifySegment } from '../sync.ts';
 
@@ -62,6 +67,38 @@ const LEGACY_EXTRACTABLE_TYPES = [
 const SYNTHESIS_OUTPUT_TYPES = new Set<string>(['atom', 'concept']);
 const PAGE_DISCOVERY_BUDGET = 50;
 const MIN_PAGE_CHARS_FOR_EXTRACTION = 500;
+const MAX_FAILURE_ERROR_LENGTH = 200;
+const MAX_FAILURE_METADATA_LENGTH = 80;
+
+function extractErrorCode(err: unknown): string | undefined {
+  if (err && typeof err === 'object' && 'code' in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string' && code.length > 0) return code.slice(0, 80);
+  }
+  return undefined;
+}
+
+function summarizeFailureError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return redactConnectionInfo(raw).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_ERROR_LENGTH);
+}
+
+function summarizeFailureMetadata(value: string): string {
+  return redactConnectionInfo(value).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_METADATA_LENGTH);
+}
+
+function failureFromError(source: string, err: unknown): ExtractReceiptFailure {
+  const errorClass = err instanceof Error && err.name !== 'Error'
+    ? summarizeFailureMetadata(err.name)
+    : undefined;
+  const errorCode = extractErrorCode(err);
+  return {
+    source,
+    error: summarizeFailureError(err),
+    ...(errorClass ? { error_class: errorClass } : {}),
+    ...(errorCode ? { error_code: summarizeFailureMetadata(errorCode) } : {}),
+  };
+}
 
 function completedAtomSql(alias: string): string {
   return `(
@@ -502,7 +539,7 @@ export async function runPhaseExtractAtoms(
   let pagesProcessed = 0;
   let transcriptsSkipped = 0;
   let pagesSkipped = 0;
-  const failures: Array<{ source: string; error: string }> = [];
+  const failures: ExtractReceiptFailure[] = [];
   let estimatedSpendUsd = 0;
   const budgetCap = DEFAULT_BUDGET_USD;
   let deadlineElapsed = false;
@@ -641,18 +678,15 @@ export async function runPhaseExtractAtoms(
         deadlineElapsed = true;
         break;
       }
-      failures.push({
-        source: originLabel,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      failures.push(failureFromError(originLabel, err));
     }
   }
 
   // v0.42 Wave B2: write extract receipt + rollup row when the phase
-  // actually extracted atoms. Both are best-effort per F-OUT-19 —
+  // actually extracted atoms OR stopped with a failure/deadline. Both are best-effort per F-OUT-19 —
   // audit-trail / search-visibility surfaces don't block the phase result.
-  if (!opts.dryRun && totalAtomsExtracted > 0) {
-    const runId = `atoms-${Date.now().toString(36)}-${sourceId.slice(0, 4)}`;
+  if (!opts.dryRun && (totalAtomsExtracted > 0 || failures.length > 0 || deadlineElapsed)) {
+    const runId = buildExtractRunId('atoms', sourceId);
     try {
       await writeReceipt(engine, {
         kind: 'atoms',
@@ -662,9 +696,15 @@ export async function runPhaseExtractAtoms(
         extracted_at: new Date().toISOString(),
         total_rows: totalAtomsExtracted,
         cost_usd: estimatedSpendUsd,
+        status: failures.length > 0 ? 'warn' : 'ok',
+        deadline_elapsed: deadlineElapsed,
+        failure_count: failures.length,
+        failures,
         summary:
           `Extracted ${totalAtomsExtracted} atoms from ` +
-          `${transcriptsProcessed} transcripts + ${pagesProcessed} pages.`,
+          `${transcriptsProcessed} transcripts + ${pagesProcessed} pages.` +
+          (failures.length > 0 ? ` ${failures.length} item(s) failed.` : '') +
+          (deadlineElapsed ? ' Deadline elapsed before all work completed.' : ''),
       });
     } catch (err) {
       console.error(`[extract_atoms] receipt write failed: ${(err as Error).message}`);
@@ -701,6 +741,7 @@ export async function runPhaseExtractAtoms(
       pages_total: pages.length,
       pages_skipped_budget: pagesSkipped,
       duplicates_skipped: duplicatesSkipped,
+      failure_count: failures.length,
       failures,
       estimated_spend_usd: estimatedSpendUsd,
       budget_usd: budgetCap,

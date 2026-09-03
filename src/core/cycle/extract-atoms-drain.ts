@@ -16,13 +16,31 @@
  *  - BOUNDED by a wallclock window; reports `remaining` so a cron/agent loop
  *    knows whether to run again.
  *
- * Pure over injected deps: no DB, no LLM, no lock primitive imported here, so
- * the loop logic is unit-testable. The wiring helper `runExtractAtomsDrainForSource`
- * (below) builds the real deps; it uses DYNAMIC imports so this module's static
- * graph stays empty and the pure-loop unit tests don't drag in db-lock / cycle.
+ * Pure over injected deps: no DB, no LLM, or lock primitive is imported here,
+ * so the loop logic is unit-testable. The wiring helper
+ * `runExtractAtomsDrainForSource` uses DYNAMIC imports for runtime deps.
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
+
+/** Bounded operator-facing detail; failure_count remains exact above the cap. */
+export const MAX_DRAIN_FAILURE_RECORDS = 25;
+export const MAX_DRAIN_FAILURE_SOURCE_CHARS = 256;
+export const MAX_DRAIN_FAILURE_REASON_CHARS = 200;
+
+export interface ExtractAtomsDrainFailure {
+  /** One-based batch number within this bounded drain window. */
+  batch: number;
+  /** Stable page slug / transcript locator. */
+  source: string;
+  /** Bounded, redacted failure reason. */
+  reason: string;
+}
+
+function sanitizeFailureText(raw: string, maxChars: number): string {
+  return redactConnectionInfo(raw).replace(/\s+/g, ' ').trim().slice(0, maxChars);
+}
 
 export interface ExtractAtomsDrainDeps {
   /**
@@ -33,8 +51,19 @@ export interface ExtractAtomsDrainDeps {
    * routine cycle's skip contract.
    */
   withLock: <T>(work: () => Promise<T>) => Promise<T>;
-  /** Process one bounded batch (rediscovers eligibility). Returns counts. */
-  runBatch: (info: { deadlineMs: number }) => Promise<{ extracted: number; skipped: number }>;
+  /**
+   * Process one bounded batch (rediscovers eligibility). The optional
+   * failure fields match upstream's current drain observability contract.
+   */
+  runBatch: (info: { deadlineMs: number }) => Promise<{
+    extracted: number;
+    skipped: number;
+    /** True when every attempted item failed in this batch. */
+    providerFailure?: boolean;
+    failureCount?: number;
+    firstError?: string;
+    failures?: Array<{ source: string; reason: string }>;
+  }>;
   /** Count remaining eligible-but-unextracted pages, or null on query error. */
   countRemaining: () => Promise<number | null>;
   /** Injectable clock. Production: Date.now. */
@@ -52,15 +81,24 @@ export interface ExtractAtomsDrainOpts {
 
 export interface ExtractAtomsDrainResult {
   phase: 'extract_atoms';
-  status: 'ok';
+  /** Provider outage is distinct so protected jobs can retry. */
+  status: 'ok' | 'provider_failure';
   extracted: number;
   skipped: number;
   /** Eligible pages still pending after the window. null if the count errored. */
   remaining: number | null;
   /** Batches actually processed. */
   batches: number;
-  /** Why the loop stopped: drained | window | no_progress | max_batches. */
-  stopped: 'drained' | 'window' | 'no_progress' | 'max_batches';
+  /** Why the loop stopped, including a retryable provider outage. */
+  stopped: 'drained' | 'window' | 'no_progress' | 'max_batches' | 'provider_failure';
+  /** Exact per-item failure total across all processed batches. */
+  failure_count: number;
+  /** Bounded, redacted failure records in batch order. */
+  failures: ExtractAtomsDrainFailure[];
+  /** Count-only or capped failures not present in failures[]. */
+  omitted_failure_count: number;
+  /** Most recent representative failure, or null for a clean run. */
+  last_error: string | null;
 }
 
 export async function runExtractAtomsDrain(
@@ -74,6 +112,10 @@ export async function runExtractAtomsDrain(
     let skipped = 0;
     let batches = 0;
     let stopped: ExtractAtomsDrainResult['stopped'] = 'window';
+    let providerFailure = false;
+    let failureCount = 0;
+    const failures: ExtractAtomsDrainFailure[] = [];
+    let lastError: string | null = null;
 
     while (deps.now() < deadline) {
       if (batches >= maxBatches) { stopped = 'max_batches'; break; }
@@ -85,7 +127,47 @@ export async function runExtractAtomsDrain(
       extracted += r.extracted;
       skipped += r.skipped;
       batches++;
+      const batchFailures = Array.isArray(r.failures)
+        ? r.failures.filter(
+            (failure): failure is { source: string; reason: string } =>
+              failure != null &&
+              typeof failure === 'object' &&
+              typeof failure.source === 'string' &&
+              typeof failure.reason === 'string',
+          )
+        : [];
+      const reportedFailureCount =
+        typeof r.failureCount === 'number' && Number.isFinite(r.failureCount) && r.failureCount > 0
+          ? Math.floor(r.failureCount)
+          : 0;
+      failureCount += Math.max(reportedFailureCount, batchFailures.length);
+      for (const failure of batchFailures) {
+        if (failures.length >= MAX_DRAIN_FAILURE_RECORDS) break;
+        failures.push({
+          batch: batches,
+          source: sanitizeFailureText(failure.source, MAX_DRAIN_FAILURE_SOURCE_CHARS),
+          reason: sanitizeFailureText(failure.reason, MAX_DRAIN_FAILURE_REASON_CHARS),
+        });
+      }
+      const representative = batchFailures[0];
+      if (representative) {
+        lastError = `${sanitizeFailureText(representative.source, MAX_DRAIN_FAILURE_SOURCE_CHARS)}: ${sanitizeFailureText(representative.reason, MAX_DRAIN_FAILURE_REASON_CHARS)}`;
+      } else if (typeof r.firstError === 'string' && r.firstError.trim()) {
+        lastError = sanitizeFailureText(
+          r.firstError,
+          MAX_DRAIN_FAILURE_SOURCE_CHARS + 2 + MAX_DRAIN_FAILURE_REASON_CHARS,
+        );
+      }
       deps.onBatch?.({ batch: batches, extracted: r.extracted, remaining: before });
+
+      // A total provider outage must not complete a protected drain job as a
+      // clean no-progress result. Latch the state before the final recount so
+      // a concurrent cleanup cannot rewrite the stop reason to "drained".
+      if (r.providerFailure) {
+        providerFailure = true;
+        stopped = 'provider_failure';
+        break;
+      }
 
       if (deps.now() >= deadline) { stopped = 'window'; break; }
 
@@ -96,8 +178,20 @@ export async function runExtractAtomsDrain(
     }
 
     const remaining = await deps.countRemaining();
-    if (remaining === 0) stopped = 'drained';
-    return { phase: 'extract_atoms', status: 'ok', extracted, skipped, remaining, batches, stopped };
+    if (!providerFailure && remaining === 0) stopped = 'drained';
+    return {
+      phase: 'extract_atoms',
+      status: providerFailure ? 'provider_failure' : 'ok',
+      extracted,
+      skipped,
+      remaining,
+      batches,
+      stopped,
+      failure_count: failureCount,
+      failures,
+      omitted_failure_count: failureCount - failures.length,
+      last_error: lastError,
+    };
   });
 }
 
@@ -170,9 +264,27 @@ export async function runExtractAtomsDrainForSource(
           deadlineMs,
         });
         const d = (r.details ?? {}) as Record<string, unknown>;
+        const failures = Array.isArray(d.failures) ? d.failures : [];
+        const typedFailures = failures
+          .filter(
+            (failure): failure is { source: string; error: string } =>
+              failure != null &&
+              typeof failure === 'object' &&
+              typeof (failure as { source?: unknown }).source === 'string' &&
+              typeof (failure as { error?: unknown }).error === 'string',
+          )
+          .map(({ source, error }) => ({ source, reason: error }));
+        const first = typedFailures[0];
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
+          providerFailure: typedFailures.length > 0
+            && Number(d.transcripts_processed ?? 0) + Number(d.pages_processed ?? 0) === 0,
+          failureCount: typeof d.failure_count === 'number'
+            ? d.failure_count
+            : failures.length,
+          ...(first ? { firstError: `${first.source}: ${first.reason}` } : {}),
+          failures: typedFailures,
         };
       },
       countRemaining: () => countExtractAtomsBacklog(engine, extractionSourceId),

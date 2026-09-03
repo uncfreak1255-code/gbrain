@@ -2,7 +2,9 @@
  * Shared connection-info redactor (v0.41.22.2).
  *
  * Strips DSNs, credentials, hostnames, and IPv4 octets from text before
- * it lands in an audit JSONL or any other operator-facing surface.
+ * it lands in an audit JSONL or any other operator-facing surface. It also
+ * strips bearer and API-key header forms because provider failures can carry
+ * those credentials even when no database connection is involved.
  *
  * Risk model: Postgres errors during connection failures often embed the
  * connection string into the error message:
@@ -38,6 +40,16 @@ const PATTERNS: ReadonlyArray<RedactPattern> = [
   // shapes plus query-string variants. Terminator is whitespace or
   // common JSON/markdown delimiters.
   { kind: 'pg_url', re: /postgres(?:ql)?:\/\/[^\s"'>)]+/gi },
+
+  // Authorization: Bearer <token> and bare Bearer <token>. Provider errors
+  // commonly echo request headers; redact the credential while preserving
+  // the surrounding diagnostic text.
+  { kind: 'bearer', re: /(?:authorization\s*:\s*)?\bbearer\s+[A-Za-z0-9._~+\/-]{10,}=*/gi },
+
+  // api_key=secret, api-key: secret, and x-api-key: secret. Anchor the key
+  // name at the start, after whitespace, or after URL query delimiters so
+  // provider URLs cannot leak credentials through `?api_key=` / `&x-api-key=`.
+  { kind: 'api_key', re: /(?:^|[\s?&])(?:api[_-]?key|x-api-key)\s*[:=]\s*[^\s"'&)]+/gi },
 
   // password=secret OR pwd=secret. Both Postgres conninfo forms in
   // common use. Value terminates at whitespace, quote, or & (for

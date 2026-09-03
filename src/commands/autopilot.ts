@@ -940,16 +940,28 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                 const threshold = parsePosInt(await engine.getConfig('autopilot.auto_drain.threshold'), 25);
                 const windowSeconds = parsePosInt(await engine.getConfig('autopilot.auto_drain.window_seconds'), 120);
                 const maxUsdPerDay = parseNonNegFloat(await engine.getConfig('autopilot.auto_drain.max_usd_per_day'), 2.0);
-                // Each drain run is BudgetTracker-capped at ~$0.30; bound the
-                // brain-wide daily count instead of a real-time spend ledger.
-                const PER_RUN_USD = 0.3;
-                const maxJobsToday = Math.max(0, Math.floor(maxUsdPerDay / PER_RUN_USD));
+                // Each drain attempt is BudgetTracker-capped at ~$0.30. Reserve
+                // the full retry envelope per submitted job so a provider
+                // outage cannot spend past the brain-wide daily cap.
+                const AUTO_DRAIN_MAX_ATTEMPTS = 2;
+                const PER_ATTEMPT_USD = 0.3;
+                const PER_JOB_USD = PER_ATTEMPT_USD * AUTO_DRAIN_MAX_ATTEMPTS;
+                const maxJobsToday = Math.max(0, Math.floor(maxUsdPerDay / PER_JOB_USD));
                 const utcDay = new Date().toISOString().slice(0, 10);
 
                 let submittedToday = 0;
                 try {
                   const rows = await engine.executeRaw<{ cnt: number }>(
-                    `SELECT count(*)::int AS cnt FROM minion_jobs WHERE name = 'extract-atoms-drain' AND created_at >= $1::timestamptz`,
+                    `SELECT count(*)::int AS cnt
+                     FROM minion_jobs
+                     WHERE name = 'extract-atoms-drain'
+                       AND (
+                         created_at >= $1::timestamptz
+                         OR (
+                           created_at < $1::timestamptz
+                           AND status IN ('waiting','active','delayed','waiting-children','paused')
+                         )
+                       )`,
                     [`${utcDay}T00:00:00Z`],
                   );
                   submittedToday = rows[0]?.cnt ?? 0;
@@ -1015,7 +1027,14 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                         {
                           queue: 'default',
                           idempotency_key: idemKey,
-                          max_attempts: 1,
+                          // Provider failures are surfaced by the drain handler
+                          // so Minions can retry them. Keep this bounded to one
+                          // retry with an explicit short fixed backoff; the
+                          // daily idempotency key still prevents hot-looping.
+                          max_attempts: AUTO_DRAIN_MAX_ATTEMPTS,
+                          backoff_type: 'fixed',
+                          backoff_delay: 5000,
+                          backoff_jitter: 0,
                           timeout_ms: routineTimeoutMs,
                         },
                         { allowProtectedSubmit: true },

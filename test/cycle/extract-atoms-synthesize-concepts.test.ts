@@ -50,6 +50,22 @@ function stubChat(text: string, opts: { input_tokens?: number; output_tokens?: n
   });
 }
 
+async function readReceipt(engine: PGLiteEngine): Promise<Array<{
+  status: string;
+  deadline_elapsed: string;
+  failure_count: string;
+  compiled_truth: string;
+}>> {
+  return engine.executeRaw(
+    `SELECT frontmatter->>'status' AS status,
+            frontmatter->>'deadline_elapsed' AS deadline_elapsed,
+            frontmatter->>'failure_count' AS failure_count,
+            compiled_truth
+       FROM pages
+      WHERE type = 'extract_receipt'`,
+  );
+}
+
 describe('v0.41 T5: parseAtomsResponse', () => {
   test('parses well-formed JSON array', () => {
     const raw = `[{"title":"Test","atom_type":"insight","body":"body text"}]`;
@@ -175,6 +191,78 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
     expect(result.status).toBe('warn');
     expect(result.details?.atoms_extracted).toBe(1);
     expect((result.details?.failures as unknown[]).length).toBe(1);
+  });
+
+  test('writes a failure receipt when no atoms were extracted', async () => {
+    const result = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath: '/private/example.txt', content: 'content', contentHash: 'failure-hash' }],
+      _pages: [],
+      _chat: async () => { throw new Error('password=hunter2 provider timeout'); },
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.details?.atoms_extracted).toBe(0);
+    expect(result.details?.failure_count).toBe(1);
+
+    const receipts = await readReceipt(engine);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].status).toBe('warn');
+    expect(receipts[0].deadline_elapsed).toBe('false');
+    expect(receipts[0].failure_count).toBe('1');
+    expect(receipts[0].compiled_truth).toContain('Failures: **1**');
+    expect(receipts[0].compiled_truth).not.toContain('hunter2');
+  });
+
+  test('writes a deadline receipt when no atoms were committed', async () => {
+    const result = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath: '/private/deadline.txt', content: 'content', contentHash: 'deadline-hash' }],
+      _pages: [],
+      deadlineMs: 100,
+      _now: () => 100,
+      _chat: async () => { throw new Error('chat should not run after the deadline'); },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.details?.atoms_extracted).toBe(0);
+    expect(result.details?.deadline_elapsed).toBe(true);
+
+    const receipts = await readReceipt(engine);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].status).toBe('ok');
+    expect(receipts[0].deadline_elapsed).toBe('true');
+    expect(receipts[0].failure_count).toBe('0');
+    expect(receipts[0].compiled_truth).toContain('Deadline: **elapsed**');
+  });
+
+  test('keeps a real atom receipt when a later empty deadline run occurs', async () => {
+    const extracted = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath: '/kept.txt', content: 'content', contentHash: 'kept-hash' }],
+      _pages: [],
+      _chat: stubChat('[{"title":"kept","atom_type":"insight","body":"survives"}]'),
+    });
+    expect(extracted.details?.atoms_extracted).toBe(1);
+
+    const deadline = await runPhaseExtractAtoms(engine, {
+      _transcripts: [{ filePath: '/later.txt', content: 'content', contentHash: 'later-hash' }],
+      _pages: [],
+      deadlineMs: 100,
+      _now: () => 100,
+      _chat: async () => { throw new Error('chat should not run after the deadline'); },
+    });
+    expect(deadline.details?.atoms_extracted).toBe(0);
+    expect(deadline.details?.deadline_elapsed).toBe(true);
+
+    const receipts = await engine.executeRaw<{ slug: string; total_rows: string; deadline_elapsed: string }>(
+      `SELECT slug,
+              frontmatter->>'total_rows' AS total_rows,
+              frontmatter->>'deadline_elapsed' AS deadline_elapsed
+         FROM pages
+        WHERE type = 'extract_receipt'`,
+    );
+    expect(receipts).toHaveLength(2);
+    expect(new Set(receipts.map((receipt) => receipt.slug)).size).toBe(2);
+    expect(receipts.some((receipt) => receipt.total_rows === '1' && receipt.deadline_elapsed === 'false')).toBe(true);
+    expect(receipts.some((receipt) => receipt.total_rows === '0' && receipt.deadline_elapsed === 'true')).toBe(true);
   });
 
   // v0.41.2.1 regression case (D9 #14 wording): with _pages:[] and same
