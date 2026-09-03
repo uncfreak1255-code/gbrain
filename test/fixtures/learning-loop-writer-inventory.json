@@ -31,7 +31,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        1769
+        1788
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -43,7 +43,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1767
+        1786
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -55,9 +55,9 @@
       "primitive": "fs:writeFileSync",
       "count": 3,
       "lines": [
-        1702,
-        1743,
-        1745
+        1721,
+        1762,
+        1764
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -69,7 +69,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1564
+        1583
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -81,7 +81,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1671
+        1690
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -105,7 +105,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1654
+        1673
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -141,11 +141,11 @@
       "primitive": "fs:unlinkSync",
       "count": 5,
       "lines": [
-        1792,
-        1804,
-        1816,
-        1862,
-        1873
+        1811,
+        1823,
+        1835,
+        1881,
+        1892
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -157,9 +157,9 @@
       "primitive": "fs:writeFileSync",
       "count": 3,
       "lines": [
-        1842,
-        1843,
-        1860
+        1861,
+        1862,
+        1879
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -171,7 +171,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1484
+        1503
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -1989,7 +1989,7 @@
       "primitive": "db:putPage",
       "count": 1,
       "lines": [
-        606
+        643
       ],
       "classification": "db_first_content",
       "boundary": "engine_collision_guard",
@@ -2209,7 +2209,7 @@
       "primitive": "db:putPage",
       "count": 1,
       "lines": [
-        196
+        309
       ],
       "classification": "db_first_content",
       "boundary": "engine_collision_guard",
