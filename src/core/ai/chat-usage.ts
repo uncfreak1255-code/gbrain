@@ -32,6 +32,39 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { canonicalLookup } from '../model-pricing.ts';
 
+function finiteToken(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Normalize provider cache telemetry into mutually exclusive billing buckets. */
+export function normalizeChatUsageForBudget(
+  usage: Record<string, any>,
+  providerMetadata: Record<string, any> | undefined,
+  providerId?: string,
+): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number } {
+  const details = usage.inputTokenDetails ?? usage.input_token_details ?? {};
+  const promptDetails = usage.promptTokensDetails ?? usage.prompt_tokens_details ?? {};
+  const anthropic = providerMetadata?.anthropic ?? {};
+  const anthropicUsage = anthropic.usage ?? {};
+  const zaiCache = providerId === 'zai'
+    ? finiteToken(promptDetails.cachedTokens) ?? finiteToken(promptDetails.cached_tokens)
+    : undefined;
+  const cacheReadTokens = finiteToken(details.cacheReadTokens) ?? finiteToken(details.cachedTokens) ??
+    finiteToken(details.cached_tokens) ?? finiteToken(usage.cachedInputTokens) ??
+    finiteToken(anthropicUsage.cache_read_input_tokens) ?? finiteToken(anthropic.cacheReadInputTokens) ??
+    finiteToken(anthropic.cache_read_input_tokens) ?? zaiCache ?? 0;
+  const cacheCreationTokens = finiteToken(details.cacheWriteTokens) ??
+    finiteToken(anthropicUsage.cache_creation_input_tokens) ?? finiteToken(anthropic.cacheCreationInputTokens) ??
+    finiteToken(anthropic.cache_creation_input_tokens) ?? 0;
+  const totalInputTokens = finiteToken(usage.inputTokens) ?? finiteToken(usage.promptTokens) ??
+    finiteToken(anthropicUsage.input_tokens) ?? 0;
+  const inputTokens = finiteToken(details.noCacheTokens) ?? finiteToken(anthropicUsage.input_tokens) ??
+    (providerId === 'zai' ? Math.max(0, totalInputTokens - cacheReadTokens) : totalInputTokens);
+  const outputTokens = finiteToken(usage.outputTokens) ?? finiteToken(usage.completionTokens) ??
+    finiteToken(anthropicUsage.output_tokens) ?? 0;
+  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens };
+}
+
 export interface ChatUsageRecord {
   /** "provider:modelId" of the model that actually answered. */
   model: string;

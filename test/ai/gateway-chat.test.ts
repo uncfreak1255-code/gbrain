@@ -26,16 +26,21 @@ import {
   recipeSupportsStructuredOutputs,
   parseExpansionResponse,
   chat,
+  withBudgetTracker,
   __setGenerateTextTransportForTests,
 } from '../../src/core/ai/gateway.ts';
 import { parseModelId, resolveRecipe, assertTouchpoint } from '../../src/core/ai/model-resolver.ts';
 import { AIConfigError } from '../../src/core/ai/errors.ts';
 import { listRecipes, getRecipe } from '../../src/core/ai/recipes/index.ts';
 import type { Recipe } from '../../src/core/ai/types.ts';
+import { BudgetTracker } from '../../src/core/budget/budget-tracker.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('chat touchpoint — recipe registry', () => {
   test('all hosted tool-loop providers ship a chat touchpoint with supports_subagent_loop', () => {
-    const expected = ['anthropic', 'openai', 'google', 'deepseek', 'groq', 'together'];
+    const expected = ['anthropic', 'openai', 'google', 'deepseek', 'groq', 'together', 'zai'];
     for (const id of expected) {
       const r = getRecipe(id);
       expect(r, `recipe missing: ${id}`).toBeDefined();
@@ -64,7 +69,7 @@ describe('chat touchpoint — recipe registry', () => {
     // it is a property of the whole provider. Anything else must declare no
     // caching.
     const PREDICATE = new Set(['openai', 'openrouter', 'google']);
-    const ALWAYS_CACHES = new Set(['anthropic', 'deepseek', 'llama-server']);
+    const ALWAYS_CACHES = new Set(['anthropic', 'deepseek', 'llama-server', 'zai']);
     for (const r of listRecipes()) {
       if (!r.touchpoints.chat) continue;
       const flag = r.touchpoints.chat.supports_prompt_cache;
@@ -512,6 +517,74 @@ describe('chat touchpoint — per-part providerMetadata round trip (#4201)', () 
     expect(capturedMessages).toBeDefined();
     const assistant = (capturedMessages as any[]).find(m => m.role === 'assistant');
     expect(assistant.content[0].providerOptions).toEqual(SIG);
+  });
+});
+
+describe('chat touchpoint — Z.AI cache accounting', () => {
+  test('preserves an explicit caller maxTokens bound', async () => {
+    resetGateway();
+    configureGateway({ chat_model: 'zai:glm-5.2', env: { ZAI_API_KEY: 'fake' } });
+    let forwarded: number | undefined;
+    __setGenerateTextTransportForTests(async (args: any) => {
+      forwarded = args.maxOutputTokens;
+      return {
+        content: [{ type: 'text', text: 'ok' }],
+        finishReason: 'stop',
+        usage: { promptTokens: 1, completionTokens: 1 },
+      } as any;
+    });
+    try {
+      await chat({ model: 'zai:glm-5.2', messages: [{ role: 'user', content: 'x' }], maxTokens: 1 });
+      expect(forwarded).toBe(1);
+    } finally {
+      __setGenerateTextTransportForTests(null);
+      resetGateway();
+    }
+  });
+
+  test('normalizes prompt cache hits before the production budget record', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-zai-usage-'));
+    try {
+      resetGateway();
+      configureGateway({
+        chat_model: 'zai:glm-5.2',
+        env: { ZAI_API_KEY: 'fake' },
+      });
+      __setGenerateTextTransportForTests(async () => ({
+        content: [{ type: 'text', text: 'ok' }],
+        finishReason: 'stop',
+        usage: {
+          promptTokens: 1_000,
+          completionTokens: 500,
+          promptTokensDetails: { cachedTokens: 200 },
+        },
+      }) as any);
+      const tracker = new BudgetTracker({
+        maxCostUsd: 1,
+        label: 'zai-production-lane',
+        auditPath: join(dir, 'budget.jsonl'),
+      });
+
+      const result = await withBudgetTracker(tracker, () => chat({
+        model: 'zai:glm-5.2',
+        messages: [{ role: 'user', content: 'hello' }],
+        maxTokens: 16,
+      }));
+
+      expect(result.usage).toMatchObject({
+        input_tokens: 800,
+        output_tokens: 500,
+        cache_read_tokens: 200,
+      });
+      expect(tracker.totalSpent).toBeCloseTo(
+        (800 / 1_000_000) * 1.4 + (200 / 1_000_000) * 0.26 + (500 / 1_000_000) * 4.4,
+        10,
+      );
+    } finally {
+      __setGenerateTextTransportForTests(null);
+      resetGateway();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

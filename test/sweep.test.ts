@@ -66,6 +66,7 @@ beforeEach(async () => {
   corpusDir = mkdtempSync(join(tmpdir(), 'gbrain-sweep-corpus-'));
   tmpDirs.push(corpusDir);
   await engine.setConfig('dream.synthesize.session_corpus_dir', corpusDir);
+  await engine.setConfig('facts.sweep_max_usd', '1');
 });
 
 afterEach(() => {
@@ -305,6 +306,52 @@ describe('runMaintenanceSweep — watermark progress + link reconciliation (#419
 });
 
 describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
+  test('missing or invalid USD cap fails closed before transport and sidecars', async () => {
+    await engine.setConfig('facts.sweep_max_usd', '0');
+    writeFileSync(join(corpusDir, 'uncapped.txt'), 'This must not reach a paid provider.\n');
+    let chatCalls = 0;
+    __setChatTransportForTests(async () => {
+      chatCalls += 1;
+      throw new Error('must not be called');
+    });
+
+    const r = await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED });
+    expect(chatCalls).toBe(0);
+    expect(r.corpusIngested).toBe(0);
+    expect(r.skipped).toContainEqual({ reason: 'cost_cap_missing_or_invalid:corpus', count: 1 });
+    expect(existsSync(join(corpusDir, 'uncapped.txt' + CORPUS_INGESTED_SUFFIX))).toBe(false);
+    expect(existsSync(join(corpusDir, 'uncapped.txt' + CORPUS_CLAIM_SUFFIX))).toBe(false);
+  });
+
+  test('one tracker spans files and post-call spend stops the next transport', async () => {
+    await engine.setConfig('facts.sweep_max_usd', '0.005');
+    await engine.setConfig('pricing.overrides', JSON.stringify({
+      'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
+      'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
+    }));
+    writeFileSync(join(corpusDir, 'a.txt'), 'First paid extraction.\n');
+    writeFileSync(join(corpusDir, 'b.txt'), 'Second paid extraction.\n');
+    let chatCalls = 0;
+    __setChatTransportForTests(async (): Promise<ChatResult> => {
+      chatCalls += 1;
+      return {
+        text: JSON.stringify({ facts: [] }), blocks: [], stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 4_000, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'anthropic:claude-haiku-4-5', providerId: 'anthropic',
+      };
+    });
+
+    const r = await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED, batchLimit: 2 });
+    expect(chatCalls).toBe(1);
+    expect(r.corpusIngested).toBe(1);
+    expect(r.spentUsd).toBeGreaterThan(0);
+    expect(r.spentUsd).toBeLessThanOrEqual(0.005);
+    expect(r.skipped).toContainEqual({ reason: 'cost_cap_exhausted:corpus', count: 1 });
+    expect(existsSync(join(corpusDir, 'a.txt' + CORPUS_INGESTED_SUFFIX))).toBe(true);
+    expect(existsSync(join(corpusDir, 'b.txt' + CORPUS_INGESTED_SUFFIX))).toBe(false);
+    expect(existsSync(join(corpusDir, 'b.txt' + CORPUS_CLAIM_SUFFIX))).toBe(false);
+  });
+
   test('keyless: skipped with reason keyless, sidecar NOT written', async () => {
     writeFileSync(join(corpusDir, 'session-1.txt'), 'User said something notable.\n');
 
@@ -607,6 +654,7 @@ describe('runMaintenanceSweep — budget + never-throw', () => {
       linksExtracted: 1,
       linksRemoved: 0,
       timelineExtracted: 0,
+      spentUsd: 0,
       skipped: [{ reason: 'budget_exhausted:corpus', count: 2 }],
       durationMs: 10,
     };

@@ -81,6 +81,9 @@ function anthro(input: number, output: number): ModelPricing {
  * keep aliases in lockstep; the drift guard asserts they agree.
  */
 export const CANONICAL_PRICING: Record<string, ModelPricing> = {
+  // Z.AI GLM-5.2 — https://docs.z.ai/guides/overview/pricing (2026-09-01).
+  // Context caching is implicit; cached-input storage is currently free.
+  'zai:glm-5.2':                         { input: 1.40, cache_read: 0.26, output: 4.40 },
   // ── Anthropic ──────────────────────────────────────────────────────────
   // All Anthropic rows carry derived cache_read/cache_write fields (#4218);
   // see the anthro() helper + multiplier constants above.

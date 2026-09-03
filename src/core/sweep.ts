@@ -85,6 +85,12 @@ export interface SweepOpts {
   batchLimit?: number;
   /** Wall-clock budget; the sweep stops between items when exceeded. Default 5000. */
   budgetMs?: number;
+  /**
+   * Projected USD ceiling for the LLM-backed corpus pass. When omitted, the
+   * value is read from `facts.sweep_max_usd`. Missing/invalid/non-positive
+   * values fail closed for corpus ingest; zero-LLM passes still run.
+   */
+  maxCostUsd?: number;
   /** Recency window (days) for "recently-modified pages". Default 7. */
   recentDays?: number;
   /** Diagnostic sink (stderr in serve contexts). Default: silent. */
@@ -108,6 +114,10 @@ export interface SweepReport {
   /** Stale sweep-owned edges reconciled away (#4196). */
   linksRemoved: number;
   timelineExtracted: number;
+  /** Projected pre-call ceiling applied to the corpus pass, when valid. */
+  maxCostUsd?: number;
+  /** Actual gateway-recorded cost for this sweep's corpus pass. */
+  spentUsd: number;
   skipped: SweepSkip[];
   durationMs: number;
 }
@@ -134,6 +144,7 @@ export async function runMaintenanceSweep(
     linksExtracted: 0,
     linksRemoved: 0,
     timelineExtracted: 0,
+    spentUsd: 0,
     skipped: [],
     durationMs: 0,
   };
@@ -223,16 +234,31 @@ export async function runMaintenanceSweep(
       if (overBudget()) {
         skip('budget_exhausted:corpus');
       } else {
-        await runCorpusIngestPass(engine, {
-          sourceId,
-          batchLimit,
-          overBudget,
-          signal: budgetController.signal,
-          capabilities: opts.capabilities,
-          report,
-          skip,
-          log,
-        });
+        const configuredCap = opts.maxCostUsd ?? Number(await engine.getConfig('facts.sweep_max_usd'));
+        if (!Number.isFinite(configuredCap) || configuredCap <= 0) {
+          skip('cost_cap_missing_or_invalid:corpus');
+        } else {
+          const { BudgetTracker, loadPricingOverrides } = await import('./budget/budget-tracker.ts');
+          const { withBudgetTracker } = await import('./ai/gateway.ts');
+          const tracker = new BudgetTracker({
+            maxCostUsd: configuredCap,
+            label: 'sweep:corpus',
+            pricingOverrides: await loadPricingOverrides(engine),
+          });
+          report.maxCostUsd = configuredCap;
+          await withBudgetTracker(tracker, () => runCorpusIngestPass(engine, {
+            sourceId,
+            batchLimit,
+            overBudget,
+            signal: budgetController.signal,
+            capabilities: opts.capabilities,
+            report,
+            skip,
+            log,
+            costTracker: tracker,
+          }));
+          report.spentUsd = tracker.snapshot().cumulativeCostUsd;
+        }
       }
     } catch (e) {
       skip('corpus_error');
@@ -554,9 +580,10 @@ async function runCorpusIngestPass(
     signal: AbortSignal;
     capabilities?: CapabilityReport;
     log: (msg: string) => void;
+    costTracker: import('./budget/budget-tracker.ts').BudgetTracker;
   },
 ): Promise<void> {
-  const { sourceId, batchLimit, overBudget, signal, report, skip, log } = ctx;
+  const { sourceId, batchLimit, overBudget, signal, report, skip, log, costTracker } = ctx;
 
   // Corpus dir: dream's session corpus (transcripts.ts:66 precedent);
   // default ~/.gbrain/transcripts/corpus (GBRAIN_HOME-aware via configDir).
@@ -789,8 +816,16 @@ async function runCorpusIngestPass(
         }) + '\n',
       );
       report.corpusIngested += 1;
+      if (costTracker.snapshot().cumulativeCostUsd > (report.maxCostUsd ?? Number.POSITIVE_INFINITY)) {
+        skip('cost_cap_exhausted:corpus', candidates.length - i - 1);
+        abortLoop = true;
+      }
     } catch (e) {
-      if (e instanceof Error && e.name === 'AbortError') {
+      const budgetError = findBudgetError(e);
+      if (budgetError) {
+        skip(budgetError.reason === 'no_pricing' ? 'cost_cap_no_pricing:corpus' : 'cost_cap_exhausted:corpus', candidates.length - i);
+        abortLoop = true;
+      } else if (e instanceof Error && e.name === 'AbortError') {
         skip('budget_exhausted:corpus', candidates.length - i);
         abortLoop = true;
       } else {
@@ -804,6 +839,17 @@ async function runCorpusIngestPass(
     }
     if (abortLoop) break;
   }
+}
+
+function findBudgetError(error: unknown): import('./budget/budget-tracker.ts').BudgetExhausted | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current.name === 'BudgetExhausted' && 'reason' in current) {
+      return current as import('./budget/budget-tracker.ts').BudgetExhausted;
+    }
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 /**

@@ -71,6 +71,14 @@ describe('CANONICAL_PRICING — table integrity', () => {
     expect(CANONICAL_PRICING['google:gemini-2.5-flash-lite']).toEqual({ input: 0.1, output: 0.4 });
   });
 
+  test('Z.AI GLM-5.2 uses the published 2026-09-01 cache-aware rate', () => {
+    expect(CANONICAL_PRICING['zai:glm-5.2']).toEqual({
+      input: 1.4,
+      cache_read: 0.26,
+      output: 4.4,
+    });
+  });
+
   // #4218 drift guard extension: cache_read/cache_write are DERIVED from the
   // input rate via the exported multipliers — a hand-edited cache number that
   // drifts from input*mult fails here.
@@ -96,7 +104,7 @@ describe('CANONICAL_PRICING — table integrity', () => {
       // Non-Anthropic rows deliberately carry NO cache fields until their
       // provider's cache pricing is verified — consumers fall back to the
       // input rate (documented in ModelPricing).
-      if (!key.startsWith('anthropic:')) {
+      if (!key.startsWith('anthropic:') && key !== 'zai:glm-5.2') {
         expect(p.cache_read).toBeUndefined();
         expect(p.cache_write).toBeUndefined();
       }

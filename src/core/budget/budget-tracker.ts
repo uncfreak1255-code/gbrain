@@ -52,8 +52,13 @@ export interface BudgetEstimate {
 
 export interface BudgetActualUsage {
   modelId: string;
+  /** Uncached input tokens billed at the ordinary input rate. */
   inputTokens: number;
   outputTokens?: number;
+  /** Prompt-cache reads billed at cache_read (input-rate fallback). */
+  cacheReadTokens?: number;
+  /** Prompt-cache writes billed at cache_write (input-rate fallback). */
+  cacheCreationTokens?: number;
   /** For embeddings: dimension count, surfaces in audit only. */
   embeddingDims?: number;
   /** Optional label echo for the audit row. */
@@ -347,13 +352,20 @@ function costForUsage(
   outputTokens: number,
   kind: BudgetKind,
   overrides?: PricingOverrides,
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
 ): number | null {
   // #4312: operator overrides win — the operator owns their bill (negotiated
   // rates, proxy routes the shipped tables can't know about). Missing both →
   // null, and the TX2 fail-closed contract in reserve() still applies.
   const p = overrideFor(modelId, overrides) ?? lookupPricing(modelId, kind);
   if (!p) return null;
-  return (inputTokens / 1_000_000) * p.input + (outputTokens / 1_000_000) * p.output;
+  return (
+    (inputTokens / 1_000_000) * p.input +
+    (cacheReadTokens / 1_000_000) * (p.cache_read ?? p.input) +
+    (cacheCreationTokens / 1_000_000) * (p.cache_write ?? p.input) +
+    (outputTokens / 1_000_000) * p.output
+  );
 }
 
 export class BudgetTracker {
@@ -544,6 +556,8 @@ export class BudgetTracker {
       actual.outputTokens ?? 0,
       kind,
       this.opts.pricingOverrides,
+      actual.cacheReadTokens ?? 0,
+      actual.cacheCreationTokens ?? 0,
     );
 
     if (cost === null) {
@@ -560,6 +574,8 @@ export class BudgetTracker {
         sub_label: actual.label,
         input_tokens: actual.inputTokens,
         output_tokens: actual.outputTokens ?? 0,
+        cache_read_tokens: actual.cacheReadTokens ?? 0,
+        cache_creation_tokens: actual.cacheCreationTokens ?? 0,
         embedding_dims: actual.embeddingDims ?? null,
       });
       return;
@@ -577,6 +593,8 @@ export class BudgetTracker {
       sub_label: actual.label,
       input_tokens: actual.inputTokens,
       output_tokens: actual.outputTokens ?? 0,
+      cache_read_tokens: actual.cacheReadTokens ?? 0,
+      cache_creation_tokens: actual.cacheCreationTokens ?? 0,
       embedding_dims: actual.embeddingDims ?? null,
       actual_cost_usd: cost,
       cumulative_cost_usd: this.cumulativeUsd,
