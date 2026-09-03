@@ -215,37 +215,35 @@ export function makeEngineChatUsageSink(engine: {
 }
 
 /**
- * Spend-guard rule for a SUCCESS response whose usage is unusable: charge the
- * same pessimistic ceiling the failure path charges. An openai-compatible
- * route may omit `usage` entirely (the SDK types every count as
- * `number | undefined`), and a tracked call settled at $0 turns every cap on
- * that lane off. Negative or non-finite counts get the same treatment. The
- * returned record is for the BUDGET only — the usage handed back to the
+ * Spend-guard rule for a response whose usage is not fully usable: charge the
+ * pre-call projection for each side the provider did not report. An
+ * openai-compatible route may omit `usage` entirely, or send `prompt_tokens`
+ * with `completion_tokens ?? 0` (the SDK types every count as
+ * `number | undefined`), and a tracked call whose output side settles at $0
+ * turns every cap on that lane off. Rules, per side:
+ *   - input is known when a finite, non-negative count is reported and
+ *     (uncached input + cache reads) > 0 — a fully cached prompt is fine;
+ *   - output is known when a finite count > 0 is reported — a completion that
+ *     produced text but reports 0 output tokens is charged the projection;
+ *   - a negative or non-finite count anywhere marks that side unknown.
+ * The returned record is for the BUDGET only — the usage handed back to the
  * caller and the durable usage ledger keep the provider's own numbers.
  */
 export function usageForBudgetRecord(
   actual: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number },
   pessimistic: { inputTokens: number; outputTokens: number },
 ): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; unmetered: boolean } {
+  const bad = (n: unknown): boolean => typeof n !== 'number' || !Number.isFinite(n) || n < 0;
   const cacheRead = actual.cacheReadTokens ?? 0;
   const cacheCreation = actual.cacheCreationTokens ?? 0;
-  const malformed = [actual.inputTokens, actual.outputTokens, cacheRead, cacheCreation]
-    .some((n) => typeof n !== 'number' || !Number.isFinite(n) || n < 0);
-  const empty = !(actual.inputTokens > 0) && !(actual.outputTokens > 0) && !(cacheRead > 0);
-  if (malformed || empty) {
-    return {
-      inputTokens: pessimistic.inputTokens,
-      outputTokens: pessimistic.outputTokens,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      unmetered: true,
-    };
-  }
+  const inputKnown = !bad(actual.inputTokens) && !bad(cacheRead) && !bad(cacheCreation)
+    && (actual.inputTokens > 0 || cacheRead > 0);
+  const outputKnown = !bad(actual.outputTokens) && actual.outputTokens > 0;
   return {
-    inputTokens: actual.inputTokens,
-    outputTokens: actual.outputTokens,
-    cacheReadTokens: cacheRead,
-    cacheCreationTokens: cacheCreation,
-    unmetered: false,
+    inputTokens: inputKnown ? actual.inputTokens : pessimistic.inputTokens,
+    outputTokens: outputKnown ? actual.outputTokens : pessimistic.outputTokens,
+    cacheReadTokens: inputKnown ? cacheRead : 0,
+    cacheCreationTokens: inputKnown ? cacheCreation : 0,
+    unmetered: !inputKnown || !outputKnown,
   };
 }
