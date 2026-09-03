@@ -63,9 +63,15 @@ describe('autopilot auto-drain wiring', () => {
 
   test('provider failures get one bounded retry with fixed backoff', () => {
     expect(DRAIN_SUBMIT).toBeGreaterThanOrEqual(0);
-    expect(DRAIN_BLOCK).toMatch(/max_attempts:\s*2/);
+    expect(SRC).toContain('const AUTO_DRAIN_MAX_ATTEMPTS = 2');
+    expect(DRAIN_BLOCK).toContain('max_attempts: AUTO_DRAIN_MAX_ATTEMPTS');
     expect(DRAIN_BLOCK).toMatch(/backoff_type:\s*'fixed'/);
     expect(DRAIN_BLOCK).toMatch(/backoff_delay:\s*5000/);
     expect(DRAIN_BLOCK).toMatch(/backoff_jitter:\s*0/);
+  });
+
+  test('daily cap reserves the full retry envelope per submitted job', () => {
+    expect(SRC).toContain('const PER_JOB_USD = PER_ATTEMPT_USD * AUTO_DRAIN_MAX_ATTEMPTS');
+    expect(SRC).toContain('Math.floor(maxUsdPerDay / PER_JOB_USD)');
   });
 });
