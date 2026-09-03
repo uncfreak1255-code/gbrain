@@ -506,10 +506,9 @@ async function redirectFiles(args: string[]) {
       mime: mimeType || 'application/octet-stream',
       uploaded: new Date().toISOString(),
     });
-  assertUnmanagedPathMutation(filePath);
-  writeFileSync(filePath + '.redirect.yaml', pointer);
-  assertUnmanagedPathMutation(filePath);
-  unlinkSync(filePath);
+    assertUnmanagedPathMutation(filePath);
+    writeFileSync(filePath + '.redirect.yaml', pointer);
+    unlinkSync(filePath);
     redirected++;
   }
 
@@ -559,10 +558,8 @@ async function restoreFiles(args: string[]) {
       const storagePath = info.storage_path || info.path; // v0.9 or legacy format
       const data = await storage.download(storagePath);
       // Binary restoration is not a canonical Markdown content transform;
-      // still reject an existing managed page before replacing it.
-      assertUnmanagedPathMutation(originalPath);
-      writeFileSync(originalPath, data);
-      assertUnmanagedPathMutation(originalPath);
+      // reject current or proposed Learning Loop metadata before any write.
+      writeUnmanagedFile(originalPath, data);
       unlinkSync(redirectPath);
       restored++;
     } catch (e: unknown) {
@@ -643,6 +640,12 @@ async function filesStatus(args: string[]) {
   } else if (redirected > 0) {
     console.log(`\n${redirected} files redirected to storage. Run: gbrain files clean <dir> --yes to remove breadcrumbs.`);
   }
+}
+
+/** Write bytes only after current and proposed content are proven unmanaged. */
+export function writeUnmanagedFile(path: string, data: string | Buffer): void {
+  assertUnmanagedPathMutation(path, typeof data === 'string' ? data : data.toString('utf8'));
+  writeFileSync(path, data);
 }
 
 export function collectFiles(dir: string): string[] {

@@ -1,10 +1,12 @@
 import { describe, test, expect, beforeAll, afterAll, spyOn } from 'bun:test';
-import { writeFileSync, mkdirSync, rmSync, symlinkSync, mkdtempSync } from 'fs';
+import { writeFileSync, mkdirSync, rmSync, symlinkSync, mkdtempSync, readFileSync } from 'fs';
 import { join, basename } from 'path';
 import { createHash } from 'crypto';
 import { extname } from 'path';
 import { tmpdir } from 'os';
-import { collectFiles } from '../src/commands/files.ts';
+import { collectFiles, writeUnmanagedFile } from '../src/commands/files.ts';
+import { learningLoopProtectedStateHash, renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
+import { parseFactsFence, renderFactsTable } from '../src/core/facts-fence.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import * as db from '../src/core/db.ts';
 
@@ -214,6 +216,33 @@ describe('collectFiles (production import)', () => {
       expect(() => JSON.stringify(result)).not.toThrow();
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  test('writeUnmanagedFile rejects proposed managed content before touching the file', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-unmanaged-write-'));
+    try {
+      const path = join(tmpDir, 'page.md');
+      writeFileSync(path, '# original\n');
+      const managedFact = { rowNum: 1, claim: 'Managed', kind: 'preference' as const, confidence: 1, visibility: 'private' as const, notability: 'high' as const, active: true };
+      const facts = renderFactsTable([managedFact]);
+      const knowledge: LearningLoopKnowledge = {
+        brain_id: 'b', source_id: 's', canonical_slug: 'x',
+        managed_rows: { generation: { claim: 'Managed', row_num: 1, active: true, generation: 1 } },
+        blocked_identities: [], correction_lineages: {}, reversal_attempts: {},
+        immutable_commit_markers: [], pending_delivery: null,
+      };
+      const managed = `# X\n\n${facts}\n\n${renderLearningLoopFence({
+        ...knowledge,
+        protected_state_hash: learningLoopProtectedStateHash(knowledge, parseFactsFence(facts).facts),
+      })}\n`;
+      expect(() => writeUnmanagedFile(path, managed)).toThrow('path-only writer cannot mutate managed');
+      expect(() => writeUnmanagedFile(path, Buffer.from(managed))).toThrow('path-only writer cannot mutate managed');
+      expect(readFileSync(path, 'utf8')).toBe('# original\n');
+      writeUnmanagedFile(path, Buffer.from('# restored\n'));
+      expect(readFileSync(path, 'utf8')).toBe('# restored\n');
+    } finally {
+      rmSync(tmpDir, { recursive: true });
     }
   });
 

@@ -453,7 +453,7 @@ export async function writeSourceQualifiedCanonicalPage(
   const expectedManaged = await expectedManagedByDurableHint(mutation.engine, mutation.slug, mutation.sourceId);
   return withCanonicalSourceBoundary(mutation.engine, target, sourceLease => {
     mkdirSync(dirname(join(sourceLease.root_realpath, `${mutation.slug}.md`)), { recursive: true });
-    return writeCanonicalPage(target, content, { mode, sourceLease, expectedManaged: expectedManaged || undefined });
+    return writeCanonicalPage(target, content, { mode, sourceLease, expectedManaged });
   });
 }
 export async function withSourceWriteLease<T>(target: SourceQualifiedCanonicalTarget, fn: (lease: SourceWriteLease) => Promise<T>, opts: { sourceLock: (target: SourceQualifiedCanonicalTarget) => Promise<() => Promise<void>> }): Promise<T> { const release=await opts.sourceLock(target); try { const configured_root=resolve(target.configured_root), root_realpath=realpathSync(configured_root), st=statSync(root_realpath); if(!st.isDirectory())throw new Error('canonical root unavailable'); const lease=Object.freeze({__brand:'SourceWriteLease' as const,brain_id:target.brain_id,source_id:target.source_id,configured_root,root_realpath,token:randomUUID(),dev:st.dev,ino:st.ino}); liveLeases.add(lease); liveLeaseTokens.add(lease.token); try{return await fn(lease);}finally{liveLeases.delete(lease); liveLeaseTokens.delete(lease.token);} } finally { await release(); } }

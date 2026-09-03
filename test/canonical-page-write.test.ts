@@ -8,6 +8,7 @@ import {
   inspectExpectedManagedState,
   assertLegacyPathMutationAllowed,
   writeSourceQualifiedCanonicalPage,
+  assertUnmanagedPathMutation,
   type CanonicalWriterMode,
   type SourceQualifiedCanonicalTarget,
   type SourceWriteLease,
@@ -227,4 +228,38 @@ describe('source-qualified and standalone path lanes', () => {
         .rejects.toThrow('canonical page is missing');
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
+
+  test('source-qualified lane keeps explicit not-managed expectation so planted managed state fails closed', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'canonical-not-managed-'));
+    try {
+      const a = join(base, 'a');
+      mkdirSync(a);
+      const plantedKnowledge: LearningLoopKnowledge = { ...knowledge(), source_id: 'a', canonical_slug: 'planted' };
+      const plantedPage = `# Planted\n\n${facts}\n\n${renderLearningLoopFence({
+        ...plantedKnowledge,
+        protected_state_hash: learningLoopProtectedStateHash(plantedKnowledge, parseFactsFence(facts).facts),
+      })}\n`;
+      const planted = join(a, 'planted.md');
+      writeFileSync(planted, plantedPage);
+      const engine = boundaryEngine([{ id: 'a', local_path: a }]);
+      await expect(writeSourceQualifiedCanonicalPage(
+        { engine, sourceId: 'a', slug: 'planted', brainId: 'b' },
+        '# no\n',
+      )).rejects.toThrow('unexpected managed state');
+      expect(readFileSync(planted, 'utf8')).toBe(plantedPage);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  test('assertUnmanagedPathMutation rejects current or proposed managed content before any caller write', async () => inRoot(async ({ path }) => {
+    writeFileSync(path, managedPage());
+    expect(() => assertUnmanagedPathMutation(path)).toThrow('path-only writer cannot mutate managed');
+    expect(readFileSync(path, 'utf8')).toBe(managedPage());
+
+    writeFileSync(path, '# Unmanaged\n');
+    expect(() => assertUnmanagedPathMutation(path, managedPage())).toThrow('path-only writer cannot mutate managed');
+    expect(readFileSync(path, 'utf8')).toBe('# Unmanaged\n');
+
+    expect(() => assertUnmanagedPathMutation(path, '# still unmanaged\n')).not.toThrow();
+    expect(readFileSync(path, 'utf8')).toBe('# Unmanaged\n');
+  }));
 });
