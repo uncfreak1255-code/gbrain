@@ -403,7 +403,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        604
+        601
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -427,7 +427,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        512
+        511
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -451,19 +451,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        566
-      ],
-      "classification": "destructive_admin",
-      "boundary": "managed_target_reject",
-      "reason": "Redirect and restore paths reject managed canonical files."
-    },
-    {
-      "file": "src/commands/files.ts",
-      "symbol": "restoreFiles",
-      "primitive": "fs:writeFileSync",
-      "count": 1,
-      "lines": [
-        564
+        563
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -488,6 +476,18 @@
       "count": 1,
       "lines": [
         248
+      ],
+      "classification": "destructive_admin",
+      "boundary": "managed_target_reject",
+      "reason": "Redirect and restore paths reject managed canonical files."
+    },
+    {
+      "file": "src/commands/files.ts",
+      "symbol": "writeUnmanagedFile",
+      "primitive": "fs:writeFileSync",
+      "count": 1,
+      "lines": [
+        648
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -1820,7 +1820,7 @@
       "primitive": "fs:renameSync",
       "count": 1,
       "lines": [
-        124
+        128
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -1832,7 +1832,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        130
+        134
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -1844,7 +1844,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        114
+        118
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -2515,7 +2515,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        1981
+        1988
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2527,7 +2527,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        2363
+        2370
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",

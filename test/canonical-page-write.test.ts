@@ -9,6 +9,7 @@ import {
   assertLegacyPathMutationAllowed,
   writeSourceQualifiedCanonicalPage,
   assertUnmanagedPathMutation,
+  assertManagedPagesMutationAllowed,
   type CanonicalWriterMode,
   type SourceQualifiedCanonicalTarget,
   type SourceWriteLease,
@@ -74,6 +75,20 @@ describe('canonical page write boundary', () => {
       await expect(writeCanonicalPage(target, replacement, { mode: 'learning_transition', lockRoot: locks, sourceLease: lease })).rejects.toThrow('transition permit required');
     }, { sourceLock });
     expect(readFileSync(path, 'utf8')).toBe(managedPage(1));
+  }));
+
+  test('non_lineage_fact appends a facts fence without restoring the previous table', async () => inRoot(async ({ target, path, locks }) => {
+    const first = `# X\n\n${facts}\n`;
+    writeFileSync(path, first);
+    const appendedFact = { ...managedFact, rowNum: 2, claim: 'Also this' };
+    const nextFacts = renderFactsTable([managedFact, appendedFact]);
+    const next = `# X\n\n${nextFacts}\n`;
+    const out = await withSourceWriteLease(target, lease => writeCanonicalPage(target, next, {
+      mode: 'non_lineage_fact', lockRoot: locks, sourceLease: lease, expectedManaged: false,
+    }), { sourceLock });
+    expect(out).toContain('Also this');
+    expect(out).toContain('Managed');
+    expect(readFileSync(path, 'utf8')).toBe(out);
   }));
 
   test('generic modes cannot introduce Learning Loop metadata', async () => inRoot(async ({ target, path, locks }) => {
@@ -249,6 +264,25 @@ describe('source-qualified and standalone path lanes', () => {
       expect(readFileSync(planted, 'utf8')).toBe(plantedPage);
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
+
+  test('batched managed-page assert rejects one managed slug in a delete batch', async () => inRoot(async ({ root, path }) => {
+    writeFileSync(path, managedPage());
+    const engine = {
+      kind: 'pglite',
+      executeRaw: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('SELECT id, local_path FROM sources')) return [{ id: 's', local_path: root }];
+        if (sql.includes('SELECT slug, compiled_truth, timeline FROM pages')) {
+          const slugs = Array.isArray(params?.[1]) ? params[1] as string[] : [];
+          return slugs.includes('x') ? [{ slug: 'x', compiled_truth: managedPage(), timeline: null }] : [];
+        }
+        return [];
+      },
+      getConfig: async () => null,
+      learningLoopLedgerConfig: () => ({ engine: 'pglite', database_url: 'test-batch-assert' }),
+    } as unknown as BrainEngine;
+    await expect(assertManagedPagesMutationAllowed(engine, ['other', 'x', 'also'], 's', 'destructive_admin'))
+      .rejects.toThrow('managed canonical page mutation rejected');
+  }));
 
   test('assertUnmanagedPathMutation rejects current or proposed managed content before any caller write', async () => inRoot(async ({ path }) => {
     writeFileSync(path, managedPage());

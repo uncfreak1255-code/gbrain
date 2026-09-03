@@ -1446,7 +1446,14 @@ export async function discoverBaselineSnapshot(input: {
   }
   const paths: string[] = [];
   const visit = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM') return;
+      throw error;
+    }
+    for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
       const path = join(dir, entry.name);
       if (entry.isDirectory()) {

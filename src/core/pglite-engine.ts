@@ -31,7 +31,7 @@ import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
-import { assertManagedPageMutationAllowed } from './canonical-page-write.ts';
+import { assertManagedPageMutationAllowed, assertManagedPagesMutationAllowed } from './canonical-page-write.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
@@ -1236,8 +1236,8 @@ export class PGLiteEngine implements BrainEngine {
    * proves this).
    */
   async deletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
-    for (const slug of slugs) await assertManagedPageMutationAllowed(this, slug, opts.sourceId, 'destructive_admin');
     if (slugs.length === 0) return [];
+    await assertManagedPagesMutationAllowed(this, slugs, opts.sourceId, 'destructive_admin');
     if (slugs.length > DELETE_BATCH_SIZE) {
       throw new Error(
         `deletePages: input size ${slugs.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,

@@ -5436,7 +5436,7 @@ const learning_loop_submit_session_v1: Operation = {
 
 const learning_loop_candidate: Operation = {
   name: 'learning_loop_candidate', description: 'Record a locally-derived Learning Loop candidate.',
-  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, locators: { type: 'array', required: true } },
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, locators: { type: 'array', required: true, items: { type: 'object' } } },
   mutating: true, scope: 'write', localOnly: true,
   handler: async (ctx, p) => {
     assertTrustedLocal(ctx, 'learning_loop_candidate');
@@ -5454,7 +5454,7 @@ const learning_loop_candidate: Operation = {
 
 const learning_loop_authority: Operation = {
   name: 'learning_loop_authority', description: 'Record locally-derived direct-user or repetition authority.',
-  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, authority: { type: 'string', required: true }, locators: { type: 'array', required: true } },
+  params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, authority: { type: 'string', required: true }, locators: { type: 'array', required: true, items: { type: 'object' } } },
   mutating: true, scope: 'write', localOnly: true,
   handler: async (ctx, p) => {
     assertTrustedLocal(ctx, 'learning_loop_authority');

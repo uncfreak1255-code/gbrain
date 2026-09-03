@@ -31,10 +31,10 @@ beforeAll(async () => {
 }, 60_000);
 afterAll(async () => { await pglite?.disconnect(); }, 60_000);
 
-function fakeEngine(initialMode: string | null = null): BrainEngine {
+function fakeEngine(initialMode: string | null = null, corpusRoot = mkdtempSync(join(tmpdir(), 'll-corpus-'))): BrainEngine {
   const values = new Map<string, string>();
   if (initialMode !== null) values.set('learning_loop.mode', initialMode);
-  values.set('learning_loop.corpus.codex.root', '/tmp');
+  values.set('learning_loop.corpus.codex.root', corpusRoot);
   values.set('learning_loop.corpus.codex.source_id', 'source');
   return {
     getConfig: async (key: string) => values.get(key) ?? null,
@@ -96,7 +96,9 @@ async function v2Fixture(suffix: string) {
 describe('Learning Loop mode-transition recovery', () => {
   test('persists one exact intent before canonical work and recovers it idempotently', async () => {
     const root = mkdtempSync(join(tmpdir(), 'learning-loop-recovery-'));
-    const engine = fakeEngine();
+    const corpusRoot = join(root, 'corpus');
+    mkdirSync(corpusRoot, { recursive: true });
+    const engine = fakeEngine(null, corpusRoot);
     const config = { database_path: join(root, 'brain') } as never;
     const ledgerOpts = opts(root);
     try {

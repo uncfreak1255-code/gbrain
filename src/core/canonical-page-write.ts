@@ -78,6 +78,10 @@ function prepare(input: string, old: string, mode: CanonicalWriterMode, permit?:
   }
   let output = input;
   for (let index = 0; index < 2; index++) {
+    // Fence-write appends a replacement facts table in non_lineage_fact mode.
+    // Restoring the previous table would wipe the inserted row. Ordinary
+    // managed writes still omit the fence and must restore it from disk.
+    if (index === 0 && mode === 'non_lineage_fact' && next[0]) continue;
     if (previous[index]) {
       output = next[index] ? output.replace(next[index], previous[index]) : `${output.trimEnd()}\n\n${previous[index]}\n`;
     }
@@ -189,6 +193,28 @@ export async function resolveEffectiveCanonicalRoot(
   return null;
 }
 
+function managedHintFromBody(body: string, slug: string, sourceId: string): boolean {
+  if (!body) return false;
+  let fence: ReturnType<typeof parseLearningLoopFence>;
+  try { fence = parseLearningLoopFence(body); }
+  catch { throw new Error('managed_state_unavailable: malformed managed row marker'); }
+  if (!fence) return false;
+  if (fence.value.source_id !== sourceId || fence.value.canonical_slug !== slug) {
+    throw new Error('managed_state_unavailable: managed row marker target mismatch');
+  }
+  return true;
+}
+
+function activeDestinationHint(
+  engine: Pick<BrainEngine, 'learningLoopLedgerConfig'>,
+  slug: string,
+  sourceId: string,
+): boolean {
+  const ledgerConfig = engine.learningLoopLedgerConfig?.();
+  const active = ledgerConfig ? activeV2DestinationBinding({ config: ledgerConfig }) : undefined;
+  return Boolean(active && active.source_id === sourceId && active.canonical_slug === slug);
+}
+
 async function expectedManagedByDurableHint(
   engine: Pick<BrainEngine, 'executeRaw' | 'learningLoopLedgerConfig'>,
   slug: string,
@@ -198,20 +224,30 @@ async function expectedManagedByDurableHint(
     'SELECT compiled_truth, timeline FROM pages WHERE slug = $1 AND source_id = $2 LIMIT 1', [slug, sourceId],
   );
   const body = [rows[0]?.compiled_truth, rows[0]?.timeline].filter(Boolean).join('\n');
-  if (body) {
-    let fence: ReturnType<typeof parseLearningLoopFence>;
-    try { fence = parseLearningLoopFence(body); }
-    catch { throw new Error('managed_state_unavailable: malformed managed row marker'); }
-    if (fence) {
-      if (fence.value.source_id !== sourceId || fence.value.canonical_slug !== slug) {
-        throw new Error('managed_state_unavailable: managed row marker target mismatch');
-      }
-      return true;
-    }
-  }
+  return managedHintFromBody(body, slug, sourceId) || activeDestinationHint(engine, slug, sourceId);
+}
+
+async function expectedManagedByDurableHints(
+  engine: Pick<BrainEngine, 'executeRaw' | 'learningLoopLedgerConfig'>,
+  slugs: readonly string[],
+  sourceId: string,
+): Promise<Map<string, boolean>> {
+  const hints = new Map<string, boolean>();
+  if (slugs.length === 0) return hints;
+  const rows = await engine.executeRaw<{ slug: string; compiled_truth: string | null; timeline: string | null }>(
+    'SELECT slug, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = ANY($2::text[])',
+    [sourceId, slugs],
+  );
+  const bySlug = new Map(rows.map(row => [row.slug, row]));
   const ledgerConfig = engine.learningLoopLedgerConfig?.();
   const active = ledgerConfig ? activeV2DestinationBinding({ config: ledgerConfig }) : undefined;
-  return Boolean(active && active.source_id === sourceId && active.canonical_slug === slug);
+  for (const slug of slugs) {
+    const row = bySlug.get(slug);
+    const body = [row?.compiled_truth, row?.timeline].filter(Boolean).join('\n');
+    hints.set(slug, managedHintFromBody(body, slug, sourceId)
+      || Boolean(active && active.source_id === sourceId && active.canonical_slug === slug));
+  }
+  return hints;
 }
 
 /**
@@ -371,6 +407,52 @@ export async function assertManagedPageMutationAllowed(
       return;
     }
     throw new Error('managed_state_unavailable: managed canonical page mutation rejected');
+  }
+}
+
+/** Batch form of assertManagedPageMutationAllowed for delete/sync loops. */
+export async function assertManagedPagesMutationAllowed(
+  engine: Pick<BrainEngine, 'executeRaw' | 'getConfig' | 'learningLoopLedgerConfig'>,
+  slugs: readonly string[],
+  sourceId: string,
+  mutationClass: PageDbMutationClass,
+): Promise<void> {
+  const unique = [...new Set(slugs)];
+  if (unique.length === 0) return;
+  if (unique.length === 1) {
+    await assertManagedPageMutationAllowed(engine, unique[0]!, sourceId, mutationClass);
+    return;
+  }
+  const root = await resolveEffectiveCanonicalRoot(engine, sourceId);
+  const hints = await expectedManagedByDurableHints(engine, unique, sourceId);
+  for (const slug of unique) {
+    const expectedManaged = hints.get(slug) === true;
+    if (!root) {
+      if (expectedManaged) throw new Error('managed_state_unavailable: expected canonical root is unavailable');
+      continue;
+    }
+    const path = join(resolve(root), `${slug}.md`);
+    let content = '';
+    try { content = readFileSync(path, 'utf8'); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code === 'ENOENT' || code === 'ENOTDIR') && !expectedManaged) continue;
+      if (code === 'ENOENT' || code === 'ENOTDIR') throw new Error('managed_state_unavailable: canonical permit target is missing');
+      throw error;
+    }
+    let fence: ReturnType<typeof parseLearningLoopFence>;
+    try { fence = parseLearningLoopFence(content); }
+    catch { throw new Error('managed_state_unavailable: malformed protected fence'); }
+    if (!fence) {
+      if (expectedManaged) throw new Error('managed_state_unavailable: expected managed state is absent');
+      continue;
+    }
+    if (sourceId !== fence.value.source_id || slug !== fence.value.canonical_slug) {
+      throw new Error('managed_state_unavailable: canonical permit target mismatch');
+    }
+    if (mutationClass !== 'derived_only') {
+      throw new Error('managed_state_unavailable: managed canonical page mutation rejected');
+    }
   }
 }
 
