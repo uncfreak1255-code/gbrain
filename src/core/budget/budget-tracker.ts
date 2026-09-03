@@ -52,8 +52,19 @@ export interface BudgetEstimate {
 
 export interface BudgetActualUsage {
   modelId: string;
+  /**
+   * Model id to PRICE with when it differs from the audit label — the id the
+   * matching reserve() used (pre-alias), so an operator override keyed by the
+   * alias applies at record time too. Falls back to `modelId` when unpriced.
+   */
+  pricingModelId?: string;
+  /** Uncached input tokens billed at the ordinary input rate. */
   inputTokens: number;
   outputTokens?: number;
+  /** Prompt-cache reads billed at cache_read (input-rate fallback). */
+  cacheReadTokens?: number;
+  /** Prompt-cache writes billed at cache_write (input-rate fallback). */
+  cacheCreationTokens?: number;
   /** For embeddings: dimension count, surfaces in audit only. */
   embeddingDims?: number;
   /** Optional label echo for the audit row. */
@@ -67,6 +78,8 @@ export interface BudgetSnapshot {
   maxCostUsd?: number;
   maxRuntimeMs?: number;
   callsRecorded: number;
+  /** Calls charged at the pre-call projection because usage was unusable. */
+  unmeteredCalls: number;
 }
 
 export interface BudgetTrackerOpts {
@@ -347,13 +360,20 @@ function costForUsage(
   outputTokens: number,
   kind: BudgetKind,
   overrides?: PricingOverrides,
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
 ): number | null {
   // #4312: operator overrides win — the operator owns their bill (negotiated
   // rates, proxy routes the shipped tables can't know about). Missing both →
   // null, and the TX2 fail-closed contract in reserve() still applies.
   const p = overrideFor(modelId, overrides) ?? lookupPricing(modelId, kind);
   if (!p) return null;
-  return (inputTokens / 1_000_000) * p.input + (outputTokens / 1_000_000) * p.output;
+  return (
+    (inputTokens / 1_000_000) * p.input +
+    (cacheReadTokens / 1_000_000) * (p.cache_read ?? p.input) +
+    (cacheCreationTokens / 1_000_000) * (p.cache_write ?? p.input) +
+    (outputTokens / 1_000_000) * p.output
+  );
 }
 
 export class BudgetTracker {
@@ -368,6 +388,8 @@ export class BudgetTracker {
   /** FIFO of unsettled projections keyed `${modelId}|${kind}` (gateway pairs reserve→record 1:1). */
   private readonly outstandingByKey = new Map<string, number[]>();
   private callsRecorded = 0;
+  /** Records whose label ends in `.unmetered`: charged at the projection because the provider reported no usable usage. */
+  private unmeteredCalls = 0;
   private readonly startedAt: number;
   private readonly auditPath: string;
   private readonly onExhaustedCbs: Array<() => void> = [];
@@ -535,16 +557,38 @@ export class BudgetTracker {
    * `outputTokens` defaults to 0 (embed/rerank). `embeddingDims` is audit-
    * only metadata.
    */
-  record(actual: BudgetActualUsage & { kind?: BudgetKind }): void {
+  record(reported: BudgetActualUsage & { kind?: BudgetKind }): void {
     this.callsRecorded++;
+    // Defense in depth for the spend guard: a non-finite or negative token
+    // count (a malformed provider response, or a test seam) must not push
+    // cumulative spend to NaN — where every later cap comparison is false —
+    // or negative, where the cap silently widens. Clamp to 0; the gateway
+    // already substitutes the pre-call projection for an unusable success
+    // usage before it reaches here.
+    const clampTokens = (n: number | undefined): number =>
+      typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0;
+    const actual: BudgetActualUsage & { kind?: BudgetKind } = {
+      ...reported,
+      inputTokens: clampTokens(reported.inputTokens),
+      outputTokens: clampTokens(reported.outputTokens),
+      cacheReadTokens: clampTokens(reported.cacheReadTokens),
+      cacheCreationTokens: clampTokens(reported.cacheCreationTokens),
+    };
     const kind: BudgetKind = actual.kind ?? 'chat';
-    const cost = costForUsage(
-      actual.modelId,
+    if (actual.label?.endsWith('.unmetered')) this.unmeteredCalls++;
+    const priceWith = (id: string): number | null => costForUsage(
+      id,
       actual.inputTokens,
       actual.outputTokens ?? 0,
       kind,
       this.opts.pricingOverrides,
+      actual.cacheReadTokens ?? 0,
+      actual.cacheCreationTokens ?? 0,
     );
+    // Price with the id reserve() used first (overrides keyed by an alias
+    // must not silently fall back to the shipped table for the canonical
+    // id), then the canonical id.
+    const cost = (actual.pricingModelId ? priceWith(actual.pricingModelId) : null) ?? priceWith(actual.modelId);
 
     if (cost === null) {
       // Unpriced model: record audit but skip cumulative math. Cap (if set)
@@ -560,6 +604,8 @@ export class BudgetTracker {
         sub_label: actual.label,
         input_tokens: actual.inputTokens,
         output_tokens: actual.outputTokens ?? 0,
+        cache_read_tokens: actual.cacheReadTokens ?? 0,
+        cache_creation_tokens: actual.cacheCreationTokens ?? 0,
         embedding_dims: actual.embeddingDims ?? null,
       });
       return;
@@ -577,6 +623,8 @@ export class BudgetTracker {
       sub_label: actual.label,
       input_tokens: actual.inputTokens,
       output_tokens: actual.outputTokens ?? 0,
+      cache_read_tokens: actual.cacheReadTokens ?? 0,
+      cache_creation_tokens: actual.cacheCreationTokens ?? 0,
       embedding_dims: actual.embeddingDims ?? null,
       actual_cost_usd: cost,
       cumulative_cost_usd: this.cumulativeUsd,
@@ -601,6 +649,7 @@ export class BudgetTracker {
       maxCostUsd: this.opts.maxCostUsd,
       maxRuntimeMs: this.opts.maxRuntimeMs,
       callsRecorded: this.callsRecorded,
+      unmeteredCalls: this.unmeteredCalls,
     };
   }
 

@@ -63,12 +63,63 @@ The USD-limit knobs accept `off`, `unlimited`, or `none` (case-insensitive) to m
 | `enrich` / `onboard --auto` | `--max-usd` (per-call) | — | refuse without a cap (non-TTY) | `--max-usd off` | runs uncapped (still ledgered) |
 | Image-OCR per-run ceiling | `embedding_image_ocr_max_images` / `embedding_image_ocr_max_usd` | `200` images / `$1.00` (estimated) | skips OCR over-cap (import continues; skips counted in `ocr_skipped_budget`, surfaced by doctor `ocr_health`) | `0` disables that cap | **not** bypassed (per-run cap, not a tracker gate) |
 | Dream `extract_atoms` phase budget | `cycle.extract_atoms.budget_usd` | `0.30` | caps the phase's budget tracker | — | **not** consulted (phase budget enforces regardless) |
+| Sweep corpus-ingest per-run cap | `facts.sweep_max_usd` | — (**required**) | refuses the corpus pass while missing/invalid; caps the run's tracker (pre-call reserve) | none — fail-closed by design | **not** consulted |
+| Sweep corpus-ingest per-day cap | `facts.sweep_max_usd_per_day` | — (**required**) | refuses the corpus pass while missing/invalid or once today's ledger is at the cap; the run's tracker is capped at the remaining UTC-day headroom | none — fail-closed by design | **not** consulted |
 
 The `extract_atoms` cap is enforced only for models in the pricing maps. A model
 the tracker cannot price — e.g. a local Ollama model selected via
 `models.dream.extract_atoms` — runs without a cost gate after a one-line stderr
 warning (a USD cap cannot be enforced on an unpriced model; local models incur
 no API spend).
+
+The maintenance sweep's corpus pass (LLM fact extraction over
+`~/.gbrain/transcripts/corpus`) fires from every `gbrain serve` process on a
+10-minute idle timer, so a per-run cap alone is not a spend ceiling — it leaks
+`cap × 6 × processes` per hour. `facts.sweep_max_usd_per_day` is the ceiling.
+Mechanics, in the order they run:
+
+1. The sweep reads today's cumulative corpus spend (UTC day) from the
+   sweep-owned config row `facts.sweep_spend_ledger`
+   (`{"day":"YYYY-MM-DD","usd":n}`) and refuses the pass if the row is
+   unreadable, from a day the clock has not reached, or already at the cap
+   (a refusal still lets the pass do its zero-LLM housekeeping; only paid
+   ingest stops, and `gbrain sweep --once` prints the refusal reason).
+2. **Write-ahead reservation.** Before any provider call it books the whole
+   run ceiling — `min(run cap, day cap − ledger)` — into the row with one
+   atomic, cap-checked SQL statement. Concurrent serve processes therefore
+   cannot jointly exceed the day cap, and a ledger that cannot be written
+   refuses the pass (`daily_ledger_write_failed:corpus`) instead of letting
+   it run unmetered.
+3. The run's `BudgetTracker` is capped at that reservation, so the day ceiling
+   is enforced by the pre-call reserve, not after the money is spent.
+4. **Settle.** On every exit path the reservation is replaced by the actual
+   spend. If that write fails the reservation stays booked — the day is
+   over-counted, never under-counted. A run that straddled UTC midnight keeps
+   its reservation on the day that authorized it; it never overwrites the new
+   day's row.
+
+What can still exceed the day cap: only a single call whose true cost beats
+its projection (the tracker records the true cost, names it
+`*_cap_overshoot:corpus`, and books it into the row immediately). The one way
+the row can sit *below* the truth is that immediate booking failing — and a
+ledger that cannot be written also refuses the next reservation, so it cannot
+compound. Never `config unset facts.sweep_spend_ledger` while a sweep is
+running: a run that booked into the old row settles against the new one. The bucket is a UTC calendar day, so a rolling
+24-hour window straddling midnight can reach 2× the day cap. A response whose
+usage is missing on either side (no `usage` at all, or `completion_tokens ?? 0`
+from an openai-compatible route) is charged the projection for that side
+(`gateway.chat.unmetered` in the audit, `cost_unmetered_calls:corpus` in the
+report), never $0; the same applies to a thrown provider error that carries
+zero usage. A `pricing.overrides` entry keyed by a model alias (for example
+`anthropic:claude-haiku-4-5` for the dated id) is honored at record time as
+well as at reserve time. The sweep loads `pricing.overrides` strictly: a
+row it cannot read as a complete rate table refuses the pass
+(`pricing_overrides_invalid:corpus`) rather than repricing at the shipped
+table — and a rate you set to `0` disables the guard for that model, by your
+choice.
+
+Reset a day with `gbrain config unset facts.sweep_spend_ledger`.
+`gbrain sweep --once` prints `corpus today (UTC)` under `corpus cost`.
 
 ### Sync inline-embed cost gate
 

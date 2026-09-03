@@ -125,7 +125,7 @@ export interface GBrainConfig {
    * TOGETHER_API_KEY (required by the together recipe). Same fold pattern
    * (and same DB-plane caveat) as voyage_api_key above.
    */
-  together_api_key?: string;
+  together_api_key?: string; zai_api_key?: string;
   /**
    * Google Gemini API key (#3500). File-plane slot folded into the gateway
    * env as GOOGLE_GENERATIVE_AI_API_KEY (the name the google recipe reads).
@@ -1243,7 +1243,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'voyage_api_key',
   'dashscope_api_key',
   'litellm_api_key',
-  'together_api_key',
+  'together_api_key', 'zai_api_key',
   'google_api_key',
   'azure_openai_api_key',
   'azure_openai_endpoint',
@@ -1377,7 +1377,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // own docstring tells operators to flip it with
   // `gbrain config set facts.extraction_enabled false` — which was rejected
   // as an unknown key until this registration.
-  'facts.extraction_enabled',
+  'facts.extraction_enabled', 'facts.sweep_max_usd', 'facts.sweep_max_usd_per_day', 'facts.sweep_spend_ledger', // sweep corpus spend caps (both required) + sweep-owned day ledger — sweep.ts
   // Open-loop engine kill switch: LLM commitment/decision extraction over
   // google-source email pages (default ON for google sources; deterministic
   // thread detection is unaffected). `gbrain config set loops.extraction_enabled false`.

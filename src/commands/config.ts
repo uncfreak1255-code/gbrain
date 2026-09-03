@@ -123,6 +123,7 @@ export const FILE_PLANE_API_KEYS: readonly string[] = [
   'dashscope_api_key',
   'litellm_api_key',
   'together_api_key',
+  'zai_api_key',
   'google_api_key',
   'azure_openai_api_key', // #4031: mergedProviderEnv reads the file plane only
 ];

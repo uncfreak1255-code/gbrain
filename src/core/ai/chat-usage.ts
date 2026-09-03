@@ -32,6 +32,39 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { canonicalLookup } from '../model-pricing.ts';
 
+function finiteToken(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Normalize provider cache telemetry into mutually exclusive billing buckets. */
+export function normalizeChatUsageForBudget(
+  usage: Record<string, any>,
+  providerMetadata: Record<string, any> | undefined,
+  providerId?: string,
+): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number } {
+  const details = usage.inputTokenDetails ?? usage.input_token_details ?? {};
+  const promptDetails = usage.promptTokensDetails ?? usage.prompt_tokens_details ?? {};
+  const anthropic = providerMetadata?.anthropic ?? {};
+  const anthropicUsage = anthropic.usage ?? {};
+  const zaiCache = providerId === 'zai'
+    ? finiteToken(promptDetails.cachedTokens) ?? finiteToken(promptDetails.cached_tokens)
+    : undefined;
+  const cacheReadTokens = finiteToken(details.cacheReadTokens) ?? finiteToken(details.cachedTokens) ??
+    finiteToken(details.cached_tokens) ?? finiteToken(usage.cachedInputTokens) ??
+    finiteToken(anthropicUsage.cache_read_input_tokens) ?? finiteToken(anthropic.cacheReadInputTokens) ??
+    finiteToken(anthropic.cache_read_input_tokens) ?? zaiCache ?? 0;
+  const cacheCreationTokens = finiteToken(details.cacheWriteTokens) ??
+    finiteToken(anthropicUsage.cache_creation_input_tokens) ?? finiteToken(anthropic.cacheCreationInputTokens) ??
+    finiteToken(anthropic.cache_creation_input_tokens) ?? 0;
+  const totalInputTokens = finiteToken(usage.inputTokens) ?? finiteToken(usage.promptTokens) ??
+    finiteToken(anthropicUsage.input_tokens) ?? 0;
+  const inputTokens = finiteToken(details.noCacheTokens) ?? finiteToken(anthropicUsage.input_tokens) ??
+    (providerId === 'zai' ? Math.max(0, totalInputTokens - cacheReadTokens) : totalInputTokens);
+  const outputTokens = finiteToken(usage.outputTokens) ?? finiteToken(usage.completionTokens) ??
+    finiteToken(anthropicUsage.output_tokens) ?? 0;
+  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens };
+}
+
 export interface ChatUsageRecord {
   /** "provider:modelId" of the model that actually answered. */
   model: string;
@@ -178,5 +211,39 @@ export function makeEngineChatUsageSink(engine: {
         r.cost_usd,
       ],
     );
+  };
+}
+
+/**
+ * Spend-guard rule for a response whose usage is not fully usable: charge the
+ * pre-call projection for each side the provider did not report. An
+ * openai-compatible route may omit `usage` entirely, or send `prompt_tokens`
+ * with `completion_tokens ?? 0` (the SDK types every count as
+ * `number | undefined`), and a tracked call whose output side settles at $0
+ * turns every cap on that lane off. Rules, per side:
+ *   - input is known when a finite, non-negative count is reported and
+ *     (uncached input + cache reads) > 0 — a fully cached prompt is fine;
+ *   - output is known when a finite count > 0 is reported — a completion that
+ *     produced text but reports 0 output tokens is charged the projection;
+ *   - a negative or non-finite count anywhere marks that side unknown.
+ * The returned record is for the BUDGET only — the usage handed back to the
+ * caller and the durable usage ledger keep the provider's own numbers.
+ */
+export function usageForBudgetRecord(
+  actual: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number },
+  pessimistic: { inputTokens: number; outputTokens: number },
+): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; unmetered: boolean } {
+  const bad = (n: unknown): boolean => typeof n !== 'number' || !Number.isFinite(n) || n < 0;
+  const cacheRead = actual.cacheReadTokens ?? 0;
+  const cacheCreation = actual.cacheCreationTokens ?? 0;
+  const inputKnown = !bad(actual.inputTokens) && !bad(cacheRead) && !bad(cacheCreation)
+    && (actual.inputTokens > 0 || cacheRead > 0);
+  const outputKnown = !bad(actual.outputTokens) && actual.outputTokens > 0;
+  return {
+    inputTokens: inputKnown ? actual.inputTokens : pessimistic.inputTokens,
+    outputTokens: outputKnown ? actual.outputTokens : pessimistic.outputTokens,
+    cacheReadTokens: inputKnown ? cacheRead : 0,
+    cacheCreationTokens: inputKnown ? cacheCreation : 0,
+    unmetered: !inputKnown || !outputKnown,
   };
 }
