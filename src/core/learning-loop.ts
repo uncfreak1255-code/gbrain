@@ -39,7 +39,7 @@ import { parseFactsFence, renderFactsTable, upsertFactRow } from './facts-fence.
 import { inspectExpectedManagedState, writeCanonicalPage, reconcileCanonicalReadback, withCanonicalSourceBoundary, type SourceQualifiedCanonicalTarget, type SourceWriteLease } from './canonical-page-write.ts';
 import { importFromContent } from './import-file.ts';
 import { learningClaimFingerprint, normalizeLearningClaim, parseAuthoritativeUserRows } from './learning-loop-knowledge.ts';
-import type { LearningClaimIdentity, TranscriptUserRow } from './learning-loop-knowledge.ts';
+import { makeLearningManagedRow, type LearningClaimIdentity, type TranscriptUserRow } from './learning-loop-knowledge.ts';
 export { parseAuthoritativeUserRows } from './learning-loop-knowledge.ts';
 
 export type LearningLoopMode = 'off' | 'capture' | 'canary';
@@ -977,7 +977,7 @@ export async function activateLearningClaim(input: ActivateLearningClaimInput): 
       const factKind = input.identity.class === 'constraint' ? 'belief' : input.identity.class === 'preference' ? 'preference' : input.identity.class === 'goal' || input.identity.class === 'open_loop' ? 'commitment' : 'fact';
       const appended = upsertFactRow(inspected.canonical, { claim: input.identity.claim, kind: factKind, confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `learning_class:${input.identity.class}`, active: true });
       const lineage = reduceLearningLoopLineage(fence.value, { kind: 'activate', identity: input.identity, pointer: { identity: blockedKey, canonical_slug: input.canonical_slug, row_num: appended.rowNum } });
-      const next: LearningLoopKnowledge = { ...lineage.next, managed_rows: { ...lineage.next.managed_rows, [input.identity.claim_fingerprint!]: { claim: input.identity.claim, class: input.identity.class, row_num: appended.rowNum, active: true, run_id: input.run_id } }, pending_delivery: null };
+      const next: LearningLoopKnowledge = { ...lineage.next, managed_rows: { ...lineage.next.managed_rows, [input.identity.claim_fingerprint!]: makeLearningManagedRow(input.identity, appended.rowNum, true, input.run_id) }, pending_delivery: null };
       const sequence = state.events.filter(e => (e.event_type === 'learning_transition' || e.event_type === 'learning_correction') && e.brain_id === binding.brain_id && e.run_id === input.run_id).length + 1;
       const occurred_at = new Date().toISOString();
       const payload = { schema_version: 1 as const, event_type: 'learning_transition' as const, transition_version: 1 as const, brain_id: binding.brain_id, run_id: input.run_id, semantic_sequence: sequence, source_id: input.source_id, canonical_slug: input.canonical_slug, transition: 'activate' as const, identity: input.identity, authority: input.authority, fact_row: appended.rowNum, occurred_at };
@@ -1067,12 +1067,14 @@ export async function correctLearningClaim(input: CorrectLearningClaimInput): Pr
     if (!Number.isSafeInteger(predecessorRow) || predecessorRow < 1) throw new LearningLoopError('forbidden', 'Correction predecessor is not an active managed row');
     const parsed = parseFactsFence(inspected.canonical);
     const old = parsed.facts.find(row => row.rowNum === predecessorRow);
-    if (!old || !old.active || old.claim !== input.predecessor.claim) throw new LearningLoopError('forbidden', 'Correction predecessor is not active');
+    if (!old || !old.active || (priorRow.identity as LearningClaimIdentity)?.claim !== input.predecessor.claim
+      || canonicalJson((priorRow.identity as LearningClaimIdentity)) !== canonicalJson(input.predecessor)) throw new LearningLoopError('forbidden', 'Correction predecessor is not active');
     const struck = parsed.facts.map(row => row.rowNum === predecessorRow ? { ...row, active: false, context: `superseded by #${Math.max(...parsed.facts.map(f => f.rowNum), predecessorRow) + 1}` } : row);
     const bodyWithoutFence = inspected.canonical.replace(/<!--- gbrain:facts:begin -->[\s\S]*?<!--- gbrain:facts:end -->/, renderFactsTable(struck));
     const appended = upsertFactRow(bodyWithoutFence, { claim: input.replacement.claim, kind: input.replacement.class === 'constraint' ? 'belief' : input.replacement.class === 'preference' ? 'preference' : 'commitment', confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `learning_class:${input.replacement.class}`, active: true });
     const lineage = reduceLearningLoopLineage(fence.value, { kind: 'correct', predecessor: input.predecessor, replacement: { identity: learningBlockedClaimKey(input.replacement), canonical_slug: input.canonical_slug, row_num: appended.rowNum } });
-    const next: LearningLoopKnowledge = { ...lineage.next, managed_rows: { ...lineage.next.managed_rows, [input.predecessor.claim_fingerprint!]: { ...priorRow, active: false }, [input.replacement.claim_fingerprint!]: { claim: input.replacement.claim, class: input.replacement.class, row_num: appended.rowNum, active: true, run_id: input.run_id } }, pending_delivery: null };
+    const retiredPredecessor = { ...priorRow, active: false };
+    const next: LearningLoopKnowledge = { ...lineage.next, managed_rows: { ...lineage.next.managed_rows, [input.predecessor.claim_fingerprint!]: retiredPredecessor, [input.replacement.claim_fingerprint!]: makeLearningManagedRow(input.replacement, appended.rowNum, true, input.run_id) }, pending_delivery: null };
     const sequence = state.events.filter(e => (e.event_type === 'learning_transition' || e.event_type === 'learning_correction') && e.brain_id === binding.brain_id && e.run_id === input.run_id).length + 1;
     const occurred_at = new Date().toISOString();
     const payload = { schema_version: 1 as const, event_type: 'learning_correction' as const, correction_version: 1 as const, brain_id: binding.brain_id, run_id: input.run_id, semantic_sequence: sequence, source_id: input.source_id, canonical_slug: input.canonical_slug, predecessor: input.predecessor, replacement: input.replacement, authority: input.authority, blocked_claim_key: predecessorKey, predecessor_fact_row: predecessorRow, replacement_fact_row: appended.rowNum, lineage_generation: (lineage.next.correction_lineages[predecessorKey] as { lineage_generation: number }).lineage_generation, replacement_set_fingerprint: (lineage.next.correction_lineages[predecessorKey] as { replacement_set_fingerprint: string }).replacement_set_fingerprint, occurred_at };
@@ -1393,7 +1395,7 @@ export async function reverseLearningClaim(input: ReverseLearningClaimInput): Pr
       if (parsedFacts.facts.some(row => row.rowNum === intent.reinstated.row_num)) throw new LearningLoopError('assertion_mismatch', 'Reversal reinstatement row already exists with an unexpected state');
       const appended = upsertFactRow(canonical, { claim: input.identity.claim, kind: learningFactKind(input.identity), confidence: 1, visibility: 'private', notability: 'high', source: `learning-loop:${input.run_id}`, context: `reversal:${rootId}`, rowNum: intent.reinstated.row_num, active: true });
       if (appended.rowNum !== intent.reinstated.row_num) throw new LearningLoopError('assertion_mismatch', 'Reversal reinstatement row number changed');
-      const managedRows = { ...fence.value.managed_rows, [input.identity.claim_fingerprint!]: { claim: input.identity.claim, class: input.identity.class, row_num: appended.rowNum, active: true, run_id: input.run_id } };
+      const managedRows = { ...fence.value.managed_rows, [input.identity.claim_fingerprint!]: makeLearningManagedRow(input.identity, appended.rowNum, true, input.run_id) };
       const finalLineage = { blocked_identity: blocked, active_replacements: [intent.reinstated], replacement_set_fingerprint: replacementSetFingerprint([intent.reinstated]), lineage_generation: checkpoint.lineage_generation + 1 };
       const finalBase: LearningLoopKnowledge = { ...fence.value, managed_rows: managedRows, correction_lineages: { ...fence.value.correction_lineages, [blocked]: finalLineage } };
       const marker = `${rootId}:${attempt.attempt_no}:${intent.final_state_hash}`;
@@ -1555,8 +1557,8 @@ function validIdentity(value: unknown): value is LearningClaimIdentity {
   if (typeof x.claim !== 'string' || x.claim.length === 0 || x.claim.length > 4096 || /[\r\n\u0000-\u001f\u007f]/.test(x.claim) || x.claim.normalize('NFC') !== x.claim || normalizeLearningClaim(x.claim) !== x.claim || !isLearningClass(x.class) || !x.scope || typeof x.target !== 'string' && x.target !== null || !('trigger' in x)) return false;
   if (Object.keys(x).some(k => !['claim','class','scope','target','trigger','claim_fingerprint'].includes(k))) return false;
   if (x.scope.kind === 'global' && (x.target !== null || Object.keys(x.scope).length !== 1)) return false;
-  if (x.scope.kind === 'repository' && (Object.keys(x.scope).length !== 2 || !/^repo:[^/\s:]+\/[^/\s]+\/[^/\s]+$/.test(x.scope.target) || x.target !== x.scope.target)) return false;
-  if (x.scope.kind === 'project' && (Object.keys(x.scope).length !== 2 || !x.scope.target || x.target !== x.scope.target || /[\r\n\u0000-\u001f\u007f]/.test(x.scope.target))) return false;
+  if (x.scope.kind === 'repository' && (Object.keys(x.scope).length !== 2 || !/^repo:[^/\s:]+\/[^/\s:]+\/[^/\s:]+$/.test(x.scope.target) || x.target !== x.scope.target)) return false;
+  if (x.scope.kind === 'project' && (Object.keys(x.scope).length !== 2 || typeof x.scope.target !== 'string' || !/^project:[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(x.scope.target) || x.target !== x.scope.target)) return false;
   if (!['global', 'repository', 'project'].includes(x.scope.kind)) return false;
   if (x.class === 'open_loop' && (!x.trigger || typeof x.trigger !== 'object' || Object.keys(x.trigger).length !== 3 || Object.keys(x.trigger).some(k => !['kind','id','state'].includes(k)) || !/^[a-z][a-z0-9_-]{0,31}$/.test(x.trigger.kind) || !x.trigger.id || /[\r\n\u0000-\u001f\u007f]/.test(x.trigger.id) || x.trigger.state !== 'pending')) return false;
   if (x.class !== 'open_loop' && x.trigger !== null) return false;

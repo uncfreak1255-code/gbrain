@@ -5,6 +5,13 @@ export type LearningClass = 'constraint' | 'preference' | 'goal' | 'lesson' | 'f
 export type LearningScope = { kind: 'global' } | { kind: 'repository'; target: string } | { kind: 'project'; target: string };
 export type LearningTrigger = null | { kind: string; id: string; state: 'pending' };
 export interface LearningClaimIdentity { claim: string; class: LearningClass; scope: LearningScope; target: string | null; trigger: LearningTrigger; claim_fingerprint?: string; }
+/** The only durable representation of a claim in the canonical page fence. */
+export interface LearningManagedRow {
+  identity: LearningClaimIdentity;
+  row_num: number;
+  active: boolean;
+  run_id: string;
+}
 export type BlockedClaimKey = string & { readonly __blockedClaimKey: unique symbol };
 export interface LearningPointer { identity: BlockedClaimKey; canonical_slug: string; row_num: number; }
 export interface CorrectionLineage {
@@ -436,6 +443,55 @@ export function reduceLearningLoopLineage(previous: LearningLoopKnowledge, comma
 const KEYS = new Set(['brain_id','source_id','canonical_slug','managed_rows','blocked_identities','correction_lineages','reversal_attempts','immutable_commit_markers','pending_delivery','protected_state_hash']);
 function fail(message: string): never { throw new Error(`learning-loop metadata: ${message}`); }
 function object(value: unknown, name: string): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${name} must be an object`); return value as Record<string, unknown>; }
+const LEARNING_CLASSES = new Set<LearningClass>(['constraint','preference','goal','lesson','friction','open_loop','business_candidate']);
+const PROJECT_TARGET_RE = /^project:[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+const REPOSITORY_TARGET_RE = /^repo:[^/\s:]+\/[^/\s:]+\/[^/\s:]+$/;
+function canonicalManagedIdentity(value: unknown): LearningClaimIdentity {
+  const identity = object(value, 'managed row identity');
+  if (Object.keys(identity).some(key => !['claim','class','scope','target','trigger','claim_fingerprint'].includes(key))) fail('managed row identity unknown field');
+  if (typeof identity.claim !== 'string' || !identity.claim || identity.claim.length > 4096
+    || /[\r\n\u0000-\u001f\u007f]/.test(identity.claim)
+    || identity.claim.normalize('NFC') !== identity.claim
+    || normalizeLearningClaim(identity.claim) !== identity.claim) fail('managed row identity claim is not canonical');
+  if (!LEARNING_CLASSES.has(identity.class as LearningClass)) fail('managed row identity class is invalid');
+  const scope = object(identity.scope, 'managed row identity scope');
+  if (Object.keys(scope).some(key => !['kind','target'].includes(key))) fail('managed row identity scope unknown field');
+  if (scope.kind === 'global') {
+    if (Object.keys(scope).length !== 1 || identity.target !== null) fail('managed row identity global target is contradictory');
+  } else if (scope.kind === 'repository') {
+    if (Object.keys(scope).length !== 2 || typeof scope.target !== 'string' || !REPOSITORY_TARGET_RE.test(scope.target) || identity.target !== scope.target) fail('managed row identity repository target is contradictory or malformed');
+  } else if (scope.kind === 'project') {
+    if (Object.keys(scope).length !== 2 || typeof scope.target !== 'string' || !PROJECT_TARGET_RE.test(scope.target) || identity.target !== scope.target) fail('managed row identity project target is contradictory or malformed');
+  } else fail('managed row identity scope is ambiguous');
+  const trigger = identity.trigger;
+  if (identity.class === 'open_loop') {
+    const t = object(trigger, 'managed row identity trigger');
+    if (Object.keys(t).length !== 3 || t.state !== 'pending' || typeof t.kind !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(t.kind)
+      || typeof t.id !== 'string' || !t.id || /[\r\n\u0000-\u001f\u007f]/.test(t.id)) fail('managed row identity trigger is invalid');
+  } else if (trigger !== null) fail('managed row identity trigger must be null');
+  const normalized = makeLearningClaimIdentity({ claim: identity.claim, class: identity.class as LearningClass, scope: scope as LearningScope, target: identity.target as string | null, trigger: trigger as LearningTrigger });
+  if (identity.claim_fingerprint !== normalized.claim_fingerprint) fail('managed row identity fingerprint mismatch');
+  return identity as unknown as LearningClaimIdentity;
+}
+function validateManagedRows(value: Record<string, unknown>): void {
+  for (const [key, raw] of Object.entries(value)) {
+    if (!/^[a-f0-9]{64}$/.test(key)) fail('managed row key must be sha256');
+    const row = object(raw, 'managed row');
+    if (Object.keys(row).some(field => !['identity','row_num','active','run_id'].includes(field))) fail('managed row unknown field');
+    const identity = canonicalManagedIdentity(row.identity);
+    if (key !== identity.claim_fingerprint) fail('managed row key does not match identity fingerprint');
+    if (!Number.isSafeInteger(row.row_num) || Number(row.row_num) < 1 || typeof row.active !== 'boolean' || typeof row.run_id !== 'string' || !row.run_id || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(row.run_id)) fail('managed row state is invalid');
+  }
+}
+export function makeLearningManagedRow(identity: LearningClaimIdentity, row_num: number, active: boolean, run_id: string): LearningManagedRow {
+  canonicalManagedIdentity(identity);
+  const row = { identity, row_num, active, run_id };
+  validateManagedRows({ [identity.claim_fingerprint!]: row });
+  return row;
+}
+export function validateLearningManagedRows(value: unknown): asserts value is Readonly<Record<string, LearningManagedRow>> {
+  validateManagedRows(object(value, 'managed_rows'));
+}
 function validateLineages(value: Record<string, unknown>): void {
   for (const [key, raw] of Object.entries(value)) {
     if (!/^[a-f0-9]{64}$/.test(key)) fail('correction lineage key must be sha256');
@@ -494,7 +550,7 @@ export function encodeLearningLoopKnowledge(value: LearningLoopKnowledge): strin
   const blocked = obj.blocked_identities as string[];
   if (blocked.some((key, index) => index > 0 && Buffer.from(blocked[index - 1]).compare(Buffer.from(key)) >= 0)) fail('blocked_identities must be unique and sorted');
   if (!Array.isArray(obj.immutable_commit_markers) || !obj.immutable_commit_markers.every(x => typeof x === 'string')) fail('immutable_commit_markers must be strings');
-  object(obj.managed_rows, 'managed_rows');
+  validateManagedRows(object(obj.managed_rows, 'managed_rows'));
   validateLineages(object(obj.correction_lineages, 'correction_lineages'));
   validateReversalAttempts(object(obj.reversal_attempts, 'reversal_attempts'));
   if (typeof obj.protected_state_hash !== 'undefined' && !/^[0-9a-f]{64}$/.test(String(obj.protected_state_hash))) fail('protected_state_hash must be sha256');

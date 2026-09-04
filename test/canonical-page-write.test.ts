@@ -17,15 +17,16 @@ import {
   type SourceWriteLease,
 } from '../src/core/canonical-page-write.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
-import { learningLoopProtectedStateHash, renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
+import { learningLoopProtectedStateHash, makeLearningClaimIdentity, makeLearningManagedRow, renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
 import { parseFactsFence, renderFactsTable } from '../src/core/facts-fence.ts';
 
 const managedFact = { rowNum: 1, claim: 'Managed', kind: 'preference' as const, confidence: 1, visibility: 'private' as const, notability: 'high' as const, active: true };
 const facts = renderFactsTable([managedFact]);
 const knowledge = (generation = 1): LearningLoopKnowledge => {
+  const identity = makeLearningClaimIdentity({ claim: 'Managed', class: 'preference', scope: { kind: 'global' }, target: null, trigger: null });
   const value: LearningLoopKnowledge = {
     brain_id: 'b', source_id: 's', canonical_slug: 'x',
-    managed_rows: { generation: { claim: 'Managed', row_num: 1, active: true, generation } }, blocked_identities: [], correction_lineages: {},
+    managed_rows: { [identity.claim_fingerprint!]: makeLearningManagedRow(identity, 1, true, `run-${generation}`) }, blocked_identities: [], correction_lineages: {},
     reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
   };
   return { ...value, protected_state_hash: learningLoopProtectedStateHash(value, parseFactsFence(facts).facts) };
@@ -184,11 +185,12 @@ describe('canonical page write boundary', () => {
   }));
 
   test('binds protected state to managed rows and rejects a valid-looking tamper', async () => inRoot(async ({ target, path, locks }) => {
-    const blocked = 'a'.repeat(64);
+    const managedIdentity = makeLearningClaimIdentity({ claim: 'Managed', class: 'preference', scope: { kind: 'global' }, target: null, trigger: null });
+    const blocked = managedIdentity.claim_fingerprint!;
     const fact = { rowNum: 1, claim: 'Managed', kind: 'preference' as const, confidence: 1, visibility: 'private' as const, notability: 'high' as const, active: true };
     const state: LearningLoopKnowledge = {
       brain_id: target.brain_id, source_id: target.source_id, canonical_slug: target.canonical_slug,
-      managed_rows: { [blocked]: { claim: 'Managed', row_num: 1, active: true } }, blocked_identities: [blocked],
+      managed_rows: { [blocked]: makeLearningManagedRow(managedIdentity, 1, true, 'run-1') }, blocked_identities: [blocked],
       correction_lineages: {}, reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
     };
     const factsFence = renderFactsTable([fact]);
