@@ -29,12 +29,41 @@ export interface AcquirePageLockOpts {
   sourceId?: string;
 }
 
-const heldPageLocks = new AsyncLocalStorage<ReadonlyMap<string, object>>();
-const livePageLockScopes = new WeakSet<object>();
+interface PageLockScope {
+  active: boolean;
+  handle: PageLockHandle;
+  refs: number;
+}
 
-function inheritedLiveScope(lockPath: string): object | undefined {
+const heldPageLocks = new AsyncLocalStorage<ReadonlyMap<string, PageLockScope>>();
+
+function inheritedLiveScope(lockPath: string): PageLockScope | undefined {
   const scope = heldPageLocks.getStore()?.get(lockPath);
-  return scope && livePageLockScopes.has(scope) ? scope : undefined;
+  return scope?.active && scope.refs > 0 ? scope : undefined;
+}
+
+async function releaseScope(scope: PageLockScope): Promise<void> {
+  scope.refs -= 1;
+  if (scope.refs === 0) {
+    scope.active = false;
+    await scope.handle.release();
+  }
+}
+
+function retainScope(scope: PageLockScope, slug: string): PageLockHandle {
+  scope.refs += 1;
+  let retained = true;
+  return {
+    slug,
+    refresh: async () => {
+      if (retained && scope.active) await scope.handle.refresh();
+    },
+    release: async () => {
+      if (!retained) return;
+      retained = false;
+      await releaseScope(scope);
+    },
+  };
 }
 
 export function pageLockIdentity(brainId: string, sourceId: string, slug: string): string {
@@ -90,9 +119,8 @@ function tryAcquireOnce(slug: string, lockPath: string): PageLockHandle | null {
 
 export async function acquirePageLock(slug: string, opts: AcquirePageLockOpts = {}): Promise<PageLockHandle | null> {
   const lockPath = lockPathFor(slug, opts);
-  if (inheritedLiveScope(lockPath)) {
-    return { slug, refresh: async () => {}, release: async () => {} };
-  }
+  const inherited = inheritedLiveScope(lockPath);
+  if (inherited) return retainScope(inherited, slug);
   const deadline = Date.now() + (opts.timeoutMs ?? 0);
   const pollMs = opts.pollMs ?? 200;
   let attempt = tryAcquireOnce(slug, lockPath);
@@ -108,16 +136,17 @@ export async function acquirePageLock(slug: string, opts: AcquirePageLockOpts = 
 export async function withPageLock<T>(slug: string, fn: () => Promise<T>, opts: AcquirePageLockOpts = {}): Promise<T> {
   const lockPath = lockPathFor(slug, opts);
   const inherited = heldPageLocks.getStore();
-  if (inheritedLiveScope(lockPath)) return fn();
+  const inheritedScope = inheritedLiveScope(lockPath);
+  if (inheritedScope) {
+    const retained = retainScope(inheritedScope, slug);
+    try { return await fn(); }
+    finally { await retained.release(); }
+  }
   const handle = await acquirePageLock(slug, { timeoutMs: 30_000, ...opts });
   if (!handle) throw new Error(`acquirePageLock: could not acquire lock for slug "${slug}" within ${opts.timeoutMs ?? 30_000}ms`);
-  const scope = {};
+  const scope: PageLockScope = { active: true, handle, refs: 1 };
   const owned = new Map(inherited ?? []);
   owned.set(lockPath, scope);
-  livePageLockScopes.add(scope);
   try { return await heldPageLocks.run(owned, fn); }
-  finally {
-    livePageLockScopes.delete(scope);
-    await handle.release();
-  }
+  finally { await releaseScope(scope); }
 }

@@ -121,6 +121,42 @@ describe('gbrain takes CLI source scoping', () => {
     expect(added).toHaveLength(1);
   });
 
+  test('resolve holds the source-qualified page lock through its DB mirror', async () => {
+    const brainDir = mkdtempSync(join(tmpdir(), 'gbrain-takes-source-'));
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-takes-home-'));
+    tmpRoots.push(brainDir, home);
+    const { engine, resolvePageIds } = makeEngine();
+
+    await withEnv({ GBRAIN_SOURCE: 'dept', GBRAIN_HOME: home }, async () => {
+      await runTakes(engine, [
+        'add', 'shared/page', '--claim', 'Resolve me', '--kind', 'take', '--who', 'self',
+        '--source-id', 'dept', '--dir', brainDir,
+      ]);
+    });
+
+    const held = await acquirePageLock('shared/page', {
+      lockRoot: join(home, '.gbrain', 'page-locks'),
+      brainId: computeBrainIdFromConfig({}),
+      sourceId: 'dept',
+    });
+    expect(held).not.toBeNull();
+
+    let settled = false;
+    const mutation = withEnv({ GBRAIN_SOURCE: 'dept', GBRAIN_HOME: home }, async () => {
+      await runTakes(engine, [
+        'resolve', 'shared/page', '--row', '1', '--quality', 'correct',
+        '--source-id', 'dept', '--dir', brainDir,
+      ]);
+    }).then(() => { settled = true; });
+
+    await Bun.sleep(50);
+    expect(settled).toBe(false);
+    expect(resolvePageIds).toEqual([]);
+    await held!.release();
+    await mutation;
+    expect(resolvePageIds).toEqual([22]);
+  });
+
   test('add mirrors to the page in GBRAIN_SOURCE, not an arbitrary same-slug page (#2684)', async () => {
     const brainDir = mkdtempSync(join(tmpdir(), 'gbrain-takes-source-'));
     const home = mkdtempSync(join(tmpdir(), 'gbrain-takes-home-'));

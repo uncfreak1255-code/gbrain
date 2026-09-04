@@ -429,14 +429,14 @@ async function cmdResolve(engine: BrainEngine, args: string[], sourceId: string)
     const endIdx = body.indexOf(TAKES_FENCE_END, beginIdx + TAKES_FENCE_BEGIN.length);
     const out = body.slice(0, beginIdx) + newFence + body.slice(endIdx + TAKES_FENCE_END.length);
     await writeBody(engine, sourceId, slug, path, out, Boolean(dirArg));
-  });
-  await engine.resolveTake(pageId, rowNum, {
-    quality,
-    outcome,
-    value,
-    unit,
-    source,
-    resolvedBy,
+    await engine.resolveTake(pageId, rowNum, {
+      quality,
+      outcome,
+      value,
+      unit,
+      source,
+      resolvedBy,
+    });
   });
 
   const finalQuality = quality ?? (outcome === true ? 'correct' : outcome === false ? 'incorrect' : 'unknown');
