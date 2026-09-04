@@ -1771,7 +1771,7 @@
       "primitive": "fs:renameSync",
       "count": 1,
       "lines": [
-        128
+        130
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -1783,7 +1783,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        134
+        136
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -1795,7 +1795,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        118
+        120
       ],
       "classification": "canonical_boundary",
       "boundary": "shared_canonical_boundary",
@@ -1807,8 +1807,8 @@
       "primitive": "fs:writeFileSync",
       "count": 2,
       "lines": [
-        603,
-        623
+        605,
+        625
       ],
       "classification": "live_path_writer",
       "boundary": "managed_target_reject",

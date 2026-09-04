@@ -951,6 +951,10 @@ export interface WithRefreshingLockOpts {
   ttlMinutes?: number;
   /** Heartbeat-fail threshold in ms — abort if SELECT 1 takes longer. Default 30000. */
   heartbeatTimeoutMs?: number;
+  /** Total time to wait for initial acquisition. Default 0 (fail fast). */
+  acquireTimeoutMs?: number;
+  /** Delay between bounded acquisition attempts. Default 250. */
+  acquirePollMs?: number;
 }
 
 /**
@@ -967,10 +971,23 @@ export async function withRefreshingLock<T>(
 ): Promise<T> {
   const ttlMinutes = opts.ttlMinutes ?? DEFAULT_TTL_MINUTES;
   const heartbeatTimeoutMs = opts.heartbeatTimeoutMs ?? 30000;
+  const acquireTimeoutMs = opts.acquireTimeoutMs ?? 0;
+  const acquirePollMs = opts.acquirePollMs ?? 250;
+  if (!Number.isFinite(acquireTimeoutMs) || acquireTimeoutMs < 0) {
+    throw new Error('acquireTimeoutMs must be a finite non-negative number');
+  }
+  if (!Number.isFinite(acquirePollMs) || acquirePollMs <= 0) {
+    throw new Error('acquirePollMs must be a finite positive number');
+  }
   // Refresh 6x per TTL window so a missed tick doesn't expire the lock.
   const refreshIntervalMs = Math.max(15000, (ttlMinutes * 60 * 1000) / 6);
 
-  const handle = await tryAcquireDbLock(engine, lockId, ttlMinutes);
+  const deadline = Date.now() + acquireTimeoutMs;
+  let handle = await tryAcquireDbLock(engine, lockId, ttlMinutes);
+  while (!handle && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(acquirePollMs, deadline - Date.now())));
+    handle = await tryAcquireDbLock(engine, lockId, ttlMinutes);
+  }
   if (!handle) throw new LockUnavailableError(lockId);
 
   let healthOk = true;
