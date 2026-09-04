@@ -27,6 +27,7 @@ import {
 } from '../core/takes-write.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 import { embedStaleTakes } from '../core/embed-takes.ts';
 import { assertEmbeddingEnabled } from '../core/embedding-dim-check.ts';
 import { loadConfig } from '../core/config.ts';
@@ -825,6 +826,10 @@ async function cmdRevisit(_engine: BrainEngine, rest: string[]): Promise<void> {
   // Append a cursor marker if not already present.
   const existing = readFileSync(filePath, 'utf8');
   const marker = '\n<!-- gbrain:revisit -->\n';
+  assertUnmanagedPathMutation(
+    filePath,
+    existing.includes('<!-- gbrain:revisit -->') ? undefined : existing + marker,
+  );
   if (!existing.includes('<!-- gbrain:revisit -->')) {
     writeFileSync(filePath, existing + marker);
   }

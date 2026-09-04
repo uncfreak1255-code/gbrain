@@ -33,6 +33,7 @@ import {
 } from '../core/brain-writer.ts';
 import { collectGitVisibleFiles } from '../core/git-visible-files.ts';
 import { isMarkdownFilePath, pruneDir, slugifyPath } from '../core/sync.ts';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 
 export async function runFrontmatter(args: string[]): Promise<void> {
   const sub = args[0];
@@ -227,6 +228,7 @@ async function runValidate(rest: string[]): Promise<void> {
       result.fixesApplied = fixes;
       if (fixes.length > 0 && !flags.dryRun) {
         result.backupPath = createFrontmatterBackup(file, { sourcePath: resolved, runId: backupRunId });
+        assertUnmanagedPathMutation(file, fixed);
         writeFileSync(file, fixed, 'utf8');
       }
     }
@@ -504,6 +506,7 @@ async function runGenerate(args: string[]): Promise<void> {
       const newContent = fm + '\n' + content;
       // Safety: write a centralized backup first.
       createFrontmatterBackup(absPath, { sourcePath: brainRoot, runId: backupRunId });
+      assertUnmanagedPathMutation(absPath, newContent);
       writeFileSync(absPath, newContent, 'utf-8');
       written++;
     }
