@@ -203,7 +203,7 @@ describe('Phase 4 authority foundations', () => {
           const canonical = readFileSync(path, 'utf8');
           const fence = parseLearningLoopFence(canonical)!;
           expect(fence.value.pending_delivery).toBeNull();
-          expect(fence.value.managed_rows[fixture.claimIdentity.claim_fingerprint!]).toMatchObject({ claim, active: true, run_id: fixture.armed.run_id });
+          expect(fence.value.managed_rows[fixture.claimIdentity.claim_fingerprint!]).toMatchObject({ identity: fixture.claimIdentity, active: true, run_id: fixture.armed.run_id });
           const transitions = readLearningLoopLedger({ config: fixture.config }).filter(event => event.event_type === 'learning_transition');
           expect(transitions).toHaveLength(1);
           expect(recovered.event.event_id).toBe(transitions[0].event_id);
@@ -222,7 +222,9 @@ describe('Phase 4 authority foundations', () => {
     expect(() => validateLearningClaimIdentity(valid)).not.toThrow();
     for (const bad of [
       { ...valid, scope: { kind: 'repository' } },
+      { ...valid, scope: { kind: 'repository', target: 'repo:github.com/acme:team/widgets' }, target: 'repo:github.com/acme:team/widgets' },
       { ...valid, scope: { kind: 'unknown', target: 'x' } },
+      { ...valid, scope: { kind: 'project', target: 'acme project' }, target: 'acme project' },
       { ...valid, target: 7 },
       { ...valid, trigger: { kind: 'job', id: 'x', state: 'done' } },
       { ...valid, claim_fingerprint: '0'.repeat(64) },
