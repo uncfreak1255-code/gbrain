@@ -92,12 +92,12 @@ describe('Personal Learning Loop PR3 retrieval and telemetry', () => {
     const bundle = buildContextBundle(base, [page([{ identity: identity('Keep coding changes small') }])], 'personal');
     const telemetry = makeContextSuppliedTelemetry(base, bundle);
     const event = completeLearningLoopContextEvent({
-      schema_version: 1, ...telemetry, brain_id: base.brain_id, occurred_at: '2026-01-01T00:00:00.000Z',
+      schema_version: 1, ...telemetry, brain_id: base.brain_id, source_id: base.source_id, occurred_at: '2026-01-01T00:00:00.000Z',
     });
     expect(event).not.toHaveProperty('semantic_sequence');
     expect(event.event_id).toMatch(/^[a-f0-9]{64}$/);
     expect(completeLearningLoopContextEvent({
-      schema_version: 1, ...telemetry, brain_id: base.brain_id, occurred_at: '2026-01-01T00:00:00.000Z',
+      schema_version: 1, ...telemetry, brain_id: base.brain_id, source_id: base.source_id, occurred_at: '2026-01-01T00:00:00.000Z',
     })).toEqual(event);
     expect(() => replayLearningLoop([{ ...event, semantic_sequence: 1 } as never])).toThrow();
   });

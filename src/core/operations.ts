@@ -5469,7 +5469,7 @@ const learning_loop_request_context_v1: Operation = {
       return { value: bundle };
     }
     const occurred_at = new Date().toISOString();
-    const event = mod.completeLearningLoopContextEvent({ schema_version: 1, ...telemetry, brain_id: destination.brain_id, run_id: run.run_id, occurred_at });
+    const event = mod.completeLearningLoopContextEvent({ schema_version: 1, ...telemetry, brain_id: destination.brain_id, run_id: run.run_id, source_id: destination.source_id, occurred_at });
     return { value: bundle, event };
     }));
   }),
