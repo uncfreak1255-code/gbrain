@@ -1,7 +1,7 @@
 import { accessSync, closeSync, constants, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { acquirePageLock } from './page-lock.ts';
+import { acquirePageLock, withPageLock, type AcquirePageLockOpts } from './page-lock.ts';
 import { parseLearningLoopFence, renderLearningLoopFence, isLearningTransitionPermit, learningLoopHasProtectedState, learningLoopProtectedStateHash, type LearningTransitionPermit } from './learning-loop-knowledge.ts';
 import { parseFactsFence } from './facts-fence.ts';
 import type { BrainEngine } from './engine.ts';
@@ -644,6 +644,35 @@ export async function writeSourceQualifiedCanonicalPage(
     return writeCanonicalPage(target, content, { mode, sourceLease, expectedManaged });
   });
 }
+
+/** Hold source then page ownership across one canonical mutation and its DB mirror. */
+export async function withSourceQualifiedCanonicalPageMutation<T>(
+  mutation: SourceQualifiedMutation & { configuredRoot: string; canonicalPath?: string },
+  fn: () => Promise<T>,
+  lockOpts: Pick<AcquirePageLockOpts, 'lockRoot' | 'pollMs' | 'timeoutMs'> = {},
+): Promise<T> {
+  const target: SourceQualifiedCanonicalTarget = {
+    brain_id: mutation.brainId ?? computeBrainIdFromConfig(mutation.engine.learningLoopLedgerConfig?.() ?? {}),
+    source_id: mutation.sourceId,
+    canonical_slug: mutation.slug,
+    configured_root: mutation.configuredRoot,
+  };
+  validateTarget(target);
+  const pageMutation = () => withPageLock(
+    target.canonical_slug,
+    fn,
+    {
+      ...lockOpts,
+      brainId: target.brain_id,
+      sourceId: target.source_id,
+      ...(mutation.canonicalPath ? { canonicalPath: mutation.canonicalPath } : {}),
+    },
+  );
+  // Older structural test doubles do not expose a durable engine identity.
+  // Both production engines do, and therefore always take source before page.
+  if (typeof mutation.engine.learningLoopLedgerConfig !== 'function') return pageMutation();
+  return withCanonicalSourceBoundary(mutation.engine, target, pageMutation);
+}
 export async function withSourceWriteLease<T>(target: SourceQualifiedCanonicalTarget, fn: (lease: SourceWriteLease) => Promise<T>, opts: { sourceLock: (target: SourceQualifiedCanonicalTarget) => Promise<() => Promise<void>> }): Promise<T> { const release=await opts.sourceLock(target); try { const configured_root=resolve(target.configured_root), root_realpath=realpathSync(configured_root), st=statSync(root_realpath); if(!st.isDirectory())throw new Error('canonical root unavailable'); const lease=Object.freeze({__brand:'SourceWriteLease' as const,brain_id:target.brain_id,source_id:target.source_id,configured_root,root_realpath,token:randomUUID(),dev:st.dev,ino:st.ino}); liveLeases.add(lease); liveLeaseTokens.add(lease.token); try{return await fn(lease);}finally{liveLeases.delete(lease); liveLeaseTokens.delete(lease.token);} } finally { await release(); } }
 /** Acquire the existing per-source DB lock and expose its exact lease. */
 export async function withCanonicalSourceBoundary<T>(
@@ -705,7 +734,12 @@ export async function writeCanonicalPage(target: SourceQualifiedCanonicalTarget,
   checkLease(target, options.sourceLease);
   const root = options.sourceLease.root_realpath;
   const path = join(root, `${target.canonical_slug}.md`);
-  const lock = await acquirePageLock(target.canonical_slug, { lockRoot: options.lockRoot, brainId: target.brain_id, sourceId: target.source_id });
+  const lock = await acquirePageLock(target.canonical_slug, {
+    lockRoot: options.lockRoot,
+    brainId: target.brain_id,
+    sourceId: target.source_id,
+    reentrant: true,
+  });
   if (!lock) throw new Error('canonical page is busy');
   try {
     const preflight = inspectExpectedManagedState(target, options.sourceLease, { expected: options.expectedManaged });

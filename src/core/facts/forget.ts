@@ -35,10 +35,9 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 
 import type { BrainEngine } from '../engine.ts';
-import { withPageLock } from '../page-lock.ts';
 import { resolvePageWriteTarget } from '../write-through.ts';
 import { parseFactsFence, renderFactsTable, type ParsedFact } from '../facts-fence.ts';
-import { assertManagedPageMutationAllowed, assertUnmanagedPathMutation } from '../canonical-page-write.ts';
+import { assertManagedPageMutationAllowed, assertUnmanagedPathMutation, withSourceQualifiedCanonicalPageMutation } from '../canonical-page-write.ts';
 
 export interface ForgetFactResult {
   /** True iff the row was found AND a forget was applied (fence or DB). */
@@ -182,7 +181,13 @@ export async function forgetFactInFence(
     return { ok, path: 'legacy_db', reason };
   }
 
-  return withPageLock(slug, async () => {
+  return withSourceQualifiedCanonicalPageMutation({
+    engine,
+    sourceId: row.source_id,
+    slug,
+    configuredRoot: resolved.writeRoot,
+    canonicalPath: filePath,
+  }, async () => {
     const body = readFileSync(filePath, 'utf-8');
     const parsed = parseFactsFence(body);
 

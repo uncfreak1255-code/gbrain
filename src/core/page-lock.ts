@@ -36,8 +36,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { gbrainPath } from './config.ts';
 
 const LOCK_TTL_MS = 5 * 60 * 1000; // 5 minutes — matches eng-review fold spec
@@ -62,12 +63,63 @@ export interface AcquirePageLockOpts {
   brainId?: string;
   /** Persistent source identity; required by source-qualified canonical callers. */
   sourceId?: string;
+  /** Resolved artifact path. File writers should prefer this identity. */
+  canonicalPath?: string;
+  /** Internal: allow an intentional same-chain nested canonical mutation. */
+  reentrant?: boolean;
 }
 
-function lockPathFor(slug: string, lockRoot?: string): string {
-  const sha = createHash('sha256').update(slug).digest('hex');
-  const dir = lockRoot ?? gbrainPath('page-locks');
-  return join(dir, `${sha}.lock`);
+export function pageLockIdentity(brainId: string, sourceId: string, slug: string): string {
+  return createHash('sha256').update(`${brainId}\0${sourceId}\0${slug}`, 'utf8').digest('hex');
+}
+
+export function pageLockPathIdentity(canonicalPath: string): string {
+  return createHash('sha256').update(`canonical-path\0${resolve(canonicalPath)}`, 'utf8').digest('hex');
+}
+
+function lockPathFor(slug: string, opts: AcquirePageLockOpts): string {
+  const identity = opts.canonicalPath
+    ? pageLockPathIdentity(opts.canonicalPath)
+    : pageLockIdentity(opts.brainId ?? 'default', opts.sourceId ?? 'default', slug);
+  const dir = opts.lockRoot ?? gbrainPath('page-locks');
+  return join(dir, `${identity}.lock`);
+}
+
+interface PageLockScope {
+  active: boolean;
+  handle: PageLockHandle;
+  refs: number;
+}
+
+const heldPageLocks = new AsyncLocalStorage<ReadonlyMap<string, PageLockScope>>();
+
+function inheritedLiveScope(lockPath: string): PageLockScope | undefined {
+  const scope = heldPageLocks.getStore()?.get(lockPath);
+  return scope?.active && scope.refs > 0 ? scope : undefined;
+}
+
+async function releaseScope(scope: PageLockScope): Promise<void> {
+  scope.refs -= 1;
+  if (scope.refs === 0) {
+    scope.active = false;
+    await scope.handle.release();
+  }
+}
+
+function retainScope(scope: PageLockScope, slug: string): PageLockHandle {
+  scope.refs += 1;
+  let retained = true;
+  return {
+    slug,
+    refresh: async () => {
+      if (retained && scope.active) await scope.handle.refresh();
+    },
+    release: async () => {
+      if (!retained) return;
+      retained = false;
+      await releaseScope(scope);
+    },
+  };
 }
 
 /** Line 3 of the lock file. Empty string when absent (pre-#2840 format). */
@@ -149,7 +201,9 @@ export async function acquirePageLock(
   slug: string,
   opts: AcquirePageLockOpts = {},
 ): Promise<PageLockHandle | null> {
-  const lockPath = lockPathFor(slug, opts.lockRoot);
+  const lockPath = lockPathFor(slug, opts);
+  const inherited = opts.reentrant ? inheritedLiveScope(lockPath) : undefined;
+  if (inherited) return retainScope(inherited, slug);
   const deadline = Date.now() + (opts.timeoutMs ?? 0);
   const pollMs = opts.pollMs ?? 200;
 
@@ -174,13 +228,21 @@ export async function withPageLock<T>(
   fn: () => Promise<T>,
   opts: AcquirePageLockOpts = {},
 ): Promise<T> {
+  const lockPath = lockPathFor(slug, opts);
+  const inherited = heldPageLocks.getStore();
+  const inheritedScope = opts.reentrant ? inheritedLiveScope(lockPath) : undefined;
+  if (inheritedScope) {
+    const retained = retainScope(inheritedScope, slug);
+    try { return await fn(); }
+    finally { await retained.release(); }
+  }
   const handle = await acquirePageLock(slug, { timeoutMs: 30_000, ...opts });
   if (!handle) {
     throw new Error(`acquirePageLock: could not acquire lock for slug "${slug}" within ${opts.timeoutMs ?? 30_000}ms`);
   }
-  try {
-    return await fn();
-  } finally {
-    await handle.release();
-  }
+  const scope: PageLockScope = { active: true, handle, refs: 1 };
+  const owned = new Map(inherited ?? []);
+  owned.set(lockPath, scope);
+  try { return await heldPageLocks.run(owned, fn); }
+  finally { await releaseScope(scope); }
 }
