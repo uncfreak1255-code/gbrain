@@ -9,13 +9,10 @@
  * legacy / thin-client fallback only (when the brain has no
  * sources.local_path configured).
  *
- * Concurrency: reuses the v0.28 page-lock primitive
- * (`src/core/page-lock.ts`), an FS-level lockfile under
- * `~/.gbrain/page-locks/<sha256-of-slug>.lock` with heartbeat-recency
- * staleness (5-minute TTL; namespace-agnostic — no PID-liveness, #2840).
- * Multi-process safe — two `gbrain` invocations writing
- * to the same entity page serialize through the same kernel-visible
- * lockfile. 5-second timeout per the plan's "5s retry" failure mode.
+ * Concurrency: takes the canonical source boundary before the physical-path
+ * page lock, matching timeline and other canonical writers. Ownership spans
+ * the file read, atomic rename, and DB insert. The page lock has a 5-second
+ * timeout; source contention uses the shared bounded canonical wait.
  *
  * Atomicity: write the fence to `<file>.tmp`, re-parse the .tmp body,
  * THEN `renameSync` to the canonical file. If parse fails the .tmp
@@ -42,14 +39,13 @@ import type { BrainEngine, NewFact, FactVisibility, FactKind } from '../engine.t
 import type { ResolutionSource } from '../entities/resolve.ts';
 import { inferTypeFromPack } from '../markdown.ts';
 import { loadActivePackBestEffort } from '../schema-pack/best-effort.ts';
-import { withPageLock } from '../page-lock.ts';
 import { gbrainPath } from '../config.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
 import { isDurabilityHardened, commitWriteThroughFile } from '../brain-repo-durability.ts';
 import { upsertFactRow, parseFactsFence } from '../facts-fence.ts';
 import { extractFactsFromFenceText } from './extract-from-fence.ts';
 import { logStubGuardEvent } from './stub-guard-audit.ts';
-import { assertUnmanagedPathMutation } from '../canonical-page-write.ts';
+import { assertUnmanagedPathMutation, withSourceQualifiedCanonicalPageMutation } from '../canonical-page-write.ts';
 
 /** Resolved source binding for the entity page. */
 export interface FenceTarget {
@@ -310,8 +306,8 @@ export async function writeFactsToFence(
   const tmpPath = `${filePath}.tmp`;
   const durabilityEnabled = isDurabilityHardened(writeRoot);
 
-  return withPageLock(
-    target.slug,
+  return withSourceQualifiedCanonicalPageMutation(
+    { engine, sourceId: target.sourceId, slug: target.slug, configuredRoot: writeRoot, canonicalPath: filePath },
     async () => {
       // 1. Read existing body or stub-create.
       let body: string;

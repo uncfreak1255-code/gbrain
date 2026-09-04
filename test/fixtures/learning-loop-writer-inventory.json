@@ -3736,7 +3736,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        144
+        140
       ],
       "classification": "canonical_reconciliation",
       "boundary": "shared_canonical_boundary",
@@ -3748,7 +3748,7 @@
       "primitive": "fs:renameSync",
       "count": 1,
       "lines": [
-        469
+        465
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -3760,7 +3760,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        455
+        451
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
