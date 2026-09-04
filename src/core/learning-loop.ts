@@ -1874,11 +1874,8 @@ export function replayLearningLoop(records: LearningLoopLedgerRecord[]): Learnin
       const contextKey = `${event.run_id}\u0000${event.provider_session_id}\u0000${event.request_hash}`;
       const { event_id: _eventId, occurred_at: _occurredAt, ...contextBody } = event;
       const priorContext = contextRequests.get(contextKey);
-      const contextCanonical = canonicalJson(contextBody);
-      if (priorContext !== undefined && priorContext !== contextCanonical) {
-        throw new LearningLoopError('ledger_corrupt', 'Context telemetry has conflicting payloads for one request');
-      }
-      contextRequests.set(contextKey, contextCanonical);
+      if (priorContext !== undefined) throw new LearningLoopError('ledger_corrupt', 'Context telemetry has more than one event for one request');
+      contextRequests.set(contextKey, canonicalJson(contextBody));
       // Context telemetry is content-hashed evidence only. It is retained in
       // replay state but does not participate in semantic transition order.
       projection.events.push(event);

@@ -155,6 +155,19 @@ describe('Phase 5 correction lineage reducer', () => {
       const replayed = replayLearningLoop(interleaved);
       expect(replayed.events.filter(event => event.event_type === 'learning_transition' || event.event_type === 'learning_correction').map(event => event.semantic_sequence)).toEqual([1, 2]);
       expect(replayed.events.find(event => event.event_id === contextual.event_id)).toEqual(contextual);
+      expect(replayed.events.find(event => event.event_id === contextual.event_id)).toMatchObject({
+        event_id: contextual.event_id, run_id: f.armed.run_id, provider: 'codex', provider_session_id: bound.provider_session_id,
+        brain_id: f.armed.destination_binding.brain_id, source_id: 'default', request_hash: 'a'.repeat(64), pointers: [], claims: [],
+      });
+      expect(replayLearningLoop([...ledger.slice(0, transitionIndex + 1), contextual, contextual, ...ledger.slice(transitionIndex + 1)]).events.filter(event => event.event_id === contextual.event_id)).toHaveLength(1);
+      const { event_id: _contextEventId, ...contextBody } = contextual;
+      const changedPayload = completeLearningLoopContextEvent({ ...contextBody, token_estimate: 1 });
+      expect(() => replayLearningLoop([...ledger.slice(0, transitionIndex + 1), contextual, changedPayload, ...ledger.slice(transitionIndex + 1)])).toThrow(/context telemetry/i);
+      const changedTimestamp = completeLearningLoopContextEvent({ ...contextBody, occurred_at: '2026-01-01T00:00:01.000Z' });
+      expect(() => replayLearningLoop([...ledger.slice(0, transitionIndex + 1), contextual, changedTimestamp, ...ledger.slice(transitionIndex + 1)])).toThrow(/context telemetry/i);
+      const replayedAgain = replayLearningLoop(interleaved);
+      expect(replayedAgain.runs.get(f.armed.run_id)?.cohort).toEqual(replayed.runs.get(f.armed.run_id)?.cohort);
+      expect(replayedAgain.events.filter(event => event.event_type === 'learning_transition' || event.event_type === 'learning_correction').map(event => event.semantic_sequence)).toEqual([1, 2]);
       expect(armed).toBeDefined();
       await expect(activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority: 'direct_user' })).rejects.toMatchObject({ code: 'forbidden' });
     }); } finally { rmSync(f.root, { recursive: true, force: true }); }

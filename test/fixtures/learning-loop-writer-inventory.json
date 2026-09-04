@@ -2479,7 +2479,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        2052
+        2049
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2491,7 +2491,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        2438
+        2435
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
