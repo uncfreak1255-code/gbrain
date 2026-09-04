@@ -235,7 +235,8 @@ export interface LearningAuthorityEvent extends EventBase { event_type: 'learnin
 export interface LearningTransitionEvent extends EventBase { event_type: 'learning_transition'; transition_version: 1; brain_id: string; run_id: string; semantic_sequence: number; source_id: string; canonical_slug: string; transition: 'activate'; identity: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; fact_row: number; }
 export interface LearningCorrectionEvent extends EventBase { event_type: 'learning_correction'; correction_version: 1; brain_id: string; run_id: string; semantic_sequence: number; source_id: string; canonical_slug: string; predecessor: LearningClaimIdentity; replacement: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; blocked_claim_key: string; predecessor_fact_row: number; replacement_fact_row: number; lineage_generation: number; replacement_set_fingerprint: string; }
 
-export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent | LearningCandidateEvent | LearningAuthorityEvent | LearningTransitionEvent | LearningCorrectionEvent;
+export interface ContextSuppliedEvent extends EventBase { event_type: 'context_supplied'; version: 1; brain_id: string; run_id: string; semantic_sequence: number; provider: 'codex'; provider_session_id: string; source_id: string; request_hash: string; pointers: readonly { brain_id: string; source_id: string; canonical_slug: string; row_num: number }[]; claims: readonly { claim_fingerprint: string; class: string; scope: unknown; target: string | null; trigger: unknown }[]; item_count: number; token_estimate: number; }
+export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent | LearningCandidateEvent | LearningAuthorityEvent | LearningTransitionEvent | LearningCorrectionEvent | ContextSuppliedEvent;
 export type EligibilityReason =
   | 'eligible'
   | 'transcript_too_small'
@@ -1765,6 +1766,27 @@ function assertEventShape(event: LearningLoopEvent): void {
     }
     return;
   }
+  if (event.event_type === 'context_supplied') {
+    const value = event as ContextSuppliedEvent;
+    const pointerKeys = ['brain_id','source_id','canonical_slug','row_num'];
+    const claimKeys = ['claim_fingerprint','class','scope','target','trigger'];
+    const validScope = (raw: unknown): raw is LearningClaimIdentity['scope'] => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+      const s = raw as Record<string, unknown>;
+      if (s.kind === 'global') return Object.keys(s).length === 1;
+      if (s.kind === 'repository') return Object.keys(s).length === 2 && typeof s.target === 'string' && /^repo:[^/\s:]+\/[^/\s:]+\/[^/\s:]+$/.test(s.target);
+      return s.kind === 'project' && Object.keys(s).length === 2 && typeof s.target === 'string' && /^project:[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(s.target);
+    };
+    const validClaim = (raw: unknown): boolean => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+      const c = raw as Record<string, unknown>;
+      if (Object.keys(c).some((key) => !claimKeys.includes(key)) || !/^[a-f0-9]{64}$/.test(String(c.claim_fingerprint)) || !['constraint','preference','goal','lesson','open_loop'].includes(String(c.class)) || !validScope(c.scope) || (c.scope.kind === 'global' ? c.target !== null : c.target !== c.scope.target)) return false;
+      if (c.class === 'open_loop') { const t = c.trigger; return !!t && typeof t === 'object' && !Array.isArray(t) && Object.keys(t).length === 3 && (t as Record<string, unknown>).state === 'pending' && typeof (t as Record<string, unknown>).kind === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test((t as Record<string, unknown>).kind as string) && typeof (t as Record<string, unknown>).id === 'string' && !!(t as Record<string, unknown>).id; }
+      return c.trigger === null;
+    };
+    if (Object.keys(value).some((key) => !['schema_version','event_id','occurred_at','event_type','version','brain_id','run_id','semantic_sequence','provider','provider_session_id','source_id','request_hash','pointers','claims','item_count','token_estimate'].includes(key)) || value.schema_version !== LEARNING_LOOP_SCHEMA_VERSION || value.version !== 1 || !nonEmpty(value.brain_id) || !nonEmpty(value.run_id) || !Number.isSafeInteger(value.semantic_sequence) || value.semantic_sequence < 1 || value.provider !== 'codex' || !SESSION_ID_RE.test(value.provider_session_id) || !nonEmpty(value.source_id) || !/^[a-f0-9]{64}$/.test(value.request_hash) || !Array.isArray(value.pointers) || !Array.isArray(value.claims) || value.pointers.length !== value.claims.length || value.pointers.length > 5 || value.item_count !== value.pointers.length || !Number.isSafeInteger(value.token_estimate) || value.token_estimate < 0 || value.token_estimate > 800 || value.pointers.some((p) => !p || Object.keys(p).some((key) => !pointerKeys.includes(key)) || p.brain_id !== value.brain_id || p.source_id !== value.source_id || !nonEmpty(p.canonical_slug) || !Number.isSafeInteger(p.row_num) || p.row_num < 1) || value.claims.some((c) => !validClaim(c))) throw new LearningLoopError('ledger_corrupt', 'Learning Loop context event has an invalid shape');
+    return;
+  }
   throw new LearningLoopError('ledger_corrupt', 'Learning Loop ledger contains an unknown event type');
 }
 
@@ -1898,7 +1920,7 @@ export function replayLearningLoop(records: LearningLoopLedgerRecord[]): Learnin
       }
       projection.events.push(event);
       continue;
-    } else {
+    } else if (event.event_type === 'session_evaluated') {
       const key = `${event.provider}\u0000${event.provider_session_id}`;
       const binding = projection.session_bindings.get(key);
       if (
@@ -2006,10 +2028,14 @@ function appendEvent(event: LearningLoopEvent | ExactEventRecordV1, opts: Ledger
   }
 }
 
+export async function withLearningLoopLedgerMutation<T>(engine: BrainEngine, opts: LedgerOptions, fn: (state: LearningLoopProjection) => { value: T; event?: LearningLoopEvent | ExactEventRecordV1 } | Promise<{ value: T; event?: LearningLoopEvent | ExactEventRecordV1 }>): Promise<T> {
+  return withLedgerMutation(engine, opts, fn);
+}
+
 async function withLedgerMutation<T>(
   engine: BrainEngine,
   opts: LedgerOptions,
-  fn: (state: LearningLoopProjection) => { value: T; event?: LearningLoopEvent } | Promise<{ value: T; event?: LearningLoopEvent }>,
+  fn: (state: LearningLoopProjection) => { value: T; event?: LearningLoopEvent | ExactEventRecordV1 } | Promise<{ value: T; event?: LearningLoopEvent | ExactEventRecordV1 }>,
 ): Promise<T> {
   const work = async (): Promise<T> => {
     await opts.beforeMutation?.();

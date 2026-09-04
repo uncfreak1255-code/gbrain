@@ -3,7 +3,7 @@
  * Each operation defines its schema, handler, and optional CLI hints.
  */
 
-import { lstatSync, realpathSync } from 'fs';
+import { lstatSync, realpathSync, readFileSync } from 'fs';
 import { resolve, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
@@ -27,6 +27,7 @@ import { isSearchMode } from './search/mode.ts';
 import { stampEvidence } from './search/evidence.ts';
 import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
+import { buildContextBundle, makeContextSuppliedTelemetry, normalizeContextRequest, type ContextRequestV1 } from './learning-loop-context.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import {
@@ -5434,6 +5435,44 @@ const learning_loop_submit_session_v1: Operation = {
   }),
 };
 
+const learning_loop_request_context_v1: Operation = {
+  name: 'learning_loop_request_context_v1',
+  description: 'Request bounded, exact-scope context for the authenticated active Learning Loop session.',
+  params: { request: { type: 'object', required: true } },
+  mutating: true, scope: 'write',
+  handler: async (ctx, p) => learningLoopCall(async (mod) => {
+    if (ctx.remote !== true || !ctx.auth?.clientId || !ctx.auth.sourceId || ctx.sourceId !== ctx.auth.sourceId) throw new mod.LearningLoopError('forbidden', 'Context request requires an authenticated adapter');
+    const auth = ctx.auth;
+    const input = normalizeContextRequest(p.request as ContextRequestV1);
+    return mod.withLearningLoopLedgerMutation(ctx.engine, { config: ctx.config }, async (state) => {
+    const run = state.active_run_id ? state.runs.get(state.active_run_id) : undefined;
+    const adapter = run?.armed.authorized_adapter;
+    const bound = state.session_bindings.get(`codex\u0000${input.provider_session_id}`);
+    if (!run || run.terminal || input.run_id !== run.run_id || !adapter || adapter.client_id !== auth.clientId || adapter.source_id !== input.source_id || !bound || bound.adapter.client_id !== adapter.client_id || bound.adapter.source_id !== adapter.source_id) throw new mod.LearningLoopError('forbidden', 'Context request is not bound to the authorized session');
+    const destination = run.armed.contract_version === 2 ? run.armed.destination_binding : undefined;
+    if (!destination || destination.brain_id !== input.brain_id || destination.source_id !== input.source_id) throw new mod.LearningLoopError('forbidden', 'Context request target does not match the frozen destination');
+    const current = await mod.resolveLearningLoopDestinationBinding(ctx.engine, destination.brain_id, destination.source_id, destination.canonical_slug);
+    mod.assertRootBindingUnchanged(destination, current);
+    let content: string;
+    try { content = readFileSync(resolve(current.canonical_realpath, `${current.canonical_slug}.md`), 'utf8'); } catch { throw new mod.LearningLoopError('binding_unavailable', 'Canonical destination page is unavailable'); }
+    const pages = [{ brain_id: current.brain_id, source_id: current.source_id, canonical_slug: current.canonical_slug, content }];
+    const bundle = buildContextBundle(input, pages, input.source_id);
+    const telemetry = makeContextSuppliedTelemetry(input, bundle);
+    const prior = state.events.find((event) => event.event_type === 'context_supplied' && event.run_id === run.run_id && event.provider_session_id === input.provider_session_id && event.request_hash === telemetry.request_hash) as import('./learning-loop.ts').ContextSuppliedEvent | undefined;
+    if (prior) {
+      const current = JSON.stringify({ pointers: telemetry.pointers, claims: telemetry.claims, item_count: telemetry.item_count, token_estimate: telemetry.token_estimate });
+      const previous = JSON.stringify({ pointers: prior.pointers, claims: prior.claims, item_count: prior.item_count, token_estimate: prior.token_estimate });
+      if (current !== previous) throw new mod.LearningLoopError('command_conflict', 'Context replay conflicts with persisted telemetry');
+      return { value: bundle };
+    }
+    const sequence = state.events.filter((event) => 'semantic_sequence' in event && (event as { brain_id?: string; run_id?: string }).brain_id === destination.brain_id && (event as { run_id?: string }).run_id === run.run_id).reduce((max, event) => Math.max(max, Number((event as { semantic_sequence?: number }).semantic_sequence) || 0), 0) + 1;
+    const occurred_at = new Date().toISOString();
+    const exact = mod.makeExactEventRecordV1({ event_payload: { schema_version: 1, ...telemetry, brain_id: destination.brain_id, run_id: run.run_id, occurred_at, semantic_sequence: sequence }, brain_id: destination.brain_id, run_id: run.run_id, occurred_at, semantic_sequence: sequence });
+    return { value: bundle, event: exact };
+    });
+  }),
+};
+
 const learning_loop_candidate: Operation = {
   name: 'learning_loop_candidate', description: 'Record a locally-derived Learning Loop candidate.',
   params: { run_id: { type: 'string', required: true }, source_id: { type: 'string', required: true }, identity: { type: 'object', required: true }, locators: { type: 'array', required: true, items: { type: 'object' } } },
@@ -5608,6 +5647,7 @@ export const operations: Operation[] = [
   learning_loop_get_mode, learning_loop_set_mode, learning_loop_inspect,
   learning_loop_arm, learning_loop_abort, learning_loop_resolve_transcript, learning_loop_bind_session,
   learning_loop_submit_session_v1,
+  learning_loop_request_context_v1,
   learning_loop_candidate, learning_loop_authority, learning_loop_activate, learning_loop_correct,
   learning_loop_reverse,
 ];
