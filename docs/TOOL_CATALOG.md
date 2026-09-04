@@ -4,7 +4,7 @@
 <!-- Regenerate: bun run scripts/generate-tool-catalog.ts -->
 <!-- Freshness-guarded by scripts/check-tool-catalog-fresh.sh (bun run verify). -->
 
-Every non-localOnly operation on the MCP surface: 122 tools across 23 areas. **Starter** marks membership in the ~27-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
+Every non-localOnly operation on the MCP surface: 123 tools across 24 areas. **Starter** marks membership in the ~27-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
 
 ## admin
 
@@ -103,6 +103,12 @@ Every non-localOnly operation on the MCP surface: 122 tools across 23 areas. **S
 | `send_job_message` | Send a sidechannel message to a running job's inbox | admin |  |  |
 | `submit_agent` | Submit an LLM agent job that the worker dispatches via the gateway-native tool loop. | agent | yes |  |
 | `submit_job` | Submit a background job to the Minions queue. | admin |  |  |
+
+## learning
+
+| Tool | Description | Scope | Starter | Gate |
+|---|---|---|---|---|
+| `learning_loop_submit_session_v1` | Submit bounded Codex session metadata from an authenticated, source- and session-bound adapter. | write |  |  |
 
 ## links
 
