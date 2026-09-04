@@ -5448,7 +5448,7 @@ const learning_loop_request_context_v1: Operation = {
     const run = state.active_run_id ? state.runs.get(state.active_run_id) : undefined;
     const adapter = run?.armed.authorized_adapter;
     const bound = state.session_bindings.get(`codex\u0000${input.provider_session_id}`);
-    if (!run || run.terminal || input.run_id !== run.run_id || !adapter || adapter.client_id !== auth.clientId || adapter.source_id !== input.source_id || !bound || bound.adapter.client_id !== adapter.client_id || bound.adapter.source_id !== adapter.source_id) throw new mod.LearningLoopError('forbidden', 'Context request is not bound to the authorized session');
+    if (!run || run.terminal || input.run_id !== run.run_id || input.source_id !== auth.sourceId || !adapter || adapter.client_id !== auth.clientId || adapter.source_id !== input.source_id || !bound || bound.adapter.client_id !== adapter.client_id || bound.adapter.source_id !== adapter.source_id) throw new mod.LearningLoopError('forbidden', 'Context request is not bound to the authorized session');
     const destination = run.armed.contract_version === 2 ? run.armed.destination_binding : undefined;
     if (!destination || destination.brain_id !== input.brain_id || destination.source_id !== input.source_id) throw new mod.LearningLoopError('forbidden', 'Context request target does not match the frozen destination');
     const current = await mod.resolveLearningLoopDestinationBinding(ctx.engine, destination.brain_id, destination.source_id, destination.canonical_slug);

@@ -42,6 +42,7 @@ describe('Personal Learning Loop PR3 context request', () => {
     expect(source).not.toContain('process.env'); expect(source).not.toContain('cwd('); expect(source).not.toContain('.git');
     expect(operation).not.toContain('getPage('); expect(operation).not.toContain('process.env'); expect(operation).not.toContain('cwd(');
     expect(operation).toContain('assertRootBindingUnchanged'); expect(operation).toContain('readFileSync');
+    expect(operation).toContain('input.source_id !== auth.sourceId');
   });
 });
 
