@@ -2,6 +2,34 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.48.0.1] - 2026-09-03
+
+**Edits to the same brain page now stay in one safe line, even when several learning jobs touch it at once.** GBrain already protected page writes, but a few user commands identified that protection differently from the background learning loop. Under unlucky timing, two valid edits to one page could enter separate write paths instead of waiting for each other. This release gives those edits one shared identity, so the later writer sees the latest page before it makes its change.
+
+There is nothing to configure. Existing `gbrain takes` and fact-forgetting commands keep the same syntax, and the learning loop keeps its current schedule and budget controls. The change applies automatically after upgrade.
+
+### What you'd see in a concrete example
+
+| Concurrent work | Result after this release |
+|---|---|
+| A learning-loop write and `gbrain takes add` target the same page and source | One waits, then reads and updates the latest page |
+| A fact is forgotten while another canonical writer updates the page | The Markdown page and database mirror stay inside the same protected mutation |
+| Two sources use the same page slug | Each source keeps its own lock identity and content |
+| A nested canonical write reuses the active mutation scope | It completes without deadlocking or opening a second physical lock |
+
+### Things to watch
+
+This is a coordination fix, not a new recovery system. It prevents cooperating GBrain writers from using different lock identities; it does not replace backups or make arbitrary external file edits transactional. No schema migration, new configuration, paid operation, or manual backfill is required.
+
+### Itemized changes
+
+### Fixed
+- **Canonical page mutations now use one brain-, source-, and slug-qualified lock identity.** `takes` mutations and fact forgetting acquire the source boundary first, then hold the exact page lock across both the Markdown edit and database mirror.
+- **Nested writes remain safe without masking later work.** The page-lock scope uses reference-counted ownership, so the physical lock remains held until every nested holder finishes. Async work that inherits an expired scope must acquire a new physical lock.
+
+### For contributors
+- Focused regression coverage now pins source-qualified writer routing, same-chain nesting, delayed-child ownership, expired-context reacquisition, and mirrored page updates for takes and fact forgetting.
+
 ## [0.48.0.0] - 2026-08-14
 
 **Autopilot and maintenance now report explicit health states instead of silent green.** `gbrain status`, `gbrain doctor`, and the MCP HTTP surface distinguish healthy, degraded, and stalled autopilot/maintenance runs, so a wedged loop reads as a problem rather than as quiet success. Checkpoint of the Aug 13 session; shipped under a recorded one-release /ship policy exception (the /ship skill was lost with the retired gstack repo - restoration is a named follow-up).

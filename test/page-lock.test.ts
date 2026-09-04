@@ -106,6 +106,64 @@ describe('withPageLock', () => {
     await expect(withPageLock('held/page', async () => 'unreachable', { lockRoot: tmp, timeoutMs: 100, pollMs: 10 })).rejects.toThrow();
     await first!.release();
   });
+
+  test('re-enters the same qualified lock in one async call chain', async () => {
+    const opts = { lockRoot: tmp, brainId: 'brain', sourceId: 'source', timeoutMs: 50, pollMs: 10 };
+    const order: string[] = [];
+    await withPageLock('nested/page', async () => {
+      order.push('outer');
+      const nestedHandle = await acquirePageLock('nested/page', opts);
+      expect(nestedHandle).not.toBeNull();
+      await nestedHandle!.release();
+      await withPageLock('nested/page', async () => {
+        order.push('inner');
+      }, opts);
+    }, opts);
+    expect(order).toEqual(['outer', 'inner']);
+  });
+
+  test('an inherited async context reacquires after the outer lock is released', async () => {
+    const opts = { lockRoot: tmp, brainId: 'brain', sourceId: 'source' };
+    let continueChild!: () => void;
+    const gate = new Promise<void>(resolve => { continueChild = resolve; });
+    let child!: Promise<Awaited<ReturnType<typeof acquirePageLock>>>;
+    await withPageLock('delayed/page', async () => {
+      child = (async () => {
+        await gate;
+        return acquirePageLock('delayed/page', opts);
+      })();
+    }, opts);
+
+    continueChild();
+    const reacquired = await child;
+    expect(reacquired).not.toBeNull();
+    expect(await acquirePageLock('delayed/page', opts)).toBeNull();
+    await reacquired!.release();
+  });
+
+  test('a nested callback keeps the physical lock until the nested holder finishes', async () => {
+    const opts = { lockRoot: tmp, brainId: 'brain', sourceId: 'source' };
+    let continueChild!: () => void;
+    const gate = new Promise<void>(resolve => { continueChild = resolve; });
+    let childEntered = false;
+    let child!: Promise<void>;
+
+    await withPageLock('nested-delayed/page', async () => {
+      child = withPageLock('nested-delayed/page', async () => {
+        await gate;
+        childEntered = true;
+      }, opts);
+      await Bun.sleep(0);
+    }, opts);
+
+    expect(childEntered).toBe(false);
+    expect(await acquirePageLock('nested-delayed/page', opts)).toBeNull();
+    continueChild();
+    await child;
+    const next = await acquirePageLock('nested-delayed/page', opts);
+    expect(next).not.toBeNull();
+    await next!.release();
+  });
 });
 
 test('source-qualified identities produce safe filenames', () => {
