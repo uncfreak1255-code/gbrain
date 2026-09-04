@@ -2479,7 +2479,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        1996
+        1998
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2491,7 +2491,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        2378
+        2380
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2505,7 +2505,7 @@
       "lines": [
         1056,
         1060,
-        1096
+        1098
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2517,7 +2517,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        1188
+        1190
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2529,8 +2529,8 @@
       "primitive": "db:importFromContent",
       "count": 2,
       "lines": [
-        1310,
-        1405
+        1312,
+        1407
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
