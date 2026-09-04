@@ -2465,9 +2465,9 @@
       "primitive": "db:importFromContent",
       "count": 3,
       "lines": [
-        960,
-        971,
-        1006
+        962,
+        973,
+        1008
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2479,7 +2479,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        1998
+        2052
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2491,7 +2491,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        2380
+        2438
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2503,9 +2503,9 @@
       "primitive": "db:importFromContent",
       "count": 3,
       "lines": [
-        1056,
-        1060,
-        1098
+        1058,
+        1062,
+        1100
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2517,7 +2517,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        1190
+        1192
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2529,8 +2529,8 @@
       "primitive": "db:importFromContent",
       "count": 2,
       "lines": [
-        1312,
-        1407
+        1314,
+        1409
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -2700,7 +2700,7 @@
       "primitive": "db:purgeDeletedPages",
       "count": 1,
       "lines": [
-        1415
+        1416
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -2712,7 +2712,7 @@
       "primitive": "db:restorePage",
       "count": 1,
       "lines": [
-        1389
+        1390
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -2724,7 +2724,7 @@
       "primitive": "db:revertToVersion",
       "count": 1,
       "lines": [
-        2645
+        2646
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -2736,7 +2736,7 @@
       "primitive": "db:softDeletePage",
       "count": 1,
       "lines": [
-        1361
+        1362
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",

@@ -5468,10 +5468,9 @@ const learning_loop_request_context_v1: Operation = {
       if (current !== previous) throw new mod.LearningLoopError('command_conflict', 'Context replay conflicts with persisted telemetry');
       return { value: bundle };
     }
-    const sequence = state.events.filter((event) => 'semantic_sequence' in event && (event as { brain_id?: string; run_id?: string }).brain_id === destination.brain_id && (event as { run_id?: string }).run_id === run.run_id).reduce((max, event) => Math.max(max, Number((event as { semantic_sequence?: number }).semantic_sequence) || 0), 0) + 1;
     const occurred_at = new Date().toISOString();
-    const exact = mod.makeExactEventRecordV1({ event_payload: { schema_version: 1, ...telemetry, brain_id: destination.brain_id, run_id: run.run_id, occurred_at, semantic_sequence: sequence }, brain_id: destination.brain_id, run_id: run.run_id, occurred_at, semantic_sequence: sequence });
-    return { value: bundle, event: exact };
+    const event = mod.completeLearningLoopContextEvent({ schema_version: 1, ...telemetry, brain_id: destination.brain_id, run_id: run.run_id, occurred_at });
+    return { value: bundle, event };
     }));
   }),
 };

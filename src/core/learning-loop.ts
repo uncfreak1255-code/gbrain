@@ -236,7 +236,7 @@ export interface LearningAuthorityEvent extends EventBase { event_type: 'learnin
 export interface LearningTransitionEvent extends EventBase { event_type: 'learning_transition'; transition_version: 1; brain_id: string; run_id: string; semantic_sequence: number; source_id: string; canonical_slug: string; transition: 'activate'; identity: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; fact_row: number; }
 export interface LearningCorrectionEvent extends EventBase { event_type: 'learning_correction'; correction_version: 1; brain_id: string; run_id: string; semantic_sequence: number; source_id: string; canonical_slug: string; predecessor: LearningClaimIdentity; replacement: LearningClaimIdentity; authority: 'direct_user' | 'repetition'; blocked_claim_key: string; predecessor_fact_row: number; replacement_fact_row: number; lineage_generation: number; replacement_set_fingerprint: string; }
 
-export interface ContextSuppliedEvent extends EventBase { event_type: 'context_supplied'; version: 1; brain_id: string; run_id: string; semantic_sequence: number; provider: 'codex'; provider_session_id: string; source_id: string; request_hash: string; pointers: readonly { brain_id: string; source_id: string; canonical_slug: string; row_num: number }[]; claims: readonly { claim_fingerprint: string; class: string; scope: unknown; target: string | null; trigger: unknown }[]; item_count: number; token_estimate: number; }
+export interface ContextSuppliedEvent extends EventBase { event_type: 'context_supplied'; version: 1; brain_id: string; run_id: string; provider: 'codex'; provider_session_id: string; source_id: string; request_hash: string; pointers: readonly { brain_id: string; source_id: string; canonical_slug: string; row_num: number }[]; claims: readonly { claim_fingerprint: string; class: string; scope: unknown; target: string | null; trigger: unknown }[]; item_count: number; token_estimate: number; }
 export type LearningLoopEvent = RunArmedEvent | RunArmedEventV2 | RunAbortedEvent | AdapterSessionBoundEvent | SessionEvaluatedEvent | LearningCandidateEvent | LearningAuthorityEvent | LearningTransitionEvent | LearningCorrectionEvent | ContextSuppliedEvent;
 export type EligibilityReason =
   | 'eligible'
@@ -1539,6 +1539,11 @@ function completeEvent<T extends Omit<LearningLoopEvent, 'event_id'>>(event: T):
   return { ...event, event_id: eventId(event) } as unknown as LearningLoopEvent;
 }
 
+/** Build a content-hashed operational context telemetry event. */
+export function completeLearningLoopContextEvent(input: Omit<ContextSuppliedEvent, 'event_id'>): ContextSuppliedEvent {
+  return completeEvent(input) as ContextSuppliedEvent;
+}
+
 function nonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
@@ -1785,7 +1790,7 @@ function assertEventShape(event: LearningLoopEvent): void {
       if (c.class === 'open_loop') { const t = c.trigger; return !!t && typeof t === 'object' && !Array.isArray(t) && Object.keys(t).length === 3 && (t as Record<string, unknown>).state === 'pending' && typeof (t as Record<string, unknown>).kind === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test((t as Record<string, unknown>).kind as string) && typeof (t as Record<string, unknown>).id === 'string' && !!(t as Record<string, unknown>).id; }
       return c.trigger === null;
     };
-    if (Object.keys(value).some((key) => !['schema_version','event_id','occurred_at','event_type','version','brain_id','run_id','semantic_sequence','provider','provider_session_id','source_id','request_hash','pointers','claims','item_count','token_estimate'].includes(key)) || value.schema_version !== LEARNING_LOOP_SCHEMA_VERSION || value.version !== 1 || !nonEmpty(value.brain_id) || !nonEmpty(value.run_id) || !Number.isSafeInteger(value.semantic_sequence) || value.semantic_sequence < 1 || value.provider !== 'codex' || !SESSION_ID_RE.test(value.provider_session_id) || !nonEmpty(value.source_id) || !/^[a-f0-9]{64}$/.test(value.request_hash) || !Array.isArray(value.pointers) || !Array.isArray(value.claims) || value.pointers.length !== value.claims.length || value.pointers.length > 5 || value.item_count !== value.pointers.length || !Number.isSafeInteger(value.token_estimate) || value.token_estimate < 0 || value.token_estimate > 800 || value.pointers.some((p) => !p || Object.keys(p).some((key) => !pointerKeys.includes(key)) || p.brain_id !== value.brain_id || p.source_id !== value.source_id || !nonEmpty(p.canonical_slug) || !Number.isSafeInteger(p.row_num) || p.row_num < 1) || value.claims.some((c) => !validClaim(c))) throw new LearningLoopError('ledger_corrupt', 'Learning Loop context event has an invalid shape');
+    if (Object.keys(value).some((key) => !['schema_version','event_id','occurred_at','event_type','version','brain_id','run_id','provider','provider_session_id','source_id','request_hash','pointers','claims','item_count','token_estimate'].includes(key)) || value.schema_version !== LEARNING_LOOP_SCHEMA_VERSION || value.version !== 1 || !nonEmpty(value.brain_id) || !nonEmpty(value.run_id) || !validIso(value.occurred_at) || value.provider !== 'codex' || !SESSION_ID_RE.test(value.provider_session_id) || !nonEmpty(value.source_id) || !/^[a-f0-9]{64}$/.test(value.request_hash) || !Array.isArray(value.pointers) || !Array.isArray(value.claims) || value.pointers.length !== value.claims.length || value.pointers.length > 5 || value.item_count !== value.pointers.length || !Number.isSafeInteger(value.token_estimate) || value.token_estimate < 0 || value.token_estimate > 800 || value.pointers.some((p) => !p || Object.keys(p).some((key) => !pointerKeys.includes(key)) || p.brain_id !== value.brain_id || p.source_id !== value.source_id || !nonEmpty(p.canonical_slug) || !Number.isSafeInteger(p.row_num) || p.row_num < 1) || value.claims.some((c) => !validClaim(c))) throw new LearningLoopError('ledger_corrupt', 'Learning Loop context event has an invalid shape');
     return;
   }
   throw new LearningLoopError('ledger_corrupt', 'Learning Loop ledger contains an unknown event type');
@@ -1818,6 +1823,7 @@ export function replayLearningLoop(records: LearningLoopLedgerRecord[]): Learnin
   };
   validateExactEventSequence(records.filter(isExactEventRecord));
   const ids = new Map<string, string>();
+  const contextRequests = new Map<string, string>();
   const commands = new Set<string>();
   for (const ledgerRecord of records) {
     const event = isExactEventRecord(ledgerRecord) ? eventFromExactRecord(ledgerRecord) : ledgerRecord;
@@ -1852,6 +1858,31 @@ export function replayLearningLoop(records: LearningLoopLedgerRecord[]): Learnin
         throw new LearningLoopError('ledger_corrupt', 'A provider session has more than one adapter binding');
       }
       projection.session_bindings.set(key, event);
+    } else if (event.event_type === 'context_supplied') {
+      const run = projection.runs.get(event.run_id);
+      const binding = projection.session_bindings.get(`codex\u0000${event.provider_session_id}`);
+      if (!run || run.terminal || run.armed.contract_version !== 2
+        || run.armed.destination_binding.brain_id !== event.brain_id
+        || run.armed.destination_binding.source_id !== event.source_id
+        || !binding
+        || binding.adapter.provider !== event.provider
+        || binding.adapter.client_id !== run.armed.authorized_adapter.client_id
+        || binding.adapter.source_id !== run.armed.authorized_adapter.source_id
+        || binding.adapter.source_id !== event.source_id) {
+        throw new LearningLoopError('ledger_corrupt', 'Learning Loop context event does not match its bound run and session');
+      }
+      const contextKey = `${event.run_id}\u0000${event.provider_session_id}\u0000${event.request_hash}`;
+      const { event_id: _eventId, occurred_at: _occurredAt, ...contextBody } = event;
+      const priorContext = contextRequests.get(contextKey);
+      const contextCanonical = canonicalJson(contextBody);
+      if (priorContext !== undefined && priorContext !== contextCanonical) {
+        throw new LearningLoopError('ledger_corrupt', 'Context telemetry has conflicting payloads for one request');
+      }
+      contextRequests.set(contextKey, contextCanonical);
+      // Context telemetry is content-hashed evidence only. It is retained in
+      // replay state but does not participate in semantic transition order.
+      projection.events.push(event);
+      continue;
     } else if (event.event_type === 'learning_candidate' || event.event_type === 'learning_authority') {
       const run = projection.runs.get(event.run_id);
       if (!run || run.terminal) throw new LearningLoopError('ledger_corrupt', 'Learning event references a missing or terminal run');

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildContextBundle, contextRequestHash, makeContextSuppliedTelemetry, normalizeContextRequest, type ContextRequestV1 } from '../src/core/learning-loop-context.ts';
+import { completeLearningLoopContextEvent, replayLearningLoop } from '../src/core/learning-loop.ts';
 import { encodeLearningLoopKnowledge, learningBlockedClaimKey, makeLearningClaimIdentity, type LearningClaimIdentity } from '../src/core/learning-loop-knowledge.ts';
 
 const base: ContextRequestV1 = { version: 1, run_id: 'run-1', provider: 'codex', provider_session_id: 'session-1', brain_id: 'brain-a', source_id: 'personal', scope: { kind: 'repository', target: 'repo:github.com/acme/repo' }, forge_repository: 'github.com/acme/repo', project: null, task_class: 'coding', relevance_window: ['Fix parser\r\n', 'Keep scope explicit'] };
@@ -85,5 +86,19 @@ describe('Personal Learning Loop PR3 retrieval and telemetry', () => {
     expect(telemetry.item_count).toBe(bundle.items.length); expect(telemetry.token_estimate).toBe(bundle.token_estimate);
     const serialized = JSON.stringify(telemetry);
     expect(serialized).not.toContain('Fix parser'); expect(serialized).not.toContain('Keep coding changes small'); expect(serialized).not.toContain('relevance_window');
+  });
+
+  test('context telemetry is content-hashed evidence outside semantic ordering', () => {
+    const bundle = buildContextBundle(base, [page([{ identity: identity('Keep coding changes small') }])], 'personal');
+    const telemetry = makeContextSuppliedTelemetry(base, bundle);
+    const event = completeLearningLoopContextEvent({
+      schema_version: 1, ...telemetry, brain_id: base.brain_id, occurred_at: '2026-01-01T00:00:00.000Z',
+    });
+    expect(event).not.toHaveProperty('semantic_sequence');
+    expect(event.event_id).toMatch(/^[a-f0-9]{64}$/);
+    expect(completeLearningLoopContextEvent({
+      schema_version: 1, ...telemetry, brain_id: base.brain_id, occurred_at: '2026-01-01T00:00:00.000Z',
+    })).toEqual(event);
+    expect(() => replayLearningLoop([{ ...event, semantic_sequence: 1 } as never])).toThrow();
   });
 });

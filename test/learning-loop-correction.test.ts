@@ -12,7 +12,7 @@ import {
 } from '../src/core/learning-loop-knowledge.ts';
 import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { armLearningLoop, bindLearningLoopSession, correctLearningClaim, activateLearningClaim, reverseLearningClaim, recordLearningAuthority, recordLearningCandidate, recordSessionEvaluation, resolveAuthoritativeTranscript, parseAuthoritativeUserRows, setLearningLoopMode, readLearningLoopLedger, type AdapterIdentity } from '../src/core/learning-loop.ts';
+import { armLearningLoop, bindLearningLoopSession, completeLearningLoopContextEvent, correctLearningClaim, activateLearningClaim, replayLearningLoop, reverseLearningClaim, recordLearningAuthority, recordLearningCandidate, recordSessionEvaluation, resolveAuthoritativeTranscript, parseAuthoritativeUserRows, setLearningLoopMode, readLearningLoopLedger, type AdapterIdentity } from '../src/core/learning-loop.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
 import { importFromFile } from '../src/core/import-file.ts';
@@ -140,6 +140,22 @@ describe('Phase 5 correction lineage reducer', () => {
         expect.objectContaining({ rowNum: 2, claim: 'B', active: true }),
       ]));
       expect(readLearningLoopLedger({ config: f.config }).filter(event => event.event_type === 'learning_transition' || event.event_type === 'learning_correction').map(event => event.semantic_sequence)).toEqual([1, 2]);
+      const ledger = readLearningLoopLedger({ config: f.config });
+      const armed = ledger.find(event => event.event_type === 'run_armed' && event.run_id === f.armed.run_id)!;
+      const context = completeLearningLoopContextEvent({
+        schema_version: 1, event_type: 'context_supplied', version: 1, brain_id: f.armed.destination_binding.brain_id,
+        run_id: f.armed.run_id, provider: 'codex', provider_session_id: `correction-integration`, source_id: 'default',
+        request_hash: 'a'.repeat(64), pointers: [], claims: [], item_count: 0, token_estimate: 0,
+        occurred_at: '2026-01-01T00:00:00.000Z',
+      });
+      const bound = ledger.find(event => event.event_type === 'adapter_session_bound')!;
+      const contextual = { ...context, provider_session_id: bound.provider_session_id };
+      const transitionIndex = ledger.findIndex(event => event.event_type === 'learning_transition');
+      const interleaved = [...ledger.slice(0, transitionIndex + 1), contextual, ...ledger.slice(transitionIndex + 1)];
+      const replayed = replayLearningLoop(interleaved);
+      expect(replayed.events.filter(event => event.event_type === 'learning_transition' || event.event_type === 'learning_correction').map(event => event.semantic_sequence)).toEqual([1, 2]);
+      expect(replayed.events.find(event => event.event_id === contextual.event_id)).toEqual(contextual);
+      expect(armed).toBeDefined();
       await expect(activateLearningClaim({ engine, config: f.config, run_id: f.armed.run_id, source_id: 'default', canonical_slug: f.slug, identity: f.a, authority: 'direct_user' })).rejects.toMatchObject({ code: 'forbidden' });
     }); } finally { rmSync(f.root, { recursive: true, force: true }); }
   }, 60_000);
