@@ -159,7 +159,7 @@ function realpathExistingOrJoin(path: string): string {
   }
 }
 
-/** Slug is the registered-root-relative path, never a caller --dir/cwd basename. */
+/** Slug is the registered-root-relative path, never a caller directory or cwd basename. */
 function canonicalSlugForRegisteredPath(root: string, path: string): string {
   const rel = relative(root, realpathExistingOrJoin(path));
   if (!rel || rel.startsWith('..') || isAbsolute(rel) || rel.includes('\0')) {

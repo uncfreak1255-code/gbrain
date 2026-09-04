@@ -71,7 +71,9 @@ d("Cross-session recall test (Postgres)", () => {
   // `source` (the writer), not on the fact TEXT.
   test('excludeAuditRows filters extraction audit checkpoint rows out of listFactsSince', async () => {
     const engine = getEngine();
-    const before = new Date();
+    // Use the same clock as facts.created_at, including container clock drift.
+    const [clock] = await engine.executeRaw<{ now: string | Date }>('SELECT now() AS now');
+    const before = new Date(clock.now);
     await engine.insertFact(
       {
         fact: 'EXTRACTION_COMPLETE',
@@ -117,7 +119,9 @@ d("Cross-session recall test (Postgres)", () => {
   // matching on fact TEXT — which hid this legitimate content.
   test('excludeAuditRows only excludes audit-SOURCED rows — a real fact whose exact text matches an audit marker string survives (pg)', async () => {
     const engine = getEngine();
-    const before = new Date();
+    // Use the same clock as facts.created_at, including container clock drift.
+    const [clock] = await engine.executeRaw<{ now: string | Date }>('SELECT now() AS now');
+    const before = new Date(clock.now);
     await engine.insertFact(
       {
         fact: 'EXTRACTION_COMPLETE',
