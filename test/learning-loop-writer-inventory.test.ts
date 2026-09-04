@@ -24,6 +24,7 @@ const FILE_MUTATORS = new Set([
   'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync',
   'unlink', 'unlinkSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync', 'rm', 'rmSync',
   'createWriteStream',
+  'atomicWriteFileSync',
 ]);
 const PAGE_MUTATORS = new Set([
   'importFromContent', 'importFromFile', 'importFile', 'withImportTransaction', 'putPage',
@@ -185,6 +186,13 @@ describe('Learning Loop Phase 3 writer inventory', () => {
       'function f(engine: any, table: string) { const raw = engine.executeRaw; raw(`UPDATE ${table} SET x = 1`); }',
     );
     expect(sites.some(site => site.primitive === 'sql:dynamic_table:mutation')).toBe(true);
+  });
+
+  test('detects aliased atomic filesystem wrapper calls', () => {
+    const sites = scanMutationSitesFromSource(
+      "import { atomicWriteFileSync as write } from './atomic-write'; function f() { write('x', 'y'); }",
+    );
+    expect(sites.some(site => site.primitive === 'fs:atomicWriteFileSync')).toBe(true);
   });
 
   test('rejects unresolved computed mutations on nested receivers', () => {

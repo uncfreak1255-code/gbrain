@@ -206,6 +206,18 @@
       "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
     },
     {
+      "file": "src/commands/backlinks.ts",
+      "symbol": "fixBacklinkGaps",
+      "primitive": "fs:atomicWriteFileSync",
+      "count": 1,
+      "lines": [
+        314
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Path-only canonical Markdown mutation explicitly rejects Learning Loop-managed targets before writing."
+    },
+    {
       "file": "src/commands/bench-publish.ts",
       "symbol": "runBenchPublish",
       "primitive": "fs:writeFileSync",
@@ -1037,11 +1049,11 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        580
+        582
       ],
-      "classification": "non_live_or_configuration",
-      "boundary": "checked_inventory",
-      "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Path-only canonical Markdown mutation explicitly rejects Learning Loop-managed targets before writing."
     },
     {
       "file": "src/commands/migrate-engine.ts",
@@ -3279,6 +3291,18 @@
       "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
     },
     {
+      "file": "src/core/creds/vault.ts",
+      "symbol": "write",
+      "primitive": "fs:atomicWriteFileSync",
+      "count": 1,
+      "lines": [
+        243
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Atomic credential state mutation; not a canonical Markdown page owner."
+    },
+    {
       "file": "src/core/cross-modal-eval/receipt-write.ts",
       "symbol": "writeReceipt",
       "primitive": "fs:writeFileSync",
@@ -4082,6 +4106,18 @@
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
       "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/google/google-source.ts",
+      "symbol": "writeGoogleState",
+      "primitive": "fs:atomicWriteFileSync",
+      "count": 1,
+      "lines": [
+        161
+      ],
+      "classification": "non_live_or_configuration",
+      "boundary": "checked_inventory",
+      "reason": "Atomic connector state mutation; not a canonical Markdown page owner."
     },
     {
       "file": "src/core/import-checkpoint.ts",
@@ -6506,6 +6542,18 @@
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
       "reason": "Exact non-canonical output, cache, log, temp, configuration, or tool-state mutation retained to detect ownership drift."
+    },
+    {
+      "file": "src/core/takes-write.ts",
+      "symbol": "writePageBody",
+      "primitive": "fs:atomicWriteFileSync",
+      "count": 1,
+      "lines": [
+        366
+      ],
+      "classification": "live_path_writer",
+      "boundary": "managed_target_reject",
+      "reason": "Canonical Markdown writer explicitly rejects Learning Loop-managed targets before its atomic path-only write."
     },
     {
       "file": "src/core/thin-client-upgrade-prompt.ts",

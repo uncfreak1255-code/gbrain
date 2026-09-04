@@ -17,6 +17,7 @@ import { createProgress, startHeartbeat } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { parseMarkdown, frontmatterBodyOffset, findTimelineSplitIndex } from '../core/markdown.ts';
 import { atomicWriteFileSync } from '../core/atomic-write.ts';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 import { withPageLock } from '../core/page-lock.ts';
 import type { BrainEngine } from '../core/engine.ts';
 
@@ -309,6 +310,7 @@ export async function fixBacklinkGaps(
         }
 
         if (!dryRun) {
+          assertUnmanagedPathMutation(targetPath, content);
           atomicWriteFileSync(targetPath, content, {
             verify: (onDisk) => {
               const diskError = firstEditBlockingError(onDisk, targetPath);
