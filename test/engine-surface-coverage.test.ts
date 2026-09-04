@@ -97,7 +97,7 @@ const INTERFACE_METHODS: readonly string[] = [
   'updateSlug', 'rewriteLinks', 'resolveSlugWithAlias', 'resolveSlugWithAliasDetailed', 'resolveAliases', 'setPageAliases',
   'refreshPageBody', 'updatePageContextualRetrievalState', 'migrateFactsToCanonical',
   // Config + migration + raw SQL
-  'getConfig', 'setConfig', 'unsetConfig', 'listConfigKeys', 'runMigration',
+  'getConfig', 'setConfig', 'unsetConfig', 'listConfigKeys', 'runMigration', 'learningLoopLedgerConfig',
   'getChunksWithEmbeddings', 'executeRaw', 'executeRawDirect',
   // v0.46.28-34 master waves (classified at the test-gap-wave merge):
   // #3980 bulk config read, #3776 takes-embedding update, #3674 scoped
