@@ -43,6 +43,7 @@ describe('Personal Learning Loop PR3 context request', () => {
     expect(operation).not.toContain('getPage('); expect(operation).not.toContain('process.env'); expect(operation).not.toContain('cwd(');
     expect(operation).toContain('assertRootBindingUnchanged'); expect(operation).toContain('readFileSync');
     expect(operation).toContain('input.source_id !== auth.sourceId');
+    expect(operation.indexOf('withCanonicalSourceBoundary')).toBeLessThan(operation.indexOf('withLearningLoopLedgerMutation'));
   });
 });
 

@@ -37,6 +37,7 @@ import { isPathContained } from './path-confine.ts';
 import { parseLearningLoopFence, renderLearningLoopFence, createLearningTransitionPermit, reduceLearningLoopLineage, reduceLearningLoopReversal, replacementSetFingerprint, learningBlockedClaimKey, type LearningLoopKnowledge, type LearningPointer, type LearningReversalAttempt, type LearningReversalCheckpoint } from './learning-loop-knowledge.ts';
 import { parseFactsFence, renderFactsTable, upsertFactRow } from './facts-fence.ts';
 import { inspectExpectedManagedState, writeCanonicalPage, reconcileCanonicalReadback, withCanonicalSourceBoundary, type SourceQualifiedCanonicalTarget, type SourceWriteLease } from './canonical-page-write.ts';
+export { withCanonicalSourceBoundary } from './canonical-page-write.ts';
 import { importFromContent } from './import-file.ts';
 import { learningClaimFingerprint, normalizeLearningClaim, parseAuthoritativeUserRows } from './learning-loop-knowledge.ts';
 import { makeLearningManagedRow, type LearningClaimIdentity, type TranscriptUserRow } from './learning-loop-knowledge.ts';

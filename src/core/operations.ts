@@ -5444,7 +5444,10 @@ const learning_loop_request_context_v1: Operation = {
     if (ctx.remote !== true || !ctx.auth?.clientId || !ctx.auth.sourceId || ctx.sourceId !== ctx.auth.sourceId) throw new mod.LearningLoopError('forbidden', 'Context request requires an authenticated adapter');
     const auth = ctx.auth;
     const input = normalizeContextRequest(p.request as ContextRequestV1);
-    return mod.withLearningLoopLedgerMutation(ctx.engine, { config: ctx.config }, async (state) => {
+    const snapshot = mod.activeV2DestinationBinding({ config: ctx.config });
+    if (!snapshot || snapshot.brain_id !== input.brain_id || snapshot.source_id !== input.source_id) throw new mod.LearningLoopError('forbidden', 'Context request target does not match the active frozen destination');
+    const target = { brain_id: snapshot.brain_id, source_id: snapshot.source_id, canonical_slug: snapshot.canonical_slug, configured_root: snapshot.canonical_realpath };
+    return mod.withCanonicalSourceBoundary(ctx.engine, target, () => mod.withLearningLoopLedgerMutation(ctx.engine, { config: ctx.config }, async (state) => {
     const run = state.active_run_id ? state.runs.get(state.active_run_id) : undefined;
     const adapter = run?.armed.authorized_adapter;
     const bound = state.session_bindings.get(`codex\u0000${input.provider_session_id}`);
@@ -5469,7 +5472,7 @@ const learning_loop_request_context_v1: Operation = {
     const occurred_at = new Date().toISOString();
     const exact = mod.makeExactEventRecordV1({ event_payload: { schema_version: 1, ...telemetry, brain_id: destination.brain_id, run_id: run.run_id, occurred_at, semantic_sequence: sequence }, brain_id: destination.brain_id, run_id: run.run_id, occurred_at, semantic_sequence: sequence });
     return { value: bundle, event: exact };
-    });
+    }));
   }),
 };
 
