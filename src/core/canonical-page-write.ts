@@ -45,6 +45,8 @@ const liveLeases = new WeakSet<object>();
 const liveLeaseTokens = new Set<string>();
 const mutationPermits = new WeakSet<object>();
 const sourceLeaseContext = new AsyncLocalStorage<SourceWriteLease>();
+const CANONICAL_SOURCE_LOCK_TIMEOUT_MS = 30_000;
+const CANONICAL_SOURCE_LOCK_POLL_MS = 250;
 const FACTS = /<!--- gbrain:facts:begin -->[\s\S]*?<!--- gbrain:facts:end -->/g;
 const META = /<!-- gbrain:learning-loop:v1:begin -->[\s\S]*?<!-- gbrain:learning-loop:v1:end -->/g;
 function validateTarget(t: SourceQualifiedCanonicalTarget): void {
@@ -690,6 +692,9 @@ export async function withCanonicalSourceBoundary<T>(
     liveLeases.add(lease); liveLeaseTokens.add(lease.token);
     try { return await sourceLeaseContext.run(lease, () => fn(lease)); }
     finally { liveLeases.delete(lease); liveLeaseTokens.delete(lease.token); }
+  }, {
+    acquireTimeoutMs: CANONICAL_SOURCE_LOCK_TIMEOUT_MS,
+    acquirePollMs: CANONICAL_SOURCE_LOCK_POLL_MS,
   });
 }
 
