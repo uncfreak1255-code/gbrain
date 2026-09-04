@@ -1557,7 +1557,7 @@ function validIdentity(value: unknown): value is LearningClaimIdentity {
   if (typeof x.claim !== 'string' || x.claim.length === 0 || x.claim.length > 4096 || /[\r\n\u0000-\u001f\u007f]/.test(x.claim) || x.claim.normalize('NFC') !== x.claim || normalizeLearningClaim(x.claim) !== x.claim || !isLearningClass(x.class) || !x.scope || typeof x.target !== 'string' && x.target !== null || !('trigger' in x)) return false;
   if (Object.keys(x).some(k => !['claim','class','scope','target','trigger','claim_fingerprint'].includes(k))) return false;
   if (x.scope.kind === 'global' && (x.target !== null || Object.keys(x.scope).length !== 1)) return false;
-  if (x.scope.kind === 'repository' && (Object.keys(x.scope).length !== 2 || !/^repo:[^/\s:]+\/[^/\s]+\/[^/\s]+$/.test(x.scope.target) || x.target !== x.scope.target)) return false;
+  if (x.scope.kind === 'repository' && (Object.keys(x.scope).length !== 2 || !/^repo:[^/\s:]+\/[^/\s:]+\/[^/\s:]+$/.test(x.scope.target) || x.target !== x.scope.target)) return false;
   if (x.scope.kind === 'project' && (Object.keys(x.scope).length !== 2 || typeof x.scope.target !== 'string' || !/^project:[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(x.scope.target) || x.target !== x.scope.target)) return false;
   if (!['global', 'repository', 'project'].includes(x.scope.kind)) return false;
   if (x.class === 'open_loop' && (!x.trigger || typeof x.trigger !== 'object' || Object.keys(x.trigger).length !== 3 || Object.keys(x.trigger).some(k => !['kind','id','state'].includes(k)) || !/^[a-z][a-z0-9_-]{0,31}$/.test(x.trigger.kind) || !x.trigger.id || /[\r\n\u0000-\u001f\u007f]/.test(x.trigger.id) || x.trigger.state !== 'pending')) return false;

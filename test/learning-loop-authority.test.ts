@@ -222,6 +222,7 @@ describe('Phase 4 authority foundations', () => {
     expect(() => validateLearningClaimIdentity(valid)).not.toThrow();
     for (const bad of [
       { ...valid, scope: { kind: 'repository' } },
+      { ...valid, scope: { kind: 'repository', target: 'repo:github.com/acme:team/widgets' }, target: 'repo:github.com/acme:team/widgets' },
       { ...valid, scope: { kind: 'unknown', target: 'x' } },
       { ...valid, scope: { kind: 'project', target: 'acme project' }, target: 'acme project' },
       { ...valid, target: 7 },
