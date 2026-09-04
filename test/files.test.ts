@@ -5,7 +5,7 @@ import { createHash } from 'crypto';
 import { extname } from 'path';
 import { tmpdir } from 'os';
 import { collectFiles, writeUnmanagedFile } from '../src/commands/files.ts';
-import { learningLoopProtectedStateHash, renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
+import { learningLoopProtectedStateHash, makeLearningClaimIdentity, makeLearningManagedRow, renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
 import { parseFactsFence, renderFactsTable } from '../src/core/facts-fence.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import * as db from '../src/core/db.ts';
@@ -228,7 +228,7 @@ describe('collectFiles (production import)', () => {
       const facts = renderFactsTable([managedFact]);
       const knowledge: LearningLoopKnowledge = {
         brain_id: 'b', source_id: 's', canonical_slug: 'x',
-        managed_rows: { generation: { claim: 'Managed', row_num: 1, active: true, generation: 1 } },
+        managed_rows: { [makeLearningClaimIdentity({ claim: 'Managed', class: 'preference', scope: { kind: 'global' }, target: null, trigger: null }).claim_fingerprint!]: makeLearningManagedRow(makeLearningClaimIdentity({ claim: 'Managed', class: 'preference', scope: { kind: 'global' }, target: null, trigger: null }), 1, true, 'run-1') },
         blocked_identities: [], correction_lineages: {}, reversal_attempts: {},
         immutable_commit_markers: [], pending_delivery: null,
       };
