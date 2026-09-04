@@ -55,6 +55,7 @@ import { AIConfigError } from '../ai/errors.ts';
 import { resolveChatContextTokens } from '../ai/model-resolver.ts';
 import { normalizeModelId, splitProviderModelId } from '../model-id.ts';
 import { hasAnthropicKey } from '../ai/anthropic-key.ts';
+import { assertUnmanagedPathMutation } from '../canonical-page-write.ts';
 import { basename, join, dirname, isAbsolute, resolve } from 'node:path';
 import { parseLlmJson } from '../llm-json.ts';
 import type { BrainEngine, DreamVerdict, TriageSegment } from '../engine.ts';
@@ -2913,6 +2914,7 @@ async function reverseWriteRefs(
         ? join(brainDir, `${slug}.md`)
         : join(brainDir, '.sources', source_id, `${slug}.md`);
       mkdirSync(dirname(filePath), { recursive: true });
+      assertUnmanagedPathMutation(filePath, md);
       writeFileSync(filePath, md, 'utf8');
       count++;
     } catch (e) {
@@ -3085,6 +3087,7 @@ async function writeSummaryPage(
   try {
     const filePath = join(brainDir, `${summarySlug}.md`);
     mkdirSync(dirname(filePath), { recursive: true });
+    assertUnmanagedPathMutation(filePath, fullMarkdown);
     writeFileSync(filePath, fullMarkdown, 'utf8');
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

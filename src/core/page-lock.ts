@@ -58,6 +58,10 @@ export interface AcquirePageLockOpts {
   pollMs?: number;
   /** Override lock root for tests. */
   lockRoot?: string;
+  /** Persistent brain identity; required by source-qualified canonical callers. */
+  brainId?: string;
+  /** Persistent source identity; required by source-qualified canonical callers. */
+  sourceId?: string;
 }
 
 function lockPathFor(slug: string, lockRoot?: string): string {

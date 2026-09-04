@@ -49,6 +49,7 @@ import { isDurabilityHardened, commitWriteThroughFile } from '../brain-repo-dura
 import { upsertFactRow, parseFactsFence } from '../facts-fence.ts';
 import { extractFactsFromFenceText } from './extract-from-fence.ts';
 import { logStubGuardEvent } from './stub-guard-audit.ts';
+import { assertUnmanagedPathMutation } from '../canonical-page-write.ts';
 
 /** Resolved source binding for the entity page. */
 export interface FenceTarget {
@@ -448,6 +449,9 @@ export async function writeFactsToFence(
         : 'clean';
 
       // 3. Atomic write: .tmp first, then parse-validate, then rename.
+      // Managed Learning Loop pages must use the source-qualified canonical
+      // writer; this legacy temp-file path cannot preserve their metadata.
+      assertUnmanagedPathMutation(filePath, body);
       writeFileSync(tmpPath, body, 'utf-8');
 
       // 4. Parse-before-rename: re-read the .tmp content and verify the

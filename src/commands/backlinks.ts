@@ -18,6 +18,7 @@ import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'
 import { parseMarkdown, frontmatterBodyOffset, findTimelineSplitIndex } from '../core/markdown.ts';
 import { atomicWriteFileSync } from '../core/atomic-write.ts';
 import { withPageLock } from '../core/page-lock.ts';
+import type { BrainEngine } from '../core/engine.ts';
 
 export interface BacklinkGap {
   /** The page that mentions the entity */
@@ -332,6 +333,8 @@ export interface BacklinksOpts {
   action: 'check' | 'fix';
   dir: string;
   dryRun?: boolean;
+  engine?: BrainEngine;
+  sourceId?: string;
 }
 
 export interface BacklinksResult {

@@ -42,6 +42,7 @@ import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhase
 import { loadConfig, toEngineConfig, gbrainPath } from '../../core/config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
 import type { BrainEngine } from '../../core/engine.ts';
+import { assertManagedPageMutationAllowed } from '../../core/canonical-page-write.ts';
 // Bug 3 — ledger writes moved to the runner (apply-migrations.ts).
 
 // Lazy: GBRAIN_HOME may be set after module load.
@@ -154,6 +155,14 @@ export async function phaseCGrandfather(
           'SELECT id, slug, source_id, frontmatter FROM pages WHERE id = ANY($1::int[])',
           [chunk],
         );
+        for (const page of snap) {
+          await assertManagedPageMutationAllowed(
+            engine,
+            page.slug,
+            page.source_id ?? 'default',
+            'destructive_admin',
+          );
+        }
         appendRollbackBatch(snap);
 
         await engine.executeRaw(

@@ -74,7 +74,8 @@ const BRAIN_AUDIENCE_KEY = 'brain.audience';
 
 /** Learning-loop activation is owned by its race-safe local lifecycle op. */
 export function isProtectedOwnerControlKey(key: string): boolean {
-  return key === 'learning_loop.mode';
+  return key === 'learning_loop.mode'
+    || key === 'learning_loop.mode_transition_intent_v1';
 }
 
 function rejectProtectedOwnerControlKey(key: string): never {

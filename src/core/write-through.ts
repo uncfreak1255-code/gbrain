@@ -31,6 +31,7 @@ import {
   isDurabilityHardened, commitWriteThroughFile, currentBranch, getLastPushOutcome,
   type PushLogOutcome,
 } from './brain-repo-durability.ts';
+import { assertManagedPageMutationAllowed } from './canonical-page-write.ts';
 
 /** Minimal logger surface — structurally compatible with operations.ts `Logger`. */
 export interface WriteThroughLogger {
@@ -361,6 +362,8 @@ export async function writePageThrough(
 ): Promise<WriteThroughResult> {
   const sourceId = opts.sourceId ?? 'default';
   try {
+    // DB-derived rendering cannot reconstruct Learning Loop protected state.
+    await assertManagedPageMutationAllowed(engine, slug, sourceId, 'destructive_admin');
     // Opt-out flag: `sync.write_through=false` (or '0'/'off'/'no', any case)
     // makes every page write DB-only, for brains whose host repo is a shared
     // working tree where per-page `.md` artifacts are unwanted. Unset or any

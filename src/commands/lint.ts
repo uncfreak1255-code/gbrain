@@ -473,6 +473,8 @@ export interface LintOpts {
    *  create + disconnect a competing module-style engine that nulls the
    *  shared db singleton mid-cycle. */
   engine?: BrainEngine;
+  /** Source identity for canonical mutation checks. */
+  sourceId?: string;
   /**
    * #1972: cooperative-abort signal. lint's per-page work is synchronous, so
    * without a periodic yield the event loop can't deliver an abort and a

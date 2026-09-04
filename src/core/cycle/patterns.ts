@@ -28,6 +28,7 @@ import { isQueueQuotaExceededError } from '../minions/admission.ts';
 import { waitForCompletionRenewing, TimeoutError } from '../minions/wait-for-completion.ts';
 import type { MinionJobInput, MinionJobStatus, SubagentHandlerData } from '../minions/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
+import { assertUnmanagedPathMutation } from '../canonical-page-write.ts';
 import { truncateUtf8 } from '../text-safe.ts';
 import type { Page, PageType } from '../types.ts';
 // #2415: allow-list + output-root resolution shared with the synthesize
@@ -602,6 +603,7 @@ async function reverseWriteRefs(
         ? join(brainDir, `${slug}.md`)
         : join(brainDir, '.sources', source_id, `${slug}.md`);
       mkdirSync(dirname(filePath), { recursive: true });
+      assertUnmanagedPathMutation(filePath, md);
       writeFileSync(filePath, md, 'utf8');
       count++;
     } catch (e) {

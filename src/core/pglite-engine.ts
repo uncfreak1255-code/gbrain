@@ -34,8 +34,17 @@ import type {
   FactRow, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
   SourceRow,
+  LearningLoopConfigMutationPermit,
 } from './engine.ts';
-import { DREAM_VERDICT_TTL_SECONDS, MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
+import {
+  DREAM_VERDICT_TTL_SECONDS,
+  MAX_SEARCH_LIMIT,
+  clampSearchLimit,
+  assertLearningLoopConfigMutationPermit,
+  consumeLearningLoopConfigMutationPermit,
+  isLearningLoopConfigKey,
+  learningLoopConfigValueHash,
+} from './engine.ts';
 // Engine-path imports stay static unless a call site carries an explicit
 // engine-dynamic-import-ok justification. The gateway is the only current
 // exception because its local try/catch preserves a soft fallback.
@@ -62,6 +71,7 @@ import { PageMissingError } from './engine-errors.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
 import { MARKDOWN_CHUNKER_VERSION } from './chunkers/recursive.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
+import { assertManagedPageMutationAllowed, assertManagedPagesMutationAllowed, assertManagedSlugMutationAllowed } from './canonical-page-write.ts';
 // Engine-live path (#3596): static import, never a lazy `import()` in the
 // connect() catch. No cycle: pglite-repair.ts imports nothing from this file.
 import { attemptWalRepairAndRetry, closeRepairEpisodeIfOpen, type WalRepairReceipt } from './pglite-repair.ts';
@@ -699,6 +709,13 @@ export class PGLiteEngine implements BrainEngine {
   // #2034: captured at connect() so reconnect() can restore the same data dir
   // after a drop, matching PostgresEngine's _savedConfig contract.
   private _savedConfig: EngineConfig | null = null;
+
+  learningLoopLedgerConfig(): Pick<EngineConfig, 'database_url' | 'database_path'> {
+    return {
+      database_url: this._savedConfig?.database_url,
+      database_path: this._savedConfig?.database_path,
+    };
+  }
   // Tier 3: when GBRAIN_PGLITE_SNAPSHOT loaded a post-initSchema state into
   // PGlite.create(loadDataDir), initSchema is a no-op (schema is already
   // present + migrations already applied). Saves ~1-3s per fresh test PGLite.
@@ -1721,7 +1738,8 @@ export class PGLiteEngine implements BrainEngine {
     return { slug: r.slug, id: Number(r.id) };
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; allowEmptyOverwrite?: boolean }): Promise<Page> {
+  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; allowEmptyOverwrite?: boolean; canonicalPermit?: import('./canonical-page-write.ts').PageDbMutationPermit }): Promise<Page> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'canonical_reconciliation', opts?.canonicalPermit);
     slug = validateSlug(slug);
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
@@ -1814,6 +1832,7 @@ export class PGLiteEngine implements BrainEngine {
 
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
     const sourceId = opts?.sourceId ?? 'default';
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     await this.db.query(
       'DELETE FROM pages WHERE slug = $1 AND source_id = $2',
       [slug, sourceId]
@@ -1828,6 +1847,7 @@ export class PGLiteEngine implements BrainEngine {
    */
   async deletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
     if (slugs.length === 0) return [];
+    await assertManagedPagesMutationAllowed(this, slugs, opts.sourceId, 'destructive_admin');
     if (slugs.length > DELETE_BATCH_SIZE) {
       throw new Error(
         `deletePages: input size ${slugs.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,
@@ -1864,6 +1884,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async softDeletePage(slug: string, opts?: { sourceId?: string }): Promise<{ slug: string } | null> {
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'active');
     // Idempotent-as-null: only flip rows currently active. Source filter is
     // optional; without it the first matching row across sources gets soft-deleted.
     const sourceId = opts?.sourceId;
@@ -1892,6 +1913,7 @@ export class PGLiteEngine implements BrainEngine {
    */
   async softDeletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
     if (slugs.length === 0) return [];
+    await assertManagedPagesMutationAllowed(this, slugs, opts.sourceId, 'destructive_admin');
     if (slugs.length > DELETE_BATCH_SIZE) {
       throw new Error(
         `softDeletePages: input size ${slugs.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,
@@ -1905,6 +1927,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'deleted');
     const sourceId = opts?.sourceId;
     const where: string[] = ['slug = $1', 'deleted_at IS NOT NULL'];
     const params: unknown[] = [slug];
@@ -1961,6 +1984,7 @@ export class PGLiteEngine implements BrainEngine {
     timeline: string,
     contentHash: string,
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     // Parity with PostgresEngine.refreshPageBody: narrow UPDATE only.
     // The deleted_at filter prevents a redirect retry from reviving a
     // canonical that was already purged.
@@ -5595,6 +5619,7 @@ export class PGLiteEngine implements BrainEngine {
     versionId: number,
     opts?: { sourceId?: string },
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     // v0.31.8 (D12): when opts.sourceId is set, scope BOTH the page lookup
     // and the version row reference. Without it, multi-source brains can
     // revert the wrong same-slug page (the one Postgres returns first).
@@ -5918,6 +5943,7 @@ export class PGLiteEngine implements BrainEngine {
 
   // Sync
   async updateSlug(oldSlug: string, newSlug: string, opts?: { sourceId?: string }): Promise<number> {
+    await assertManagedPageMutationAllowed(this, oldSlug, opts?.sourceId ?? 'default', 'destructive_admin');
     newSlug = validateSlug(newSlug);
     const sourceId = opts?.sourceId ?? 'default';
     // Source-qualify so a rename in source A doesn't sweep up same-slug rows
@@ -6031,20 +6057,35 @@ export class PGLiteEngine implements BrainEngine {
     return rows.length > 0 ? (rows[0] as { value: string }).value : null;
   }
 
-  async setConfig(key: string, value: string): Promise<void> {
+  async setConfig(key: string, value: string, permit?: LearningLoopConfigMutationPermit): Promise<void> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'set', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) {
+        throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+      }
+    }
     await this.db.query(
       `INSERT INTO config (key, value) VALUES ($1, $2)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
       [key, value]
     );
+    if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
   }
 
-  async unsetConfig(key: string): Promise<number> {
+  async unsetConfig(key: string, permit?: LearningLoopConfigMutationPermit): Promise<number> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'unset', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) {
+        throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+      }
+    }
     const { affectedRows } = await this.db.query(
       'DELETE FROM config WHERE key = $1',
       [key],
     ) as { affectedRows?: number };
-    return affectedRows ?? 0;
+    const count = affectedRows ?? 0;
+    if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
+    return count;
   }
 
   async listConfigKeys(prefix: string): Promise<string[]> {

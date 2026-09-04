@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -13,6 +13,7 @@ import {
   armLearningLoop,
   bindLearningLoopSession,
   classifyTranscript,
+  discoverBaselineSnapshot,
   learningLoopLedgerPath,
   orderBaselineCandidates,
   readLearningLoopLedger,
@@ -248,7 +249,7 @@ describe('append-only run, replay, and cohort reducer', () => {
 
   test('real database locks exclude concurrent ledger mutation and mode transition', async () => {
     const corpus = tempRoot('learning-loop-real-lock-corpus-');
-    await engine.setConfig('learning_loop.mode', 'canary');
+    await setLearningLoopMode(engine, { engine: 'pglite' }, 'canary');
     await engine.setConfig('learning_loop.corpus.codex.root', corpus);
     await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
     const ledgerRoot = tempRoot('learning-loop-real-ledger-lock-');
@@ -291,7 +292,7 @@ describe('append-only run, replay, and cohort reducer', () => {
       });
       await armHeld;
       await expect(withLearningLoopLifecycleLock(engine, async () => {
-        await engine.setConfig('learning_loop.mode', 'off');
+        await setLearningLoopMode(engine, { engine: 'pglite' }, 'off', { root: lifecycleRoot });
       }, { root: lifecycleRoot })).rejects.toMatchObject({ code: 'ledger_busy' });
       releaseArm();
       const armed = await arming;
@@ -353,7 +354,7 @@ describe('append-only run, replay, and cohort reducer', () => {
   test('mode change completes when a concurrent owner abort wins first', async () => {
     const root = tempRoot('learning-loop-mode-abort-race-');
     const corpus = tempRoot('learning-loop-mode-abort-corpus-');
-    await engine.setConfig('learning_loop.mode', 'canary');
+    await setLearningLoopMode(engine, { engine: 'pglite' }, 'canary');
     await engine.setConfig('learning_loop.corpus.codex.root', corpus);
     await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
     await armLearningLoop({
@@ -390,7 +391,7 @@ describe('append-only run, replay, and cohort reducer', () => {
     writeFileSync(join(nested, `${sessionId}.jsonl`), codexTranscript(sessionId));
 
     await withEnv({ GBRAIN_HOME: home }, async () => {
-      await engine.setConfig('learning_loop.mode', 'capture');
+      await setLearningLoopMode(engine, config, 'capture', { config });
       await engine.setConfig('learning_loop.corpus.codex.root', corpus);
       await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
       await bindLearningLoopSession(engine, `bind:${sessionId}`, adapter, sessionId, {
@@ -459,7 +460,7 @@ describe('append-only run, replay, and cohort reducer', () => {
     writeFileSync(join(nested, `${sessionId}.jsonl`), codexTranscript(sessionId));
 
     await withEnv({ GBRAIN_HOME: home }, async () => {
-      await engine.setConfig('learning_loop.mode', 'capture');
+      await setLearningLoopMode(engine, config, 'capture', { config });
       await engine.setConfig('learning_loop.corpus.codex.root', corpus);
       await engine.setConfig('learning_loop.corpus.codex.source_id', 'personal');
       await bindLearningLoopSession(engine, `bind:${sessionId}`, adapter, sessionId, {
@@ -686,6 +687,33 @@ describe('append-only run, replay, and cohort reducer', () => {
       expect(armed.baseline_discovery.candidate_count).toBe(count);
       expect(armed.baseline_discovery.status).toBe(count === 10 ? 'complete' : 'insufficient');
       expect(armed.baseline_discovery.selected_candidates).toHaveLength(count === 10 ? 10 : 0);
+    }
+  });
+
+  test('baseline walk fails closed on an unreadable corpus root and skips a denied child', async () => {
+    const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    expect(() => _testing.handleBaselineWalkError(denied, '/corpus', '/corpus'))
+      .toThrow(new LearningLoopError('binding_unavailable', 'Baseline corpus root is unreadable'));
+    expect(() => _testing.handleBaselineWalkError(denied, '/corpus/child', '/corpus')).not.toThrow();
+    expect(() => _testing.handleBaselineWalkError(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }), '/corpus/child', '/corpus'))
+      .toThrow(/ENOENT/);
+
+    const corpus = tempRoot('learning-loop-baseline-eacces-');
+    const child = join(corpus, 'denied');
+    mkdirSync(child);
+    writeFileSync(join(corpus, 'keep.jsonl'), codexTranscript('keep', undefined, '2026-08-01T00:00:00.000Z'));
+    writeFileSync(join(child, 'hidden.jsonl'), codexTranscript('hidden', undefined, '2026-08-02T00:00:00.000Z'));
+    chmodSync(child, 0);
+    try {
+      const childSkip = await discoverBaselineSnapshot({
+        engine: corpusEngine(corpus),
+        source_id: 'personal',
+        cutoff_at: '2026-09-01T00:00:00.000Z',
+      });
+      expect(childSkip.candidate_count).toBe(1);
+      expect(childSkip.status).toBe('insufficient');
+    } finally {
+      chmodSync(child, 0o755);
     }
   });
 
