@@ -72,6 +72,17 @@ const MEMORY_DUAL_PLANE_KEYS: ReadonlySet<string> = new Set(
  * shared-declared brain never gets the enable-nudge advisory. */
 const BRAIN_AUDIENCE_KEY = 'brain.audience';
 
+/** Learning-loop activation is owned by its race-safe local lifecycle op. */
+export function isProtectedOwnerControlKey(key: string): boolean {
+  return key === 'learning_loop.mode';
+}
+
+function rejectProtectedOwnerControlKey(key: string): never {
+  console.error(`[config] ${key} is owned by a trusted-local lifecycle control.`);
+  console.error(`[config] Use: gbrain call learning_loop_set_mode '{"mode":"off|capture|canary"}'`);
+  process.exit(1);
+}
+
 /** Ambient-writeback posture re-stamp (red-team review, this wave): the
  * engine-free bootstrap-harness renderer reads `memory.visibility_posture`
  * from the file mirror, previously refreshed ONLY by `config set memory.*` —
@@ -256,6 +267,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
         process.exit(1);
       }
       const keys = await engine.listConfigKeys(prefix);
+      const protectedKey = keys.find(isProtectedOwnerControlKey);
+      if (protectedKey) rejectProtectedOwnerControlKey(protectedKey);
       // Dual-plane keys matching the prefix must ALSO leave the file mirror
       // (codex re-review, this wave): a DB-only pattern delete would report
       // success while the engine-free Stop hook keeps reading the mirror's
@@ -304,6 +317,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       console.error('Usage: gbrain config unset <key> | --pattern <prefix>');
       process.exit(1);
     }
+    if (isProtectedOwnerControlKey(key)) rejectProtectedOwnerControlKey(key);
     if (MEMORY_DUAL_PLANE_KEYS.has(key) || key === BRAIN_AUDIENCE_KEY) {
       // Dual-plane delete, mirroring the dual-plane set: file mirror AND the
       // authoritative DB row both go. "Not found" only when neither had it.
@@ -471,6 +485,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
   } else if (action === 'set' && key && value) {
+    if (isProtectedOwnerControlKey(key)) rejectProtectedOwnerControlKey(key);
     // #3661: `config set` dropped flags it does not implement and wrote
     // anyway. `--dry-run` — honored by sync/import/extract/quarantine/pages —
     // printed the usual "Set <key> = <value>" confirmation and persisted the

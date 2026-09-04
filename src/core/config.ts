@@ -82,6 +82,11 @@ export interface GBrainConfig {
    * merge → buildGatewayConfig env dict → recipe reads ZEROENTROPY_API_KEY.
    */
   zeroentropy_api_key?: string;
+  /** Personal Learning Loop repository contract. Absence is always `off`. */
+  learning_loop?: {
+    mode?: 'off' | 'capture' | 'canary';
+    corpus?: { codex?: { root?: string; source_id?: string } };
+  };
   /**
    * OpenRouter API key. File-plane slot so `gbrain config set
    * openrouter_api_key X` (or config.json) reaches the openrouter recipe:
@@ -1233,6 +1238,9 @@ export async function loadConfigWithEngine(
  */
 export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // File-plane (GBrainConfig static fields)
+  'learning_loop.mode',
+  'learning_loop.corpus.codex.root',
+  'learning_loop.corpus.codex.source_id',
   'engine',
   'database_url',
   'database_path',
