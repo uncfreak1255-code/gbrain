@@ -171,7 +171,7 @@ test/jobs-list-get-json.serial.test.ts	help advertises --json on list/get/stats 
 test/jobs-thin-client-date-rehydration.test.ts	thin-client unpack sites route through rehydrateJobDates (source audit)	2	readFileSync
 test/jobs-worker-startup-recovery.test.ts	work-handler recovery placement (structural)	1	readFileSync
 test/learning-loop-config-boundary.test.ts	Learning Loop config boundary inventory	5	readFileSync
-test/learning-loop-trust-boundary.test.ts	Learning Loop and generic localOnly transport boundary	8	readFileSync
+test/learning-loop-trust-boundary.test.ts	Learning Loop and generic localOnly transport boundary	9	readFileSync
 test/loops-extract-wiring.test.ts	jobs.ts wiring	2	readFileSync
 test/loops-extract-wiring.test.ts	relational edge vocabulary	2	readFileSync
 test/migrate-stdout-clean.test.ts	migration output stays off stdout	2	readFileSync
