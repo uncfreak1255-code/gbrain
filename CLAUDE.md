@@ -277,11 +277,10 @@ grep -E '(fail\)|✗|error:' /tmp/ship_units.txt | head -30
 bun test 2>&1 | tail -10
 ```
 
-The pipe form silently breaks /ship Step T1 (test failure ownership triage) and
-the test verification gate (Step 16) because:
+The pipe form hides failures and can report a false success because:
 - `$?` after a pipe is the LAST command's exit code (`tail` → 0), not bun's
 - bun prints failure details before the summary line, so `tail -N` drops them
-- Step T1 needs the full failure list to classify in-branch vs pre-existing
+- Triage needs the full failure list to distinguish changed behavior from baseline failures
 
 This bit us during v0.26.2 ship: `bun test 2>&1 | tail -10` reported "3911 pass / 23 fail"
 but no failure details survived, forcing a 23-minute re-run to triage.
@@ -331,10 +330,9 @@ are in `docs/operations/pace-mode.md`.
 
 ## Version locations (single source of truth: `VERSION` file)
 
-Every release keeps **five release-metadata files** in sync. `/ship` Step 12
-checks `VERSION` against `package.json`; the release-workflow regression test
-checks both bundled manifests. The canonical list lives here so future runs and
-the auto-update agent know where to look.
+Every release keeps **five release-metadata files** in sync using the commands
+below and the CI version gate. The canonical list lives here so release
+preparation can run in any agent host.
 
 **Version format is mandatory: `MAJOR.MINOR.PATCH.MICRO` (four numeric
 segments, dot-separated, no leading `v`).** Every new release MUST use the
@@ -351,7 +349,7 @@ four numeric segments are required first. Historical 3-segment versions
 
 | File | What lives there | Format |
 |---|---|---|
-| `VERSION` | The single source of truth. Read first by `/ship`, the binary, and CI version-gate. | Bare 4-segment string `MAJOR.MINOR.PATCH.MICRO` (e.g. `0.31.4.1`), no leading `v`. |
+| `VERSION` | The single source of truth. Read by the binary and CI version-gate. | Bare 4-segment string `MAJOR.MINOR.PATCH.MICRO` (e.g. `0.31.4.1`), no leading `v`. |
 | `package.json` | Bun/npm package version. `gbrain --version` reads it via the compiled binary's bundled package metadata. CI version-gate cross-checks this against `VERSION` and fails if they drift. | `"version": "0.31.4.1"` |
 | `openclaw.plugin.json` | OpenClaw/ClawHub bundle manifest version. The release-workflow guard cross-checks it against `VERSION`. | `"version": "0.31.4.1"` |
 | `skills/manifest.json` | Bundled skill-manifest version. The release-workflow guard cross-checks it against `VERSION`. | `"version": "0.31.4.1"` |
@@ -394,18 +392,11 @@ four numeric segments are required first. Historical 3-segment versions
   (e.g. "v0.21.0 Code Cathedral"); update only when the README's marketing
   copy is intentionally being refreshed, NOT on every micro/patch bump.
 
-**The /ship workflow's version idempotency check:** Step 12 reads
-`VERSION` and `package.json`, classifies as FRESH / ALREADY_BUMPED /
-DRIFT_STALE_PKG / DRIFT_UNEXPECTED, and refuses to proceed on
-DRIFT_UNEXPECTED. `test/scripts/release-workflow.test.ts` separately pins
-`openclaw.plugin.json` and `skills/manifest.json` to `VERSION`. This is why
-all five release-metadata files must move together.
-
-**The CI version-gate** rejects pushes where `VERSION` and
-`package.json` disagree, OR where `VERSION` is not strictly greater
-than master's VERSION. If a queue collision claims your version on
-master before yours lands, /ship's queue-aware allocator (Step 12)
-will detect drift and re-bump on the next run.
+**The CI version-gate** checks `VERSION` against `package.json` and the
+release base. `test/scripts/release-workflow.test.ts` also checks both bundled
+manifests. If another release claims the selected version, choose the next
+valid version and update all five release-metadata files before publication.
+No external version allocator is required.
 
 ### Mandatory version-consistency audit (run after EVERY merge or commit that touches release metadata)
 
@@ -431,9 +422,6 @@ no situation in which "I'll fix it next push" is OK, because:
   bundled-manifest mismatch fails the release-workflow regression test.
 - A green CHANGELOG entry under the wrong version header silently lies
   to release-notes consumers.
-- /ship's Step 12 idempotency check classifies a mismatch as
-  `DRIFT_UNEXPECTED` and HALTS — but only if you remember to run /ship
-  before pushing. Manual `git push` skips the check.
 
 ### Merge-conflict recovery on release metadata
 
@@ -445,45 +433,12 @@ and the `git checkout --ours/--theirs` anti-pattern — is in
 before pushing any merge commit; if it doesn't show your version on all five
 lines, you have not finished the merge.
 
-## Conductor branch-name = workspace-name (IRON RULE)
+## App-specific workspace behavior
 
-Conductor workspaces expect the git branch name to match the workspace
-directory name. When they disagree, Conductor silently fails to render the
-PR view + show ship state, leading to "did you actually push?" confusion.
-
-**Check this FIRST on every ship and BEFORE creating any PR:**
-
-```bash
-WORKSPACE=$(basename "$PWD")              # e.g. puebla-v4
-BRANCH=$(git branch --show-current)        # e.g. garrytan/gstack-requests
-case "$BRANCH" in
-  */"$WORKSPACE") echo "OK: branch tail matches workspace" ;;
-  "$WORKSPACE")   echo "OK: branch == workspace" ;;
-  *)              echo "MISMATCH: branch=$BRANCH workspace=$WORKSPACE — RENAME BEFORE SHIPPING" ;;
-esac
-```
-
-If MISMATCH (branch is `garrytan/foo` but workspace is `puebla-v4`):
-
-```bash
-# Rename local, push under new name, delete old remote (and old PR if it
-# was already created — github auto-closes it when head ref dies).
-git branch -m garrytan/<workspace-name>
-git push -u origin garrytan/<workspace-name>
-git push origin --delete <old-branch-name>
-# If a PR existed against the old branch:
-#   gh pr comment <old-pr> --body "Superseded by #<new>: branch renamed to match Conductor workspace."
-#   gh pr create --base master --title "..." --body "..."  # recreate from renamed branch
-```
-
-Caught the hard way on v0.41.9.0 ship: workspace `puebla-v4` but branch
-`garrytan/gstack-requests` produced PR #1439 that Conductor wouldn't
-display. Renamed to `garrytan/puebla-v4`; recreated as #1440.
-
-The /ship workflow's Step 1 should be augmented to run the mismatch
-check; until that lands upstream, ALWAYS run the check above before
-`/ship` invokes its first push or PR-create step.
-
+Branch naming is governed by the repository and the active workspace. Apply
+Conductor-specific naming only when this task actually runs in Conductor and
+the current app requires it. Do not rename branches, delete remote refs, or
+recreate PRs to satisfy an inactive app's historical convention.
 
 ## Releasing
 
@@ -491,32 +446,30 @@ Before any ship, read **[docs/RELEASING.md](docs/RELEASING.md)** in full. It car
 full release + contributor process: pre-ship test requirements (`bun run ci:local` / the
 E2E lifecycle), the CHANGELOG voice + release-summary template, the "To take advantage of
 vX" self-repair block, version migrations, the GitHub Actions SHA refresh, PR conventions,
-and the community-PR-wave process. **Use `/ship` — never hand-roll a release.**
+and the community-PR-wave process. Use the native repository commands and
+GitHub workflow there; external skills are optional helpers.
 
 The ship-critical IRON RULES stay inline in this file (do NOT relocate them): the
 Version-locations table above (the 5-file release-metadata sync + the 5-line audit),
-the Conductor branch=workspace rule (above), Post-ship `/document-release` (below),
+the documentation checks (below),
 the Privacy + Responsible-disclosure rules (below), and the PR-title-version-first rule
 (below).
 
-## Post-ship requirements (MANDATORY)
+## Release documentation
 
-After EVERY /ship, you MUST run /document-release. This is NOT optional. Do NOT
-skip it. Do NOT say "docs look fine" without running it. The skill reads every .md
-file in the project, cross-references the diff, and updates anything that drifted.
+Inspect the release diff and update the documentation affected by its behavior,
+commands, or setup changes. Regenerate committed bundles when their sources
+change. No separate documentation skill or scan of every Markdown file is
+required. An unchanged, accurate document needs no edit.
 
-If /ship's Step 8.5 triggers document-release automatically, that counts. But if
-it gets skipped for ANY reason (timeout, error, oversight), you MUST run it manually
-before considering the ship complete.
-
-Files that MUST be checked on every ship:
+Check the relevant owners for the changed behavior:
 - README.md — does it reflect new features, commands, or setup steps?
 - CLAUDE.md — does it reflect new files, test files, or architecture changes?
 - CHANGELOG.md — does it cover every commit?
 - TODOS.md — are completed items marked done?
 - docs/ — do any guides need updating?
 
-A ship without updated docs is an incomplete ship. Period.
+A release with inaccurate affected documentation is incomplete.
 
 
 ## Privacy rule: scrub real names from public docs
@@ -637,35 +590,20 @@ read version-first. A title with the version parenthesized at the end
 (`feat(search): autocut ... (v0.42.3.0)`) is WRONG — fix it with
 `gh pr edit <N> --title "vX.Y.Z.W <type>: <summary>"`.
 
-This applies to `gh pr create` and every `gh pr edit --title`. When `/ship`
-(or any flow) sets a PR title, the version is the first token. Same rule for the
+This applies to any tool that creates or edits a PR title: the version is the
+first token. Same rule for the
 final commit subject that carries the version bump.
 
 
 ## Skill routing
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
+Use native agent reasoning and the repository commands as the default. Apply an
+available skill when the user requests it or its actual task trigger fits. Read
+`skills/RESOLVER.md` for GBrain-specific operations. Do not assume a host exposes
+a tool named `Skill` or requires an external GStack workflow.
 
-**NEVER hand-roll ship operations.** Do not manually run git commit + push + gh pr
-create when /ship is available. /ship handles VERSION bump, CHANGELOG, document-release,
-pre-landing review, test coverage audit, and adversarial review. Manually creating a PR
-skips all of these. If the user says "commit and ship", "push and ship", "bisect and
-ship", or any combination that ends with shipping — invoke /ship and let it handle
-everything including the commits. If the branch name contains a version (e.g.
-`v0.5-live-sync`), /ship should use that version for the bump.
-
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR, "commit and ship", "push and ship" → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
+A historical skill name is not a prerequisite or approval gate. If an optional
+helper is unavailable, complete the authorized work with the current tools and
+preserve the underlying tests, review, privacy, and authorization requirements.
+Publication does not authorize runtime installation, service restart, spending,
+or production data changes.
