@@ -11,6 +11,7 @@
  *   await worker.start(); // polls until SIGTERM
  */
 
+import { withGatewaySpendScope, gatewayJobRunId } from '../budget/gateway-spend.ts';
 import { existsSync } from 'fs';
 import { autopilotPausedMarkerPath } from '../autopilot-paths.ts';
 import type { BrainEngine } from '../engine.ts';
@@ -1316,7 +1317,7 @@ export class MinionWorker extends EventEmitter {
           })
         // #4218: attribute every gateway.chat() the handler makes to this
         // job so chat_usage_log rows carry `phase = 'job:<name>'`.
-        : await withChatPhase(`job:${job.name}`, () => handler(context as MinionJobContext));
+        : await withGatewaySpendScope(this.engine, () => withChatPhase(`job:${job.name}`, () => handler(context as MinionJobContext)), await gatewayJobRunId(this.engine, job));
 
       // The child spawned and ran — the spawn path is healthy again.
       this._consecutiveChildSpawnFailures = 0;

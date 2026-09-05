@@ -175,6 +175,46 @@ estimate is `delta + stale backlog`, labeled as such.
   toward their ceiling; a run that hits its cap needs a higher cap, not a bug
   report.
 
+## Optional durable paid text limits
+
+The file-plane `paid_budget` object accepts `max_usd_per_run` and
+`max_usd_per_day`, both finite non-negative USD amounts. Zero refuses paid
+requests. Absence preserves existing phase controls; `spend.posture` does
+not relax these limits. Enabling the policy is a separate runtime action.
+
+Engine-connected CLI, MCP, sweep and Dream entrypoints establish a run.
+Queued descendants and retries retain a queue-owned root identity. A paid
+engine-free request refuses because it has no durable ledger connection.
+All processes connected to one brain share the UTC-day ceiling; separate
+brains do not share an account-wide ceiling.
+
+Before each supported text HTTP attempt, the gateway checks the serialized
+model, output limit, text-only messages and tool shapes. It commits a
+conservative hold into the existing `mcp_spend_log` under operation
+`gateway_reservation`. Admission uses the existing transaction advisory lock,
+with the UTC day read after acquiring it. Holds round up to the table's
+microdollar precision. Run totals include earlier days. Ledger read or write
+failure prevents HTTP dispatch. Redirects are refused and SDK retries are
+disabled for chat and expansion.
+
+These rows are reservations, not provider-billed usage. They do not refund or
+expire on success, failure, timeout or missing usage. Input admission uses
+serialized request bytes plus a framing allowance; output uses the wire token
+limit. Correct provider pricing and token-limit semantics remain prerequisites.
+This conservatism can stop a run before its billed usage reaches the cap.
+
+Supported paid transports are plain OpenAI-compatible text endpoints without
+custom fetch shims. Native SDK transports, Claude CLI, paid embeddings, OCR,
+multimodal inference, hosted tools and reranking refuse under this policy.
+Ollama, llama-server and LM Studio local embeddings remain available; explicit
+local endpoint overrides must use loopback. Raw-SDK subagent execution also
+refuses: use the gateway loop for protected jobs.
+
+Query expansion reserves before each SDK call and limits output to 512 tokens.
+Atom extraction always retains its phase cap; an unknown price, malformed
+cap or unreadable configuration refuses inference. Both atom extraction and
+durable admission load operator pricing overrides strictly.
+
 ## Operator price overrides (`pricing.overrides`)
 
 Cost caps are fail-closed: when `--max-cost` (or a phase's default cap) is set

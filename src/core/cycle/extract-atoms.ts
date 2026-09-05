@@ -68,7 +68,7 @@ import { createGlobalLlmHaltTracker, haltedClassOf, type GlobalLlmErrorClass } f
 import { importFromContent } from '../import-file.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { truncateUtf8 } from '../text-safe.ts';
-import { BudgetExhausted, BudgetTracker, isModelPriceable } from '../budget/budget-tracker.ts';
+import { BudgetExhausted, BudgetTracker, loadPricingOverridesStrict } from '../budget/budget-tracker.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { createHash } from 'crypto';
@@ -749,9 +749,10 @@ export async function runPhaseExtractAtoms(
   try {
     extractModel = await resolveExtractAtomsModel(engine);
     const configuredBudget = await engine.getConfig('cycle.extract_atoms.budget_usd');
-    if (configuredBudget) {
+    if (configuredBudget != null) {
       const n = Number(configuredBudget);
-      if (Number.isFinite(n) && n > 0) budgetCap = n;
+      if (!configuredBudget.trim() || !Number.isFinite(n) || n < 0) throw new Error('Invalid cycle.extract_atoms.budget_usd');
+      budgetCap = n;
     }
     // #4529: legacy input-cap key (its own floor of 500 chars, as landed).
     // Read FIRST so the newer #4540 max_input_chars key below wins when
@@ -782,26 +783,15 @@ export async function runPhaseExtractAtoms(
       const n = Number(configuredPacing);
       if (Number.isFinite(n) && n > 0) pacingMs = Math.min(60_000, Math.floor(n));
     }
-  } catch {
-    // Keep safe defaults on any config-read failure: key-aware utility-tier
-    // model, $0.30 cap, default input cap (max_input_chars).
+  } catch (err) {
+    throw new Error('extract_atoms configuration unavailable; inference refused', { cause: err });
   }
-  // A cost cap is only meaningful for a model the tracker can price.
-  // BudgetTracker.reserve() hard-fails with BudgetExhausted(reason:'no_pricing')
-  // when the model is absent from the pricing maps AND a cap is set; with no cap
-  // it warns once and proceeds. Because this phase always set a cap, every
-  // non-Anthropic model tripped that hard-fail on the first item, latched
-  // `budgetExhausted`, and skipped the entire workload while reporting ok.
-  const priceable = isModelPriceable(extractModel, 'chat');
-  if (!priceable) {
-    console.error(
-      `[extract_atoms] model "${extractModel}" is not in the pricing maps; ` +
-        `running without a cost gate (a cap cannot be enforced on an unpriced model).`,
-    );
-  }
+  // Unknown prices must not remove a cap. Local models have explicit zero
+  // rates in the shared resolver; paid models require a known or declared rate.
   const budgetTracker = new BudgetTracker({
-    maxCostUsd: priceable ? budgetCap : undefined,
+    maxCostUsd: budgetCap,
     label: 'cycle.extract_atoms',
+    pricingOverrides: await loadPricingOverridesStrict(engine),
   });
 
   // v0.41.19.0 (T3): throttled yield helper. Fires `opts.yieldDuringPhase`

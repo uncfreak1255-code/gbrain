@@ -26,6 +26,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { listRecipes } from './recipes/index.ts';
 import { createOpenAI } from '@ai-sdk/openai';
+import { paidTextFetch, validatePaidBudget, assertLocalPaidPolicy } from '../budget/gateway-spend.ts';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
@@ -457,6 +458,7 @@ export function recipeSupportsStructuredOutputs(recipe: Recipe): boolean {
 
 /** Configure the gateway. Called by cli.ts#connectEngine. Clears cached models. */
 export function configureGateway(config: AIGatewayConfig): void {
+  validatePaidBudget(config.paid_budget);
   _config = {
     embedding_model: config.embedding_model ?? DEFAULT_EMBEDDING_MODEL,
     // #1292/D6: do NOT fabricate a default here. Every gateway-internal reader
@@ -474,6 +476,7 @@ export function configureGateway(config: AIGatewayConfig): void {
     embedding_image_ocr_model: config.embedding_image_ocr_model,
     expansion_model: config.expansion_model ?? DEFAULT_EXPANSION_MODEL,
     chat_model: config.chat_model ?? DEFAULT_CHAT_MODEL,
+    paid_budget: config.paid_budget,
     chat_fallback_chain: config.chat_fallback_chain,
     // v0.35.0.0+: reranker_model stays undefined when unset — reranker is
     // opt-in and pulling DEFAULT_RERANKER_MODEL into every gateway start
@@ -1920,6 +1923,7 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   // global default. resolveEmbeddingProvider validates the override at the
   // recipe layer — bad model strings throw AIConfigError with a clear hint.
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
+  assertLocalPaidPolicy(cfg, resolveTarget, 'embeddings');
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
   const truncated = texts.map(t => truncateUtf8(t ?? '', MAX_CHARS));
@@ -2280,6 +2284,7 @@ export async function embedMultimodal(
   if (!inputs || inputs.length === 0) return [];
 
   const cfg = requireConfig();
+  if (cfg.paid_budget) throw new Error('paid_budget: multimodal inference is unsupported');
   // Prefer embedding_multimodal_model when set, so brains using OpenAI for
   // text embeddings can route multimodal to Voyage without changing the
   // primary embedding_model. Falls back to embedding_model for single-model setups.
@@ -2723,6 +2728,7 @@ async function resolveExpansionProvider(modelStr: string): Promise<{ model: any;
 }
 
 function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayConfig): any {
+  if (cfg.paid_budget && recipe.implementation !== 'openai-compatible') paidTextFetch(recipe, modelId, cfg);
   switch (recipe.implementation) {
     case 'native-openai': {
       const apiKey = cfg.env.OPENAI_API_KEY;
@@ -2758,7 +2764,7 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       return createOpenAICompatible({
         name: recipe.id,
         baseURL: compat.baseURL,
-        ...(compat.fetch ? { fetch: compat.fetch } : {}),
+        fetch: paidTextFetch(recipe, modelId, cfg, compat.fetch),
         ...auth,
         supportsStructuredOutputs: recipeSupportsStructuredOutputs(recipe),
       }).languageModel(modelId);
@@ -2877,7 +2883,9 @@ export async function expand(query: string): Promise<string[]> {
     tokens: { inputTokens: number; outputTokens: number },
   ): void => recordSpendOnTracker(tracker, modelLabel, label, tokens);
   const recordExpansionUsage = (modelLabel: string, usage: unknown): void =>
-    recordExpansion(modelLabel, 'gateway.expand', normalizeSdkUsage(usage));
+    recordExpansion(modelLabel, 'gateway.expand', usageForBudgetRecord(normalizeSdkUsage(usage), {
+      inputTokens: estimatedPromptTokens, outputTokens: EXPANSION_FAILED_PESSIMISTIC_OUTPUT_TOKENS,
+    }));
   const estimatedPromptTokens = estimateChatInputTokens({
     messages: [{ content: expansionPrompt }],
   });
@@ -2885,10 +2893,10 @@ export async function expand(query: string): Promise<string[]> {
     recordExpansion(
       modelLabel,
       'gateway.expand.failed',
-      _extractUsageFromError(err, {
+      usageForBudgetRecord(_extractUsageFromError(err, {
         inputTokens: estimatedPromptTokens,
         outputTokens: EXPANSION_FAILED_PESSIMISTIC_OUTPUT_TOKENS,
-      }),
+      }), { inputTokens: estimatedPromptTokens, outputTokens: EXPANSION_FAILED_PESSIMISTIC_OUTPUT_TOKENS }),
     );
 
   try {
@@ -2903,11 +2911,14 @@ export async function expand(query: string): Promise<string[]> {
     // tolerant parse recovers the queries instead. Fresh abortSignal per call.
     const viaText = async (): Promise<string[]> => {
       let textResult: Awaited<ReturnType<GenerateTextFn>>;
+      tracker?.reserve({ modelId: modelLabel, estimatedInputTokens: estimatedPromptTokens, maxOutputTokens: 512, kind: 'chat', label: 'gateway.expand' });
       try {
         textResult = await _generateTextTransport({
           model,
           abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
           prompt: expansionPrompt,
+          maxOutputTokens: 512,
+          maxRetries: 0,
         });
       } catch (err) {
         recordExpansionFailure(modelLabel, err); // failed call still billed upstream
@@ -2923,6 +2934,7 @@ export async function expand(query: string): Promise<string[]> {
       // (Typed structurally: ReturnType<GenerateObjectFn> erases the schema
       // generic, so `object` would be `{}`.)
       let result: { object?: { queries?: string[] }; usage?: unknown };
+      tracker?.reserve({ modelId: modelLabel, estimatedInputTokens: estimatedPromptTokens, maxOutputTokens: 512, kind: 'chat', label: 'gateway.expand' });
       try {
         result = await _generateObjectTransport({
           model,
@@ -2944,6 +2956,8 @@ export async function expand(query: string): Promise<string[]> {
           schemaDescription: 'The rewritten search queries used to retrieve relevant documents.',
           abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
           prompt: expansionPrompt,
+          maxOutputTokens: 512,
+          maxRetries: 0,
         });
       } catch (err) {
         recordExpansionFailure(modelLabel, err);
@@ -2955,6 +2969,7 @@ export async function expand(query: string): Promise<string[]> {
       // openai-compatible backend that honors strict json_schema: request the
       // schema (strict validation), and fall back to the text path if it is
       // rejected at call time so a mis-declared capability never drops expansion.
+      tracker?.reserve({ modelId: modelLabel, estimatedInputTokens: estimatedPromptTokens, maxOutputTokens: 512, kind: 'chat', label: 'gateway.expand' });
       try {
         const result = await _generateObjectTransport({
           model,
@@ -2967,6 +2982,8 @@ export async function expand(query: string): Promise<string[]> {
           schemaDescription: 'The rewritten search queries used to retrieve relevant documents.',
           abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
           prompt: expansionPrompt,
+          maxOutputTokens: 512,
+          maxRetries: 0,
         });
         recordExpansionUsage(modelLabel, result.usage);
         expansions = result.object?.queries ?? [];
@@ -3021,6 +3038,7 @@ export async function expand(query: string): Promise<string[]> {
  * keeping the gateway focused on the LLM call.
  */
 export async function generateOcrText(imageBytes: Buffer, mime: string): Promise<string> {
+  if (_config?.paid_budget) throw new Error('paid_budget: paid OCR is unsupported');
   // Unconfigured gateway stays a silent '' no-op (the pre-#4107 isAvailable
   // gate's behavior), never a requireConfig() throw.
   if (!_config) return '';
@@ -3540,6 +3558,7 @@ async function resolveChatProvider(modelStr: string): Promise<{ model: any; reci
 }
 
 function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig): any {
+  if (cfg.paid_budget && recipe.implementation !== 'openai-compatible') paidTextFetch(recipe, modelId, cfg);
   switch (recipe.implementation) {
     case 'native-openai': {
       const apiKey = cfg.env.OPENAI_API_KEY;
@@ -3575,7 +3594,7 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
       return createOpenAICompatible({
         name: recipe.id,
         baseURL: compat.baseURL,
-        ...(compat.fetch ? { fetch: compat.fetch } : {}),
+        fetch: paidTextFetch(recipe, modelId, cfg, compat.fetch),
         ...auth,
         supportsStructuredOutputs: recipeSupportsStructuredOutputs(recipe),
       }).languageModel(modelId);
@@ -3989,6 +4008,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       messages: toModelMessages(repairToolPairing(opts.messages)) as any,
       tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
       maxOutputTokens,
+      maxRetries: 0,
       // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
       // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
       abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),
@@ -4525,6 +4545,7 @@ const DEFAULT_RERANK_TIMEOUT_MS = 5000;
  * mis-parse a response rather than fail cleanly.
  */
 export async function rerank(input: RerankInput): Promise<RerankResult[]> {
+  if (_config?.paid_budget) throw new Error('paid_budget: reranking is unsupported');
   if (!input.query) {
     throw new RerankError('rerank: query is required', 'unknown');
   }

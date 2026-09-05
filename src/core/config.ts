@@ -29,6 +29,8 @@ function getConfigDir() { return configDir(); }
 function getConfigPath() { return configPath(); }
 
 export interface GBrainConfig {
+  /** File-plane opt-in: does not enable any workload. */
+  paid_budget?: import('./budget/gateway-spend.ts').PaidBudgetPolicy;
   engine: 'postgres' | 'pglite';
   /** File-plane hook-lane keys (read by engine-free hook/push children).
    * `gbrain config set` routes these two dotted keys here, not to the DB. */

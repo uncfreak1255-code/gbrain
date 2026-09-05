@@ -1,3 +1,4 @@
+import { withGatewaySpendScope } from '../core/budget/gateway-spend.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -432,5 +433,5 @@ export async function handleToolCall(
       : {}),
   });
 
-  return op.handler(ctx, params);
+  return withGatewaySpendScope(engine, () => op.handler(ctx, params));
 }

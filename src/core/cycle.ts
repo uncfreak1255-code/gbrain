@@ -43,6 +43,7 @@
  * trigger lock acquisition.
  */
 
+import { withGatewaySpendScope } from './budget/gateway-spend.ts';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, statSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { gbrainPath } from './config.ts';
@@ -1864,7 +1865,7 @@ async function runPhaseOrphans(engine: BrainEngine, sourceId?: string): Promise<
  * selections (e.g., --phase lint) skip the lock as an optimization so
  * single-phase runs are always responsive even if another cycle is live.
  */
-export async function runCycle(
+async function runCycleInner(
   engine: BrainEngine | null,
   opts: CycleOpts,
 ): Promise<CycleReport> {
@@ -3201,3 +3202,7 @@ export function deriveStatus(phases: PhaseResult[], totals: CycleReport['totals'
 export const __testing = {
   deriveStatus,
 };
+
+export function runCycle(engine: BrainEngine | null, opts: CycleOpts) {
+  return engine ? withGatewaySpendScope(engine, () => runCycleInner(engine, opts)) : runCycleInner(engine, opts);
+}

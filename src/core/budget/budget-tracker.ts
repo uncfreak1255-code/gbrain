@@ -166,6 +166,29 @@ export async function loadPricingOverrides(
   }
 }
 
+/** Guard callers must not silently replace an unreadable operator rate. */
+export async function loadPricingOverridesStrict(
+  engine: { getConfig(key: string): Promise<string | null> },
+): Promise<PricingOverrides | undefined> {
+  const raw = await engine.getConfig('pricing.overrides');
+  if (raw == null || raw.trim() === '') return undefined;
+  let declared: unknown;
+  try { declared = JSON.parse(raw); } catch { throw new Error('Invalid pricing.overrides'); }
+  if (!declared || typeof declared !== 'object' || Array.isArray(declared)) {
+    throw new Error('Invalid pricing.overrides');
+  }
+  const parsed = parsePricingOverrides(declared);
+  if (Object.keys(parsed ?? {}).length !== Object.keys(declared).length) {
+    throw new Error('Invalid pricing.overrides: every declared rate must be valid');
+  }
+  return parsed;
+}
+
+/** One pricing owner for durable admission and in-process tracking. */
+export function resolveBudgetPricing(modelId: string, kind: BudgetKind, overrides?: PricingOverrides): ModelPricing | null {
+  return overrideFor(modelId, overrides) ?? lookupPricing(modelId, kind);
+}
+
 /** Exact-key override lookup (keys normalized to lowercase at parse time). */
 function overrideFor(modelId: string, overrides?: PricingOverrides): ModelPricing | null {
   if (!overrides) return null;
@@ -396,6 +419,10 @@ export class BudgetTracker {
   private exhaustedFired = false;
 
   constructor(private readonly opts: BudgetTrackerOpts) {
+    for (const key of ['maxCostUsd', 'maxRuntimeMs'] as const) {
+      const value = opts[key];
+      if (value !== undefined && (!Number.isFinite(value) || value < 0)) throw new TypeError(`Invalid ${key}`);
+    }
     this.startedAt = Date.now();
     this.auditPath = opts.auditPath ?? defaultAuditPath();
   }
@@ -437,6 +464,9 @@ export class BudgetTracker {
    * (legacy behavior preserved for non-priced providers).
    */
   reserve(estimate: BudgetEstimate): void {
+    if (![estimate.estimatedInputTokens, estimate.maxOutputTokens].every(n => Number.isSafeInteger(n) && n >= 0)) {
+      throw new TypeError('Budget token bounds must be non-negative safe integers');
+    }
     this.assertRuntime(estimate.modelId);
 
     const projected = costForUsage(
