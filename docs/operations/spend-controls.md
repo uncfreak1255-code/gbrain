@@ -167,13 +167,11 @@ estimate is `delta + stale backlog`, labeled as such.
 - **Recovery under parallel:** `--skip-failed` / `--retry-failed` work under parallel
   sync (the failure ledger is per-source and lock-serialized), so recovery never
   requires dropping to `--serial` (which would arm the inline gate).
-- **Chat-side accounting completeness:** query-expansion and image-OCR calls record
-  on the ambient budget tracker like every other gateway call, including failed
-  attempts (recorded pessimistically). This is record-only — these paths never
-  pre-reserve, so a cap breach from them surfaces on the next reserving call.
-  Practical effect: capped runs (`--max-cost` and friends) count these calls
-  toward their ceiling; a run that hits its cap needs a higher cap, not a bug
-  report.
+- **Chat-side accounting:** query expansion reserves before each SDK call and
+  records usage on the ambient tracker, including failed attempts. Image OCR
+  records usage after the call under the existing phase controls. The optional
+  durable paid policy below refuses image OCR because it lacks a proved
+  pre-dispatch bound.
 
 ## Optional durable paid text limits
 
