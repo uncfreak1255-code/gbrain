@@ -1,14 +1,20 @@
 # Releasing & contributing (gbrain)
 
 The full release + contributor process. CLAUDE.md keeps the ship-critical IRON RULES
-inline (the Version-locations table, branch=workspace, post-ship `/document-release`,
-the Privacy + Responsible-disclosure rules, PR-title-version-first, never-hand-roll-ship)
-and points here for everything else. **Before any ship, read this in full. Use `/ship` —
-never hand-roll a release.**
+inline (the Version-locations table, Privacy + Responsible-disclosure rules,
+and PR-title-version-first) and points here for everything else.
+
+Use the repository commands and native GitHub checks below. An external skill,
+wrapper, or app is optional; its absence does not block authorized work. Do not
+install an old tool or ask the user to restore it merely to satisfy a historical
+reference. Required tests, current review rules, user authorization, and separate
+runtime activation still apply.
 
 ## Pre-ship requirements
 
-Before shipping (/ship) or reviewing (/review), always run the full test suite.
+Before publishing code changes, run the full test suite. Read-only review does
+not require replaying tests merely to start inspection. For documentation-only
+changes, run the affected documentation and generated-content checks.
 Two equivalent paths:
 
 **Path A — local CI gate (recommended, v0.23.1+):**
@@ -96,10 +102,9 @@ specifically, ALWAYS use the explicit `echo > VERSION` + sed-strip-markers
 pattern above. The directional checkout flags have bitten us when the conflict
 shape was unexpected (e.g. master stripped a section we expected to keep).
 
-**Before pushing a merge commit**, run the 5-line audit one more time. If you've
-been editing the branch via `/ship`, Step 12's idempotency check covers you. If
-you've been editing manually (merge resolution, conflict fix, version bump), the
-audit is the last line of defense before CI yells at you.
+**Before pushing a merge commit**, run the 5-line audit one more time.
+The same check applies after version edits or merge resolution, regardless
+of the agent host or optional helper used.
 
 ## CHANGELOG + VERSION are branch-scoped
 
@@ -108,7 +113,7 @@ here.** Every feature branch that ships gets its own version bump and CHANGELOG
 entry. The entry is product release notes for users; it is not a log of internal
 decisions, review rounds, or codex findings.
 
-**Write the CHANGELOG entry at /ship time, not during development.** Mid-branch
+**Write the CHANGELOG entry when preparing the release, not during development.** Mid-branch
 iterations, review rounds (CEO/Eng/Codex/DX), and implementation detours belong
 in the plan file at `~/.claude/plans/`, not in the CHANGELOG. One unified entry
 per branch, covering what the branch added vs the base branch.
@@ -408,8 +413,10 @@ Phase C/E. Never modify a user's custom directories or re-suggest declined ones.
 
 ## GitHub Actions SHA maintenance
 
-All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Before shipping
-(`/ship`) or reviewing (`/review`), check for stale pins and update them:
+All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Check and
+update pins when the task concerns those actions or a relevant security fix.
+An unrelated release or read-only review does not authorize workflow changes.
+For an in-scope pin update:
 
 ```bash
 for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions/download-artifact softprops/action-gh-release; do
@@ -418,7 +425,8 @@ for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions
 done
 ```
 
-If any SHA differs from what's in the workflow files, update the pin and version comment.
+For each selected action, verify the intended upstream release, update its pin
+and version comment, and review the workflow diff under the current boundary policy.
 
 ## PR descriptions cover the whole branch
 

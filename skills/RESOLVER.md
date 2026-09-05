@@ -60,7 +60,8 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | "Retro", "what shipped", "retrospective" | GStack: retro |
 
 > These skills come from GStack. If GStack is installed, the agent reads them directly.
-> If not, brain-only mode still works (brain skills function without thinking skills).
+> If not, use native agent reasoning for these tasks. Missing GStack skills do
+> not block coding, debugging, review, or release work. GBrain skills remain usable.
 
 ## Operational
 
