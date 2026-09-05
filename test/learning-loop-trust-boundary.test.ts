@@ -15,6 +15,11 @@ const PRIVILEGED = [
   'learning_loop_abort',
   'learning_loop_resolve_transcript',
   'learning_loop_bind_session',
+  'learning_loop_candidate',
+  'learning_loop_authority',
+  'learning_loop_activate',
+  'learning_loop_correct',
+  'learning_loop_reverse',
 ];
 
 function unsafeContext(remote: unknown): OperationContext {
@@ -34,6 +39,18 @@ describe('Learning Loop and generic localOnly transport boundary', () => {
     expect(isProtectedOwnerControlKey('search.mode')).toBe(false);
   });
 
+  test('trusted-local inspection returns the empty ledger replay', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'learning-loop-inspect-'));
+    try {
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        await expect(operationsByName.learning_loop_inspect.handler(unsafeContext(false), {}))
+          .resolves.toEqual({ active_run_id: null, event_count: 0, runs: [] });
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('network discovery omits every localOnly operation', () => {
     const localNames = operations.filter((op) => op.localOnly).map((op) => op.name);
     const http = new Set(operations.filter((op) => !op.localOnly).map((op) => op.name));
@@ -43,6 +60,7 @@ describe('Learning Loop and generic localOnly transport boundary', () => {
   });
 
   test('the streamable HTTP registry applies the current localOnly filter', () => {
+    // test-reads-source-ok: pins HTTP registry wiring alongside runtime dispatch and handler rejection tests.
     const source = readFileSync(new URL('../src/commands/serve-http.ts', import.meta.url), 'utf8');
     expect(source).toContain('operations.filter(op => !op.localOnly)');
     expect(source).not.toContain('const mcpOperations = operations;');

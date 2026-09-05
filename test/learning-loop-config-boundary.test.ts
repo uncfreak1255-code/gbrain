@@ -68,6 +68,7 @@ describe('Learning Loop config boundary inventory', () => {
   });
 
   test('generic CLI set/unset/prefix paths identify both reserved keys before mutation', () => {
+    // test-reads-source-ok: pins each generic CLI mutation lane alongside runtime permit rejection tests.
     const cli = readFileSync(resolve(root, 'src/commands/config.ts'), 'utf8');
     expect(cli).toContain('isProtectedOwnerControlKey(key)');
     expect(cli).toContain('keys.find(isProtectedOwnerControlKey)');

@@ -91,7 +91,7 @@ function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
 const putPage = operations.find((o) => o.name === 'put_page')!;
 
 describe('put_page write-through — happy path', () => {
-  test('managed page writes canonical first, preserves metadata, then reconciles the row', async () => {
+  test('raw put_page rejects a managed page before file or row mutation', async () => {
     const slug = 'inbox/managed-put';
     const fence = renderLearningLoopFence({
       brain_id: 'host', source_id: 'default', canonical_slug: slug,
@@ -100,18 +100,16 @@ describe('put_page write-through — happy path', () => {
     });
     const file = path.join(brainDir, `${slug}.md`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `---\ntitle: Before\nslug: ${slug}\n---\n\nBefore.\n\n${fence}\n`);
+    const before = `---\ntitle: Before\nslug: ${slug}\n---\n\nBefore.\n\n${fence}\n`;
+    fs.writeFileSync(file, before);
 
-    const result = (await putPage.handler(makeCtx({ brainId: 'host' }), {
+    await expect(putPage.handler(makeCtx({ brainId: 'host' }), {
       slug,
       content: `---\ntitle: After\nslug: ${slug}\n---\n\nAfter.\n`,
-    })) as { write_through?: { written: boolean; path?: string } };
+    })).rejects.toThrow('managed canonical page mutation rejected');
 
-    expect(result.write_through?.written).toBe(true);
-    const onDisk = fs.readFileSync(file, 'utf8');
-    expect(onDisk).toContain('After.');
-    expect(onDisk).toContain(fence);
-    expect((await engine.getPage(slug, { sourceId: 'default' }))?.title).toBe('After');
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    expect(await engine.getPage(slug, { sourceId: 'default' })).toBeNull();
   });
 
   test('rejects a managed fence that claims a different brain before file or row mutation', async () => {
@@ -129,7 +127,7 @@ describe('put_page write-through — happy path', () => {
     await expect(putPage.handler(makeCtx({ brainId: 'host' }), {
       slug,
       content: `---\ntitle: After\nslug: ${slug}\n---\n\nAfter.\n`,
-    })).rejects.toThrow('metadata target mismatch');
+    })).rejects.toThrow('managed canonical page mutation rejected');
 
     expect(fs.readFileSync(file, 'utf8')).toBe(before);
     expect(await engine.getPage(slug, { sourceId: 'default' })).toBeNull();

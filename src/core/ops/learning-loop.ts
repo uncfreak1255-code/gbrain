@@ -144,10 +144,14 @@ const learning_loop_submit_session_v1: Operation = {
   name: 'learning_loop_submit_session_v1',
   description: 'Submit bounded Codex session metadata from an authenticated, source- and session-bound adapter. GBrain resolves and hashes local transcript bytes.',
   params: {
-    provider: { type: 'string', required: true, enum: ['codex'] }, provider_session_id: { type: 'string', required: true },
-    source_id: { type: 'string', required: true }, completion_state: { type: 'string', required: true, enum: ['completed'] },
-    completed_at: { type: 'string', required: true }, asserted_relative_path: { type: 'string' },
-    asserted_size_bytes: { type: 'number' }, asserted_content_hash: { type: 'string' },
+    provider: { type: 'string', required: true, enum: ['codex'], description: 'Transcript provider; must be codex.' },
+    provider_session_id: { type: 'string', required: true, description: 'Completed provider session already bound to the authenticated adapter.' },
+    source_id: { type: 'string', required: true, description: 'Source ID matching both the authenticated adapter and operation context.' },
+    completion_state: { type: 'string', required: true, enum: ['completed'], description: 'Session completion state; only completed sessions are accepted.' },
+    completed_at: { type: 'string', required: true, description: 'Asserted completion timestamp, checked against the authoritative transcript.' },
+    asserted_relative_path: { type: 'string', description: 'Optional transcript path relative to the configured corpus root, checked against local discovery.' },
+    asserted_size_bytes: { type: 'number', description: 'Optional expected transcript size in bytes, checked against local bytes.' },
+    asserted_content_hash: { type: 'string', description: 'Optional expected transcript content hash, checked against the locally computed hash.' },
   },
   mutating: true, scope: 'write',
   handler: async (ctx, p) => learningLoopCall(async (mod) => {
