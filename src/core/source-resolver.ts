@@ -18,7 +18,7 @@ import { join, dirname, resolve } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { isSourceFederated, parseSourceConfig } from './sources-load.ts';
 import { SOURCE_ID_RE, isValidSourceId, ALL_SOURCES } from './source-id.ts';
-import { isTrustedDotfile, realpathOrResolve, realpathOrResolveAsync } from './path-confine.ts';
+import { isTrustedDotfile, realpathOrResolveAsync } from './path-confine.ts';
 
 // Re-export so scope-resolution call sites can import the sentinel from
 // either module (#1712).
@@ -672,20 +672,8 @@ export async function resolveSourceForRepoPath(
     return { source_id: dotfile, tier: 'dotfile', detail: `.gbrain-source under ${dir}` };
   }
 
-  // 2. Registered local_path containing the repo dir (longest prefix wins).
-  const registered = await engine.executeRaw<{ id: string; local_path: string }>(
-    `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL`,
-  );
-  const dirResolved = realpathOrResolve(dir);
-  let best: { id: string; path: string; pathLen: number } | null = null;
-  for (const r of registered) {
-    const p = realpathOrResolve(r.local_path);
-    if (dirResolved === p || dirResolved.startsWith(p + '/')) {
-      if (!best || p.length > best.pathLen) {
-        best = { id: r.id, path: p, pathLen: p.length };
-      }
-    }
-  }
+  // Share active-over-archived precedence with ambient source resolution.
+  const best = await resolveRegisteredPathMatch(engine, dir);
   if (best) {
     await assertSourceExists(engine, best.id);
     return { source_id: best.id, tier: 'local_path', detail: best.path };

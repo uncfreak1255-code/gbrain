@@ -3,7 +3,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { loadStorageConfig, validateStorageConfig, getStorageTier } from '../core/storage-config.ts';
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
-import { getDefaultSourcePath, resolveSourceForRepoPath } from '../core/source-resolver.ts';
+import { getDefaultSourcePath, resolveSourceForRepoPath, resolveSourceId } from '../core/source-resolver.ts';
 
 /**
  * Distinct nominal types for the two tier-keyed numeric maps. Both shapes
@@ -75,14 +75,16 @@ async function runStorageStatus(engine: BrainEngine, args: string[]): Promise<vo
   // Resolution chain (D5, Issue #3): explicit --repo → typed accessor → null.
   // No cwd fallback. The original silent footgun is dead.
   let repoPath: string | null = null;
+  let sourceId: string | undefined;
   const repoIdx = args.indexOf('--repo');
   if (repoIdx !== -1 && args[repoIdx + 1]) {
     repoPath = args[repoIdx + 1];
   } else {
+    sourceId = await resolveSourceId(engine, null);
     repoPath = await getDefaultSourcePath(engine);
   }
 
-  const result = await getStorageStatus(engine, repoPath);
+  const result = await getStorageStatus(engine, repoPath, sourceId);
 
   if (args.includes('--json')) {
     console.log(formatStorageStatusJson(result));
@@ -133,7 +135,16 @@ export function __resetPGLiteWarn(): void {
 export async function getStorageStatus(
   engine: BrainEngine,
   repoPath: string | null,
+  resolvedSourceId?: string,
 ): Promise<StorageStatusResult> {
+  // Keep the implicit source even when its path comes from legacy config.
+  // An explicit unmapped repo must never expand the query to every source.
+  let sourceId = resolvedSourceId;
+  if (!sourceId && repoPath) {
+    sourceId = (await resolveSourceForRepoPath(engine, repoPath))?.source_id;
+    if (!sourceId) throw new Error('Storage repository has no registered source. Register its path or add a .gbrain-source file.');
+  }
+  sourceId ??= await resolveSourceId(engine, null);
   const config = repoPath ? loadStorageConfig(repoPath) : null;
   const warnings = config ? validateStorageConfig(config) : [];
 
@@ -146,10 +157,9 @@ export async function getStorageStatus(
   // per directory + one stat per .md file, plus O(1) lookups below.
   const fileMap: Map<string, DiskFileEntry> = repoPath ? walkBrainRepo(repoPath) : new Map();
 
-  const source = repoPath ? await resolveSourceForRepoPath(engine, repoPath) : null;
   const pages = await engine.listPages({
     limit: 1_000_000,
-    ...(source ? { sourceId: source.source_id } : {}),
+    sourceId,
   });
 
   for (const page of pages) {

@@ -13,9 +13,11 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { withEnv } from './helpers/with-env.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   getStorageStatus,
+  runStorage,
   formatStorageStatusHuman,
   __resetPGLiteWarn,
 } from '../src/commands/storage.ts';
@@ -54,7 +56,8 @@ beforeEach(async () => {
     await (engine as unknown as { db: { exec(sql: string): Promise<unknown> } }).db.exec(`DELETE FROM ${t}`);
   }
   await engine.executeRaw(
-    `INSERT INTO sources (id, name) VALUES ('default', 'Default') ON CONFLICT DO NOTHING`,
+    `INSERT INTO sources (id, name, local_path) VALUES ('default', 'Default', $1) ON CONFLICT DO NOTHING`,
+    [tmp],
   );
 });
 
@@ -137,6 +140,35 @@ describe('Storage tiering on PGLite — full lifecycle (D8 + D4)', () => {
       expect(result.pagesByTier.db_only).toBe(1);
       expect(result.missingFiles).toEqual([]);
     } finally {
+      cleanup();
+    }
+  });
+
+  test('unmapped explicit repo refuses instead of counting all sources', async () => {
+    try {
+      await engine.executeRaw(`UPDATE sources SET local_path = NULL`);
+      await expect(getStorageStatus(engine, tmp)).rejects.toThrow('no registered source');
+    } finally { cleanup(); }
+  });
+
+  test('implicit legacy repo retains the selected source', async () => {
+    const oldLog = console.log;
+    const output: string[] = [];
+    try {
+      writeGbrainYml();
+      await engine.executeRaw(`UPDATE sources SET local_path = NULL`);
+      await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('foreign', 'Foreign')`);
+      await engine.setConfig('sync.repo_path', tmp);
+      await engine.putPage('media/x/owned', { type: 'note', title: 'Owned', compiled_truth: '', timeline: '' });
+      await engine.putPage('media/x/foreign', { type: 'note', title: 'Foreign', compiled_truth: '', timeline: '' }, { sourceId: 'foreign' });
+      console.log = (...args: unknown[]) => output.push(args.map(String).join(' '));
+      await withEnv({ GBRAIN_SOURCE: 'default' }, () => runStorage(engine, ['status', '--json']));
+      const result = JSON.parse(output.at(-1)!);
+      expect(result.totalPages).toBe(1);
+      expect(result.missingFiles.map((p: { slug: string }) => p.slug)).toEqual(['media/x/owned']);
+    } finally {
+      console.log = oldLog;
+      await engine.executeRaw(`DELETE FROM config WHERE key = 'sync.repo_path'`);
       cleanup();
     }
   });
