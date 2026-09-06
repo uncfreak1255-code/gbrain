@@ -3,7 +3,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { loadStorageConfig, validateStorageConfig, getStorageTier } from '../core/storage-config.ts';
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
-import { getDefaultSourcePath, resolveSourceForRepoPath, resolveSourceId } from '../core/source-resolver.ts';
+import { ALL_SOURCES, getDefaultSourcePath, resolveSourceForRepoPath, resolveSourceId } from '../core/source-resolver.ts';
 
 /**
  * Distinct nominal types for the two tier-keyed numeric maps. Both shapes
@@ -159,7 +159,7 @@ export async function getStorageStatus(
 
   const pages = await engine.listPages({
     limit: 1_000_000,
-    sourceId,
+    ...(sourceId === ALL_SOURCES ? {} : { sourceId }),
   });
 
   for (const page of pages) {

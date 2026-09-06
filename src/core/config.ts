@@ -5,7 +5,6 @@ import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
 import { applyDbPlaneReadSideMerge, type DbPlaneEngineReader } from './config-db-merge.ts';
 import { loadConfigSnapshot } from './config-snapshot.ts';
 import { loadGbrainEnvFile } from './gbrain-env-file.ts';
-
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
  * attempt. Used by `gbrain doctor --fast` so the user gets a precise message
@@ -1258,6 +1257,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'chat_model',
   'chat_fallback_chain',
   'provider_base_urls',
+  'paid_budget',
   // Integration gates (file-plane, hook-lane)
   'integrations.memorable.enabled',
   // MEMORY_VERBS v1 (Cathedral 1)

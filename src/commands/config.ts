@@ -10,6 +10,7 @@ import {
 } from '../core/search/embedding-column.ts';
 
 import { redactPgUrl } from '../core/url-redact.ts';
+import { validatePaidBudget } from '../core/budget/gateway-spend.ts';
 
 // v0.36.x #892: sensitive config-key allowlist. The `show` path used a
 // loose `.includes('key')` check that also redacts (works); the `set` path
@@ -391,6 +392,19 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       }
       return;
     }
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+      const cfg = loadConfigFileOnly();
+      if (cfg?.paid_budget !== undefined) {
+        delete cfg.paid_budget;
+        saveConfig(cfg);
+        console.log(`Unset ${key} (file plane)`);
+      } else {
+        console.error(`Config key not found: ${key}`);
+        process.exit(1);
+      }
+      return;
+    }
     if (FILE_PLANE_API_KEYS.includes(key)) {
       const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
       const cfg = loadConfigFileOnly() as unknown as Record<string, unknown> | null;
@@ -733,6 +747,23 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     // single home in handleDbPlaneRoutedKeys, shared with the engine-free
     // pre-connectEngine dispatch.
     if (await handleDbPlaneRoutedKeys(key, value)) return;
+
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+      let policy: unknown;
+      try {
+        policy = JSON.parse(value);
+        validatePaidBudget(policy);
+      } catch (e) {
+        console.error(`[config] paid_budget must be JSON with finite non-negative max_usd_per_run and max_usd_per_day values (${e instanceof Error ? e.message : String(e)}). Nothing was written.`);
+        process.exit(1);
+      }
+      const cfg = loadConfigFileOnly() ?? { engine: 'pglite' as const };
+      cfg.paid_budget = policy;
+      saveConfig(cfg);
+      console.log(`Set ${key} = ${JSON.stringify(policy)} (file plane: ~/.gbrain/config.json)`);
+      return;
+    }
 
     // Vendor credentials are file-plane canonical (see FILE_PLANE_API_KEYS).
     // Routed, not refused: unlike embedding_model there is nothing to re-init,

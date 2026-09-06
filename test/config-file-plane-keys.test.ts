@@ -76,6 +76,51 @@ describe('config set — file-plane bootstrap hook-lane keys [D18]', () => {
   });
 });
 
+describe('config set/unset — paid_budget file-plane policy', () => {
+  test('validated policy round-trips through the plane consumed by the gateway', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gb-cfg-paid-budget-'));
+    await withEnv({ GBRAIN_HOME: parent }, async () => {
+      const out = await captureLog(() => runConfig(noEngine, [
+        'set', 'paid_budget', '{"max_usd_per_run":0.25,"max_usd_per_day":2}',
+      ]));
+      expect(out).toContain('file plane');
+      const cfgPath = join(parent, '.gbrain', 'config.json');
+      let cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { paid_budget?: unknown };
+      expect(cfg.paid_budget).toEqual({ max_usd_per_run: 0.25, max_usd_per_day: 2 });
+
+      const unsetOut = await captureLog(() => runConfig(noEngine, ['unset', 'paid_budget']));
+      expect(unsetOut).toContain('Unset paid_budget (file plane)');
+      cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { paid_budget?: unknown };
+      expect(cfg.paid_budget).toBeUndefined();
+    });
+  });
+
+  test('invalid policy is refused before the file is written', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gb-cfg-paid-budget-invalid-'));
+    const origError = console.error;
+    const origExit = process.exit;
+    let error = '';
+    console.error = (...a: unknown[]) => { error += a.map(String).join(' ') + '\n'; };
+    (process as { exit: unknown }).exit = (() => { throw new Error('__exit__'); }) as unknown as typeof process.exit;
+    try {
+      await withEnv({ GBRAIN_HOME: parent }, async () => {
+        await expect(runConfig(noEngine, ['set', 'paid_budget', '{"max_usd_per_run":-1,"max_usd_per_day":2}']))
+          .rejects.toThrow('__exit__');
+      });
+      expect(error).toContain('Nothing was written');
+      expect(existsSync(join(parent, '.gbrain', 'config.json'))).toBe(false);
+    } finally {
+      console.error = origError;
+      process.exit = origExit;
+    }
+  });
+
+  test('paid_budget is a registered config key', async () => {
+    const { KNOWN_CONFIG_KEYS } = await import('../src/core/config.ts');
+    expect(KNOWN_CONFIG_KEYS).toContain('paid_budget');
+  });
+});
+
 /**
  * backup.* keys are FILE-plane canonical for the same reason as the hook-lane
  * keys: their readers (backupCheckDisabled / backupIntervalMs in

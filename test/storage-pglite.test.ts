@@ -23,6 +23,7 @@ import {
 } from '../src/commands/storage.ts';
 import { manageGitignore, __resetPGLiteTierWarn } from '../src/commands/sync.ts';
 import { __resetMissingStorageWarning } from '../src/core/storage-config.ts';
+import { ALL_SOURCES } from '../src/core/source-resolver.ts';
 
 let engine: PGLiteEngine;
 let tmp: string;
@@ -139,6 +140,19 @@ describe('Storage tiering on PGLite — full lifecycle (D8 + D4)', () => {
       expect(result.totalPages).toBe(1);
       expect(result.pagesByTier.db_only).toBe(1);
       expect(result.missingFiles).toEqual([]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('the all-sources sentinel omits the scalar listPages filter', async () => {
+    try {
+      await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('foreign', 'Foreign')`);
+      await engine.putPage('people/default', { type: 'person', title: 'Default', compiled_truth: '', timeline: '' });
+      await engine.putPage('people/foreign', { type: 'person', title: 'Foreign', compiled_truth: '', timeline: '' }, { sourceId: 'foreign' });
+
+      const result = await getStorageStatus(engine, null, ALL_SOURCES);
+      expect(result.totalPages).toBe(2);
     } finally {
       cleanup();
     }
