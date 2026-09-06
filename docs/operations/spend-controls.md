@@ -179,6 +179,11 @@ The file-plane `paid_budget` object accepts `max_usd_per_run` and
 `max_usd_per_day`, both finite non-negative USD amounts. Zero refuses paid
 requests. Absence preserves existing phase controls; `spend.posture` does
 not relax these limits. Enabling the policy is a separate runtime action.
+Set the object with `gbrain config set paid_budget '<JSON>'`; remove it with
+`gbrain config unset paid_budget`. These commands save file configuration.
+They do not change gateways already running: restart every affected
+`gbrain serve`, jobs worker, and autopilot process before relying on a new
+policy. Keep stopped services stopped until their activation is approved.
 
 Engine-connected CLI, MCP, sweep and Dream entrypoints establish a run.
 Queued descendants and retries retain a queue-owned root identity. A paid

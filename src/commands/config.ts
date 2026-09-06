@@ -398,7 +398,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       if (cfg?.paid_budget !== undefined) {
         delete cfg.paid_budget;
         saveConfig(cfg);
-        console.log(`Unset ${key} (file plane)`);
+        console.log(`Unset ${key} (file plane) — restart every running gbrain serve, jobs worker, and autopilot process to apply. Running processes retain their previous policy.`);
       } else {
         console.error(`Config key not found: ${key}`);
         process.exit(1);
@@ -761,7 +761,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       const cfg = loadConfigFileOnly() ?? { engine: 'pglite' as const };
       cfg.paid_budget = policy;
       saveConfig(cfg);
-      console.log(`Set ${key} = ${JSON.stringify(policy)} (file plane: ~/.gbrain/config.json)`);
+      console.log(`Set ${key} = ${JSON.stringify(policy)} (file plane: ~/.gbrain/config.json) — saved, not active in running processes; restart every running gbrain serve, jobs worker, and autopilot process to apply; restart is required before relying on these limits.`);
       return;
     }
 

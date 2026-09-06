@@ -87,9 +87,14 @@ describe('config set/unset — paid_budget file-plane policy', () => {
       const cfgPath = join(parent, '.gbrain', 'config.json');
       let cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { paid_budget?: unknown };
       expect(cfg.paid_budget).toEqual({ max_usd_per_run: 0.25, max_usd_per_day: 2 });
+      expect(out).toContain('restart');
+      expect(out).toContain('jobs worker');
+      expect(out).toContain('not active in running processes');
 
       const unsetOut = await captureLog(() => runConfig(noEngine, ['unset', 'paid_budget']));
       expect(unsetOut).toContain('Unset paid_budget (file plane)');
+      expect(unsetOut).toContain('restart');
+      expect(unsetOut).toContain('jobs worker');
       cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { paid_budget?: unknown };
       expect(cfg.paid_budget).toBeUndefined();
     });

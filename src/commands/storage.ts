@@ -81,7 +81,7 @@ async function runStorageStatus(engine: BrainEngine, args: string[]): Promise<vo
     repoPath = args[repoIdx + 1];
   } else {
     sourceId = await resolveSourceId(engine, null);
-    repoPath = await getDefaultSourcePath(engine);
+    repoPath = sourceId === ALL_SOURCES ? null : await getDefaultSourcePath(engine);
   }
 
   const result = await getStorageStatus(engine, repoPath, sourceId);
@@ -145,6 +145,9 @@ export async function getStorageStatus(
     if (!sourceId) throw new Error('Storage repository has no registered source. Register its path or add a .gbrain-source file.');
   }
   sourceId ??= await resolveSourceId(engine, null);
+  // A cross-source count has no single owning filesystem/configuration.
+  // Never use the legacy scalar repo fallback for that span.
+  if (sourceId === ALL_SOURCES) repoPath = null;
   const config = repoPath ? loadStorageConfig(repoPath) : null;
   const warnings = config ? validateStorageConfig(config) : [];
 
@@ -213,7 +216,9 @@ export function formatStorageStatusHuman(result: StorageStatusResult): string {
     lines.push('No gbrain.yml configuration found.');
     if (result.repoPath) lines.push(`Checked: ${result.repoPath}/gbrain.yml`);
     lines.push('');
-    lines.push('All pages are stored in git by default.');
+    lines.push(result.repoPath
+      ? 'All pages are stored in git by default.'
+      : 'No single repository selected; disk usage and storage tiers are not assessed. Use --repo <path> for repository status.');
     lines.push(`Total pages: ${result.totalPages}`);
     return lines.join('\n');
   }

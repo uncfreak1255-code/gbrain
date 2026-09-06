@@ -158,6 +158,37 @@ describe('Storage tiering on PGLite — full lifecycle (D8 + D4)', () => {
     }
   });
 
+  test('all-source status does not apply a legacy repo config or disk map to foreign pages', async () => {
+    const oldLog = console.log;
+    const output: string[] = [];
+    try {
+      writeGbrainYml();
+      mkdirSync(join(tmp, 'media', 'x'), { recursive: true });
+      writeFileSync(join(tmp, 'media', 'x', 'shared.md'), 'local file');
+      await engine.executeRaw(`UPDATE sources SET local_path = NULL`);
+      await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('foreign', 'Foreign')`);
+      await engine.setConfig('sync.repo_path', tmp);
+      for (const sourceId of ['default', 'foreign']) {
+        await engine.putPage('media/x/shared', { type: 'note', title: 'Shared', compiled_truth: '', timeline: '' }, { sourceId });
+        await engine.putPage('media/x/missing', { type: 'note', title: 'Missing', compiled_truth: '', timeline: '' }, { sourceId });
+      }
+      console.log = (...args: unknown[]) => output.push(args.map(String).join(' '));
+      await withEnv({ GBRAIN_SOURCE: ALL_SOURCES }, () => runStorage(engine, ['status', '--json']));
+      const result = JSON.parse(output.at(-1)!);
+      expect(result.totalPages).toBe(4);
+      expect(result.repoPath).toBeNull();
+      expect(result.config).toBeNull();
+      expect(result.pagesByTier).toEqual({ db_tracked: 0, db_only: 0, unspecified: 4 });
+      expect(result.diskUsageByTier).toEqual({ db_tracked: 0, db_only: 0, unspecified: 0 });
+      expect(result.missingFiles).toEqual([]);
+      expect(formatStorageStatusHuman(result)).toContain('--repo');
+    } finally {
+      console.log = oldLog;
+      await engine.executeRaw(`DELETE FROM config WHERE key = 'sync.repo_path'`);
+      cleanup();
+    }
+  });
+
   test('unmapped explicit repo refuses instead of counting all sources', async () => {
     try {
       await engine.executeRaw(`UPDATE sources SET local_path = NULL`);

@@ -780,7 +780,7 @@ async function main() {
     if (op.scope === 'read') {
       try {
         rawResult = await withTimeout(
-          op.handler(ctx, params),
+          withGatewaySpendScope(engine, () => op.handler(ctx, params)),
           wallclockMs,
           `gbrain ${command}`,
         );
@@ -792,7 +792,7 @@ async function main() {
         throw e;
       }
     } else {
-      rawResult = await op.handler(ctx, params);
+      rawResult = await withGatewaySpendScope(engine, () => op.handler(ctx, params));
     }
     // ENG-2 (renderer parity by data shape): JSON-round-trip the local-engine
     // path's return value so renderers see the same shape they'd see on the
