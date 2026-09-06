@@ -269,8 +269,14 @@ import {
 } from '../src/commands/backlinks.ts';
 import { frontmatterBodyOffset, parseMarkdown, serializeMarkdown } from '../src/core/markdown.ts';
 import { acquirePageLock } from '../src/core/page-lock.ts';
+import { renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
 
 const fence = '---';
+const managedFence = (slug: string) => renderLearningLoopFence({
+  brain_id: 'b', source_id: 's', canonical_slug: slug, managed_rows: {},
+  blocked_identities: [], correction_lineages: {}, reversal_attempts: {},
+  immutable_commit_markers: [], pending_delivery: null,
+} satisfies LearningLoopKnowledge);
 
 function makeFixture(): { root: string; lockRoot: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), 'gbrain-backlinks-fix-'));
@@ -435,6 +441,22 @@ describe('insertBacklinkEntry', () => {
 });
 
 describe('fixBacklinkGaps safety pipeline', () => {
+  test('managed target is skipped before the atomic path-only writer changes bytes', async () => {
+    const { root, lockRoot, cleanup } = makeFixture();
+    try {
+      const original = `# Alice\n\n${managedFence('people/alice')}\n`;
+      const path = join(root, 'people/alice.md');
+      writeFileSync(path, original);
+      const outcome = await fixBacklinkGaps(root, [gapFor('people/alice.md')], false, { lockRoot });
+      expect(outcome.fixed).toBe(0);
+      expect(outcome.skipped).toHaveLength(1);
+      expect(outcome.skipped[0].reason).toContain('path-only writer cannot mutate managed canonical page');
+      expect(readFileSync(path, 'utf-8')).toBe(original);
+    } finally {
+      cleanup();
+    }
+  });
+
   test('valid frontmatter page: entry inserted, frontmatter byte-identical, no tmp residue', async () => {
     const { root, lockRoot, cleanup } = makeFixture();
     try {

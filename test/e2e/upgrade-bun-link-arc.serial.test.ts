@@ -53,7 +53,7 @@
 
 import { describe, test, expect, afterEach, afterAll } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -318,7 +318,7 @@ describe('runUpgrade — bun-link arc (real git vs local bare origin; bun/gbrain
     const run = await spawnWithShims(fx, [fx.driver]);
     assertExit0('upgrade driver (full arc)', run);
     expect(run.out).toContain('Detected install method: bun-link');
-    expect(run.out).toContain(`Upgrading bun-link source clone at ${fx.clone}...`);
+    expect(run.out).toContain(`Upgrading bun-link source clone at ${realpathSync(fx.clone)}...`);
     expect(run.out).toContain('DRIVER_EXIT_OK');
     expect(run.out).not.toContain('TRIPWIRE_MISMATCH');
     expect(run.err).not.toContain('Auto-upgrade failed');

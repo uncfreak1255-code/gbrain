@@ -27,6 +27,7 @@ import {
 } from '../core/content-sanity.ts';
 import { loadOperatorLiterals } from '../core/content-sanity-literals.ts';
 import { loadConfig, loadConfigWithEngine, gbrainPath } from '../core/config.ts';
+import { assertUnmanagedPathMutation } from '../core/canonical-page-write.ts';
 import type { BrainEngine } from '../core/engine.ts';
 
 export interface LintIssue {
@@ -473,6 +474,8 @@ export interface LintOpts {
    *  create + disconnect a competing module-style engine that nulls the
    *  shared db singleton mid-cycle. */
   engine?: BrainEngine;
+  /** Source identity for canonical mutation checks. */
+  sourceId?: string;
   /**
    * #1972: cooperative-abort signal. lint's per-page work is synchronous, so
    * without a periodic yield the event loop can't deliver an abort and a
@@ -575,6 +578,7 @@ export async function runLintCore(opts: LintOpts): Promise<LintResult> {
         fixCount = issues.filter(i => i.fixable).length;
         totalFixed += fixCount;
         if (!opts.dryRun) {
+          assertUnmanagedPathMutation(page, fixed);
           writeFileSync(page, fixed);
         }
       }

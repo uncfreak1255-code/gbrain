@@ -13,8 +13,8 @@
  * mismatched-brain state, the upgrade pipeline silently runs the full path.
  */
 
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, readFileSync, realpathSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gbrainPath, loadConfig } from './config.ts';
 
@@ -61,6 +61,28 @@ export function computeBrainId(databaseUrl?: string | null): string {
   // Strip userinfo so the hash is stable across credential rotations.
   const stripped = databaseUrl.replace(/\/\/[^@]*@/, '//');
   return createHash('sha256').update(stripped).digest('hex').slice(0, 16);
+}
+
+/**
+ * Pure brain identity input for callers that already resolved the active
+ * engine configuration. This avoids ambient-config cross-brain mistakes in
+ * multi-brain processes while preserving computeBrainId's hash contract.
+ */
+export function computeBrainIdFromConfig(config: {
+  database_url?: string;
+  database_path?: string;
+}): string {
+  if (config.database_url) return computeBrainId(config.database_url);
+  const configuredPath = config.database_path;
+  let canonicalPath = 'default';
+  if (configuredPath) {
+    try {
+      canonicalPath = realpathSync(configuredPath);
+    } catch {
+      canonicalPath = resolve(configuredPath);
+    }
+  }
+  return createHash('sha256').update(`pglite:${canonicalPath}`).digest('hex').slice(0, 16);
 }
 
 /**

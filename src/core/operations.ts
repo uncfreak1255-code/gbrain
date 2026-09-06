@@ -112,6 +112,7 @@ import { chronicleOperations } from './ops/chronicle.ts';
 import { extractionOperations } from './ops/extraction.ts';
 import { entityIdentityOperations } from './ops/entity-identity.ts';
 import { requestToolsOperations } from './ops/request-tools.ts';
+import { learningLoopOperations } from './ops/learning-loop.ts';
 
 // parseTtlParam moved to ops/facts.ts with the facts cluster; the `remember`
 // verb (verbs.ts) loads it from THIS module at runtime — re-exported so every
@@ -211,6 +212,8 @@ export const operations: Operation[] = [
   ...schemaPacksOperations,
   // v0.41.18.0 run_onboard + v0.41.20.0 run_skillopt — ops/skillopt.ts
   ...skilloptOperations,
+  // Personal Learning Loop capture and trusted lifecycle controls.
+  ...learningLoopOperations,
   // v0.47: open-loop engine (who is waiting on you) — ops/loops.ts
   ...loopsOperations,
 ];
@@ -294,6 +297,11 @@ const OP_AREAS: Record<string, string> = {
   entity_identity_list: 'entities',
   // v0.47 open-loop engine (google source kind)
   open_loops: 'loops', loops_close: 'loops', loops_mute: 'loops', loops_unmute: 'loops',
+  // Personal Learning Loop
+  learning_loop_get_mode: 'learning', learning_loop_set_mode: 'learning',
+  learning_loop_inspect: 'learning', learning_loop_arm: 'learning',
+  learning_loop_abort: 'learning', learning_loop_resolve_transcript: 'learning',
+  learning_loop_bind_session: 'learning', learning_loop_submit_session_v1: 'learning',
   // insight / signal reads
   get_recent_salience: 'insights', find_anomalies: 'insights',
   find_contradictions: 'insights', find_experts: 'insights',

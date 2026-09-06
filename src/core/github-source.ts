@@ -34,6 +34,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync } from 'node:fs';
 import { createSign } from 'node:crypto';
 import { dirname, join, relative } from 'node:path';
+import { assertUnmanagedPathMutation } from './canonical-page-write.ts';
 
 import type { BrainEngine } from './engine.ts';
 import type { SyncOpts } from '../commands/sync.ts';
@@ -1384,7 +1385,9 @@ export async function runGitHubSync(
             repoMeta.set(repo, meta);
             mkdirSync(dirname(cardPath), { recursive: true });
             const cardExisted = existsSync(cardPath);
-            writeFileSync(cardPath, renderRepoCard(repo, meta), 'utf-8');
+            const cardMarkdown = renderRepoCard(repo, meta);
+            assertUnmanagedPathMutation(cardPath, cardMarkdown);
+            writeFileSync(cardPath, cardMarkdown, 'utf-8');
             const imported = await importPage(deps, cardPath, activePack);
             if (!summary.pagesAffected.includes(imported.slug)) summary.pagesAffected.push(imported.slug);
             if (cardExisted) summary.modified++; else summary.added++;
