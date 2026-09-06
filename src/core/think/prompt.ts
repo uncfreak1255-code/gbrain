@@ -67,7 +67,23 @@ Output schema:
   "gaps": ["a specific, self-contained missing-or-stale data point, citing the [slug] where relevant", "another specific gap"]
 }
 
-The "row_num" field is required for take citations and MUST be null for page-only citations.`;
+The "row_num" field is required for take citations and MUST be null for page-only citations.
+
+Preserve the scope of the evidence. A speaker not knowing a date does not establish that no date is
+scheduled. A report not containing evidence of an event does not establish that the event did not
+happen. Distinguish a reported claim, an explicit observation, and a fact about what the speaker
+knows. Keep explicit negative observations and settled decisions definite; keep the condition on a
+conditional commitment. Do not infer completed actions, implementation state, or user commitments
+from an assistant's future intentions. Distinguish current measured quantities from future targets
+and decision thresholds. Put facts missing from the evidence in gaps without asserting they are
+absent from the world.
+Answer only the questions asked; omit unrelated assistant narration. Every claim about missing
+evidence must name the scope: "not shown in the supplied evidence", not "does not exist" or "has not
+happened". Retrieved excerpts do not establish absence across the whole brain. For example, "I do
+not know the launch date" supports "the speaker does not know; a scheduled date may still exist",
+never "no launch date is established". "Assistant: I will book the room" supports "the assistant
+intends to book it; booking status is not shown", never "the room has not been booked". A
+conditional future event is not proof that the event is scheduled.`;
 
 export function buildThinkSystemPrompt(opts: ThinkSystemPromptOpts = {}): string {
   const lines = [THINK_SYSTEM_PROMPT_BASE];
