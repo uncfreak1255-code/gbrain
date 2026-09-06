@@ -43,6 +43,8 @@
  * cheap and a broken optional dep degrades to a skip, never a crash.
  */
 
+import { loadPricingOverridesStrict } from './budget/budget-tracker.ts';
+import { withGatewaySpendScope } from './budget/gateway-spend.ts';
 import { join } from 'node:path';
 import { readdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from './engine.ts';
@@ -292,23 +294,8 @@ export async function settleSweepSpendToday(
 async function loadSweepPricingOverrides(
   engine: BrainEngine,
 ): Promise<import('./budget/budget-tracker.ts').PricingOverrides | undefined | 'invalid'> {
-  const raw = await engine.getConfig('pricing.overrides');
-  if (raw === null || raw === undefined) return undefined;
-  if (typeof raw !== 'string') return 'invalid';
-  if (raw.trim() === '') return undefined;
-  let declared: unknown;
-  try {
-    declared = JSON.parse(raw);
-  } catch {
-    return 'invalid';
-  }
-  if (!declared || typeof declared !== 'object' || Array.isArray(declared)) return 'invalid';
-  const { parsePricingOverrides } = await import('./budget/budget-tracker.ts');
-  const overrides = parsePricingOverrides(declared);
-  // Every declared entry must survive parsing: a dropped entry is a rate the
-  // operator meant to apply, and the shipped table would silently replace it.
-  if (!overrides || Object.keys(overrides).length !== Object.keys(declared as object).length) return 'invalid';
-  return overrides;
+  try { return await loadPricingOverridesStrict(engine); }
+  catch { return 'invalid'; }
 }
 
 /** What the corpus pass may spend: a capped tracker + day reservation, or a refusal it must honor before any paid call. */
@@ -390,7 +377,7 @@ async function resolveSweepSpendGate(engine: BrainEngine, opts: SweepOpts, repor
  * Run one bounded maintenance sweep. Never throws — failures land in
  * report.skipped with a per-pass reason.
  */
-export async function runMaintenanceSweep(
+async function runMaintenanceSweepInner(
   engine: BrainEngine,
   opts: SweepOpts = {},
 ): Promise<SweepReport> {
@@ -1296,4 +1283,8 @@ export function armStartupSweep(
       try { clearT(handle); } catch { /* noop */ }
     },
   };
+}
+
+export function runMaintenanceSweep(engine: BrainEngine, opts: SweepOpts = {}) {
+  return withGatewaySpendScope(engine, () => runMaintenanceSweepInner(engine, opts));
 }

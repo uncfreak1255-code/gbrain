@@ -8,6 +8,7 @@
  *   await queue.prune({ olderThan: new Date(Date.now() - 30 * 86400000) });
  */
 
+import { currentGatewaySpendRunId, gatewayJobRunId, SPEND_RUN_DATA_KEY } from '../budget/gateway-spend.ts';
 import type { BrainEngine } from '../engine.ts';
 import type {
   MinionJob, MinionJobInput, MinionJobStatus, InboxMessage, TokenUpdate,
@@ -213,6 +214,12 @@ export class MinionQueue {
     if (jobName.length === 0) {
       throw new Error('Job name cannot be empty');
     }
+    data = { ...data };
+    delete data[SPEND_RUN_DATA_KEY];
+    const parent = opts?.parent_job_id ? await this.getJob(opts.parent_job_id) : null;
+    const spendRun = parent ? await gatewayJobRunId(this.engine, parent) : currentGatewaySpendRunId(this.engine);
+    if (opts?.parent_job_id && !parent) throw new Error('Missing gateway budget job parent');
+    if (spendRun) data[SPEND_RUN_DATA_KEY] = spendRun;
     assertEmbedBackfillQueueAdmission(this.engine, jobName, data, trusted);
     if (isProtectedJobName(jobName) && !trusted?.allowProtectedSubmit) {
       throw new Error(

@@ -65,7 +65,7 @@ export const QUOTA_MAX_WAITING_DEFAULT: Readonly<Record<string, number>> = {};
  * owner lanes — one OAuth client's submit must not be suppressed by (or
  * handed a job id owned by) another client.
  */
-export const PARAM_HASH_EXCLUDED_KEYS: ReadonlySet<string> = new Set(['__param_hash']);
+export const PARAM_HASH_EXCLUDED_KEYS: ReadonlySet<string> = new Set(['__param_hash', '__gateway_spend_run']);
 
 /**
  * error_text prefix stamped by the waiting-TTL sweep. The 24h-cancellation

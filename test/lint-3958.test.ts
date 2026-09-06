@@ -23,8 +23,14 @@ import {
   runLintCore,
   runLint,
 } from '../src/commands/lint.ts';
+import { renderLearningLoopFence, type LearningLoopKnowledge } from '../src/core/learning-loop-knowledge.ts';
 
 const SANITY_OFF = { disabled: true } as const;
+const MANAGED_FENCE = renderLearningLoopFence({
+  brain_id: 'b', source_id: 's', canonical_slug: 'fixable', managed_rows: {},
+  blocked_identities: [], correction_lineages: {}, reversal_attempts: {},
+  immutable_commit_markers: [], pending_delivery: null,
+} satisfies LearningLoopKnowledge);
 
 describe('#3958 placeholder-date skips fenced code blocks', () => {
   test('YYYY-MM-DD inside a ``` fence is not a placeholder', () => {
@@ -150,6 +156,15 @@ describe('#3958 total_fixable + the --fix hint gate', () => {
     const result = await runLintCore({ target: dir, fix: true, contentSanity: SANITY_OFF as never });
     expect(result.total_fixed).toBe(1);
     expect(readFileSync(page, 'utf-8')).toContain('created: 2026-01-05');
+  });
+
+  test('runLintCore --fix rejects a managed page before changing bytes', async () => {
+    const page = join(dir, 'fixable.md');
+    const original = `---\ntitle: B\ntype: note\ncaptured_at: 2026-01-05\n---\n\n# B\n\n${MANAGED_FENCE}\n`;
+    writeFileSync(page, original);
+    await expect(runLintCore({ target: page, fix: true, contentSanity: SANITY_OFF as never }))
+      .rejects.toThrow('path-only writer cannot mutate managed canonical page');
+    expect(readFileSync(page, 'utf-8')).toBe(original);
   });
 
   test('hint prints only when something is fixable', async () => {

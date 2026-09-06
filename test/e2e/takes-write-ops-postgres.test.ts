@@ -253,9 +253,9 @@ d('withPageLock serialization — the lock journey', () => {
   }, 30_000);
 
   test('a lock held past the 2s op budget → unavailable + detail retryable (page_locked)', async () => {
-    // Hold the REAL lock (same default lock root the op resolves) so the
+    // Hold the REAL lock (same canonical path the op resolves) so the
     // op's 2000ms acquire budget deterministically expires.
-    const held = await acquirePageLock(LOCK_HELD_SLUG, { timeoutMs: 0 });
+    const held = await acquirePageLock(LOCK_HELD_SLUG, { timeoutMs: 0, canonicalPath: pageFile(LOCK_HELD_SLUG) });
     expect(held).not.toBeNull();
     try {
       const err = await expectOpError(

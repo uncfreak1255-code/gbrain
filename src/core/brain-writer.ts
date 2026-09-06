@@ -29,6 +29,7 @@ import {
   type ParseValidationError,
 } from './markdown.ts';
 import { isMarkdownFilePath, isSyncable, pruneDir, slugifyPath } from './sync.ts';
+import { assertUnmanagedPathMutation } from './canonical-page-write.ts';
 
 export type { ParseValidationCode };
 
@@ -387,6 +388,7 @@ export function writeBrainPage(
   } else {
     mkdirSync(dirname(filePath), { recursive: true });
   }
+  assertUnmanagedPathMutation(filePath, toWrite);
   writeFileSync(filePath, toWrite, 'utf8');
   return { fixes, backupPath };
 }

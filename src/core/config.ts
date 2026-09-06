@@ -5,7 +5,6 @@ import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
 import { applyDbPlaneReadSideMerge, type DbPlaneEngineReader } from './config-db-merge.ts';
 import { loadConfigSnapshot } from './config-snapshot.ts';
 import { loadGbrainEnvFile } from './gbrain-env-file.ts';
-
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
  * attempt. Used by `gbrain doctor --fast` so the user gets a precise message
@@ -29,6 +28,8 @@ function getConfigDir() { return configDir(); }
 function getConfigPath() { return configPath(); }
 
 export interface GBrainConfig {
+  /** File-plane opt-in: does not enable any workload. */
+  paid_budget?: import('./budget/gateway-spend.ts').PaidBudgetPolicy;
   engine: 'postgres' | 'pglite';
   /** File-plane hook-lane keys (read by engine-free hook/push children).
    * `gbrain config set` routes these two dotted keys here, not to the DB. */
@@ -82,6 +83,11 @@ export interface GBrainConfig {
    * merge → buildGatewayConfig env dict → recipe reads ZEROENTROPY_API_KEY.
    */
   zeroentropy_api_key?: string;
+  /** Personal Learning Loop repository contract. Absence is always `off`. */
+  learning_loop?: {
+    mode?: 'off' | 'capture' | 'canary';
+    corpus?: { codex?: { root?: string; source_id?: string } };
+  };
   /**
    * OpenRouter API key. File-plane slot so `gbrain config set
    * openrouter_api_key X` (or config.json) reaches the openrouter recipe:
@@ -1233,6 +1239,9 @@ export async function loadConfigWithEngine(
  */
 export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // File-plane (GBrainConfig static fields)
+  'learning_loop.mode',
+  'learning_loop.corpus.codex.root',
+  'learning_loop.corpus.codex.source_id',
   'engine',
   'database_url',
   'database_path',
@@ -1256,6 +1265,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'chat_model',
   'chat_fallback_chain',
   'provider_base_urls',
+  'paid_budget',
   // Integration gates (file-plane, hook-lane)
   'integrations.memorable.enabled',
   // MEMORY_VERBS v1 (Cathedral 1)

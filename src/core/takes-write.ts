@@ -50,11 +50,11 @@ import {
   type ParsedTake,
   type ParseResult,
 } from './takes-fence.ts';
-import { withPageLock } from './page-lock.ts';
 import { resolvePageFilePath, resolveSourceLocalFilePath } from './markdown.ts';
 import { sanitizeRecordedSourcePath, recordedPathFromFileUri } from './write-through.ts';
 import { isWriteTargetContained, msysToNativePath } from './path-confine.ts';
 import { atomicWriteFileSync } from './atomic-write.ts';
+import { assertUnmanagedPathMutation, withSourceQualifiedCanonicalPageMutation } from './canonical-page-write.ts';
 
 export type TakesWriteErrorCode =
   | 'page_not_found'      // slug has no pages row (scoped)
@@ -362,6 +362,7 @@ function writePageBody(path: string, body: string, writeRoot: string): void {
     );
   }
   mkdirSync(dirname(path), { recursive: true });
+  assertUnmanagedPathMutation(path, body);
   atomicWriteFileSync(path, body);
 }
 
@@ -410,11 +411,19 @@ function toBatchInput(pageId: number, t: ParsedTake, supersededBy?: number | nul
 }
 
 async function withTakesLock<T>(
-  target: Pick<TakesWriteTarget, 'slug' | 'lockTimeoutMs'>,
-  fn: () => Promise<T>,
+  target: Pick<TakesWriteTarget, 'engine' | 'slug' | 'sourceId' | 'lockTimeoutMs'> & { brainDir: string | null },
+  fn: (pageId: number, file: { path: string; writeRoot: string }) => Promise<T>,
 ): Promise<T> {
   try {
-    return await withPageLock(target.slug, fn, {
+    const pageId = await getPageId(target.engine, target.slug, target.sourceId);
+    const file = await resolveTakesFilePath(target.engine, target.brainDir, target.slug, target.sourceId);
+    return await withSourceQualifiedCanonicalPageMutation({
+      engine: target.engine,
+      sourceId: target.sourceId ?? 'default',
+      slug: target.slug,
+      configuredRoot: file.writeRoot,
+      canonicalPath: file.path,
+    }, () => fn(pageId, file), {
       ...(target.lockTimeoutMs !== undefined ? { timeoutMs: target.lockTimeoutMs } : {}),
     });
   } catch (err) {
@@ -452,17 +461,13 @@ export async function addTakeToPage(
   assertSafeCellText('source', input.source);
   assertValidWeight(input.weight);
   assertValidSinceDate(input.sinceDate);
-  return withTakesLock(target, async () => {
+  return withTakesLock(target, async (pageId, { path, writeRoot }) => {
     // Resolve the page BEFORE touching the markdown (the historical CLI
     // ordering): failing after a fence write would leave a take on disk the
     // DB never saw until the next reconcile.
-    const pageId = await getPageId(target.engine, target.slug, target.sourceId);
     // add is the one mutate that may CREATE the page file + fence (first take
     // on a page) — readPageBody's existence refusal applies to row-targeting
     // mutates, not appends; the page itself was verified in the DB above.
-    const { path, writeRoot } = await resolveTakesFilePath(
-      target.engine, target.brainDir, target.slug, target.sourceId,
-    );
     const body = existsSync(path) ? readFileSync(path, 'utf-8') : '';
     // F1: guard only fires when a fence ALREADY exists (an empty/fence-less body
     // parses to zero warnings) — a whole-fence re-render must not delete rows
@@ -529,11 +534,7 @@ export async function appendTakesToPageMdFirst(
     assertValidWeight(row.weight);
     assertValidSinceDate(row.sinceDate);
   }
-  return withTakesLock(target, async () => {
-    const pageId = await getPageId(target.engine, target.slug, target.sourceId);
-    const { path, writeRoot } = await resolveTakesFilePath(
-      target.engine, target.brainDir, target.slug, target.sourceId,
-    );
+  return withTakesLock(target, async (pageId, { path, writeRoot }) => {
     // Unlike addTakeToPage, a missing file REFUSES (readPageBody's
     // mirror_unavailable) — see the contract note above.
     const body = readPageBody(path);
@@ -586,11 +587,7 @@ export async function updateTakeOnPage(
   assertSafeCellText('source', fields.source);
   assertValidWeight(fields.weight);
   assertValidSinceDate(fields.sinceDate);
-  return withTakesLock(target, async () => {
-    const pageId = await getPageId(target.engine, target.slug, target.sourceId);
-    const { path, writeRoot } = await resolveTakesFilePath(
-      target.engine, target.brainDir, target.slug, target.sourceId,
-    );
+  return withTakesLock(target, async (pageId, { path, writeRoot }) => {
     const body = readPageBody(path);
     const parsed = parseTakesFence(body);
     assertFenceRoundTrips(parsed); // F1: refuse a whole-fence re-render that would drop skipped rows.
@@ -643,11 +640,7 @@ export async function supersedeTakeOnPage(
   assertSafeCellText('source', input.source);
   assertValidWeight(input.weight);
   assertValidSinceDate(input.sinceDate);
-  return withTakesLock(target, async () => {
-    const pageId = await getPageId(target.engine, target.slug, target.sourceId);
-    const { path, writeRoot } = await resolveTakesFilePath(
-      target.engine, target.brainDir, target.slug, target.sourceId,
-    );
+  return withTakesLock(target, async (pageId, { path, writeRoot }) => {
     const body = readPageBody(path);
     const parsed = parseTakesFence(body);
     assertFenceRoundTrips(parsed); // F1: refuse a whole-fence re-render that would drop skipped rows.
@@ -710,11 +703,7 @@ export async function resolveTakeOnPage(
   assertSafeCellText('evidence', input.evidence);
   assertSafeCellText('unit', input.unit);
   assertSafeCellText('resolved_by', input.resolvedBy);
-  return withTakesLock(target, async () => {
-    const pageId = await getPageId(target.engine, target.slug, target.sourceId);
-    const { path, writeRoot } = await resolveTakesFilePath(
-      target.engine, target.brainDir, target.slug, target.sourceId,
-    );
+  return withTakesLock(target, async (pageId, { path, writeRoot }) => {
     const body = readPageBody(path);
     const parsed = parseTakesFence(body);
     assertFenceRoundTrips(parsed); // F1: refuse a whole-fence re-render that would drop skipped rows.

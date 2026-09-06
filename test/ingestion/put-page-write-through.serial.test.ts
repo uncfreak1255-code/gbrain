@@ -16,10 +16,12 @@ import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import { operations, OperationError } from '../../src/core/operations.ts';
 import type { OperationContext } from '../../src/core/operations.ts';
 import { resetGateway } from '../../src/core/ai/gateway.ts';
+import { renderLearningLoopFence } from '../../src/core/learning-loop-knowledge.ts';
 
 let engine: PGLiteEngine;
 let tmpRoot: string;
 let brainDir: string;
+let previousGbrainHome: string | undefined;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -47,6 +49,8 @@ beforeEach(async () => {
   // false → noEmbed=true → no network call.
   resetGateway();
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-wt-'));
+  previousGbrainHome = process.env.GBRAIN_HOME;
+  process.env.GBRAIN_HOME = tmpRoot;
   brainDir = path.join(tmpRoot, 'brain');
   fs.mkdirSync(brainDir, { recursive: true });
   // Wire sync.repo_path so write-through can find the repo.
@@ -54,6 +58,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  if (previousGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = previousGbrainHome;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -85,6 +91,48 @@ function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
 const putPage = operations.find((o) => o.name === 'put_page')!;
 
 describe('put_page write-through — happy path', () => {
+  test('raw put_page rejects a managed page before file or row mutation', async () => {
+    const slug = 'inbox/managed-put';
+    const fence = renderLearningLoopFence({
+      brain_id: 'host', source_id: 'default', canonical_slug: slug,
+      managed_rows: {}, blocked_identities: [], correction_lineages: {},
+      reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
+    });
+    const file = path.join(brainDir, `${slug}.md`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const before = `---\ntitle: Before\nslug: ${slug}\n---\n\nBefore.\n\n${fence}\n`;
+    fs.writeFileSync(file, before);
+
+    await expect(putPage.handler(makeCtx({ brainId: 'host' }), {
+      slug,
+      content: `---\ntitle: After\nslug: ${slug}\n---\n\nAfter.\n`,
+    })).rejects.toThrow('managed canonical page mutation rejected');
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    expect(await engine.getPage(slug, { sourceId: 'default' })).toBeNull();
+  });
+
+  test('rejects a managed fence that claims a different brain before file or row mutation', async () => {
+    const slug = 'inbox/wrong-brain';
+    const fence = renderLearningLoopFence({
+      brain_id: 'other-brain', source_id: 'default', canonical_slug: slug,
+      managed_rows: {}, blocked_identities: [], correction_lineages: {},
+      reversal_attempts: {}, immutable_commit_markers: [], pending_delivery: null,
+    });
+    const file = path.join(brainDir, `${slug}.md`);
+    const before = `---\ntitle: Before\nslug: ${slug}\n---\n\nBefore.\n\n${fence}\n`;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, before);
+
+    await expect(putPage.handler(makeCtx({ brainId: 'host' }), {
+      slug,
+      content: `---\ntitle: After\nslug: ${slug}\n---\n\nAfter.\n`,
+    })).rejects.toThrow('managed canonical page mutation rejected');
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    expect(await engine.getPage(slug, { sourceId: 'default' })).toBeNull();
+  });
+
   test('writes the markdown file to disk at brainDir/<slug>.md', async () => {
     const ctx = makeCtx();
     const content = '---\ntitle: Test\n---\n\n# WT body';

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { withGatewaySpendScope } from './core/budget/gateway-spend.ts';
 import { affectsRecall } from './core/types.ts';
 import { installSigchldHandler } from './core/zombie-reap.ts';
 installSigchldHandler();
@@ -779,7 +780,7 @@ async function main() {
     if (op.scope === 'read') {
       try {
         rawResult = await withTimeout(
-          op.handler(ctx, params),
+          withGatewaySpendScope(engine, () => op.handler(ctx, params)),
           wallclockMs,
           `gbrain ${command}`,
         );
@@ -791,7 +792,7 @@ async function main() {
         throw e;
       }
     } else {
-      rawResult = await op.handler(ctx, params);
+      rawResult = await withGatewaySpendScope(engine, () => op.handler(ctx, params));
     }
     // ENG-2 (renderer parity by data shape): JSON-round-trip the local-engine
     // path's return value so renderers see the same shape they'd see on the
@@ -2534,7 +2535,7 @@ async function handleCliOnly(command: string, args: string[]) {
       );
     }
     try {
-      await runDream(eng, args);
+      await (eng ? withGatewaySpendScope(eng, () => runDream(eng, args)) : runDream(eng, args));
     } finally {
       // #1471 invariant tripwire (the dream-cycle owner): `eng` created the
       // module singleton (first module connector) and is torn down LAST,
@@ -2810,7 +2811,7 @@ async function handleCliOnly(command: string, args: string[]) {
       throw e;
     }
     try {
-      await withTimeout(dispatchReadOnlyCommand(engine, command, args), readOnlyTimeoutMs, label);
+      await withTimeout(withGatewaySpendScope(engine, () => dispatchReadOnlyCommand(engine, command, args)), readOnlyTimeoutMs, label);
     } catch (e) {
       if (e instanceof OperationTimeoutError) {
         const hint = userTimeoutMs ? '' : ` (default ${e.ms}ms; pass --timeout=Ns to override)`;
@@ -2996,6 +2997,7 @@ async function handleCliOnly(command: string, args: string[]) {
     return; // serve doesn't disconnect
   }
   try {
+    const dispatch = async () => {
     switch (command) {
       case 'import': {
         const { runImport, ImportAbortError } = await import('./commands/import.ts');
@@ -3525,6 +3527,9 @@ async function handleCliOnly(command: string, args: string[]) {
         break;
       }
     }
+    };
+    if (command === 'serve') await dispatch();
+    else await withGatewaySpendScope(engine, dispatch);
   } finally {
     syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit
     // #2084 — the CLI_ONLY fall-through teardown (drain every background-work

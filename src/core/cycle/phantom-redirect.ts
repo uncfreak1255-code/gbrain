@@ -36,6 +36,7 @@
  */
 
 import * as fs from 'node:fs';
+import { assertUnmanagedPathMutation } from '../canonical-page-write.ts';
 import * as path from 'node:path';
 
 import type { BrainEngine } from '../engine.ts';
@@ -252,6 +253,7 @@ function appendPhantomFenceRowsToCanonical(
 
   // Atomic write: .tmp first, parse-validate, rename.
   const tmpPath = `${canonicalPath}.tmp`;
+  assertUnmanagedPathMutation(canonicalPath, newBody);
   fs.writeFileSync(tmpPath, newBody, 'utf-8');
   const reparsed = parseFactsFence(newBody);
   if (reparsed.warnings.length > 0) {
@@ -331,6 +333,7 @@ async function materializeCanonicalToDisk(
       '',
       { type: 'concept', title: titleFromSlug, tags: [] },
     );
+    assertUnmanagedPathMutation(canonicalPath, stubBody);
     fs.writeFileSync(canonicalPath, stubBody, 'utf-8');
     return;
   }
@@ -346,6 +349,7 @@ async function materializeCanonicalToDisk(
     },
   );
   fs.mkdirSync(path.dirname(canonicalPath), { recursive: true });
+  assertUnmanagedPathMutation(canonicalPath, body);
   fs.writeFileSync(canonicalPath, body, 'utf-8');
 }
 
@@ -467,6 +471,7 @@ export async function tryRedirectPhantom(
   const phantomPath = path.join(brainDir, `${page.slug}.md`);
   if (fs.existsSync(phantomPath)) {
     try {
+      assertUnmanagedPathMutation(phantomPath);
       fs.unlinkSync(phantomPath);
     } catch (err) {
       // ENOENT is fine (someone else got there first). Anything else

@@ -12,6 +12,7 @@ import type {
   FactRow, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
   SourceRow,
+  LearningLoopConfigMutationPermit,
 } from './engine.ts';
 // Engine-path imports stay static unless a call site carries an explicit
 // engine-dynamic-import-ok justification. The gateway is the only current
@@ -37,7 +38,15 @@ import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatch
 import type {
   DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow,
 } from './types.ts';
-import { DREAM_VERDICT_TTL_SECONDS, MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
+import {
+  DREAM_VERDICT_TTL_SECONDS,
+  MAX_SEARCH_LIMIT,
+  clampSearchLimit,
+  assertLearningLoopConfigMutationPermit,
+  consumeLearningLoopConfigMutationPermit,
+  isLearningLoopConfigKey,
+  learningLoopConfigValueHash,
+} from './engine.ts';
 import { executeRawJsonb, type SqlValue } from './sql-query.ts';
 import { sanitizeForJsonb, sanitizeText, buildLinkRows, buildTimelineRows } from './batch-rows.ts';
 import { runMigrations } from './migrate.ts';
@@ -83,6 +92,7 @@ import { ConnectionManager, DEFAULT_DIRECT_POOL_SIZE } from './connection-manage
 import { logConnectionEvent } from './connection-audit.ts';
 import { drainBackgroundWorkBeforeDisconnect } from './background-work.ts';
 import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
+import { assertManagedPageMutationAllowed, assertManagedPagesMutationAllowed, assertManagedSlugMutationAllowed } from './canonical-page-write.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery, boundWebsearchQuery } from './search/sql-ranking.ts';
 import { privatePagesFilterFragment } from './search/private-visibility.ts';
@@ -143,6 +153,13 @@ export class PostgresEngine implements BrainEngine {
   private _sql: ReturnType<typeof postgres> | null = null;
   /** Saved config for reconnection. */
   private _savedConfig: (EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }) | null = null;
+
+  learningLoopLedgerConfig(): Pick<EngineConfig, 'database_url' | 'database_path'> {
+    return {
+      database_url: this._savedConfig?.database_url,
+      database_path: this._savedConfig?.database_path,
+    };
+  }
   /** Whether a reconnect is in progress (prevents concurrent reconnects). */
   private _reconnecting = false;
   /**
@@ -728,7 +745,8 @@ export class PostgresEngine implements BrainEngine {
     });
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; allowEmptyOverwrite?: boolean }): Promise<Page> {
+  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; allowEmptyOverwrite?: boolean; canonicalPermit?: import('./canonical-page-write.ts').PageDbMutationPermit }): Promise<Page> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'canonical_reconciliation', opts?.canonicalPermit);
     slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page);
@@ -814,6 +832,7 @@ export class PostgresEngine implements BrainEngine {
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     await sql`DELETE FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}`;
   }
 
@@ -825,6 +844,7 @@ export class PostgresEngine implements BrainEngine {
    */
   async deletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
     if (slugs.length === 0) return [];
+    await assertManagedPagesMutationAllowed(this, slugs, opts.sourceId, 'destructive_admin');
     if (slugs.length > DELETE_BATCH_SIZE) {
       throw new Error(
         `deletePages: input size ${slugs.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,
@@ -865,6 +885,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async softDeletePage(slug: string, opts?: { sourceId?: string }): Promise<{ slug: string } | null> {
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'active');
     const sql = this.sql;
     const sourceId = opts?.sourceId;
     // Idempotent-as-null contract: only flip rows that are currently active.
@@ -888,6 +909,7 @@ export class PostgresEngine implements BrainEngine {
    */
   async softDeletePages(slugs: string[], opts: { sourceId: string }): Promise<string[]> {
     if (slugs.length === 0) return [];
+    await assertManagedPagesMutationAllowed(this, slugs, opts.sourceId, 'destructive_admin');
     if (slugs.length > DELETE_BATCH_SIZE) {
       throw new Error(
         `softDeletePages: input size ${slugs.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,
@@ -903,6 +925,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
+    await assertManagedSlugMutationAllowed(this, slug, opts?.sourceId, 'destructive_admin', 'deleted');
     const sql = this.sql;
     const sourceId = opts?.sourceId;
     const sourceCondition = sourceId ? sql`AND source_id = ${sourceId}` : sql``;
@@ -955,6 +978,7 @@ export class PostgresEngine implements BrainEngine {
     timeline: string,
     contentHash: string,
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, sourceId, 'destructive_admin');
     const sql = this.sql;
     // Narrow UPDATE — leaves frontmatter, type, chunks, links, embeddings,
     // tags, takes untouched. Skips soft-deleted rows so a redirect retry
@@ -4871,6 +4895,7 @@ export class PostgresEngine implements BrainEngine {
     versionId: number,
     opts?: { sourceId?: string },
   ): Promise<void> {
+    await assertManagedPageMutationAllowed(this, slug, opts?.sourceId ?? 'default', 'destructive_admin');
     const sql = this.sql;
     // v0.31.8 (D12): two-branch. With opts.sourceId, scope BOTH the page lookup
     // AND the version reference. Without it, multi-source brains can revert
@@ -5213,6 +5238,7 @@ export class PostgresEngine implements BrainEngine {
 
   // Sync
   async updateSlug(oldSlug: string, newSlug: string, opts?: { sourceId?: string }): Promise<number> {
+    await assertManagedPageMutationAllowed(this, oldSlug, opts?.sourceId ?? 'default', 'destructive_admin');
     newSlug = validateSlug(newSlug);
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
@@ -5366,19 +5392,34 @@ export class PostgresEngine implements BrainEngine {
     });
   }
 
-  async setConfig(key: string, value: string): Promise<void> {
+  async setConfig(key: string, value: string, permit?: LearningLoopConfigMutationPermit): Promise<void> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'set', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) {
+        throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+      }
+    }
     return this.connRetry(async () => {
       await this.sql`
         INSERT INTO config (key, value) VALUES (${key}, ${value})
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
       `;
+      if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
     });
   }
 
-  async unsetConfig(key: string): Promise<number> {
+  async unsetConfig(key: string, permit?: LearningLoopConfigMutationPermit): Promise<number> {
+    if (isLearningLoopConfigKey(key)) {
+      assertLearningLoopConfigMutationPermit(permit, key, 'unset', this);
+      if (permit.expectedOldValueHash !== learningLoopConfigValueHash(await this.getConfig(key))) {
+        throw new Error(`learning_loop_config_boundary: stale permit for ${key}`);
+      }
+    }
     return this.connRetry(async () => {
       const result = await this.sql`DELETE FROM config WHERE key = ${key}` as unknown as { count: number };
-      return result.count ?? 0;
+      const count = result.count ?? 0;
+      if (isLearningLoopConfigKey(key)) consumeLearningLoopConfigMutationPermit(permit!);
+      return count;
     });
   }
 

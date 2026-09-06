@@ -55,7 +55,10 @@ import {
   type WriteThroughLogger,
   type WriteThroughResult,
 } from './write-through.ts';
-import { withPageLock } from './page-lock.ts';
+import {
+  assertUnmanagedPathMutation,
+  withSourceQualifiedCanonicalPageMutation,
+} from './canonical-page-write.ts';
 import { findTimelineSplitIndex } from './markdown.ts';
 import {
   isDurabilityHardened, commitWriteThroughFile, currentBranch, getLastPushOutcome,
@@ -348,8 +351,14 @@ export async function writeTimelineEntryThrough(
     // Same page lock as the facts fence writer (fence-write.ts) so concurrent
     // fence/timeline writers to the same page serialize their read-modify-
     // write cycles instead of dropping each other's atomic renames.
-    return await withPageLock(
-      slug,
+    return await withSourceQualifiedCanonicalPageMutation(
+      {
+        engine,
+        sourceId,
+        slug,
+        configuredRoot: writeRoot,
+        canonicalPath: filePath,
+      },
       async (): Promise<TimelineWriteThroughOutcome> => {
         // Read-modify-write on the ON-DISK file: the disk copy is the merge
         // point for file-only edits (facts fences, hand edits) the pages row
@@ -373,6 +382,7 @@ export async function writeTimelineEntryThrough(
 
         const beforeText = readFileSync(filePath, 'utf8');
         const afterText = spliceTimelineIntoFileText(beforeText, entry.date, rendered.block);
+        assertUnmanagedPathMutation(filePath, afterText);
 
         // fence-write's parse-before-rename analog: the spliced text must
         // re-extract the canonical tuple, or the file is not touched.

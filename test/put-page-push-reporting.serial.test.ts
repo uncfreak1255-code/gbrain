@@ -37,6 +37,8 @@ function git(cwd: string, ...args: string[]): string {
  *  the gbrain banner (the only thing `isDurabilityHardened` checks) with a
  *  no-op body so tests never attempt a real network push. */
 function installFakeDurabilityHook(repoPath: string): void {
+  // Select the fixture hook rather than inheriting the host's hooksPath.
+  git(repoPath, 'config', '--local', 'core.hooksPath', '.git/hooks');
   const hooksDir = join(repoPath, '.git', 'hooks');
   mkdirSync(hooksDir, { recursive: true });
   const hookPath = join(hooksDir, 'post-commit');

@@ -279,3 +279,52 @@ export { clientLockKey };
 
 /** Re-export BudgetExceededError for one-stop import. */
 export { BudgetExceededError };
+
+/**
+ * Non-expiring write-ahead holds for gateway HTTP attempts. These are not
+ * billed usage. Unknown outcomes retain their whole hold, including after
+ * process restart. Reuse the existing spend table and per-client lock.
+ */
+export async function reserveGatewaySpend(engine: BrainEngine, opts: {
+  runId: string; estimatedUsd: number; runCapUsd: number; dayCapUsd: number; model: string;
+}): Promise<void> {
+  assertNonEmpty('runId', opts.runId);
+  assertNonEmpty('model', opts.model);
+  for (const key of ['estimatedUsd', 'runCapUsd', 'dayCapUsd'] as const) {
+    assertFiniteNonNegative(key, opts[key]);
+  }
+  // mcp_spend_log is NUMERIC(12,4) cents. Round UP to its microdollar
+  // precision before admission so storage cannot round a hold down.
+  const cents = Math.ceil(opts.estimatedUsd * 1_000_000) / 10_000;
+  if (!Number.isFinite(cents) || cents >= 100_000_000) throw new Error('Invalid gateway reservation');
+  const clientId = 'gbrain:gateway-budget';
+  await engine.transaction(async tx => {
+    const sql = sqlQueryForEngine(tx);
+    if (tx.kind === 'postgres') {
+      await sql`SELECT pg_advisory_xact_lock(${BigInt(clientLockKey(clientId))})`;
+    }
+    // Take the day AFTER lock acquisition. Transaction-start now() can be
+    // yesterday when a waiter crosses midnight.
+    const [row] = await sql`
+      SELECT
+        COALESCE(SUM(spend_cents) FILTER (WHERE token_name = ${opts.runId}), 0)::text AS run_cents,
+        COALESCE(SUM(spend_cents) FILTER (WHERE created_at >=
+          (date_trunc('day', clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')), 0)::text AS day_cents
+      FROM mcp_spend_log WHERE client_id = ${clientId} AND operation = 'gateway_reservation'
+    `;
+    if (row?.run_cents == null || row?.day_cents == null) throw new Error('Unreadable gateway spend ledger');
+    const run = requiredFiniteTotal(row?.run_cents, 'gateway run');
+    const day = requiredFiniteTotal(row?.day_cents, 'gateway day');
+    const runMicros = Math.round(run * 10_000), dayMicros = Math.round(day * 10_000);
+    const holdMicros = Math.round(cents * 10_000);
+    const runCapMicros = Math.floor(opts.runCapUsd * 1_000_000), dayCapMicros = Math.floor(opts.dayCapUsd * 1_000_000);
+    if (![runMicros, dayMicros, holdMicros, runCapMicros, dayCapMicros].every(Number.isSafeInteger)) {
+      throw new Error('Gateway spend amount exceeds safe precision');
+    }
+    if (runMicros + holdMicros > runCapMicros || dayMicros + holdMicros > dayCapMicros) {
+      throw new BudgetExceededError('Gateway paid budget cap exceeded', Math.max(run, day), Math.min(opts.runCapUsd, opts.dayCapUsd) * 100);
+    }
+    await sql`INSERT INTO mcp_spend_log (client_id, token_name, operation, spend_cents, provider, model, created_at)
+      VALUES (${clientId}, ${opts.runId}, 'gateway_reservation', ${cents}, ${opts.model.split(':')[0]}, ${opts.model}, clock_timestamp())`;
+  });
+}

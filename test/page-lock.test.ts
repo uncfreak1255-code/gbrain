@@ -2,8 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync, utimesSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHash } from 'node:crypto';
-import { acquirePageLock, withPageLock } from '../src/core/page-lock.ts';
+import { acquirePageLock, pageLockIdentity, pageLockPathIdentity, withPageLock } from '../src/core/page-lock.ts';
 
 let tmp: string;
 
@@ -15,8 +14,8 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-function lockFile(slug: string) {
-  const sha = createHash('sha256').update(slug).digest('hex');
+function lockFile(slug: string, brainId = 'default', sourceId = 'default') {
+  const sha = pageLockIdentity(brainId, sourceId, slug);
   return join(tmp, `${sha}.lock`);
 }
 
@@ -181,6 +180,81 @@ describe('withPageLock', () => {
     ).rejects.toThrow();
     await first!.release();
   });
+
+  test('re-enters the same qualified lock in one async call chain', async () => {
+    const opts = { lockRoot: tmp, brainId: 'brain', sourceId: 'source', timeoutMs: 50, pollMs: 10 };
+    const order: string[] = [];
+    await withPageLock('nested/page', async () => {
+      order.push('outer');
+      const nestedHandle = await acquirePageLock('nested/page', { ...opts, reentrant: true });
+      expect(nestedHandle).not.toBeNull();
+      await nestedHandle!.release();
+      await withPageLock('nested/page', async () => {
+        order.push('inner');
+      }, { ...opts, reentrant: true });
+    }, opts);
+    expect(order).toEqual(['outer', 'inner']);
+  });
+
+  test('an inherited async context reacquires after the outer lock is released', async () => {
+    const opts = { lockRoot: tmp, brainId: 'brain', sourceId: 'source' };
+    let continueChild!: () => void;
+    const gate = new Promise<void>(resolve => { continueChild = resolve; });
+    let child!: Promise<Awaited<ReturnType<typeof acquirePageLock>>>;
+    await withPageLock('delayed/page', async () => {
+      child = (async () => {
+        await gate;
+        return acquirePageLock('delayed/page', opts);
+      })();
+    }, opts);
+
+    continueChild();
+    const reacquired = await child;
+    expect(reacquired).not.toBeNull();
+    expect(await acquirePageLock('delayed/page', opts)).toBeNull();
+    await reacquired!.release();
+  });
+
+  test('a nested callback keeps the physical lock until the nested holder finishes', async () => {
+    const opts = { lockRoot: tmp, brainId: 'brain', sourceId: 'source' };
+    let continueChild!: () => void;
+    const gate = new Promise<void>(resolve => { continueChild = resolve; });
+    let childEntered = false;
+    let child!: Promise<void>;
+
+    await withPageLock('nested-delayed/page', async () => {
+      child = withPageLock('nested-delayed/page', async () => {
+        await gate;
+        childEntered = true;
+      }, { ...opts, reentrant: true });
+      await Bun.sleep(0);
+    }, opts);
+
+    expect(childEntered).toBe(false);
+    expect(await acquirePageLock('nested-delayed/page', opts)).toBeNull();
+    continueChild();
+    await child;
+    const next = await acquirePageLock('nested-delayed/page', opts);
+    expect(next).not.toBeNull();
+    await next!.release();
+  });
+
+  test('same slug in different sources has independent ownership', async () => {
+    const one = await acquirePageLock('same', { lockRoot: tmp, brainId: 'brain', sourceId: 'one' });
+    const two = await acquirePageLock('same', { lockRoot: tmp, brainId: 'brain', sourceId: 'two' });
+    expect(one).not.toBeNull();
+    expect(two).not.toBeNull();
+    await one!.release();
+    await two!.release();
+  });
+
+  test('canonical path is shared across different logical metadata', async () => {
+    const canonicalPath = join(tmp, 'people', 'alice.md');
+    const first = await acquirePageLock('people/alice', { lockRoot: tmp, brainId: 'a', sourceId: 'a', canonicalPath });
+    expect(first).not.toBeNull();
+    expect(await acquirePageLock('other', { lockRoot: tmp, brainId: 'b', sourceId: 'b', canonicalPath })).toBeNull();
+    await first!.release();
+  });
 });
 
 describe('SHA-256 path safety', () => {
@@ -193,5 +267,9 @@ describe('SHA-256 path safety', () => {
     const filename = lockPath.split(sep).pop()!;
     expect(filename).toMatch(/^[0-9a-f]{64}\.lock$/);
     await lock!.release();
+  });
+
+  test('canonical paths produce safe stable identities', () => {
+    expect(pageLockPathIdentity(join(tmp, 'people', 'alíce.md'))).toMatch(/^[0-9a-f]{64}$/);
   });
 });

@@ -29,6 +29,19 @@ const REPO_ROOT = join(import.meta.dir, '..');
  * file that merely lists the name.
  */
 const LEDGER: Record<string, string> = {
+  learning_loop_get_mode: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_set_mode: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_inspect: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_arm: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_abort: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_resolve_transcript: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_bind_session: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_submit_session_v1: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_candidate: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_authority: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_activate: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_correct: 'test/learning-loop-trust-boundary.test.ts',
+  learning_loop_reverse: 'test/learning-loop-trust-boundary.test.ts',
   remember: 'test/memory-verbs-conformance.test.ts',
   entity: 'test/memory-verbs-conformance.test.ts',
   synthesize: 'test/memory-verbs-conformance.test.ts',

@@ -95,6 +95,15 @@ describe('#3765 resolveSourceForRepoPath (unit)', () => {
     expect(sub?.source_id).toBe(SRC_A);
   });
 
+  test('archived nested source does not shadow its active ancestor', async () => {
+    await engine.executeRaw(`INSERT INTO sources (id, name, local_path, archived) VALUES ('archived-child', 'Archived', $1, true)`, [join(repoA, 'topics')]);
+    try {
+      expect((await resolveSourceForRepoPath(engine, join(repoA, 'topics')))?.source_id).toBe(SRC_A);
+    } finally {
+      await engine.executeRaw(`DELETE FROM sources WHERE id = 'archived-child'`);
+    }
+  });
+
   test('a .gbrain-source dotfile inside the repo dir wins over local_path', async () => {
     // Plant a pin for SRC_B inside repoA's tree — dotfile tier fires first.
     const pin = join(repoA, '.gbrain-source');

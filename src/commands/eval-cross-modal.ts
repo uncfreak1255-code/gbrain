@@ -281,6 +281,7 @@ function configureGatewayForCli(): boolean {
     return true;
   }
   configureGateway({
+    paid_budget: config.paid_budget,
     embedding_model: config.embedding_model,
     embedding_dimensions: config.embedding_dimensions,
     expansion_model: config.expansion_model,

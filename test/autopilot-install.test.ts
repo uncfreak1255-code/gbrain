@@ -36,7 +36,7 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-install-test-'));
   process.env.HOME = tmp;
   // Start each test with a clean slate for ephemeral env vars.
-  delete process.env.GBRAIN_HOME;
+  process.env.GBRAIN_HOME = join(tmp, '.gbrain');
   delete process.env.RENDER;
   delete process.env.RAILWAY_ENVIRONMENT;
   delete process.env.FLY_APP_NAME;

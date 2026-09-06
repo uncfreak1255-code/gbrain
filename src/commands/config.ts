@@ -10,6 +10,7 @@ import {
 } from '../core/search/embedding-column.ts';
 
 import { redactPgUrl } from '../core/url-redact.ts';
+import { validatePaidBudget } from '../core/budget/gateway-spend.ts';
 
 // v0.36.x #892: sensitive config-key allowlist. The `show` path used a
 // loose `.includes('key')` check that also redacts (works); the `set` path
@@ -71,6 +72,18 @@ const MEMORY_DUAL_PLANE_KEYS: ReadonlySet<string> = new Set(
  * audience must be readable by the ENGINE-FREE bootstrap-harness lane so a
  * shared-declared brain never gets the enable-nudge advisory. */
 const BRAIN_AUDIENCE_KEY = 'brain.audience';
+
+/** Learning-loop activation is owned by its race-safe local lifecycle op. */
+export function isProtectedOwnerControlKey(key: string): boolean {
+  return key === 'learning_loop.mode'
+    || key === 'learning_loop.mode_transition_intent_v1';
+}
+
+function rejectProtectedOwnerControlKey(key: string): never {
+  console.error(`[config] ${key} is owned by a trusted-local lifecycle control.`);
+  console.error(`[config] Use: gbrain call learning_loop_set_mode '{"mode":"off|capture|canary"}'`);
+  process.exit(1);
+}
 
 /** Ambient-writeback posture re-stamp (red-team review, this wave): the
  * engine-free bootstrap-harness renderer reads `memory.visibility_posture`
@@ -256,6 +269,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
         process.exit(1);
       }
       const keys = await engine.listConfigKeys(prefix);
+      const protectedKey = keys.find(isProtectedOwnerControlKey);
+      if (protectedKey) rejectProtectedOwnerControlKey(protectedKey);
       // Dual-plane keys matching the prefix must ALSO leave the file mirror
       // (codex re-review, this wave): a DB-only pattern delete would report
       // success while the engine-free Stop hook keeps reading the mirror's
@@ -304,6 +319,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       console.error('Usage: gbrain config unset <key> | --pattern <prefix>');
       process.exit(1);
     }
+    if (isProtectedOwnerControlKey(key)) rejectProtectedOwnerControlKey(key);
     if (MEMORY_DUAL_PLANE_KEYS.has(key) || key === BRAIN_AUDIENCE_KEY) {
       // Dual-plane delete, mirroring the dual-plane set: file mirror AND the
       // authoritative DB row both go. "Not found" only when neither had it.
@@ -391,6 +407,19 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       }
       return;
     }
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+      const cfg = loadConfigFileOnly();
+      if (cfg?.paid_budget !== undefined) {
+        delete cfg.paid_budget;
+        saveConfig(cfg);
+        console.log(`Unset ${key} (file plane) — restart every running gbrain serve, jobs worker, and autopilot process to apply. Running processes retain their previous policy.`);
+      } else {
+        console.error(`Config key not found: ${key}`);
+        process.exit(1);
+      }
+      return;
+    }
     if (FILE_PLANE_API_KEYS.includes(key)) {
       const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
       const cfg = loadConfigFileOnly() as unknown as Record<string, unknown> | null;
@@ -471,6 +500,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
   } else if (action === 'set' && key && value) {
+    if (isProtectedOwnerControlKey(key)) rejectProtectedOwnerControlKey(key);
     // #3661: `config set` dropped flags it does not implement and wrote
     // anyway. `--dry-run` — honored by sync/import/extract/quarantine/pages —
     // printed the usual "Set <key> = <value>" confirmation and persisted the
@@ -733,6 +763,23 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     // single home in handleDbPlaneRoutedKeys, shared with the engine-free
     // pre-connectEngine dispatch.
     if (await handleDbPlaneRoutedKeys(key, value)) return;
+
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+      let policy: unknown;
+      try {
+        policy = JSON.parse(value);
+        validatePaidBudget(policy);
+      } catch (e) {
+        console.error(`[config] paid_budget must be JSON with finite non-negative max_usd_per_run and max_usd_per_day values (${e instanceof Error ? e.message : String(e)}). Nothing was written.`);
+        process.exit(1);
+      }
+      const cfg = loadConfigFileOnly() ?? { engine: 'pglite' as const };
+      cfg.paid_budget = policy;
+      saveConfig(cfg);
+      console.log(`Set ${key} = ${JSON.stringify(policy)} (file plane: ~/.gbrain/config.json) — saved, not active in running processes; restart every running gbrain serve, jobs worker, and autopilot process to apply; restart is required before relying on these limits.`);
+      return;
+    }
 
     // Vendor credentials are file-plane canonical (see FILE_PLANE_API_KEYS).
     // Routed, not refused: unlike embedding_model there is nothing to re-init,

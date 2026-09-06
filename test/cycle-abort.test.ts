@@ -147,7 +147,7 @@ describe('autopilot-cycle handler contract (v0.20.5)', () => {
     // lock-steal signal — so a stolen lock aborts at the same seams an
     // external abort always did.
     const runCycleBody = cycleSource.slice(
-      cycleSource.indexOf('export async function runCycle'),
+      cycleSource.indexOf('async function runCycleInner'),
     );
     const checkCalls = (runCycleBody.match(/checkAborted\(cycleSignal\)/g) || []).length;
 
@@ -178,7 +178,7 @@ describe('#1972 — complete cooperative-abort coverage', () => {
   test('cycle.ts threads opts.signal into every long phase + guards the success stamp', async () => {
     const fs = await import('fs');
     const src = fs.readFileSync(new URL('../src/core/cycle.ts', import.meta.url), 'utf8');
-    const body = src.slice(src.indexOf('export async function runCycle'));
+    const body = src.slice(src.indexOf('async function runCycleInner'));
     // Each long phase receives the signal (W0: the combined cycleSignal, so
     // phases also stop on lock-steal, not just external aborts).
     expect(body).toContain('runPhaseExtract(engine, brainDir, dryRun, syncPagesAffected, cycleSignal, cycleSourceId)');
@@ -210,7 +210,7 @@ describe('#4077 — synthesize/patterns cooperative-abort threading', () => {
   test('cycle.ts forwards cycleSignal into the synthesize and patterns phase opts', async () => {
     const fs = await import('fs');
     const src = fs.readFileSync(new URL('../src/core/cycle.ts', import.meta.url), 'utf8');
-    const body = src.slice(src.indexOf('export async function runCycle'));
+    const body = src.slice(src.indexOf('async function runCycleInner'));
     // Bounded to each call's own opts literal — an unanchored [\s\S]*? regex
     // would false-pass on consolidate's `signal: cycleSignal` further down.
     const callOf = (fnName: string): string => {

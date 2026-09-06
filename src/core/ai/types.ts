@@ -487,6 +487,8 @@ export interface Recipe {
 }
 
 export interface AIGatewayConfig {
+  /** Optional durable limits for supported paid text requests. */
+  paid_budget?: import('../budget/gateway-spend.ts').PaidBudgetPolicy;
   /** Current embedding model as "provider:modelId" (e.g. "openai:text-embedding-3-large"). */
   embedding_model?: string;
   /** Target embedding dims. Gateway asserts returned embeddings match this. */

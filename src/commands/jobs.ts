@@ -2269,7 +2269,13 @@ export async function registerBuiltinHandlers(
     const target = typeof job.data.dir === 'string' ? job.data.dir : '.';
     // issue #1678: reuse the worker's live engine for lint's content-sanity
     // DB lift so it doesn't create + disconnect a competing engine.
-    const result = await runLintCore({ target, fix: !!job.data.fix, dryRun: !!job.data.dryRun, engine });
+    const result = await runLintCore({
+      target,
+      fix: !!job.data.fix,
+      dryRun: !!job.data.dryRun,
+      engine,
+      sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined,
+    });
     return result;
   });
 
@@ -2391,7 +2397,13 @@ export async function registerBuiltinHandlers(
     const { runLintCore } = await import('./lint.ts');
     const target = typeof job.data.dir === 'string' ? job.data.dir : '.';
     // issue #1678: reuse the worker's live engine (see 'lint' handler).
-    return await runLintCore({ target, fix: true, dryRun: false, engine });
+    return await runLintCore({
+      target,
+      fix: true,
+      dryRun: false,
+      engine,
+      sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined,
+    });
   });
 
   worker.register('integrity-auto', async () => {
@@ -2485,7 +2497,13 @@ export async function registerBuiltinHandlers(
     const dir = typeof job.data.dir === 'string'
       ? job.data.dir
       : (await engine.getConfig('sync.repo_path')) ?? '.';
-    return await runBacklinksCore({ action, dir, dryRun: !!job.data.dryRun });
+    return await runBacklinksCore({
+      action,
+      dir,
+      dryRun: !!job.data.dryRun,
+      engine,
+      sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined,
+    });
   });
 
   // Local patch 2026-06-11: durable facts:absorb. One-shot CLI processes

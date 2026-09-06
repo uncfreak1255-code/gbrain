@@ -120,15 +120,14 @@ describe('expand() budget accounting — native generateObject path', () => {
   });
 
   test('BudgetExhausted from record() (TX1) is swallowed — expand() still returns its result', async () => {
-    // Tiny cap: reserve() has no pre-flight for expand() (only chat() calls
-    // reserve()), so the first record() itself pushes cumulative > cap and
-    // throws internally. recordExpansionUsage must swallow it.
+    // Admission fits the projection; an unexpectedly oversized usage report
+    // still records the overage without breaking optional expansion.
     __setGenerateObjectTransportForTests(async () => ({
       object: { queries: ['alt one'] },
       usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
     }) as any);
 
-    const tracker = new BudgetTracker({ maxCostUsd: 0.0001, label: 'tight-expand', auditPath });
+    const tracker = new BudgetTracker({ maxCostUsd: 0.1, label: 'tight-expand', auditPath });
 
     let result: string[] = [];
     let threw: unknown = null;
@@ -142,7 +141,7 @@ describe('expand() budget accounting — native generateObject path', () => {
 
     expect(threw).toBeNull();
     expect(result).toContain('original query');
-    expect(tracker.totalSpent).toBeGreaterThan(0.0001);
+    expect(tracker.totalSpent).toBeGreaterThan(0.1);
   });
 });
 

@@ -12,9 +12,13 @@
  * the same row, breaking the writer-window exclusion that performSync relies on).
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { syncLockId, SYNC_LOCK_ID, tryAcquireDbLock } from '../src/core/db-lock.ts';
+import { syncLockId, SYNC_LOCK_ID, tryAcquireDbLock, withRefreshingLock } from '../src/core/db-lock.ts';
+import { withCanonicalSourceBoundary } from '../src/core/canonical-page-write.ts';
 
 let engine: PGLiteEngine;
 
@@ -82,5 +86,48 @@ describe('tryAcquireDbLock with per-source keys', () => {
     const second = await tryAcquireDbLock(engine, syncLockId('default'));
     expect(second).toBeNull();
     await first?.release();
+  });
+
+  test('canonical mutation waits for an occupied source lock', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'canonical-source-lock-'));
+    const first = await tryAcquireDbLock(engine, syncLockId('source-wait'));
+    expect(first).not.toBeNull();
+
+    let entered = false;
+    const waiter = withCanonicalSourceBoundary(engine, {
+      brain_id: 'brain',
+      source_id: 'source-wait',
+      canonical_slug: 'page',
+      configured_root: root,
+    }, async () => {
+      entered = true;
+      return 'done';
+    });
+    const settled = waiter.then(
+      value => ({ value, error: null as Error | null }),
+      error => ({ value: null as string | null, error: error as Error }),
+    );
+
+    try {
+      await Bun.sleep(50);
+      expect(entered).toBe(false);
+      await first!.release();
+      const result = await settled;
+      expect(result.error).toBeNull();
+      expect(result.value).toBe('done');
+      expect(entered).toBe(true);
+    } finally {
+      await first?.release();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('bounded acquisition rejects non-finite timing options', async () => {
+    await expect(withRefreshingLock(engine, syncLockId('invalid-timeout'), async () => undefined, {
+      acquireTimeoutMs: Number.POSITIVE_INFINITY,
+    })).rejects.toThrow('acquireTimeoutMs must be a finite non-negative number');
+    await expect(withRefreshingLock(engine, syncLockId('invalid-poll'), async () => undefined, {
+      acquirePollMs: Number.NaN,
+    })).rejects.toThrow('acquirePollMs must be a finite positive number');
   });
 });

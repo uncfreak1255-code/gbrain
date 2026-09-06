@@ -214,6 +214,8 @@ const EXPECTED_BY_SHAPE: Record<string, Partial<Record<Shape, Outcome>>> = {
 //              permission_denied with the mcp.* config key)
 type Outcome = 'data' | 'ok' | 'error' | 'denied';
 const EXPECTED_OUTCOME: Record<string, Outcome> = {
+  // Empty input lacks the authenticated adapter/provider/source binding.
+  learning_loop_submit_session_v1: 'error',
   // reads that must prove corpus contact
   get_page: 'data',
   fetch: 'data',

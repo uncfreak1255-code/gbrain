@@ -17,7 +17,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { __thinkAdapter } from '../src/core/think/index.ts';
-import { resetGateway } from '../src/core/ai/gateway.ts';
+import { __unconfigureGatewayForTests } from '../src/core/ai/gateway.ts';
 import { AIConfigError } from '../src/core/ai/errors.ts';
 import { withEnv, emptyHome } from './helpers/with-env.ts';
 
@@ -134,7 +134,7 @@ describe('think gateway adapter — #1698 slash form + explicit-model fork', () 
     await withEnv({ ANTHROPIC_API_KEY: 'sk-test-fake' }, async () => {
       // Build valid clients (key present → probe ok) but leave the gateway UNCONFIGURED
       // so gateway.chat() throws AIConfigError (requireConfig) at create() time.
-      resetGateway();
+      __unconfigureGatewayForTests();
       const params: any = {
         model: 'anthropic:claude-sonnet-4-6',
         max_tokens: 16,
@@ -169,7 +169,7 @@ describe('think gateway adapter — #1698 slash form + explicit-model fork', () 
     await withEnv(
       { ANTHROPIC_API_KEY: undefined, DEEPSEEK_API_KEY: undefined, OPENAI_API_KEY: undefined, GBRAIN_HOME: emptyHome() },
       async () => {
-        resetGateway();  // unconfigured → gateway.chat() throws AIConfigError at create()
+        __unconfigureGatewayForTests();  // unconfigured → gateway.chat() throws AIConfigError at create()
         // deepseek:deepseek-chat passes validateModelId (real recipe + chat touchpoint) — the
         // A9 non-anthropic model. probeChatModel returns ok (no anthropic key check) → builds.
         const client = await __thinkAdapter.tryBuildGatewayClient(

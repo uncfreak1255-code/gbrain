@@ -30,6 +30,8 @@ import {
 } from '../src/core/timeline-write-through.ts';
 import { writeFactsToFence } from '../src/core/facts/fence-write.ts';
 import type { FenceInputFact } from '../src/core/facts/fence-write.ts';
+import { withCanonicalSourceBoundary } from '../src/core/canonical-page-write.ts';
+import { computeBrainIdFromConfig } from '../src/core/upgrade-checkpoint.ts';
 import { extractTimelineFromContent } from '../src/commands/extract.ts';
 
 const addTimelineEntryOp = operations.find((o) => o.name === 'add_timeline_entry') as Operation;
@@ -388,32 +390,118 @@ describe('wave-C review: splice-under-lock, never whole-file regeneration', () =
     expect(extractTimelineFromContent(disk, slug).length).toBe(2);
   });
 
-  test('concurrent fence + timeline writers both land (page-lock serialization pin)', async () => {
+  test.each(['default', 'alpha'])('fence and timeline serialize a forced stale-read overlap in %s', async (sourceId) => {
     await engine.setConfig('sync.repo_path', brainDir);
+    if (sourceId !== 'default') {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config) VALUES ($1, $1, $2, '{}'::jsonb)`,
+        [sourceId, brainDir],
+      );
+    }
     const slug = 'people/concurrent-writers';
-    const filePath = await seedPage(slug);
-
-    const [fenceRes, opRes] = await Promise.all([
-      writeFactsToFence(
-        engine,
-        { sourceId: 'default', localPath: brainDir, slug, resolutionSource: 'exact_page' },
-        [fenceFact('Concurrent fence fact')],
-      ),
-      addTimelineEntryOp.handler(makeCtx(), {
-        slug,
-        date: '2026-07-15',
-        summary: 'Concurrent milestone',
-        source: 'manual',
-      }) as Promise<{ status: string }>,
-    ]);
-    expect(fenceRes.inserted).toBe(1);
-    expect(opRes.status).toBe('ok');
-
-    // Whichever writer went second must have read the first writer's rename,
-    // not clobbered it — both artifacts are in the final file.
+    await importFromContent(engine, slug, '# Original body', {
+      noEmbed: true, sourceId, sourcePath: `${slug}.md`,
+    });
+    const written = await writePageThrough(engine, slug, { sourceId });
+    expect(written.written).toBe(true);
+    const filePath = written.path!;
+    const readReached = Promise.withResolvers<void>();
+    const resumeFence = Promise.withResolvers<void>();
+    const timelineBlocked = Promise.withResolvers<void>();
+    let paused = false;
+    const db = new Proxy(engine.db, {
+      get(target, prop) {
+        if (prop === 'query') return async (...args: Parameters<typeof target.query>) => {
+          const result = await target.query(...args);
+          if (paused && String(args[0]).includes('INSERT INTO gbrain_cycle_locks') && result.rows.length === 0) {
+            timelineBlocked.resolve();
+          }
+          return result;
+        };
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const coordinated = new Proxy(engine, {
+      get(target, prop) {
+        if (prop === 'db') return db;
+        if (prop === 'executeRaw') return async (...args: Parameters<typeof target.executeRaw>) => {
+          if (String(args[0]).includes('SELECT MAX(row_num)')) {
+            // The fence has already read the file, but has not renamed it.
+            paused = true;
+            readReached.resolve();
+            await resumeFence.promise;
+          }
+          return target.executeRaw(...args);
+        };
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const fence = writeFactsToFence(
+      coordinated,
+      { sourceId, localPath: brainDir, slug, resolutionSource: 'exact_page' },
+      [fenceFact('Concurrent fence fact')],
+    );
+    let timeline: ReturnType<typeof writeTimelineEntryThrough> | undefined;
+    try {
+      await readReached.promise;
+      timeline = writeTimelineEntryThrough(coordinated, slug, sourceId, {
+        date: '2026-07-15', summary: 'Concurrent milestone', source: 'manual',
+      });
+      // Fixed code encounters the held source lock. Broken code finishes
+      // its rename first, then the stale fence body overwrites that update.
+      await Promise.race([timelineBlocked.promise, timeline]);
+    } finally {
+      resumeFence.resolve();
+      await Promise.allSettled([fence, ...(timeline ? [timeline] : [])]);
+    }
+    expect((await fence).inserted).toBe(1);
+    expect((await timeline!).handled).toBe(true);
     const disk = fs.readFileSync(filePath, 'utf8');
     expect(disk).toContain('Concurrent fence fact');
     expect(disk).toContain('- **2026-07-15** | manual — Concurrent milestone');
+    expect(fs.existsSync(path.join(brainDir, '.sources', sourceId, `${slug}.md`))).toBe(false);
+    const facts = await engine.executeRaw<{ fact: string }>(
+      'SELECT fact FROM facts WHERE source_id = $1 AND source_markdown_slug = $2', [sourceId, slug],
+    );
+    expect(facts.map(row => row.fact)).toEqual(['Concurrent fence fact']);
+    expect((await engine.getTimeline(slug, { sourceId })).map(row => row.summary)).toEqual(['Concurrent milestone']);
+    expect((await engine.getPage(slug, { sourceId }))?.timeline).toContain('Concurrent milestone');
+    expect(await engine.executeRaw('SELECT id FROM gbrain_cycle_locks')).toEqual([]);
+  });
+
+  test('fence failure releases ownership and supports an inherited source lease', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'people/fence-recovery';
+    const filePath = await seedPage(slug);
+    const failing = new Proxy(engine, {
+      get(target, prop) {
+        if (prop === 'insertFacts') return async () => { throw new Error('injected mirror failure'); };
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const target = { sourceId: 'default', localPath: brainDir, slug, resolutionSource: 'exact_page' as const };
+    await expect(writeFactsToFence(failing, target, [fenceFact('Disk-only interrupted fact')]))
+      .rejects.toThrow('injected mirror failure');
+    expect(await engine.executeRaw('SELECT id FROM gbrain_cycle_locks')).toEqual([]);
+    // Reacquire the source, then call the real writer from the inherited
+    // source scope. Success also proves the failed writer released its page.
+    await withCanonicalSourceBoundary(engine, {
+      brain_id: computeBrainIdFromConfig(engine.learningLoopLedgerConfig()),
+      source_id: 'default', canonical_slug: slug, configured_root: brainDir,
+    }, async () => {
+      expect((await writeFactsToFence(engine, target, [fenceFact('Recovered fact')])).inserted).toBe(1);
+      expect((await writeTimelineEntryThrough(engine, slug, 'default', {
+        date: '2026-07-16', summary: 'Recovered timeline', source: 'manual',
+      })).handled).toBe(true);
+    });
+    const disk = fs.readFileSync(filePath, 'utf8');
+    expect(disk).toContain('Disk-only interrupted fact');
+    expect(disk).toContain('Recovered fact');
+    expect(disk).toContain('Recovered timeline');
+    expect(await engine.executeRaw('SELECT id FROM gbrain_cycle_locks')).toEqual([]);
   });
 
   test('error after the disk splice → fallback inserts the CANONICAL tuple (no dupe on re-extract)', async () => {
