@@ -2,13 +2,14 @@
  * codex.ts — Codex rollout (.jsonl) adapter (cathedral-4).
  *
  * One rollout file = one session. Line shape: {timestamp, type, payload}.
- * Verified against a live local rollout 2026-08-14 (see SPEC_TARGET).
+ * Verified against local CLI and desktop rollouts (see SPEC_TARGET).
  *
  * TURN SELECTION IS STRUCTURAL, not heuristic: the human's typed text is
- * recorded as `event_msg` payload.type='user_message' (payload.message);
- * `response_item` rows with role user/developer are INJECTED context
- * (app-context, plugin lists, instruction preambles) and are skipped
- * wholesale. Assistant text comes from `response_item` payload.type='message'
+ * recorded as `event_msg` payload.type='user_message' (payload.message), or
+ * desktop `response_item` user blocks explicitly labeled `user.text` in
+ * content_item_kinds. Unmarked user blocks and injected context (app-context,
+ * plugin lists, instruction preambles) stay excluded. Assistant text comes
+ * from `response_item` payload.type='message'
  * role='assistant' output_text blocks. reasoning / tool calls / token_count
  * and every other event kind are skipped — the archive records conversation
  * text only (lossy by design).
@@ -36,10 +37,11 @@ const CODEX_HEAD_WINDOW_BYTES = 256 * 1024;
 export const CODEX_SPEC_TARGET: HostSpecTarget = {
   id: 'codex-rollout-2026-08',
   status: 'verified',
-  verifiedAt: '2026-08-14',
+  verifiedAt: '2026-09-05',
   references: [
     'local ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (codex CLI, live sample 2026-08-14)',
     'test/fixtures/transcripts/codex-rollout.jsonl',
+    'test/codex-desktop-transcript.test.ts (synthetic regression for an observed desktop rollout)',
   ],
   note:
     'One JSON object per line: {timestamp: ISO, type, payload}. type ' +
@@ -47,8 +49,9 @@ export const CODEX_SPEC_TARGET: HostSpecTarget = {
     "cli_version}. User turns: type 'event_msg' with payload.type " +
     "'user_message' (payload.message = typed text). Assistant turns: type " +
     "'response_item' with payload.{type:'message', role:'assistant', " +
-    "content:[{type:'output_text', text}]}. response_item rows with role " +
-    'user/developer are injected context and are skipped. reasoning, ' +
+    "content:[{type:'output_text', text}]}. Desktop response_item user text " +
+    'requires an aligned internal_chat_message_metadata_passthrough.content_item_kinds ' +
+    "entry of 'user.text'; all other user blocks and developer rows are skipped. reasoning, " +
     'custom_tool_call*, function_call*, token_count, world_state, ' +
     'turn_context, compacted: all skipped. Unknown fields tolerated.',
 };
@@ -115,6 +118,18 @@ export function mapCodexLine(entry: unknown): CodexLineResult {
   if (e.type === 'compacted') return { kind: 'boundary' };
   if (e.type === 'event_msg' && payload.type === 'user_message') {
     const text = typeof payload.message === 'string' ? payload.message.trim() : '';
+    return text ? { kind: 'user', message: { role: 'user', timestamp: lineTs, text } } : { kind: 'skip' };
+  }
+  if (e.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+    // Desktop rollouts label each content block, including injected user-role
+    // instructions. Never infer authorship from the role or the text itself.
+    const metadata = payload.internal_chat_message_metadata_passthrough;
+    const kinds = metadata !== null && typeof metadata === 'object'
+      ? (metadata as Record<string, unknown>).content_item_kinds : undefined;
+    if (!Array.isArray(payload.content) || !Array.isArray(kinds) || kinds.length !== payload.content.length) {
+      return { kind: 'skip' };
+    }
+    const text = textFromBlocks(payload.content.filter((_, i) => kinds[i] === 'user.text'), 'input_text');
     return text ? { kind: 'user', message: { role: 'user', timestamp: lineTs, text } } : { kind: 'skip' };
   }
   if (e.type === 'response_item' && payload.type === 'message' && payload.role === 'assistant') {
