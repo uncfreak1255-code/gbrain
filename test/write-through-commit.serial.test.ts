@@ -36,6 +36,8 @@ function git(cwd: string, ...args: string[]): string {
  *  key `isDurabilityHardened` looks for) with a no-op body so tests never
  *  attempt a real push. */
 function installFakeDurabilityHook(repoPath: string): void {
+  // Select the fixture hook rather than inheriting the host's hooksPath.
+  git(repoPath, 'config', '--local', 'core.hooksPath', '.git/hooks');
   const hooksDir = join(repoPath, '.git', 'hooks');
   mkdirSync(hooksDir, { recursive: true });
   const hookPath = join(hooksDir, 'post-commit');

@@ -7,7 +7,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        376
+        377
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -440,7 +440,7 @@
       "primitive": "fs:rmSync",
       "count": 1,
       "lines": [
-        879
+        880
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -452,7 +452,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        860
+        861
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2784,7 +2784,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        209
+        232
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2869,7 +2869,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1699
+        1701
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2881,7 +2881,7 @@
       "primitive": "fs:renameSync",
       "count": 1,
       "lines": [
-        1646
+        1648
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -2893,7 +2893,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1645
+        1647
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -3320,7 +3320,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        760
+        761
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -3332,8 +3332,8 @@
       "primitive": "fs:writeFileSync",
       "count": 2,
       "lines": [
-        745,
-        750
+        746,
+        751
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -3345,7 +3345,7 @@
       "primitive": "fs:rmSync",
       "count": 1,
       "lines": [
-        1705
+        1706
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -3357,7 +3357,7 @@
       "primitive": "db:purgeDeletedPages",
       "count": 1,
       "lines": [
-        1730
+        1731
       ],
       "classification": "destructive_admin",
       "boundary": "managed_target_reject",
@@ -3393,7 +3393,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        865
+        855
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -3408,7 +3408,7 @@
       "primitive": "db:importFromContent",
       "count": 1,
       "lines": [
-        1047
+        1037
       ],
       "classification": "canonical_reconciliation",
       "boundary": "expected_managed_preflight",
@@ -3420,7 +3420,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        1080
+        1070
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -3435,7 +3435,7 @@
       "primitive": "sql:update:pages",
       "count": 1,
       "lines": [
-        848
+        838
       ],
       "classification": "derived_only",
       "boundary": "exact_column_allowlist",
@@ -6427,7 +6427,7 @@
       "primitive": "fs:rm",
       "count": 1,
       "lines": [
-        1247
+        1234
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -6439,7 +6439,7 @@
       "primitive": "fs:writeFile",
       "count": 1,
       "lines": [
-        977
+        964
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -6451,7 +6451,7 @@
       "primitive": "fs:rm",
       "count": 1,
       "lines": [
-        1208
+        1195
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -6463,9 +6463,9 @@
       "primitive": "fs:writeFile",
       "count": 3,
       "lines": [
-        1071,
-        1082,
-        1162
+        1058,
+        1069,
+        1149
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -6477,7 +6477,7 @@
       "primitive": "fs:writeFile",
       "count": 1,
       "lines": [
-        1236
+        1223
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
