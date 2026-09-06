@@ -596,7 +596,7 @@
  "test/ingestion/ingest-capture.test.ts": 2458,
  "test/ingestion/markdown-greenfield.test.ts": 12,
  "test/ingestion/migration-mode.test.ts": 21,
- "test/ingestion/put-page-write-through.test.ts": 1662,
+ "test/ingestion/put-page-write-through.serial.test.ts": 1662,
  "test/ingestion/skillpack-load.test.ts": 19,
  "test/ingestion/sources/file-watcher.test.ts": 480,
  "test/ingestion/sources/inbox-folder.test.ts": 554,

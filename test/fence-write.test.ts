@@ -88,6 +88,8 @@ function initGitRepo(repoPath: string): void {
 }
 
 function installFakeDurabilityHook(repoPath: string): void {
+  // Select this fixture's hook even when the host has a global hooksPath.
+  git(repoPath, 'config', '--local', 'core.hooksPath', '.git/hooks');
   const hooksDir = join(repoPath, '.git', 'hooks');
   mkdirSync(hooksDir, { recursive: true });
   const hookPath = join(hooksDir, 'post-commit');
