@@ -87,6 +87,18 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       process.exit(1);
     }
     if (isProtectedOwnerControlKey(key)) rejectProtectedOwnerControlKey(key);
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+      const cfg = loadConfigFileOnly();
+      if (!cfg || cfg.paid_budget === undefined) {
+        console.error(`Config key not found: ${key}`);
+        process.exit(1);
+      }
+      delete cfg.paid_budget;
+      saveConfig(cfg);
+      console.log(`Unset ${key} (file plane) — restart every running gbrain serve, jobs worker, and autopilot process to apply. Running processes retain their previous policy.`);
+      return;
+    }
     const n = await engine.unsetConfig(key);
     if (n > 0) {
       console.log(`Unset ${key}`);
@@ -101,6 +113,16 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   const value = args[2];
 
   if (action === 'get' && key) {
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly } = await import('../core/config.ts');
+      const policy = loadConfigFileOnly()?.paid_budget;
+      if (policy === undefined) {
+        console.error(`Config key not found: ${key}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(policy));
+      return;
+    }
     const val = await engine.getConfig(key);
     if (val !== null) {
       console.log(val);
@@ -143,6 +165,27 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       console.error(`[config]`);
       console.error(`[config] No --force escape: silently writing a no-op preserves the bug class this rejection closes.`);
       process.exit(1);
+    }
+
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
+      const { validatePaidBudget } = await import('../core/budget/gateway-spend.ts');
+      let policy: unknown;
+      try {
+        policy = JSON.parse(value);
+        (validatePaidBudget as (value: unknown) => void)(policy);
+      } catch (err) {
+        console.error(
+          `[config] paid_budget must be JSON with finite non-negative max_usd_per_run and max_usd_per_day values ` +
+          `(${err instanceof Error ? err.message : String(err)}). Nothing was written.`,
+        );
+        process.exit(1);
+      }
+      const cfg = loadConfigFileOnly() ?? { engine: 'pglite' as const };
+      cfg.paid_budget = policy as NonNullable<typeof cfg.paid_budget>;
+      saveConfig(cfg);
+      console.log(`Set ${key} = ${JSON.stringify(policy)} (file plane: ~/.gbrain/config.json) — saved, not active in running processes; restart every running gbrain serve, jobs worker, and autopilot process to apply; restart is required before relying on these limits.`);
+      return;
     }
 
     // v0.37.10.0 (D6): strict unknown-key rejection with --force escape hatch.

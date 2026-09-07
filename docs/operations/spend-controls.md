@@ -146,6 +146,38 @@ providers keep using their existing gates.
   sync (the failure ledger is per-source and lock-serialized) — you no longer have to
   drop to `--serial`, which is what used to arm the inline gate.
 
+## Optional durable paid text limits
+
+The file-plane `paid_budget` object applies a conservative per-run and UTC-day
+ceiling to supported paid text requests:
+
+```bash
+gbrain config set paid_budget '{"max_usd_per_run":0.25,"max_usd_per_day":2}'
+gbrain config unset paid_budget
+```
+
+Both values must be finite, non-negative USD amounts. Running `serve`, `jobs worker`,
+and `autopilot` processes keep their current policy until restarted.
+Engine-connected CLI, MCP, sweep, Dream, and worker entrypoints establish a
+durable run; queued descendants inherit the queue-owned root identity. Autopilot
+creates a new durable run for each tick, so a per-run ceiling resets for the
+next interval while the UTC-day ceiling remains shared. The database-free
+`gbrain eval cross-modal` command refuses while `paid_budget` is configured.
+
+Before each supported OpenAI-compatible text request, the gateway validates the
+serialized model, output bound, text-only messages, and function-tool shape. It
+then writes a rounded-up reservation to `mcp_spend_log` under
+`gateway_reservation`, using the existing transaction advisory lock. A failed
+ledger read or write, redirect, retry, unsupported wire option, or missing
+positive price prevents HTTP dispatch. Reservations are intentionally retained
+after success, failure, timeout, or missing provider usage, so retries cannot
+bypass the ceiling.
+
+Native SDK transports, paid embeddings, OCR, multimodal inference, hosted tools,
+and reranking refuse under this policy. Local Ollama, llama-server, and LM
+Studio inference remains available only through loopback endpoints. The paid
+policy does not replace command-level `BudgetTracker` caps.
+
 ## Escape hatches at a glance
 
 ```bash

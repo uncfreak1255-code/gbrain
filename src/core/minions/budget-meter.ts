@@ -227,3 +227,7 @@ export { clientLockKey };
 
 /** Re-export BudgetExceededError for one-stop import. */
 export { BudgetExceededError };
+
+// Paid gateway admission lives beside the gateway scope, but this re-export
+// keeps the established minion budget seam available to worker/test callers.
+export { reserveGatewaySpend } from '../budget/gateway-spend.ts';

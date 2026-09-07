@@ -7,6 +7,7 @@
  */
 
 import type { BrainEngine } from '../core/engine.ts';
+import { withGatewaySpendScope } from '../core/budget/gateway-spend.ts';
 import { operations, OperationError } from '../core/operations.ts';
 import type { Operation, OperationContext, AuthInfo } from '../core/operations.ts';
 import { validateParams } from '../core/operation-params.ts';
@@ -242,7 +243,7 @@ export async function dispatchToolCall(
   const ctx = buildOperationContext(engine, safeParams, opts);
 
   try {
-    const result = await op.handler(ctx, safeParams);
+    const result = await withGatewaySpendScope(engine, () => op.handler(ctx, safeParams));
     const out: ToolResult = { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     // v0.31 (eD3 + eE4): best-effort _meta.brain_hot_memory injection.
     // The hook is wrapped in its own try/catch — any DB blip / cache miss /

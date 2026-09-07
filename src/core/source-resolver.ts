@@ -393,6 +393,51 @@ async function assertSourceExists(engine: BrainEngine, id: string): Promise<void
 }
 
 /**
+ * Resolve a source from an explicit repository path.
+ *
+ * An explicit path is a statement about that tree, so this lookup never uses
+ * the caller's ambient cwd, environment, or brain-level default. It checks
+ * only a trusted .gbrain-source pin and registered local_path prefixes.
+ * Active registrations win over archived or draining nested registrations.
+ */
+export async function resolveSourceForRepoPath(
+  engine: BrainEngine,
+  dir: string,
+): Promise<{ source_id: string; tier: 'dotfile' | 'local_path'; detail: string } | null> {
+  const dotfile = readDotfileWalk(dir);
+  if (dotfile) {
+    await assertSourceExists(engine, dotfile);
+    return { source_id: dotfile, tier: 'dotfile', detail: `.gbrain-source under ${dir}` };
+  }
+
+  const registered = await loadRegisteredPaths(engine);
+  const activeBest = pickRegisteredPathMatch(
+    registered.filter((row) => !row.archived && !row.draining),
+    dir,
+  );
+  const inactiveBest = pickRegisteredPathMatch(
+    registered.filter((row) => row.archived || row.draining),
+    dir,
+  );
+  if (inactiveBest && (!activeBest || inactiveBest.pathLen > activeBest.pathLen)) {
+    const source = registered.find((row) => row.id === inactiveBest.id);
+    const state: AutomaticSourceState = source?.archived
+      ? 'archived'
+      : source?.drain_requires_migration_resume
+        ? 'migration_draining'
+        : source?.drain_requires_hygiene_candidate
+          ? 'hygiene_candidate_draining'
+          : 'draining';
+    throw inactiveAutomaticRouteError(inactiveBest.id, `local path ${inactiveBest.detail}`, state);
+  }
+  if (activeBest) {
+    await assertSourceExists(engine, activeBest.id);
+    return { source_id: activeBest.id, tier: 'local_path', detail: activeBest.detail };
+  }
+  return null;
+}
+
+/**
  * Automatic routing signals must not revive a soft-archived source. Explicit
  * flag/env routing keeps using assertSourceExists so restore and admin flows
  * can still name an archived source intentionally.

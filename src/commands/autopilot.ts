@@ -25,6 +25,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { loadPreferences } from '../core/preferences.ts';
 import { loadConfig, saveConfig, gbrainPath as gbrainHomePath } from '../core/config.ts';
 import { ChildWorkerSupervisor } from '../core/minions/child-worker-supervisor.ts';
+import { withGatewaySpendScope } from '../core/budget/gateway-spend.ts';
 import { VERSION } from '../version.ts';
 import {
   canSelfUpdate,
@@ -672,6 +673,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   while (!stopping) {
     const cycleStart = Date.now();
     let cycleOk = true;
+    let interval = baseInterval;
+    let stopAfterTick = false;
+
+    await withGatewaySpendScope(engine, async () => {
 
     // Refresh the lock mtime so another cron-fired autopilot doesn't
     // declare the instance stale after 10 minutes (Codex C).
@@ -716,7 +721,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           );
           stopping = true;
           setCliExitVerdict(1);
-          break;
+          stopAfterTick = true;
+          return;
         }
         if (autopilotReconnectFails >= AUTOPILOT_MAX_RECONNECT_FAILS) {
           console.error(
@@ -725,7 +731,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           );
           stopping = true;
           setCliExitVerdict(1);
-          break;
+          stopAfterTick = true;
+          return;
         }
       }
     }
@@ -1281,7 +1288,6 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
     }
 
     // 4. Health check + adaptive interval (same for both paths)
-    let interval = baseInterval;
     try {
       const health = await engine.getHealth();
       const score = (health as any).brain_score ?? 50;
@@ -1305,7 +1311,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       if (consecutiveErrors >= 5) {
         console.error('5 consecutive cycle failures. Stopping autopilot.');
         void shutdown('cycle-failure-cap');
-        break;
+        stopAfterTick = true;
+        return;
       }
     }
 
@@ -1392,6 +1399,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       // Intentional: do NOT bump consecutiveErrors. Probe failure is
       // informational; autopilot loop continues.
     }
+
+    });
+
+    if (stopAfterTick) break;
 
     // Wait for next cycle
     await new Promise(r => setTimeout(r, interval * 1000));

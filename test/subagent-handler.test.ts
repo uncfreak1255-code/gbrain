@@ -19,10 +19,11 @@ import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import {
-  makeSubagentHandler,
+  makeSubagentHandler as makeBaseSubagentHandler,
   RateLeaseUnavailableError,
   stripProviderPrefix,
   type MessagesClient,
+  type SubagentDeps,
 } from '../src/core/minions/handlers/subagent.ts';
 import { UnrecoverableError, type ToolDef, type MinionJobContext } from '../src/core/minions/types.ts';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -33,6 +34,10 @@ import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
+
+function makeSubagentHandler(deps: SubagentDeps) {
+  return makeBaseSubagentHandler({ config: { engine: 'pglite' }, ...deps });
+}
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -209,6 +214,25 @@ describe('subagent handler happy path', () => {
     } finally {
       rmSync(auditDir, { recursive: true, force: true });
     }
+  });
+
+  test('paid budget rejects the legacy Anthropic path before invoking the client', async () => {
+    const client = new FakeMessagesClient([
+      { content: [{ type: 'text', text: 'must not run' }] as any, stop_reason: 'end_turn' },
+    ]);
+    const handler = makeSubagentHandler({
+      engine,
+      client,
+      toolRegistry: [],
+      config: {
+        engine: 'pglite',
+        paid_budget: { max_usd_per_run: 1, max_usd_per_day: 1 },
+      },
+    });
+    const ctx = await makeCtx({ prompt: 'hi' });
+
+    await expect(handler(ctx)).rejects.toThrow('paid_budget requires agent.use_gateway_loop');
+    expect(client.calls).toHaveLength(0);
   });
 
   test('legacy Anthropic final turn persists response before terminal scoped-cap overage', async () => {

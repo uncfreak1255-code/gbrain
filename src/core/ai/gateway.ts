@@ -28,6 +28,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { paidTextFetch, validatePaidBudget, assertLocalPaidPolicy } from '../budget/gateway-spend.ts';
 import { z } from 'zod';
 
 import {
@@ -109,6 +110,7 @@ export { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './default
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './defaults.ts';
 const DEFAULT_EXPANSION_MODEL = 'anthropic:claude-haiku-4-5-20251001';
 const DEFAULT_CHAT_MODEL = 'anthropic:claude-sonnet-4-6';
+const EXPANSION_MAX_OUTPUT_TOKENS = 512;
 // v0.35.0.0+: reranker default. Used only when search.reranker.enabled is set
 // AND no explicit reranker_model is configured. Mode bundles' per-mode
 // `reranker_model` default to this same value but can be overridden.
@@ -392,7 +394,9 @@ export function applyOpenAICompatConfig(
 
 /** Configure the gateway. Called by cli.ts#connectEngine. Clears cached models. */
 export function configureGateway(config: AIGatewayConfig): void {
+  validatePaidBudget(config.paid_budget);
   _config = {
+    paid_budget: config.paid_budget,
     embedding_model: config.embedding_model ?? DEFAULT_EMBEDDING_MODEL,
     embedding_dimensions: config.embedding_dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS,
     embedding_multimodal_model: config.embedding_multimodal_model,
@@ -1399,6 +1403,7 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   // global default. resolveEmbeddingProvider validates the override at the
   // recipe layer — bad model strings throw AIConfigError with a clear hint.
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
+  assertLocalPaidPolicy(cfg, resolveTarget, 'embeddings');
   const tracker = trackerForGatewayCall();
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
   const truncated = texts.map(t => (t ?? '').slice(0, MAX_CHARS));
@@ -1752,6 +1757,7 @@ export async function embedMultimodal(
   if (!inputs || inputs.length === 0) return [];
 
   const cfg = requireConfig();
+  if (cfg.paid_budget) throw new Error('paid_budget: multimodal inference is unsupported');
   // Prefer embedding_multimodal_model when set, so brains using OpenAI for
   // text embeddings can route multimodal to Voyage without changing the
   // primary embedding_model. Falls back to embedding_model for single-model setups.
@@ -2214,6 +2220,7 @@ async function resolveExpansionProvider(modelStr: string): Promise<{ model: any;
 }
 
 function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayConfig): any {
+  if (cfg.paid_budget && recipe.implementation !== 'openai-compatible') paidTextFetch(recipe, modelId, cfg);
   switch (recipe.implementation) {
     case 'native-openai': {
       const apiKey = cfg.env.OPENAI_API_KEY;
@@ -2238,7 +2245,7 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       return createOpenAICompatible({
         name: recipe.id,
         baseURL: compat.baseURL,
-        ...(compat.fetch ? { fetch: compat.fetch } : {}),
+        fetch: paidTextFetch(recipe, modelId, cfg, compat.fetch),
         ...auth,
       }).languageModel(modelId);
     }
@@ -2270,6 +2277,8 @@ export async function expand(query: string): Promise<string[]> {
     const result = await generateObject({
       model,
       schema: ExpansionSchema,
+      maxOutputTokens: EXPANSION_MAX_OUTPUT_TOKENS,
+      ...(_config?.paid_budget && { maxRetries: 0 }),
       // v0.42.20.0 (codex P0) — expansion had NO abortSignal; same stalled-socket
       // class as chat. Default the chat timeout.
       abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
@@ -2318,6 +2327,7 @@ export async function expand(query: string): Promise<string[]> {
  * keeping the gateway focused on the LLM call.
  */
 export async function generateOcrText(imageBytes: Buffer, mime: string): Promise<string> {
+  if (_config?.paid_budget) throw new Error('paid_budget: paid OCR is unsupported');
   if (!isAvailable('expansion')) return '';
   const { model } = await resolveExpansionProvider(getExpansionModel());
   const base64 = imageBytes.toString('base64');
@@ -2697,6 +2707,7 @@ async function resolveChatProvider(modelStr: string): Promise<{ model: any; reci
 }
 
 function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig): any {
+  if (cfg.paid_budget && recipe.implementation !== 'openai-compatible') paidTextFetch(recipe, modelId, cfg);
   switch (recipe.implementation) {
     case 'native-openai': {
       const apiKey = cfg.env.OPENAI_API_KEY;
@@ -2721,7 +2732,7 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
       return createOpenAICompatible({
         name: recipe.id,
         baseURL: compat.baseURL,
-        ...(compat.fetch ? { fetch: compat.fetch } : {}),
+        fetch: paidTextFetch(recipe, modelId, cfg, compat.fetch),
         ...auth,
       }).languageModel(modelId);
     }
@@ -2997,6 +3008,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       messages: toModelMessages(opts.messages) as any,
       tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
       maxOutputTokens,
+      ...(_config?.paid_budget && { maxRetries: 0 }),
       // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
       // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
       abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),
@@ -3563,6 +3575,7 @@ const DEFAULT_RERANK_TIMEOUT_MS = 5000;
  * openai-compatible recipes — CDX2-F11 in the plan.
  */
 export async function rerank(input: RerankInput): Promise<RerankResult[]> {
+  if (_config?.paid_budget) throw new Error('paid_budget: reranking is unsupported');
   if (!input.query) {
     throw new RerankError('rerank: query is required', 'unknown');
   }

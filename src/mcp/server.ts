@@ -1,4 +1,5 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { withGatewaySpendScope } from '../core/budget/gateway-spend.ts';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { BrainEngine } from '../core/engine.ts';
@@ -146,5 +147,5 @@ export async function handleToolCall(
     ...(opts?.sourceId ? { sourceId: opts.sourceId } : {}),
   });
 
-  return op.handler(ctx, params);
+  return withGatewaySpendScope(engine, () => op.handler(ctx, params));
 }
