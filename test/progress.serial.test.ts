@@ -2,6 +2,9 @@ import { describe, test, expect } from 'bun:test';
 import { PassThrough } from 'node:stream';
 import { createProgress, startHeartbeat, __liveReporterCountForTest, __signalHandlerInstalledForTest } from '../src/core/progress.ts';
 
+// Serial: the reporter registry is process-global; this suite verifies it has
+// no live entries and must not inherit reporters from another test file.
+
 /** Collect everything a reporter writes into a string. */
 function sink(isTTY = false): { stream: PassThrough & { isTTY?: boolean }; read: () => string } {
   const s = new PassThrough() as PassThrough & { isTTY?: boolean };
