@@ -19,7 +19,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        458
+        459
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -31,7 +31,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        1788
+        1799
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -43,7 +43,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1786
+        1797
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -55,9 +55,9 @@
       "primitive": "fs:writeFileSync",
       "count": 3,
       "lines": [
-        1721,
-        1762,
-        1764
+        1732,
+        1773,
+        1775
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -69,7 +69,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1583
+        1594
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -81,7 +81,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1690
+        1701
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -93,7 +93,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        208
+        209
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -105,7 +105,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1673
+        1684
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -117,7 +117,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        530
+        531
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -129,7 +129,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        639
+        640
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -141,11 +141,11 @@
       "primitive": "fs:unlinkSync",
       "count": 5,
       "lines": [
-        1811,
-        1823,
-        1835,
-        1881,
-        1892
+        1822,
+        1834,
+        1846,
+        1892,
+        1903
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -157,9 +157,9 @@
       "primitive": "fs:writeFileSync",
       "count": 3,
       "lines": [
-        1861,
-        1862,
-        1879
+        1872,
+        1873,
+        1890
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -171,7 +171,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1503
+        1514
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -231,7 +231,7 @@
       "primitive": "fs:rmSync",
       "count": 1,
       "lines": [
-        819
+        833
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -243,7 +243,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        800
+        814
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
