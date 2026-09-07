@@ -22,6 +22,7 @@ import { tmpdir } from 'os';
 import { createHash } from 'crypto';
 
 import { gbrainPath, loadConfig } from '../core/config.ts';
+import type { GBrainConfig } from '../core/config.ts';
 import { configureGateway, isAvailable } from '../core/ai/gateway.ts';
 import { runWithLimit } from '../core/worker-pool.ts';
 import { resolveCycleDefault, cycleDefaultSuffix } from '../core/eval/cycle-default.ts';
@@ -256,6 +257,14 @@ function isTTY(): boolean {
   return Boolean(process.stdout.isTTY);
 }
 
+/** The no-DB cross-modal command cannot persist paid-gateway reservations. */
+export function crossModalPaidBudgetError(
+  config: Pick<GBrainConfig, 'paid_budget'> | null,
+): string | undefined {
+  if (!config?.paid_budget) return undefined;
+  return 'Error: gbrain eval cross-modal cannot run while paid_budget is configured because it does not connect to a brain and cannot record durable spend reservations.';
+}
+
 /**
  * Configure the AI gateway from `~/.gbrain/config.json` + process.env.
  *
@@ -265,6 +274,11 @@ function isTTY(): boolean {
  */
 function configureGatewayForCli(): boolean {
   const config = loadConfig();
+  const paidBudgetError = crossModalPaidBudgetError(config);
+  if (paidBudgetError) {
+    process.stderr.write(`${paidBudgetError}\n`);
+    return false;
+  }
   if (!config) {
     // No config file is fine for the eval command — env vars alone may serve.
     // We still call configureGateway so gateway recipes can read the env map.
@@ -360,7 +374,7 @@ export async function runEvalCrossModal(args: string[], opts: RunCrossModalOpts 
   // Configure the AI gateway. Without this, every chat() call throws
   // "AI gateway is not configured" because the cli.ts no-DB branch skips
   // connectEngine (T3=A).
-  configureGatewayForCli();
+  if (!configureGatewayForCli()) return 1;
 
   // Probe whether the gateway can serve `chat`. If not, we can't run.
   if (!isAvailable('chat')) {
@@ -675,7 +689,7 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
   // function handles its own backend, so requiring an API key here would
   // make hermetic unit tests impossible.
   if (!opts.runEval) {
-    configureGatewayForCli();
+    if (!configureGatewayForCli()) return 1;
     if (!isAvailable('chat')) {
       process.stderr.write(
         'Error: AI gateway has no usable chat provider. ' +
