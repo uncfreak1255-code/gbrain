@@ -110,6 +110,7 @@ export { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './default
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './defaults.ts';
 const DEFAULT_EXPANSION_MODEL = 'anthropic:claude-haiku-4-5-20251001';
 const DEFAULT_CHAT_MODEL = 'anthropic:claude-sonnet-4-6';
+const EXPANSION_MAX_OUTPUT_TOKENS = 512;
 // v0.35.0.0+: reranker default. Used only when search.reranker.enabled is set
 // AND no explicit reranker_model is configured. Mode bundles' per-mode
 // `reranker_model` default to this same value but can be overridden.
@@ -2276,7 +2277,8 @@ export async function expand(query: string): Promise<string[]> {
     const result = await generateObject({
       model,
       schema: ExpansionSchema,
-      maxRetries: 0,
+      maxOutputTokens: EXPANSION_MAX_OUTPUT_TOKENS,
+      ...(_config?.paid_budget && { maxRetries: 0 }),
       // v0.42.20.0 (codex P0) — expansion had NO abortSignal; same stalled-socket
       // class as chat. Default the chat timeout.
       abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
@@ -3006,7 +3008,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       messages: toModelMessages(opts.messages) as any,
       tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
       maxOutputTokens,
-      maxRetries: 0,
+      ...(_config?.paid_budget && { maxRetries: 0 }),
       // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
       // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
       abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),

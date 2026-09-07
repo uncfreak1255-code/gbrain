@@ -20,4 +20,12 @@ describe('cli operation dispatch', () => {
       'await withGatewaySpendScope(eng, () => runDream(eng, args, dreamAbortController.signal));',
     );
   });
+
+  test('runs early remediation dispatch inside one paid-spend scope', () => {
+    const cli = readFileSync('src/cli.ts', 'utf8');
+
+    expect(cli).toContain(
+      'await withGatewaySpendScope(eng, () => runRemediate(eng, args));',
+    );
+  });
 });

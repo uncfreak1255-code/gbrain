@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runConfig } from '../src/commands/config.ts';
@@ -19,6 +19,23 @@ describe('paid gateway policy configuration', () => {
       await runConfig(noEngine, ['unset', 'paid_budget']);
       expect(JSON.parse(readFileSync(path, 'utf8')).paid_budget).toBeUndefined();
     });
+  });
+
+  test('reads paid_budget from the file plane', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-paid-config-get-'));
+    const output: string[] = [];
+    const originalLog = console.log;
+    console.log = (...values: unknown[]) => output.push(values.join(' '));
+    try {
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        await runConfig(noEngine, ['set', 'paid_budget', '{"max_usd_per_run":0.25,"max_usd_per_day":2}']);
+        await runConfig(noEngine, ['get', 'paid_budget']);
+      });
+      expect(output.at(-1)).toBe('{"max_usd_per_run":0.25,"max_usd_per_day":2}');
+    } finally {
+      console.log = originalLog;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('rejects invalid policy before writing a config file', async () => {

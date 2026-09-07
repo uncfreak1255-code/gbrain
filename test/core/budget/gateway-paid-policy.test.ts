@@ -1,9 +1,11 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { PGLiteEngine } from '../../../src/core/pglite-engine.ts';
-import { chat, configureGateway, resetGateway, embed } from '../../../src/core/ai/gateway.ts';
+import { chat, configureGateway, resetGateway, embed, expand } from '../../../src/core/ai/gateway.ts';
 import { withGatewaySpendScope } from '../../../src/core/budget/gateway-spend.ts';
 import { paidTextFetch } from '../../../src/core/budget/gateway-spend.ts';
 import { zai } from '../../../src/core/ai/recipes/zai.ts';
+import { RECIPES } from '../../../src/core/ai/recipes/index.ts';
 import { reserveGatewaySpend } from '../../../src/core/minions/budget-meter.ts';
 
 let engine: PGLiteEngine;
@@ -72,6 +74,43 @@ test('paid embeddings refuse under the text-only policy', async () => {
   await expect(withGatewaySpendScope(engine, () => embed(['test'], { embeddingModel: 'openai:text-embedding-3-small' })))
     .rejects.toThrow('local embeddings only');
   expect(calls).toBe(0);
+});
+
+test('only disables SDK retries while paid limits are active', () => {
+  const gateway = readFileSync('src/core/ai/gateway.ts', 'utf8');
+  const guardedRetries = gateway.match(/\.\.\.\(_config\?\.paid_budget && \{ maxRetries: 0 \}\)/g) ?? [];
+  expect(guardedRetries).toHaveLength(2);
+});
+
+test('paid expansion sends a bounded output request', async () => {
+  const recipeId = 'paid-expansion-test';
+  RECIPES.set(recipeId, {
+    ...zai,
+    id: recipeId,
+    touchpoints: {
+      ...zai.touchpoints,
+      expansion: { models: ['glm-5.2'] },
+    },
+  });
+  await engine.setConfig('pricing.overrides', JSON.stringify({ [`${recipeId}:glm-5.2`]: { input: 1, output: 1 } }));
+  configureGateway({
+    chat_model: 'zai:glm-5.2',
+    expansion_model: `${recipeId}:glm-5.2`,
+    env: { ZAI_API_KEY: 'test-only' },
+    paid_budget: { max_usd_per_run: 0.007, max_usd_per_day: 0.012 },
+  });
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response(JSON.stringify({ id: 'test', model: 'glm-5.2', choices: [
+      { index: 0, message: { role: 'assistant', content: '{"queries":["alternate"]}' }, finish_reason: 'stop' },
+    ], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  try {
+    await expect(withGatewaySpendScope(engine, () => expand('original'))).resolves.toEqual(['original', 'alternate']);
+    expect(calls).toBe(1);
+  } finally {
+    RECIPES.delete(recipeId);
+  }
 });
 
 test.each([null, {}, { max_usd_per_run: NaN, max_usd_per_day: 1 }, { max_usd_per_run: 1, max_usd_per_day: -1 }])(

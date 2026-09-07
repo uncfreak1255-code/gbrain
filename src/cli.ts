@@ -1312,7 +1312,7 @@ async function handleCliOnly(command: string, args: string[]) {
     if (args.includes('--remediate')) {
       const { runRemediate } = await import('./commands/doctor.ts');
       const eng = await connectEngine();
-      try { await runRemediate(eng, args); } finally { await finishCliTeardown({ engine: eng }); }
+      try { await withGatewaySpendScope(eng, () => runRemediate(eng, args)); } finally { await finishCliTeardown({ engine: eng }); }
       return;
     }
 

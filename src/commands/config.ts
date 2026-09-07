@@ -113,6 +113,16 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   const value = args[2];
 
   if (action === 'get' && key) {
+    if (key === 'paid_budget') {
+      const { loadConfigFileOnly } = await import('../core/config.ts');
+      const policy = loadConfigFileOnly()?.paid_budget;
+      if (policy === undefined) {
+        console.error(`Config key not found: ${key}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(policy));
+      return;
+    }
     const val = await engine.getConfig(key);
     if (val !== null) {
       console.log(val);
