@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, test, expect } from 'bun:test';
 
+// Serial: this fixture initializes six isolated PGLite databases. Keeping it
+// out of the shared shard process prevents resource contention during setup.
+
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { softDeleteSourceGuarded } from '../src/core/destructive-guard.ts';
