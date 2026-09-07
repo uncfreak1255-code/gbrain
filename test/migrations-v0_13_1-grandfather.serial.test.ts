@@ -4,6 +4,8 @@
 // 82K-page PGLite brain. The rewrite is a chunked bulk SQL pass keyed on
 // pages.id (NOT slug — slug isn't globally unique), filtering deleted_at IS NULL.
 // These tests drive phaseCGrandfather directly against a real PGLite engine.
+// SERIAL: the 1,200-page regression creates substantial PGLite write pressure;
+// running it in a shared shard can exceed Bun's 60-second per-test limit.
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { tmpdir } from 'os';
 import { mkdtempSync, existsSync, readFileSync } from 'fs';
