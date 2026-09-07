@@ -13,7 +13,7 @@ import { describe, test, expect } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { runEvalCrossModal, runWithLimit, type BatchSummary } from '../src/commands/eval-cross-modal.ts';
+import { crossModalPaidBudgetError, runEvalCrossModal, runWithLimit, type BatchSummary } from '../src/commands/eval-cross-modal.ts';
 import type { RunEvalResult } from '../src/core/cross-modal-eval/runner.ts';
 import type { AggregateResult } from '../src/core/cross-modal-eval/aggregate.ts';
 
@@ -51,6 +51,15 @@ function makeStubRunEval(verdicts: Array<'pass' | 'fail' | 'inconclusive' | 'thr
     };
   };
 }
+
+describe('cross-modal paid-budget guard', () => {
+  test('refuses the no-database gateway path when durable reservations are required', () => {
+    expect(crossModalPaidBudgetError(null)).toBeUndefined();
+    expect(crossModalPaidBudgetError({
+      paid_budget: { max_usd_per_run: 0.25, max_usd_per_day: 2 },
+    })).toContain('cannot record durable spend reservations');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 1. runWithLimit semaphore primitive (T4)

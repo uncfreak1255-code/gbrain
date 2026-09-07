@@ -2142,7 +2142,7 @@ async function handleCliOnly(command: string, args: string[]) {
       }
     }
     };
-    if (command === 'serve') await dispatch();
+    if (command === 'serve' || command === 'autopilot') await dispatch();
     else await withGatewaySpendScope(engine, dispatch);
   } finally {
     syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit

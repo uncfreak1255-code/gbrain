@@ -28,4 +28,10 @@ describe('cli operation dispatch', () => {
       'await withGatewaySpendScope(eng, () => runRemediate(eng, args));',
     );
   });
+
+  test('leaves autopilot scope ownership to its per-tick dispatcher', () => {
+    const cli = readFileSync('src/cli.ts', 'utf8');
+
+    expect(cli).toContain("if (command === 'serve' || command === 'autopilot') await dispatch();");
+  });
 });

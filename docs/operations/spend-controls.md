@@ -159,7 +159,10 @@ gbrain config unset paid_budget
 Both values must be finite, non-negative USD amounts. Running `serve`, `jobs worker`,
 and `autopilot` processes keep their current policy until restarted.
 Engine-connected CLI, MCP, sweep, Dream, and worker entrypoints establish a
-durable run; queued descendants inherit the queue-owned root identity.
+durable run; queued descendants inherit the queue-owned root identity. Autopilot
+creates a new durable run for each tick, so a per-run ceiling resets for the
+next interval while the UTC-day ceiling remains shared. The database-free
+`gbrain eval cross-modal` command refuses while `paid_budget` is configured.
 
 Before each supported OpenAI-compatible text request, the gateway validates the
 serialized model, output bound, text-only messages, and function-tool shape. It
