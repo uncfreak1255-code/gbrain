@@ -256,6 +256,12 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     const useGatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
     const useGatewayLoop = typeof useGatewayLoopRaw === 'string' &&
       (useGatewayLoopRaw === 'true' || useGatewayLoopRaw === '1');
+    if (config.paid_budget && !useGatewayLoop) {
+      throw new Error(
+        'subagent job: paid_budget requires agent.use_gateway_loop=true because the legacy Anthropic path cannot enforce durable paid-spend limits. ' +
+        'Enable the gateway-native loop: `gbrain config set agent.use_gateway_loop true`.',
+      );
+    }
     if (!useGatewayLoop && !isAnthropicProvider(model)) {
       throw new Error(
         `subagent job: resolved model "${model}" is non-Anthropic but agent.use_gateway_loop is not enabled. ` +

@@ -1405,7 +1405,11 @@ async function handleCliOnly(command: string, args: string[]) {
     };
     process.once('SIGINT', onDreamTimeout);
     try {
-      await runDream(eng, args, dreamAbortController.signal);
+      if (eng) {
+        await withGatewaySpendScope(eng, () => runDream(eng, args, dreamAbortController.signal));
+      } else {
+        await runDream(null, args, dreamAbortController.signal);
+      }
       // Keep the partial JSON receipt, but do not report an operator abort as
       // a successful one-shot CLI invocation. The nightly wrapper converts its
       // own timeout to 124; direct Ctrl-C callers receive the conventional 130.
