@@ -15,6 +15,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import {
   detectRegressions,
   computeDriftScore,
@@ -26,6 +27,14 @@ import type { TrajectoryPoint } from '../src/core/engine.ts';
 let engine: PGLiteEngine;
 
 beforeAll(async () => {
+  // This suite inserts deterministic 1536-d vectors. Pin the schema shape
+  // before init so a co-sharded test's gateway configuration cannot decide
+  // whether its fixtures are valid.
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: 1536,
+    env: { ...process.env },
+  });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -33,6 +42,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  resetGateway();
 });
 
 beforeEach(async () => {
