@@ -9,6 +9,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { currentGatewaySpendRunId, gatewayJobRunId, SPEND_RUN_DATA_KEY } from '../budget/gateway-spend.ts';
 import type {
   MinionJob, MinionJobInput, MinionJobStatus, InboxMessage, TokenUpdate,
   MinionQueueOpts, ChildDoneMessage, ChildOutcome, Attachment, AttachmentInput,
@@ -210,6 +211,17 @@ export class MinionQueue {
   ): Promise<MinionJob> {
     const jobName = await this.validateSubmissionName(name, data, trusted);
     await this.ensureSchema();
+
+    // The queue owns the durable run identity. Ignore caller-supplied stamps,
+    // inherit the active scope, or recover the identity from a parent job.
+    data = { ...(data ?? {}) };
+    delete data[SPEND_RUN_DATA_KEY];
+    const parent = opts?.parent_job_id ? await this.getJob(opts.parent_job_id) : null;
+    const spendRun = parent
+      ? await gatewayJobRunId(this.engine, parent)
+      : currentGatewaySpendRunId(this.engine);
+    if (opts?.parent_job_id && !parent) throw new Error('Missing gateway budget job parent');
+    if (spendRun) data[SPEND_RUN_DATA_KEY] = spendRun;
 
     const childStatus: MinionJobStatus = opts?.hold_until_children ? 'paused' : (opts?.delay ? 'delayed' : 'waiting');
     const delayUntil = opts?.delay ? new Date(Date.now() + opts.delay) : null;

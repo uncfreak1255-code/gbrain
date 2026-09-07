@@ -60,6 +60,7 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     embedding_multimodal_model: c.embedding_multimodal_model,
     expansion_model: c.expansion_model,
     chat_model: c.chat_model,
+    paid_budget: c.paid_budget,
     chat_fallback_chain: c.chat_fallback_chain,
     base_urls: { ...envBaseUrls, ...(c.provider_base_urls ?? {}) }, // config wins over env
     env: { ...envFromConfig, ...process.env }, // process.env wins

@@ -78,6 +78,11 @@ export interface GBrainConfig {
   chat_fallback_chain?: string[];
   /** Optional base URL overrides for openai-compatible providers (keyed by recipe id). */
   provider_base_urls?: Record<string, string>;
+  /** Durable per-run and per-day limits for the paid text gateway surface. */
+  paid_budget?: {
+    max_usd_per_run: number;
+    max_usd_per_day: number;
+  };
   /**
    * Optional storage backend config (S3/Supabase/local). Shape matches
    * `StorageConfig` in `./storage.ts`. Typed as `unknown` here to avoid
@@ -865,6 +870,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'chat_model',
   'chat_fallback_chain',
   'provider_base_urls',
+  'paid_budget',
   'storage',
   'eval',
   'eval.capture',

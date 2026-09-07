@@ -12,6 +12,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { withGatewaySpendScope, gatewayJobRunId } from '../budget/gateway-spend.ts';
 import type {
   MinionJob, MinionJobContext, MinionHandler, MinionWorkerOpts,
   MinionQueueOpts, TokenUpdate,
@@ -982,7 +983,11 @@ export class MinionWorker extends EventEmitter {
     };
 
     try {
-      const result = await handler(context);
+      const result = await withGatewaySpendScope(
+        this.engine,
+        () => handler(context),
+        await gatewayJobRunId(this.engine, job),
+      );
 
       clearInterval(lockTimer);
 
