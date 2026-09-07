@@ -7,7 +7,7 @@
       "primitive": "fs:unlinkSync",
       "count": 1,
       "lines": [
-        162
+        163
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -1832,7 +1832,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1061
+        1067
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -1844,7 +1844,7 @@
       "primitive": "fs:writeFileSync",
       "count": 1,
       "lines": [
-        1008
+        1014
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
