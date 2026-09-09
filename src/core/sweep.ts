@@ -954,7 +954,7 @@ async function runCorpusIngestPass(
   // OFF retires banked turns even when the brain cannot extract — otherwise
   // the files linger eligible and a later re-enable would extract turns the
   // operator already revoked (codex re-review, this wave).
-  const { parseWbFileName, writebackOffSidecarJson } = await import('./context/corpus-segments.ts');
+  const { parseWbFileName, parseSegmentFileName, writebackOffSidecarJson } = await import('./context/corpus-segments.ts');
   const { resolveWritebackConfig } = await import('./facts/writeback-config.ts');
   const { loadConfig: loadFileCfg } = await import('./config.ts');
   const { isValidSourceId } = await import('./source-id.ts');
@@ -1092,12 +1092,13 @@ async function runCorpusIngestPass(
       // the turn into the SAME source the prompt-time IPC lane would have —
       // never the pass's source. Validated before use (source-isolation
       // invariant); a legacy/invalid segment falls back to the pass source.
-      const wbSourceId = wbMeta?.sourceId && isValidSourceId(wbMeta.sourceId)
-        ? wbMeta.sourceId
+      const bankedSource = wbMeta?.sourceId ?? parseSegmentFileName(name)?.sourceId;
+      const corpusSourceId = bankedSource && isValidSourceId(bankedSource)
+        ? bankedSource
         : sourceId;
       const r = await runFactsPipeline(raw, {
         engine,
-        sourceId: wbMeta ? wbSourceId : sourceId,
+        sourceId: corpusSourceId,
         sessionId: wbMeta ? wbMeta.sessionId : `sweep:corpus:${name}`,
         // Provenance tag outside FactsBackstopCtx's enumerated writers —
         // facts.source is free text at the DB layer; the cast only
@@ -1139,7 +1140,7 @@ async function runCorpusIngestPass(
             const verified: Array<{ slug: string; title: string }> = [];
             for (const slug of r.entity_slugs) {
               try {
-                const page = await engine.getPage(slug, { sourceId });
+                const page = await engine.getPage(slug, { sourceId: corpusSourceId });
                 if (page) verified.push({ slug, title: page.title || slug });
               } catch { /* a non-resolvable link is never banked */ }
             }
@@ -1148,7 +1149,7 @@ async function runCorpusIngestPass(
               const ledger = segs.readSegmentLedger(dir, parsed.sessionId);
               const n = Math.max(1, ledger.findIndex((e) => e.hash === parsed.hash) + 1);
               const ok = await ss.appendCheckpointManifest(
-                engine, sourceId, null, parsed.sessionId, verified,
+                engine, corpusSourceId, null, parsed.sessionId, verified,
                 { seg: parsed.hash, n },
               );
               if (ok) linksBanked = verified.length;

@@ -122,7 +122,7 @@ bank remains harmless — the target serve's own DB gate decides.
 | Harness | Real-time contract | Backstop |
 |---|---|---|
 | Claude Code | MCP instructions + managed user CLAUDE.md block | Stop-hook lane (above) |
-| Codex | MCP instructions + managed `$CODEX_HOME/AGENTS.md` block | **No per-turn hook exists** (SessionEnd only, 3s hard-kill). The existing SessionEnd capture → corpus → maintenance-sweep extraction lane is the delayed backstop — whole-session, next-sweep latency, governed by `facts.extraction_enabled` (it predates this feature). |
+| Codex | MCP instructions + managed `$CODEX_HOME/AGENTS.md` block | UserPromptSubmit supplies context; Stop banks gated user statements, and PreCompact/Interrupt checkpoint the transcript. SessionEnd remains a delayed fallback. Harness bootstrap pins the per-turn source with `--source`; extraction remains governed by `facts.extraction_enabled`. |
 | opencode / OpenClaw / others | MCP instructions when connected | None wired — follow-ups filed. |
 
 The workspace-bootstrap "same-turn write-back" contract
@@ -222,3 +222,5 @@ gbrain sweep --once   # drives the sweep backstop extraction immediately
 gbrain config set memory.auto_writeback off
 gbrain bootstrap harness --yes
 ```
+
+Deferred fact extraction admits only claims explicitly classified as `lifetime: durable`. Temporary or unknown-lifetime output is omitted before embedding and storage, including historical imports. Direct `remember` calls retain their explicit TTL path. Replayed facts with the same provenance cannot revive a corrected or expired claim.

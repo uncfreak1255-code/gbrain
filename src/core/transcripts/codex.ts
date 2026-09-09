@@ -113,6 +113,13 @@ export function mapCodexLine(entry: unknown): CodexLineResult {
     };
   }
   if (e.type === 'compacted') return { kind: 'boundary' };
+  if (e.type === 'event_msg' && payload.type === 'item_completed') {
+    const item = payload.item as Record<string, unknown> | null;
+    if (item && typeof item === 'object' && item.type === 'UserMessage') {
+      const text = textFromBlocks(item.content, 'text');
+      return text ? { kind: 'user', message: { role: 'user', timestamp: lineTs, text } } : { kind: 'skip' };
+    }
+  }
   if (e.type === 'event_msg' && payload.type === 'user_message') {
     const text = typeof payload.message === 'string' ? payload.message.trim() : '';
     return text ? { kind: 'user', message: { role: 'user', timestamp: lineTs, text } } : { kind: 'skip' };

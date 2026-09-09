@@ -330,7 +330,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
   });
 
   test('one tracker spans files and post-call spend stops the next transport', async () => {
-    await engine.setConfig('facts.sweep_max_usd', '0.005');
+    await engine.setConfig('facts.sweep_max_usd', '0.006');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
       'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
@@ -351,7 +351,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
     expect(chatCalls).toBe(1);
     expect(r.corpusIngested).toBe(1);
     expect(r.spentUsd).toBeGreaterThan(0);
-    expect(r.spentUsd).toBeLessThanOrEqual(0.005);
+    expect(r.spentUsd).toBeLessThanOrEqual(0.006);
     expect(r.skipped).toContainEqual({ reason: 'cost_cap_exhausted:corpus', count: 1 });
     expect(existsSync(join(corpusDir, 'a.txt' + CORPUS_INGESTED_SUFFIX))).toBe(true);
     expect(existsSync(join(corpusDir, 'b.txt' + CORPUS_INGESTED_SUFFIX))).toBe(false);
@@ -416,8 +416,8 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
 
   test('per-day headroom caps the run, the ledger carries spend across sweeps, and a stale day resets', async () => {
     // The run cap (1, beforeEach) is wider than today's remaining headroom
-    // (0.006 - 0.001 = 0.005), so the DAY ceiling is the effective cap.
-    await engine.setConfig('facts.sweep_max_usd_per_day', '0.006');
+    // (0.007 - 0.001 = 0.006), so the DAY ceiling is the effective cap.
+    await engine.setConfig('facts.sweep_max_usd_per_day', '0.007');
     await engine.setConfig('facts.sweep_spend_ledger', JSON.stringify({ day: utcDay(), usd: 0.001 }));
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
@@ -438,8 +438,8 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
     const r1 = await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED, batchLimit: 2 });
     expect(chatCalls).toBe(1);
     expect(r1.corpusIngested).toBe(1);
-    expect(r1.maxCostUsd).toBeCloseTo(0.005, 9);
-    expect(r1.dailyCapUsd).toBe(0.006);
+    expect(r1.maxCostUsd).toBeCloseTo(0.006, 9);
+    expect(r1.dailyCapUsd).toBe(0.007);
     expect(r1.spentUsd).toBeGreaterThan(0);
     expect(r1.dailySpentUsd).toBeCloseTo(0.001 + r1.spentUsd, 6);
     expect(r1.skipped).toContainEqual({ reason: 'daily_cap_exhausted:corpus', count: 1 });
@@ -549,8 +549,8 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
   });
 
   test('concurrent sweeps cannot jointly exceed the day cap', async () => {
-    // Day cap fits exactly one projected call (~$0.0049 at 1/1 pricing).
-    await engine.setConfig('facts.sweep_max_usd_per_day', '0.005');
+    // Day cap fits exactly one projected call (under $0.006 at 1/1 pricing).
+    await engine.setConfig('facts.sweep_max_usd_per_day', '0.006');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
       'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
@@ -602,7 +602,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
   });
 
   test('a success response without usable usage is charged at the projection, so the cap still trips', async () => {
-    await engine.setConfig('facts.sweep_max_usd', '0.006');
+    await engine.setConfig('facts.sweep_max_usd', '0.007');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
       'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
@@ -647,7 +647,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
   });
 
   test('a call whose true cost exceeds its projection is named even when it was the last file', async () => {
-    await engine.setConfig('facts.sweep_max_usd', '0.005');
+    await engine.setConfig('facts.sweep_max_usd', '0.006');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
       'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
@@ -667,7 +667,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
   });
 
   test('an overshoot whose immediate settle fails once still reaches the row on the final settle', async () => {
-    await engine.setConfig('facts.sweep_max_usd', '0.005');
+    await engine.setConfig('facts.sweep_max_usd', '0.006');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
       'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
@@ -690,13 +690,13 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
     expect(r.spentUsd).toBeCloseTo(0.100001, 6);
     expect(r.skipped).toContainEqual({ reason: 'cost_cap_overshoot:corpus', count: 1 });
     expect(r.skipped).toContainEqual({ reason: 'daily_ledger_settle_failed:corpus', count: 1 });
-    // The row holds the truth, not the $0.005 booking.
+    // The row holds the truth, not the $0.006 booking.
     expect(await readSweepSpendLedger(engine)).toEqual({ day: utcDay(), usd: 0.100001 });
     expect(r.dailySpentUsd).toBeCloseTo(0.100001, 6);
   });
 
   test('seam: input reported but output missing is charged the output projection', async () => {
-    await engine.setConfig('facts.sweep_max_usd', '0.006');
+    await engine.setConfig('facts.sweep_max_usd', '0.007');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
       'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
@@ -719,7 +719,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
   });
 
   test('seam: a thrown provider error carrying zero usage is charged the projection', async () => {
-    await engine.setConfig('facts.sweep_max_usd', '0.006');
+    await engine.setConfig('facts.sweep_max_usd', '0.007');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 1, output: 1 },
       'anthropic:claude-sonnet-4-6': { input: 1, output: 1 },
@@ -770,7 +770,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
             kind: 'commitment',
             entity: null,
             confidence: 0.9,
-            notability: 'high',
+            notability: 'high', lifetime: 'durable',
           }],
         }),
         blocks: [],
@@ -849,7 +849,7 @@ describe('runMaintenanceSweep — corpus ingest [CX-P0.1, CX-P0.5]', () => {
 describe('runMaintenanceSweep — corpus claim fencing (concurrent sweeps)', () => {
   const stubChatResult = (fact: string): ChatResult => ({
     text: JSON.stringify({
-      facts: [{ fact, kind: 'fact', entity: null, confidence: 0.9, notability: 'medium' }],
+      facts: [{ fact, kind: 'fact', entity: null, confidence: 0.9, notability: 'medium', lifetime: 'durable' }],
     }),
     blocks: [],
     stopReason: 'end',

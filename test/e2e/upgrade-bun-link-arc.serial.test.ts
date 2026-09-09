@@ -53,7 +53,7 @@
 
 import { describe, test, expect, afterEach, afterAll } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -110,7 +110,7 @@ function writeShim(dir: string, name: string, body: string): void {
 }
 
 function makeBase(label: string): BaseFixture {
-  const root = mkdtempSync(join(tmpdir(), `gbrain-bunlink-${label}-`));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `gbrain-bunlink-${label}-`)));
   cleanupDirs.push(root);
   const home = join(root, 'home');
   mkdirSync(join(home, '.gbrain'), { recursive: true });

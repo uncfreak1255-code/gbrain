@@ -701,6 +701,13 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
       `SELECT id, superseded_by FROM facts WHERE id = $1`, [a.id],
     );
     expect(rows[0].superseded_by).toBe(updated.id);
+    const replay = await writeSingleFact(engine, 'default', {
+      fact: 'SUPERSEDE-PAIR alice works at acme-example',
+      provenance: 'test', entity: 'people/supersede-test', kind: 'fact',
+    });
+    expect(replay.status).toBe('duplicate');
+    const current = await engine.listFactsByEntity('default', 'people/supersede-test');
+    expect(current.map(f => f.fact)).toEqual(['SUPERSEDE-PAIR alice LEFT acme-example, now at widget-co']);
   });
 
   it('reports degraded_dedup when no embedding provider is configured', async () => {
@@ -712,6 +719,31 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
     );
     expect(r.status).toBe('inserted');
     expect(r.degraded_dedup).toBe(true);
+  });
+
+  it('concurrent copies of one attributed statement produce one fact without embeddings', async () => {
+    const input = { fact: 'Concurrent replay uses one durable record.', provenance: 'same-event', kind: 'fact' as const };
+    const results = await withNoEmbeddingProvider(() => Promise.all([
+      writeSingleFact(engine, 'default', input), writeSingleFact(engine, 'default', input),
+    ]));
+    expect(new Set(results.map(r => r.id)).size).toBe(1);
+    expect(results.map(r => r.status).sort()).toEqual(['duplicate', 'inserted']);
+  });
+
+  it('active exact claims deduplicate across lanes; historical replay differs from a new statement', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const input = { fact: 'The standing report heading is amber.', provenance: 'original-session', kind: 'preference' as const };
+      const first = await writeSingleFact(engine, 'default', input);
+      const otherLane = await writeSingleFact(engine, 'default', { ...input, provenance: 'deferred-capture' });
+      expect(otherLane.id).toBe(first.id);
+      await engine.expireFact(first.id);
+      const replay = await writeSingleFact(engine, 'default', input);
+      expect(replay.status).toBe('duplicate');
+      expect(replay.id).toBe(first.id);
+      const restated = await writeSingleFact(engine, 'default', { ...input, provenance: 'new-session' });
+      expect(restated.status).toBe('inserted');
+      expect(restated.id).not.toBe(first.id);
+    });
   });
 });
 

@@ -113,7 +113,7 @@ describe('sweep spend guard — production usage path', () => {
     // The alias resolves to the dated id inside the gateway; the override is
     // keyed by the alias, the way the reserve_no_pricing hint tells operators.
     await engine.setConfig('facts.extraction_model', 'anthropic:claude-haiku-4-5');
-    await engine.setConfig('facts.sweep_max_usd', '0.5');
+    await engine.setConfig('facts.sweep_max_usd', '0.6');
     await engine.setConfig('pricing.overrides', JSON.stringify({
       'anthropic:claude-haiku-4-5': { input: 100, output: 100 },
     }));

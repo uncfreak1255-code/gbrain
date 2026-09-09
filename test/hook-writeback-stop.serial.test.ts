@@ -88,6 +88,23 @@ async function wbHeartbeats() {
 }
 
 describe('hook stop — ambient writeback banking', () => {
+  test('Codex normal user statement banks once while serve is down, ignoring injected user context', async () => {
+    writeConfig({ writeback: 'salient' });
+    const root = join(tmp, 'codex-sessions');
+    mkdirSync(root, { recursive: true });
+    const path = join(root, 'rollout.jsonl');
+    writeFileSync(path, [
+      { type: 'session_meta', payload: { id: 's-codex', cwd: '/tmp/other-project' } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'I prefer concise weekly summaries with the evidence linked.' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Injected context must never become a personal preference.' }] } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const opts = { ...io, transcriptRoot: root, stdin: JSON.stringify({ session_id: 's-codex', transcript_path: path }) };
+    expect(await runHook(['stop', '--harness', 'codex'], opts)).toBe(0);
+    expect(await runHook(['stop', '--harness', 'codex'], opts)).toBe(0);
+    expect(existsSync(corpus()) ? readdirSync(corpus()).filter(f => f.includes('.wb-')).length : 0).toBe(1);
+    expect((await wbHeartbeats()).map(e => e.reason)).toEqual(['no_serve', 'wb_dup']);
+  });
+
   test('gate off (no memory config): exit 0, no wb file, no writeback-bank heartbeat', async () => {
     writeConfig({});
     const t = writeTranscript('I prefer dark mode in every editor, please set it up.');
