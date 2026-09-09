@@ -87,7 +87,7 @@ afterEach(() => {
 function chatStub(facts: Array<{ fact: string; entity: string | null }>) {
   __setChatTransportForTests(async (): Promise<ChatResult> => ({
     text: JSON.stringify({
-      facts: facts.map((f) => ({ fact: f.fact, kind: 'decision', entity: f.entity, confidence: 1.0, notability: 'high' })),
+      facts: facts.map((f) => ({ lifetime: 'durable', fact: f.fact, kind: 'decision', entity: f.entity, confidence: 1.0, notability: 'high' })),
     }),
     blocks: [],
     stopReason: 'end',

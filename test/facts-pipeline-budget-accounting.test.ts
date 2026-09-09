@@ -63,7 +63,7 @@ function chatStub(): void {
   __setChatTransportForTests(async (): Promise<ChatResult> => ({
     text: JSON.stringify({
       facts: [
-        { fact: 'budget-accounting-probe fact', kind: 'fact', entity: null, confidence: 1.0, notability: 'medium' },
+        { fact: 'budget-accounting-probe fact', kind: 'fact', entity: null, confidence: 1.0, notability: 'medium', lifetime: 'durable' },
       ],
     }),
     blocks: [],

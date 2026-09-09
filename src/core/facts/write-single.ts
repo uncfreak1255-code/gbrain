@@ -76,6 +76,17 @@ export async function writeSingleFact(
   sourceId: string,
   input: SingleFactInput,
 ): Promise<SingleFactResult> {
+  const { withPageLock } = await import('../page-lock.ts');
+  // Reuse the cross-process lock owner. This is distinct from the inner
+  // Markdown page lock, and covers DB-only writes as well as fence writes.
+  return withPageLock(`fact-write:${sourceId}`, () => writeSingleFactLocked(engine, sourceId, input));
+}
+
+async function writeSingleFactLocked(
+  engine: BrainEngine,
+  sourceId: string,
+  input: SingleFactInput,
+): Promise<SingleFactResult> {
   const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
   const { cosineSimilarity } = await import('./classify.ts');
   const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
@@ -105,6 +116,17 @@ export async function writeSingleFact(
   // #4108: provenance for the fence writer's stub guard. Null when the
   // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
+
+  // A replay must see historical rows too. Similarity candidates contain only
+  // current beliefs; otherwise replaying a corrected claim corrects it BACK.
+  const recorded = await findRecordedFact(engine, sourceId, {
+    fact: factText, entity: resolvedSlug, kind, provenance: input.provenance,
+    sessionId: input.sessionId,
+  });
+  if (recorded) return {
+    id: recorded.id, status: 'duplicate', entity_slug: resolvedSlug,
+    valid_until: recorded.valid_until, degraded_dedup: false,
+  };
 
   // Embedding (NOT an LLM call): powers dedup + downstream recall. Fail-soft —
   // a missing/failing provider degrades dedup, never the write.
@@ -262,4 +284,26 @@ async function expireSuperseded(engine: BrainEngine, oldId: number, newId: numbe
 
 function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** Active exact claims deduplicate across capture lanes. Historical replay
+ * identity includes provenance and session so a new statement can revisit an
+ * old belief. Extraction can match all historical rows: an import cannot
+ * establish a fresh user reversal. Source/entity stay confined. */
+export async function findRecordedFact(
+  engine: BrainEngine,
+  sourceId: string,
+  input: { fact: string; entity: string | null; kind: string; provenance: string; sessionId?: string | null; matchAnyHistorical?: boolean },
+): Promise<{ id: number; valid_until: Date | null } | null> {
+  const rows = await engine.executeRaw<{ id: number; valid_until: Date | string | null }>(
+    `SELECT id, valid_until FROM facts
+     WHERE source_id = $1 AND entity_slug IS NOT DISTINCT FROM $2::text
+       AND kind = $3 AND lower(regexp_replace(btrim(fact), '[[:space:]]+', ' ', 'g')) = $4
+       AND ((expired_at IS NULL AND (valid_until IS NULL OR valid_until > NOW()))
+         OR $7::boolean OR (source = $5 AND source_session IS NOT DISTINCT FROM $6::text))
+     ORDER BY id LIMIT 1`,
+    [sourceId, input.entity, input.kind, collapse(input.fact), input.provenance, input.sessionId ?? null, input.matchAnyHistorical ?? false],
+  );
+  const row = rows[0];
+  return row ? { id: Number(row.id), valid_until: row.valid_until ? new Date(row.valid_until) : null } : null;
 }
