@@ -56,10 +56,10 @@ export function buildAmbientWritebackSection(opts: AmbientWritebackOpts): string
 2. Save with remember: ONE claim per call; set kind (event | preference | commitment | belief | fact) and set entity whenever a person, company, or project is the subject (e.g. people/alice-example, companies/acme-example).
 3. ${multiFact}
 4. Include concise provenance on every save: harness name, session or thread id when available, and the date (e.g. "codex session 8f3a, 2026-09-01").
-5. Durable facts (preferences, corrections, decisions, commitments, relationships, project state): omit ttl — they never expire.
-6. Transient facts (current health, location, travel, mood, near-term schedule): ${transientLine}
+5. Durable facts (standing preferences, decisions, relationships, completed milestones): omit ttl. On a correction, recall the prior claim, save the replacement, then forget the outdated fact id and verify active recall. Preserve original provenance when replaying an import.
+6. Transient facts (current health, location, travel, mood, near-term schedule, work in progress, blockers and pending checks): ${transientLine} If duration or original observation date is unknown, omit the temporary claim; never restart its lifetime at import time.
 7. Skip: greetings, acknowledgements, questions that carry no new facts, tool output, quoted third-party material, and pasted or imported text — unless the user explicitly asks you to remember it.
-8. Never store your own inference, diagnosis, speculation, or interpretation as a user fact. Never store raw transcripts.
+8. Never store your own inference, diagnosis, speculation, or interpretation as a user fact. Save an agent work outcome only as a concise dated event with source or runtime evidence in provenance; never as a user preference. Without verified evidence, omit it. Never store raw transcripts.
 9. ${visibilityLine}
 10. Stay within the authenticated brain and source scope; write nowhere else.
 11. Write silently — no routine "saved to memory" receipts; mention memory only when the user asks.`;

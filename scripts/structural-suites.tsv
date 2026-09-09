@@ -305,3 +305,5 @@ test/v0_37_gap_fill.serial.test.ts	Lane E.4 — loadRecommendationContext is pro
 test/v0_37_gap_fill.serial.test.ts	reinit-pglite — backup + reinit	7	readFileSync
 test/voyage-response-cap.test.ts	v0.31.8 — voyage Content-Length pre-check + per-item cap	6	bun-file
 test/worker-supervised-db-probe.test.ts	issue #1801 fix #2 — supervised DB self-defense	5	readFileSync
+# unknown (detectors present, no attributable suite):
+# unknown	test/e2e/automatic-memory-real-agents.serial.test.ts

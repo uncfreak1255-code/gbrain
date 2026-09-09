@@ -62,6 +62,8 @@ describe('gateWritebackTurn — skip rules, first hit wins', () => {
     expect(gateWritebackTurn(indented)).toEqual({ ok: false, reason: 'quoted_or_tool_output' });
     const withResidue = 'I decided we are switching the staging db to Postgres 17.\n> Alice wrote: the deploy failed';
     expect(gateWritebackTurn(withResidue).ok).toBe(true);
+    const gated = gateWritebackTurn(withResidue);
+    expect(gated.ok && gated.normalized).toBe('I decided we are switching the staging db to Postgres 17.');
   });
 
   test('bulk paste over the cap → bulk_paste (imported text needs an explicit ask)', () => {

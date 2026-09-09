@@ -56,7 +56,7 @@ function chatStub(facts: Array<{ fact: string; kind: string; notability: 'high' 
         kind: f.kind,
         entity: f.entity ?? null,
         confidence: 1.0,
-        notability: f.notability,
+        notability: f.notability, lifetime: 'durable',
       })),
     }),
     blocks: [],
@@ -68,6 +68,27 @@ function chatStub(facts: Array<{ fact: string; kind: string; notability: 'high' 
 }
 
 describe('runFactsPipeline (extract_facts MCP op path) — response shape stability', () => {
+  test('delayed extraction cannot revive a corrected foreground claim under new provenance', async () => {
+    const { writeSingleFact } = await import('../src/core/facts/write-single.ts');
+    const original = await writeSingleFact(engine, 'default', {
+      fact: 'Fixture prefers the amber heading', kind: 'preference', provenance: 'codex original turn',
+    });
+    await engine.expireFact(original.id);
+    const current = await writeSingleFact(engine, 'default', {
+      fact: 'Fixture prefers the indigo heading', kind: 'preference', provenance: 'codex correction',
+    });
+    chatStub([{ fact: 'Fixture prefers the amber heading', kind: 'preference', notability: 'high' }]);
+    const result = await runFactsPipeline('old conversation imported after the correction', {
+      engine, sourceId: 'default', sessionId: 'delayed-corpus-session', source: 'hook:compact',
+    });
+    expect(result.inserted).toBe(0);
+    expect(result.duplicate).toBe(1);
+    const active = await engine.executeRaw<{ id: number }>(
+      `SELECT id FROM facts WHERE fact LIKE 'Fixture prefers the % heading' AND expired_at IS NULL`,
+    );
+    expect(active.map(row => Number(row.id))).toEqual([current.id]);
+  });
+
   test('returns {inserted, duplicate, superseded, fact_ids} on successful extraction', async () => {
     chatStub([
       { fact: 'pipeline-shape-1', kind: 'fact', notability: 'medium', entity: null },
