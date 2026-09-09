@@ -39,6 +39,7 @@ describe('facts extractor candidate salvage (#3866)', () => {
     stubFacts([
       {
         fact: 'The migration completed',
+        lifetime: 'durable',
         kind: 'event',
         entity: null,
         confidence: 1.0,

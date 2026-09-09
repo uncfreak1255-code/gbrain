@@ -236,6 +236,7 @@ describe('eval harness — precision@HIGH contract', () => {
       text: JSON.stringify({
         facts: [{
           fact: 'eval-stub',
+          lifetime: 'durable',
           kind: 'fact',
           entity: null,
           confidence: 1.0,

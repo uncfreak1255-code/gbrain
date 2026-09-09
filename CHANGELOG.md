@@ -2,6 +2,41 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.48.2.1] - 2026-09-09
+
+**Automatic memory keeps turn checkpoints and respects corrections during later imports.**
+
+When automatic memory is enabled, Codex can now receive relevant context before
+it answers and retain user statements when a turn ends, is interrupted, or is
+compacted. Closing the session remains a fallback. Captured statements keep
+their destination source even when the next task opens in another directory.
+
+An old conversation import no longer brings an exactly matching retired claim
+back as current knowledge. A new direct statement can still intentionally change
+a preference again. Background extraction omits temporary claims and claims
+whose lifetime is unknown, instead of saving them forever. Existing operator
+choices about activation, providers, and spending remain in effect.
+
+## To take advantage of v0.48.2.1
+
+No database migration is needed. After installing this source revision, refresh
+the existing harness integration with its chosen source and memory mode. This
+release does not enable automatic memory or a background writer on its own.
+Verify an ordinary statement and correction through a fresh agent session before
+relying on the integration.
+
+### Itemized changes
+
+- Wire Codex prompt, stop, compaction, interruption, and session-end hooks with
+  event-specific trust entries, preserving other installed hooks.
+- Parse current native Codex user-message events and retain source scope in
+  deferred capture segments.
+- Deduplicate exact claims across capture paths; retain retired conversation
+  facts as replay history during re-extraction.
+- Require durable lifetime classification before deferred fact admission.
+- Cover native hook delivery, corrected-memory recovery, and fresh-client recall
+  with isolated integration tests.
+
 ## [0.48.2.0] - 2026-09-02
 
 **Your search reranker now runs on Voyage, and every surface tells you whether it is actually running.**

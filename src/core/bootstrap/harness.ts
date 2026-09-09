@@ -1262,15 +1262,15 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
       confirm(t);
       d.log(
         `Codex wired: [mcp_servers.${flags.name}] with inline bearer token in ${t.path} (0600). ` +
-          'Per-turn context on codex is MCP tools + the pull protocol. ' +
+          'Per-turn context uses MCP tools and prompt hooks. ' +
           '[X9] If codex cannot see the server, some builds gate HTTP MCP behind ' +
           'experimental_use_rmcp_client = true in the same config — add it above the managed block.',
       );
-      // Codex SessionEnd capture (v1: session-end only): user-global
+      // Codex prompt context and turn checkpoints: user-global
       // hooks.json + its config.toml trust entry via the ONE writer
       // (codex-hooks.ts) — idempotent, so a workspace-lane bootstrap and this
-      // harness lane converge on the same entry. No GBRAIN_SOURCE in the
-      // command (machine-global file; session-end resolves from the payload).
+      // harness lane converge on the same entries. Harness hooks use the
+      // explicit personal write floor, including the delayed SessionEnd fallback.
       if (!flags.noHooks) {
         const hooksBin = flags.gbrainBin ?? d.gbrainBin;
         if (!hooksBin) {
@@ -1278,8 +1278,8 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
         } else {
           // Paths derive from THIS TARGET's config.toml (CODEX_HOME-resolved
           // upstream, test-injectable) — never the ambient global default.
-          const hr = writeCodexHooks({ gbrainBin: hooksBin, configPath: t.path!, hooksPath: join(dirname(t.path!), 'hooks.json') });
-          if (hr.ok) d.log(`Codex SessionEnd hook wired: ${hr.hooksPath} + trust entry in ${hr.configPath}.`);
+          const hr = writeCodexHooks({ gbrainBin: hooksBin, sourceId: flags.source ?? 'default', configPath: t.path!, hooksPath: join(dirname(t.path!), 'hooks.json') });
+          if (hr.ok) d.log(`Codex prompt and checkpoint hooks wired: ${hr.hooksPath} + trust entry in ${hr.configPath}.`);
           else for (const note of hr.notes) d.logError(note);
         }
       }

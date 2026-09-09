@@ -391,6 +391,7 @@ describe('runExtractConversationFactsCore', () => {
         text: chatTextOverride ?? JSON.stringify({
           facts: [{
             fact: `synthetic fact #${callIndex}`,
+            lifetime: 'durable',
             kind: 'event',
             entity: 'companies/acme-corp',
             confidence: 1.0,
@@ -521,6 +522,32 @@ describe('runExtractConversationFactsCore', () => {
     });
   });
 
+  test('changed conversation replay preserves a retired claim instead of importing it again', async () => {
+    const slug = 'conversations/retired-replay';
+    const body = [fmt('Alice Example', '2024-03-15', '9:00 AM', 'first message'),
+      fmt('Bob Demo', '2024-03-15', '9:05 AM', 'second message')].join('\n');
+    chatTextOverride = JSON.stringify({ facts: [{ fact: 'Fixture chose the amber heading',
+      kind: 'preference', lifetime: 'durable', notability: 'high' }] });
+    await engine.putPage(slug, { type: 'conversation', title: 'Replay', compiled_truth: body,
+      timeline: '', frontmatter: {} });
+    await runExtractConversationFactsCore(engine, { sourceId: 'default', slug, sleepMs: 0 });
+    const old = await engine.executeRaw<{ id: number }>(
+      `SELECT id FROM facts WHERE fact = 'Fixture chose the amber heading'`,
+    );
+    expect(old).toHaveLength(1);
+    await engine.expireFact(Number(old[0].id));
+    await engine.putPage(slug, { type: 'conversation', title: 'Replay updated', compiled_truth: body + '\n',
+      timeline: '', frontmatter: {} });
+    const replay = await runExtractConversationFactsCore(engine, { sourceId: 'default', slug, sleepMs: 0 });
+    expect(replay.facts_inserted).toBe(0);
+    const historical = await engine.executeRaw<{ id: number; expired_at: Date | null }>(
+      `SELECT id, expired_at FROM facts WHERE fact = 'Fixture chose the amber heading'`,
+    );
+    expect(historical).toHaveLength(1);
+    expect(Number(historical[0].id)).toBe(Number(old[0].id));
+    expect(historical[0].expired_at).not.toBeNull();
+  });
+
   test('dry-run reports segmentation without writing facts', async () => {
     const result = await runExtractConversationFactsCore(engine, {
       sourceId: 'default',
@@ -539,10 +566,10 @@ describe('runExtractConversationFactsCore', () => {
     // extractor call would suppress low (and absent-tier) facts before embed.
     chatTextOverride = JSON.stringify({
       facts: [
-        { fact: 'historical-high', kind: 'event', notability: 'high' },
-        { fact: 'historical-medium', kind: 'fact', notability: 'medium' },
-        { fact: 'historical-low', kind: 'fact', notability: 'low' },
-        { fact: 'historical-absent', kind: 'fact' },
+        { fact: 'historical-high', kind: 'event', lifetime: 'durable', notability: 'high' },
+        { fact: 'historical-medium', kind: 'fact', lifetime: 'durable', notability: 'medium' },
+        { fact: 'historical-low', kind: 'fact', lifetime: 'durable', notability: 'low' },
+        { fact: 'historical-absent', kind: 'fact', lifetime: 'durable' },
       ],
     });
     configureGateway({
@@ -897,6 +924,7 @@ describe('runExtractConversationFactsCore', () => {
     chatTextOverride = JSON.stringify({
       facts: [{
         fact: 'Alice Example signed the offer letter.',
+        lifetime: 'durable',
         kind: 'event',
         entity: 'Alice Example',
         confidence: 1.0,
@@ -923,6 +951,7 @@ describe('runExtractConversationFactsCore', () => {
     chatTextOverride = JSON.stringify({
       facts: [{
         fact: 'Alice Example started the new role.',
+        lifetime: 'durable',
         kind: 'event',
         entity: 'people/alice-example',
         confidence: 1.0,

@@ -109,7 +109,7 @@ export const TARGETS: Record<string, HostSpecTarget> = {
       'remove` rewrites config.toml wholesale and drops comments, so the ' +
       'stdio lane (runHooks) must never manage a name the harness block ' +
       'owns, and vice versa. Codex 0.147.0 also ships a real hook system ' +
-      '(hooks.json; PreToolUse…SessionEnd) — gbrain wires SessionEnd only ' +
+      '(hooks.json) — gbrain wires prompt, Stop, PreCompact, Interrupt and SessionEnd ' +
       '(CODEX_HAS_HOOKS=true; codex-hooks.ts owns the two-file write incl. ' +
       'the config.toml trust entry, see CODEX_HOOKS_SPEC_TARGET there). ' +
       'Some codex builds gate HTTP MCP servers behind ' +
@@ -406,18 +406,11 @@ export function codexAgentsOverridePath(): string {
   return join(codexHome(), 'AGENTS.override.md');
 }
 
-/** Codex hook events gbrain wires (v1: session-end capture only — a
- * SessionStart greeting lane is a filed follow-up). */
-export const CODEX_HOOK_EVENTS = ['SessionEnd'] as const;
+/** Codex events for prompt recall, turn checkpoints, and session fallback. */
+export const CODEX_HOOK_EVENTS = ['SessionEnd', 'UserPromptSubmit', 'Stop', 'PreCompact', 'Interrupt'] as const;
 
-/**
- * Whether gbrain WIRES codex hooks. True as of the Memorable wave: bootstrap
- * writes a SessionEnd entry into hooks.json plus its config.toml trust-state
- * entry (codex-hooks.ts — the 0.147.0 trust gate makes an untrusted entry
- * silently inert). SESSION-END CAPTURE ONLY: per-turn context on codex
- * remains the pull-protocol AGENTS.md gates (plan D5); a SessionStart lane
- * is a filed follow-up.
- */
+/** Bootstrap writes each managed event and its event-specific trust entry.
+ * Verified through the native Codex 0.153.4 hook contract test. */
 export const CODEX_HAS_HOOKS = true;
 
 /**

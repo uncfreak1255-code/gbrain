@@ -280,7 +280,7 @@ describe('conversation backfill entity resolution', () => {
         sleepMs: 0,
         extractor: extractorFor(
           [extractedFacts[0]],
-          [extractedFacts[1], extractedFacts[0], extractedFacts[2]],
+          [extractedFacts[1], { ...extractedFacts[0], fact: 'A distinct later claim about the same person' }, extractedFacts[2]],
         ),
       });
 

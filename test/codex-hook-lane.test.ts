@@ -184,6 +184,15 @@ describe('captureSpecFor — the dispatch golden rule', () => {
 });
 
 describe('mapCodexLine — the shared mapper stays honest on edge shapes', () => {
+  test('current native user events are captured without promoting injected messages', () => {
+    const event = (item: unknown) => ({ timestamp: 't1', type: 'event_msg', payload: { type: 'item_completed', item } });
+    expect(mapCodexLine(event({ type: 'UserMessage', content: [{ type: 'text', text: 'My reports use amber.' }] })))
+      .toEqual({ kind: 'user', message: { role: 'user', timestamp: 't1', text: 'My reports use amber.' } });
+    for (const item of [null, {}, { type: 'AgentMessage', content: [{ type: 'text', text: 'inferred' }] }, { type: 'UserMessage', content: null }]) {
+      expect(mapCodexLine(event(item))).toEqual({ kind: 'skip' });
+    }
+    expect(mapCodexLine({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'injected' }] } })).toEqual({ kind: 'skip' });
+  });
   test('nameless calls, non-object lines, unknown payloads: skip, never throw', () => {
     expect(mapCodexLine(null)).toEqual({ kind: 'skip' });
     expect(mapCodexLine('str')).toEqual({ kind: 'skip' });
