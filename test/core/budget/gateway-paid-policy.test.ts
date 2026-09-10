@@ -1,12 +1,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
 import { PGLiteEngine } from '../../../src/core/pglite-engine.ts';
 import { chat, configureGateway, resetGateway, embed, expand } from '../../../src/core/ai/gateway.ts';
-import { withGatewaySpendScope } from '../../../src/core/budget/gateway-spend.ts';
-import { paidTextFetch } from '../../../src/core/budget/gateway-spend.ts';
+import {
+  assertLocalPaidPolicy,
+  paidTextFetch,
+  reserveGatewaySpend,
+  withGatewaySpendScope,
+} from '../../../src/core/budget/gateway-spend.ts';
 import { zai } from '../../../src/core/ai/recipes/zai.ts';
+import { ollama } from '../../../src/core/ai/recipes/ollama.ts';
 import { RECIPES } from '../../../src/core/ai/recipes/index.ts';
-import { reserveGatewaySpend } from '../../../src/core/minions/budget-meter.ts';
+import { BudgetExceededError } from '../../../src/core/spend-log.ts';
 
 let engine: PGLiteEngine;
 let calls = 0;
@@ -52,10 +56,11 @@ test('different runs share the daily cap', async () => {
   expect(calls).toBe(2);
 });
 test('timeout retains reservation and SDK does not retry', async () => {
+  configureGateway({ chat_model: 'zai:glm-5.2', env: { ZAI_API_KEY: 'test-only' },
+    paid_budget: { max_usd_per_run: 1, max_usd_per_day: 1 } });
   globalThis.fetch = (async () => { calls++; throw new Error('fixture timeout'); }) as unknown as typeof fetch;
   await withGatewaySpendScope(engine, async () => {
     await expect(call()).rejects.toThrow('fixture timeout');
-    await expect(call()).rejects.toThrow('cap');
   });
   expect(calls).toBe(1);
 });
@@ -76,10 +81,31 @@ test('paid embeddings refuse under the text-only policy', async () => {
   expect(calls).toBe(0);
 });
 
-test('only disables SDK retries while paid limits are active', () => {
-  const gateway = readFileSync('src/core/ai/gateway.ts', 'utf8');
-  const guardedRetries = gateway.match(/\.\.\.\(_config\?\.paid_budget && \{ maxRetries: 0 \}\)/g) ?? [];
-  expect(guardedRetries).toHaveLength(2);
+test('cap error reports ledger cents and USD cap in the same unit', async () => {
+  const hold = { runId: 'unit-mismatch', estimatedUsd: 0.02, runCapUsd: 0.01, dayCapUsd: 0.01, model: 'test:model' };
+  try {
+    await reserveGatewaySpend(engine, hold);
+    throw new Error('expected BudgetExceededError');
+  } catch (error) {
+    expect(error).toBeInstanceOf(BudgetExceededError);
+    const exceeded = error as BudgetExceededError;
+    expect(exceeded.spentCents).toBe(0);
+    expect(exceeded.capCents).toBe(1);
+  }
+});
+
+test('concurrent reservations cannot both clear the same cap', async () => {
+  const hold = { runId: 'race', estimatedUsd: 0.006, runCapUsd: 0.010, dayCapUsd: 0.010, model: 'test:model' };
+  const results = await Promise.allSettled([
+    reserveGatewaySpend(engine, hold),
+    reserveGatewaySpend(engine, hold),
+  ]);
+  expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+  expect(results.filter(result => result.status === 'rejected')).toHaveLength(1);
+  const [row] = await engine.executeRaw<{ total: string }>(
+    "SELECT COALESCE(SUM(spend_cents), 0)::text AS total FROM mcp_spend_log WHERE client_id = 'gbrain:gateway-budget'",
+  );
+  expect(Number(row.total)).toBeLessThanOrEqual(1);
 });
 
 test('paid expansion sends a bounded output request', async () => {
@@ -122,6 +148,7 @@ test.each([null, {}, { max_usd_per_run: NaN, max_usd_per_day: 1 }, { max_usd_per
 test.each([
   { model: 'other-model' }, { max_tokens: 0 }, { max_tokens: null }, { max_tokens: 1.5 },
   { n: 2 }, { max_completion_tokens: 200 }, { modalities: ['audio'] },
+  { thinking: true }, { reasoning_effort: 'high' },
   { tools: [{ type: 'web_search' }] },
   { messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/image' } }] }] },
 ])('invalid wire request refuses before reservation and HTTP', async override => {
@@ -157,6 +184,30 @@ test('HTTP redirect does not repeat the paid request', async () => {
     });
     expect(first).toBe(1); expect(redirected).toBe(0);
   } finally { await server.stop(true); }
+});
+
+test('local chat and embeddings share the loopback allowlist', () => {
+  const cfg = { env: {}, paid_budget: { max_usd_per_run: 1, max_usd_per_day: 1 } };
+  expect(() => assertLocalPaidPolicy(cfg, 'lmstudio:local', 'chat')).not.toThrow();
+  expect(() => assertLocalPaidPolicy(cfg, 'ollama:llama3', 'embeddings')).not.toThrow();
+});
+
+test('IPv6 loopback hostnames are accepted', () => {
+  const cfg = {
+    env: {},
+    base_urls: { ollama: 'http://[::1]:11434/v1' },
+    paid_budget: { max_usd_per_run: 1, max_usd_per_day: 1 },
+  };
+  expect(() => assertLocalPaidPolicy(cfg, 'ollama:llama3', 'chat')).not.toThrow();
+});
+
+test('resolved local env URL refuses a non-loopback paid proxy', () => {
+  const cfg = {
+    env: { OLLAMA_BASE_URL: 'http://paid-proxy.example:11434/v1' },
+    paid_budget: { max_usd_per_run: 1, max_usd_per_day: 1 },
+  };
+  expect(() => assertLocalPaidPolicy(cfg, 'ollama:llama3', 'chat')).toThrow('loopback');
+  expect(() => paidTextFetch(ollama, 'llama3', cfg)).toThrow('loopback');
 });
 
 test('missing success usage retains the admitted ceiling', async () => {

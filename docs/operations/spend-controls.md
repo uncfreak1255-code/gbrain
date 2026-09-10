@@ -165,18 +165,26 @@ next interval while the UTC-day ceiling remains shared. The database-free
 `gbrain eval cross-modal` command refuses while `paid_budget` is configured.
 
 Before each supported OpenAI-compatible text request, the gateway validates the
-serialized model, output bound, text-only messages, and function-tool shape. It
-then writes a rounded-up reservation to `mcp_spend_log` under
-`gateway_reservation`, using the existing transaction advisory lock. A failed
-ledger read or write, redirect, retry, unsupported wire option, or missing
-positive price prevents HTTP dispatch. Reservations are intentionally retained
-after success, failure, timeout, or missing provider usage, so retries cannot
-bypass the ceiling.
+serialized model, output bound, text-only messages, and function-tool shape.
+`thinking` and `reasoning_effort` are refused because those tokens are billed
+outside `max_tokens`. It then writes a rounded-up reservation to `mcp_spend_log`
+under `gateway_reservation`, using the existing transaction advisory lock on
+both Postgres and PGLite. A failed ledger read or write, redirect, retry,
+unsupported wire option, or missing positive price prevents HTTP dispatch.
+Reservations are intentionally retained after success, failure, timeout, or
+missing provider usage, so retries cannot bypass the ceiling.
 
 Native SDK transports, paid embeddings, OCR, multimodal inference, hosted tools,
 and reranking refuse under this policy. Local Ollama, llama-server, and LM
-Studio inference remains available only through loopback endpoints. The paid
-policy does not replace command-level `BudgetTracker` caps.
+Studio inference remains available only through loopback endpoints. The loopback
+check uses the URL the gateway will actually dial (config `base_urls`, then the
+provider env var, then the recipe default) and accepts `localhost`, `127.0.0.1`,
+and IPv6 `::1`. A local env URL that points at a remote proxy is refused. The
+paid policy does not replace command-level `BudgetTracker` caps.
+
+`gbrain storage status --repo` maps that tree only. A `.gbrain-source` pin must
+live in the named directory; ancestor pins are ignored so a parent pin cannot
+count another source's pages against the explicit tree.
 
 ## Escape hatches at a glance
 

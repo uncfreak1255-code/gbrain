@@ -33,6 +33,14 @@ const DOTFILE = '.gbrain-source';
 //     Tier-specific messages are clearer than the generic assertValidSourceId
 //     error, so the throws stay inline.
 
+function readDotfileHere(startDir: string): string | null {
+  const candidate = join(resolve(startDir), DOTFILE);
+  const raw = readTrustedDotfile(candidate);
+  if (raw === null) return null;
+  const content = raw.trim().split('\n')[0].trim();
+  return isValidSourceId(content) ? content : null;
+}
+
 function readDotfileWalk(startDir: string): string | null {
   let dir = resolve(startDir);
   // Guard against infinite loops on malformed paths.
@@ -397,17 +405,18 @@ async function assertSourceExists(engine: BrainEngine, id: string): Promise<void
  *
  * An explicit path is a statement about that tree, so this lookup never uses
  * the caller's ambient cwd, environment, or brain-level default. It checks
- * only a trusted .gbrain-source pin and registered local_path prefixes.
- * Active registrations win over archived or draining nested registrations.
+ * only a trusted .gbrain-source pin in that directory (not ancestor walk-up)
+ * and registered local_path prefixes. Active registrations win over archived
+ * or draining nested registrations.
  */
 export async function resolveSourceForRepoPath(
   engine: BrainEngine,
   dir: string,
 ): Promise<{ source_id: string; tier: 'dotfile' | 'local_path'; detail: string } | null> {
-  const dotfile = readDotfileWalk(dir);
+  const dotfile = readDotfileHere(dir);
   if (dotfile) {
     await assertSourceExists(engine, dotfile);
-    return { source_id: dotfile, tier: 'dotfile', detail: `.gbrain-source under ${dir}` };
+    return { source_id: dotfile, tier: 'dotfile', detail: `.gbrain-source in ${dir}` };
   }
 
   const registered = await loadRegisteredPaths(engine);
@@ -675,6 +684,7 @@ export async function resolveSourceWithTier(
 
 /** Exposed for tests. */
 export const __testing = {
+  readDotfileHere,
   readDotfileWalk,
   pickRegisteredPathMatch,
   gitCommonDir,

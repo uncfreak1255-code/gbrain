@@ -1,37 +1,57 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import {
+  cliCommandOwnsGatewaySpendScope,
+  currentGatewaySpendRunId,
+  withCliGatewaySpendScope,
+  withGatewaySpendScope,
+} from '../src/core/budget/gateway-spend.ts';
+
+let engine: PGLiteEngine;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+});
+
+afterAll(async () => {
+  await engine?.disconnect();
+});
 
 describe('cli operation dispatch', () => {
-  test('runs both read and write operation handlers inside the paid-spend scope', () => {
+  test('wires the shared CLI spend-scope helper', () => {
     const cli = readFileSync('src/cli.ts', 'utf8');
-
-    expect(cli).toContain(
-      "withGatewaySpendScope(engine, () => op.handler(ctx, params)),\n          wallclockMs",
-    );
-    expect(cli).toContain(
-      "rawResult = await withGatewaySpendScope(engine, () => op.handler(ctx, params));",
-    );
+    expect(cli).toContain('withCliGatewaySpendScope(engine, command, dispatch)');
+    expect(cli).toContain('withGatewaySpendScope(engine, () => op.handler(ctx, params))');
+    expect(cli).toContain('withGatewaySpendScope(eng, () => runDream(eng, args, dreamAbortController.signal))');
+    expect(cli).toContain('withGatewaySpendScope(eng, () => runRemediate(eng, args))');
   });
 
-  test('runs Dream with an engine inside the paid-spend scope', () => {
-    const cli = readFileSync('src/cli.ts', 'utf8');
+  test('owns a durable run for ordinary commands and leaves serve/autopilot unscoped', async () => {
+    expect(cliCommandOwnsGatewaySpendScope('query')).toBe(true);
+    expect(cliCommandOwnsGatewaySpendScope('serve')).toBe(false);
+    expect(cliCommandOwnsGatewaySpendScope('autopilot')).toBe(false);
 
-    expect(cli).toContain(
-      'await withGatewaySpendScope(eng, () => runDream(eng, args, dreamAbortController.signal));',
-    );
+    await withCliGatewaySpendScope(engine, 'query', async () => {
+      expect(currentGatewaySpendRunId(engine)).toBeDefined();
+    });
+    await withCliGatewaySpendScope(engine, 'serve', async () => {
+      expect(currentGatewaySpendRunId(engine)).toBeUndefined();
+    });
+    await withCliGatewaySpendScope(engine, 'autopilot', async () => {
+      expect(currentGatewaySpendRunId(engine)).toBeUndefined();
+    });
   });
 
-  test('runs early remediation dispatch inside one paid-spend scope', () => {
-    const cli = readFileSync('src/cli.ts', 'utf8');
-
-    expect(cli).toContain(
-      'await withGatewaySpendScope(eng, () => runRemediate(eng, args));',
-    );
-  });
-
-  test('leaves autopilot scope ownership to its per-tick dispatcher', () => {
-    const cli = readFileSync('src/cli.ts', 'utf8');
-
-    expect(cli).toContain("if (command === 'serve' || command === 'autopilot') await dispatch();");
+  test('nested CLI work reuses the same durable run id', async () => {
+    await withGatewaySpendScope(engine, async () => {
+      const runId = currentGatewaySpendRunId(engine);
+      expect(runId).toBeDefined();
+      await withCliGatewaySpendScope(engine, 'query', async () => {
+        expect(currentGatewaySpendRunId(engine)).toBe(runId);
+      });
+    }, 'cli-nested-run');
   });
 });

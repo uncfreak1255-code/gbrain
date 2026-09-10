@@ -147,6 +147,42 @@ describe('Storage tiering on PGLite — full lifecycle (D8 + D4)', () => {
     }
   });
 
+  test('explicit repo ignores an ancestor .gbrain-source pin', async () => {
+    try {
+      writeGbrainYml();
+      const parent = mkdtempSync(join(tmpdir(), 'gbrain-ancestor-pin-'));
+      const child = join(parent, 'unmapped-repo');
+      mkdirSync(child, { recursive: true });
+      writeFileSync(join(parent, '.gbrain-source'), 'default\n');
+      await engine.putPage('people/alice', { type: 'person', title: 'Alice', compiled_truth: '', timeline: '' });
+      await expect(getStorageStatus(engine, child)).rejects.toThrow('no registered source');
+      rmSync(parent, { recursive: true, force: true });
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('explicit repo pin in that directory still maps the named source', async () => {
+    try {
+      writeGbrainYml();
+      const otherRepo = join(tmp, 'pinned-repo');
+      mkdirSync(otherRepo, { recursive: true });
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+           VALUES ('pinned-corpus', 'pinned-corpus', $1, '{}'::jsonb)
+           ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+        [join(tmp, 'other-path')],
+      );
+      writeFileSync(join(otherRepo, '.gbrain-source'), 'pinned-corpus\n');
+      await engine.putPage('people/alice', { type: 'person', title: 'Default', compiled_truth: '', timeline: '' });
+      await engine.putPage('people/bob', { type: 'person', title: 'Pinned', compiled_truth: '', timeline: '' }, { sourceId: 'pinned-corpus' });
+      const result = await getStorageStatus(engine, otherRepo);
+      expect(result.totalPages).toBe(1);
+    } finally {
+      cleanup();
+    }
+  });
+
   test('implicit legacy repo retains the selected source', async () => {
     const oldLog = console.log;
     const output: string[] = [];
