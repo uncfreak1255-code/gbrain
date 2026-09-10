@@ -35,8 +35,8 @@ beforeEach(() => {
   for (const k of envKeys()) envSnapshot[k] = process.env[k];
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-install-test-'));
   process.env.HOME = tmp;
+  process.env.GBRAIN_HOME = tmp;
   // Start each test with a clean slate for ephemeral env vars.
-  delete process.env.GBRAIN_HOME;
   delete process.env.RENDER;
   delete process.env.RAILWAY_ENVIRONMENT;
   delete process.env.FLY_APP_NAME;
@@ -67,6 +67,12 @@ function makeFakeGbrainOnPath(): { binDir: string; restore: () => void } {
     },
   };
 }
+
+describe('autopilot install filesystem isolation', () => {
+  test('resolves the GBrain home inside the per-test scratch directory', () => {
+    expect(gbrainPath()).toBe(join(tmp, '.gbrain'));
+  });
+});
 
 describe('detectInstallTarget', () => {
   test('returns "macos" on darwin regardless of env', () => {
