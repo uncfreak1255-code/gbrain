@@ -2900,7 +2900,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
         try {
           if (res) {
             tracker.record({
-              modelId: res.model ?? modelStrEarly,
+              modelId: modelStrEarly,
               inputTokens: res.usage.input_tokens,
               outputTokens: res.usage.output_tokens,
               cacheReadTokens: res.usage.cache_read_tokens,
@@ -3051,7 +3051,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     const budgetUsage = normalizeChatUsageForBudget(usage, providerMetadata, recipe.id);
 
     _recordBudget(
-      `${recipe.id}:${modelId}`,
+      modelStrEarly,
       budgetUsage.inputTokens,
       budgetUsage.outputTokens,
       budgetUsage.cacheReadTokens,
@@ -3080,7 +3080,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       outputTokens: maxOutputTokens,
     });
     _recordBudget(
-      `${recipe.id}:${modelId}`,
+      modelStrEarly,
       fallback.inputTokens,
       fallback.outputTokens,
       fallback.cacheReadTokens ?? 0,
