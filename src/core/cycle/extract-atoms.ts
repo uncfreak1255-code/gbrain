@@ -37,7 +37,8 @@ import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
+import { chat as gatewayChat, getCurrentBudgetTracker, withBudgetTracker } from '../ai/gateway.ts';
+import { BudgetExhausted, BudgetTracker, CompositeBudgetTracker } from '../budget/budget-tracker.ts';
 import {
   buildExtractRunId,
   writeReceipt,
@@ -541,7 +542,15 @@ export async function runPhaseExtractAtoms(
   let pagesSkipped = 0;
   const failures: ExtractReceiptFailure[] = [];
   let estimatedSpendUsd = 0;
-  const budgetCap = DEFAULT_BUDGET_USD;
+  const configuredBudget = await engine.getConfig('cycle.extract_atoms.budget_usd');
+  const budgetCap = configuredBudget === null ? DEFAULT_BUDGET_USD : Number(configuredBudget);
+  if (configuredBudget !== null && (!configuredBudget.trim() || !Number.isFinite(budgetCap) || budgetCap < 0)) {
+    throw new Error('Invalid cycle.extract_atoms.budget_usd');
+  }
+  const phaseBudget = new BudgetTracker({ label: 'cycle.extract_atoms', maxCostUsd: budgetCap });
+  const outerBudget = getCurrentBudgetTracker();
+  const budget = outerBudget ? new CompositeBudgetTracker([outerBudget, phaseBudget]) : phaseBudget;
+  let budgetExhausted = false;
   let deadlineElapsed = false;
   const now = opts._now ?? Date.now;
   const hasDeadline = Number.isFinite(opts.deadlineMs);
@@ -585,7 +594,7 @@ export async function runPhaseExtractAtoms(
       deadlineElapsed = true;
       break;
     }
-    if (estimatedSpendUsd >= budgetCap) {
+    if (budgetExhausted || estimatedSpendUsd >= budgetCap) {
       if (item.kind === 'transcript') transcriptsSkipped++;
       else pagesSkipped++;
       continue;
@@ -597,7 +606,7 @@ export async function runPhaseExtractAtoms(
       ? undefined
       : AbortSignal.timeout(Math.max(1, remainingMs));
     try {
-      const result = await chat({
+      const result = await withBudgetTracker(budget, () => chat({
         budgetLabel: 'cycle.extract_atoms',
         system: EXTRACT_PROMPT,
         messages: [
@@ -608,7 +617,8 @@ export async function runPhaseExtractAtoms(
         ],
         maxTokens: 2000,
         abortSignal,
-      });
+      }));
+      estimatedSpendUsd = phaseBudget.totalSpent;
       // Post-await yield: closes the "long LLM call past TTL" hazard
       // codex flagged. The 30s throttle inside maybeYield bounds the
       // actual refresh rate so this is cheap when calls are fast.
@@ -617,10 +627,6 @@ export async function runPhaseExtractAtoms(
         deadlineElapsed = true;
         break;
       }
-
-      // Rough cost estimate — Haiku at ~$0.80/M input + $4/M output
-      estimatedSpendUsd +=
-        (result.usage.input_tokens * 0.8 + result.usage.output_tokens * 4.0) / 1_000_000;
 
       const atoms = parseAtomsResponse(result.text);
       if (atoms.length === 0) {
@@ -674,6 +680,8 @@ export async function runPhaseExtractAtoms(
       // Reporter rate-limits to ~1 line/sec; safe to tick every iter.
       opts.progress?.tick(1, `${totalAtomsExtracted} atoms / ${duplicatesSkipped} skipped`);
     } catch (err) {
+      estimatedSpendUsd = phaseBudget.totalSpent;
+      if (err instanceof BudgetExhausted) budgetExhausted = true;
       if (abortSignal?.aborted || isPastDeadline()) {
         deadlineElapsed = true;
         break;
@@ -722,7 +730,7 @@ export async function runPhaseExtractAtoms(
 
   return {
     phase: 'extract_atoms',
-    status: failures.length > 0 ? 'warn' : 'ok',
+    status: failures.length > 0 || transcriptsSkipped + pagesSkipped > 0 ? 'warn' : 'ok',
     duration_ms: 0,
     summary:
       `extract_atoms: ${totalAtomsExtracted} atoms from ` +

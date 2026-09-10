@@ -285,6 +285,10 @@ export class BudgetTracker {
   private readonly opts: BudgetTrackerOpts;
 
   constructor(opts: BudgetTrackerOpts) {
+    for (const key of ['maxCostUsd', 'maxRuntimeMs'] as const) {
+      const value = opts[key];
+      if (value !== undefined && (!Number.isFinite(value) || value < 0)) throw new TypeError(`Invalid ${key}`);
+    }
     this.opts = {
       ...opts,
       monthlyBudget: opts.monthlyBudget ?? _budgetTrackerDefaults.monthlyBudget,
@@ -330,6 +334,9 @@ export class BudgetTracker {
    * (legacy behavior preserved for non-priced providers).
    */
   reserve(estimate: BudgetEstimate): void {
+    if (![estimate.estimatedInputTokens, estimate.maxOutputTokens].every(n => Number.isSafeInteger(n) && n >= 0)) {
+      throw new TypeError('Budget token bounds must be non-negative safe integers');
+    }
     this.assertRuntime(estimate.modelId);
 
     const projected = costForUsage(
@@ -432,6 +439,10 @@ export class BudgetTracker {
    * only metadata.
    */
   record(actual: BudgetActualUsage & { kind?: BudgetKind }): void {
+    if (![actual.inputTokens, actual.outputTokens ?? 0, actual.cacheReadTokens ?? 0, actual.cacheCreationTokens ?? 0]
+      .every(n => Number.isSafeInteger(n) && n >= 0)) {
+      throw new TypeError('Budget usage tokens must be non-negative safe integers');
+    }
     this.callsRecorded++;
     const kind: BudgetKind = actual.kind ?? 'chat';
     const cacheReadTokens = actual.cacheReadTokens ?? 0;
@@ -723,7 +734,7 @@ export function extractUsageFromErrorWithSource(
 }
 
 function numericOrNull(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
 }
 
 /** Re-export the pricing maps for introspection / test setup. */

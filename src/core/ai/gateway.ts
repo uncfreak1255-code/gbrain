@@ -2272,24 +2272,39 @@ export async function expand(query: string): Promise<string[]> {
     metadata: { query_chars: query.length },
   });
 
+  const tracker = getCurrentBudgetTracker();
+  const modelLabel = getExpansionModel();
+  const prompt = [
+    'Rewrite the search query below into 3-4 different, related queries that would help find relevant documents.',
+    'Return ONLY the JSON object. Do NOT include the original query in the result.',
+    'Each rewrite should emphasize different aspects, synonyms, or framings.',
+    '',
+    `Query: ${query}`,
+  ].join('\n');
+  const estimatedInputTokens = Math.ceil((prompt.length + JSON.stringify(z.toJSONSchema(ExpansionSchema)).length) / 4);
+  let attempted = false;
+  let recorded = false;
   try {
-    const { model, recipe, modelId } = await resolveExpansionProvider(getExpansionModel());
+    const { model, recipe } = await resolveExpansionProvider(modelLabel);
+    tracker?.reserve({ modelId: modelLabel, estimatedInputTokens, maxOutputTokens: EXPANSION_MAX_OUTPUT_TOKENS,
+      kind: 'chat', label: 'gateway.expand' });
+    attempted = true;
     const result = await generateObject({
       model,
       schema: ExpansionSchema,
       maxOutputTokens: EXPANSION_MAX_OUTPUT_TOKENS,
-      ...(_config?.paid_budget && { maxRetries: 0 }),
+      maxRetries: 0,
       // v0.42.20.0 (codex P0) — expansion had NO abortSignal; same stalled-socket
       // class as chat. Default the chat timeout.
       abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
-      prompt: [
-        'Rewrite the search query below into 3-4 different, related queries that would help find relevant documents.',
-        'Return ONLY the JSON object. Do NOT include the original query in the result.',
-        'Each rewrite should emphasize different aspects, synonyms, or framings.',
-        '',
-        `Query: ${query}`,
-      ].join('\n'),
+      prompt,
     });
+
+    const fallback = { inputTokens: estimatedInputTokens, outputTokens: EXPANSION_MAX_OUTPUT_TOKENS };
+    const usage = normalizeChatUsageForBudget(result.usage, result.providerMetadata, recipe.id, fallback);
+    recorded = true;
+    tracker?.record({ modelId: modelLabel, ...usage,
+      label: 'gateway.expand' });
 
     const expansions = result.object?.queries ?? [];
     // Deduplicate + include the original query
@@ -2302,6 +2317,13 @@ export async function expand(query: string): Promise<string[]> {
     });
     return all;
   } catch (err) {
+    if (attempted && !recorded && tracker) {
+      const usage = _extractUsageFromErrorWithSource(err, {
+        inputTokens: estimatedInputTokens, outputTokens: EXPANSION_MAX_OUTPUT_TOKENS,
+      });
+      try { tracker.record({ modelId: modelLabel, ...usage, label: 'gateway.expand.failed' }); }
+      catch { /* The original failure wins; the tracker retains its charged usage. */ }
+    }
     // Expansion is best-effort: on failure, fall back to the original query alone.
     const normalized = normalizeAIError(err, 'expand');
     if (normalized instanceof AIConfigError) {
@@ -2554,7 +2576,7 @@ export interface ChatOpts {
 }
 
 function numericUsageToken(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function normalizeChatMaxOutputTokens(providerId: string, requested: number): number {
@@ -2573,6 +2595,7 @@ function normalizeChatUsageForBudget(
   usage: Record<string, any>,
   providerMetadata: Record<string, any> | undefined,
   providerId?: string,
+  fallback = { inputTokens: 0, outputTokens: 0 },
 ): {
   inputTokens: number;
   outputTokens: number;
@@ -2607,7 +2630,7 @@ function normalizeChatUsageForBudget(
     numericUsageToken(usage.inputTokens) ??
     numericUsageToken(usage.promptTokens) ??
     numericUsageToken(anthropicUsage.input_tokens) ??
-    0;
+    fallback.inputTokens;
   const inputTokens =
     numericUsageToken(details.noCacheTokens) ??
     numericUsageToken(anthropicUsage.input_tokens) ??
@@ -2618,7 +2641,7 @@ function normalizeChatUsageForBudget(
     numericUsageToken(usage.outputTokens) ??
     numericUsageToken(usage.completionTokens) ??
     numericUsageToken(anthropicUsage.output_tokens) ??
-    0;
+    fallback.outputTokens;
 
   return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens };
 }
@@ -3048,7 +3071,8 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
 
     const usage = (result as any).usage ?? {};
     const providerMetadata = (result as any).providerMetadata as Record<string, any> | undefined;
-    const budgetUsage = normalizeChatUsageForBudget(usage, providerMetadata, recipe.id);
+    const budgetUsage = normalizeChatUsageForBudget(usage, providerMetadata, recipe.id,
+      { inputTokens: estimatedInputTokens, outputTokens: maxOutputTokens });
 
     _recordBudget(
       modelStrEarly,
