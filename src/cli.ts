@@ -34,7 +34,7 @@ import { callRemoteTool, RemoteMcpError, unpackToolResult } from './core/mcp-cli
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
 import { isUndefinedTableError } from './core/utils.ts';
 import { VERSION } from './version.ts';
-import { withGatewaySpendScope } from './core/budget/gateway-spend.ts';
+import { withCliGatewaySpendScope, withGatewaySpendScope } from './core/budget/gateway-spend.ts';
 
 // Build CLI name -> operation lookup
 const cliOps = new Map<string, Operation>();
@@ -2142,8 +2142,7 @@ async function handleCliOnly(command: string, args: string[]) {
       }
     }
     };
-    if (command === 'serve' || command === 'autopilot') await dispatch();
-    else await withGatewaySpendScope(engine, dispatch);
+    await withCliGatewaySpendScope(engine, command, dispatch);
   } finally {
     syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit
     // #2084 — the CLI_ONLY fall-through teardown (drain every background-work

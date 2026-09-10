@@ -12,6 +12,20 @@ export interface PaidBudgetPolicy {
   max_usd_per_day: number;
 }
 
+/** Local inference that may skip paid reservation after a loopback check. */
+export const LOCAL_PAID_PROVIDERS = ['ollama', 'llama-server', 'lmstudio'] as const;
+const LOCAL_PAID_ENV: Record<(typeof LOCAL_PAID_PROVIDERS)[number], string> = {
+  ollama: 'OLLAMA_BASE_URL',
+  'llama-server': 'LLAMA_SERVER_BASE_URL',
+  lmstudio: 'LMSTUDIO_BASE_URL',
+};
+const LOCAL_PAID_DEFAULTS: Record<(typeof LOCAL_PAID_PROVIDERS)[number], string> = {
+  ollama: 'http://localhost:11434/v1',
+  'llama-server': 'http://localhost:8080/v1',
+  lmstudio: 'http://localhost:1234/v1',
+};
+const CLI_OWNED_SCOPE_EXEMPT = new Set(['serve', 'autopilot']);
+
 interface GatewayScope { engine: BrainEngine; runId: string }
 const scopes = new AsyncLocalStorage<GatewayScope>();
 const GATEWAY_CLIENT_ID = 'gbrain:gateway-budget';
@@ -23,6 +37,21 @@ export function withGatewaySpendScope<T>(
 ): Promise<T> {
   if (runId === undefined && scopes.getStore()?.engine === engine) return fn();
   return scopes.run({ engine, runId: runId ?? randomUUID() }, fn);
+}
+
+/** CLI-only commands that own their own durable run identity. */
+export function cliCommandOwnsGatewaySpendScope(command: string): boolean {
+  return !CLI_OWNED_SCOPE_EXEMPT.has(command);
+}
+
+/** Wrap a CLI command unless it owns per-tick / process-lifetime scope. */
+export function withCliGatewaySpendScope<T>(
+  engine: BrainEngine,
+  command: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!cliCommandOwnsGatewaySpendScope(command)) return fn();
+  return withGatewaySpendScope(engine, fn);
 }
 
 export function currentGatewaySpendRunId(engine: BrainEngine): string | undefined {
@@ -67,15 +96,41 @@ export function validatePaidBudget(policy: unknown): asserts policy is PaidBudge
   }
 }
 
-/** Paid mode permits only loopback local inference for embeddings. */
+function isLocalPaidProvider(provider: string): provider is (typeof LOCAL_PAID_PROVIDERS)[number] {
+  return (LOCAL_PAID_PROVIDERS as readonly string[]).includes(provider);
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+}
+
+/** Resolve the URL paid mode will actually dial for a local provider. */
+export function resolveLocalPaidBaseUrl(cfg: AIGatewayConfig, provider: string): string | undefined {
+  if (!isLocalPaidProvider(provider)) return undefined;
+  const configured = cfg.base_urls?.[provider];
+  if (configured) return configured;
+  const fromEnv = cfg.env?.[LOCAL_PAID_ENV[provider]];
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv;
+  return LOCAL_PAID_DEFAULTS[provider];
+}
+
+/** Paid mode permits only loopback local inference for embeddings and chat. */
 export function assertLocalPaidPolicy(cfg: AIGatewayConfig, model: string, kind: string): void {
   if (!cfg.paid_budget) return;
-  const provider = model.split(':', 1)[0];
-  if (!['ollama', 'llama-server', 'lmstudio'].includes(provider)) {
+  const provider = model.split(':', 1)[0] ?? '';
+  if (!isLocalPaidProvider(provider)) {
     throw new Error(`paid_budget: local ${kind} only`);
   }
-  const url = cfg.base_urls?.[provider];
-  if (url && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(url).hostname)) {
+  const url = resolveLocalPaidBaseUrl(cfg, provider);
+  if (!url) throw new Error('paid_budget: local inference requires a loopback endpoint');
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    throw new Error('paid_budget: local inference requires a loopback endpoint');
+  }
+  if (!isLoopbackHostname(hostname)) {
     throw new Error('paid_budget: local inference requires a loopback endpoint');
   }
 }
@@ -122,7 +177,7 @@ export function paidTextFetch(
 ): typeof fetch | undefined {
   if (!cfg.paid_budget) return custom;
   const paidBudget = cfg.paid_budget;
-  if (['ollama', 'llama-server'].includes(recipe.id)) {
+  if (isLocalPaidProvider(recipe.id)) {
     assertLocalPaidPolicy(cfg, `${recipe.id}:${modelId}`, 'chat');
     return custom;
   }
@@ -138,7 +193,7 @@ export function paidTextFetch(
     const allowed = new Set([
       'model', 'messages', 'max_tokens', 'max_completion_tokens', 'n', 'temperature', 'top_p', 'stop',
       'stream', 'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls', 'response_format',
-      'thinking', 'reasoning_effort', 'seed', 'user', 'presence_penalty', 'frequency_penalty',
+      'seed', 'user', 'presence_penalty', 'frequency_penalty',
       'logprobs', 'top_logprobs',
     ]);
     if (Object.keys(body).some(key => !allowed.has(key)) ||
@@ -199,7 +254,10 @@ export async function reserveGatewaySpend(
   if (!Number.isFinite(cents) || cents >= 100_000_000) throw new Error('Invalid gateway reservation');
   await engine.transaction(async tx => {
     const sql = sqlQueryForEngine(tx);
-    if (tx.kind === 'postgres') await sql`SELECT pg_advisory_xact_lock(${lockKey(GATEWAY_CLIENT_ID)})`;
+    // Same lock on both engines. PGLite (WASM Postgres 17) supports
+    // pg_advisory_xact_lock; skipping it here let concurrent MCP/toolLoop
+    // admissions double-read the SUM and both insert.
+    await sql`SELECT pg_advisory_xact_lock(${lockKey(GATEWAY_CLIENT_ID)})`;
     const [row] = await sql`
       SELECT
         COALESCE(SUM(spend_cents) FILTER (WHERE token_name = ${opts.runId}), 0)::text AS run_cents,
@@ -219,7 +277,11 @@ export async function reserveGatewaySpend(
       throw new Error('Gateway spend amount exceeds safe precision');
     }
     if (runMicros + holdMicros > runCapMicros || dayMicros + holdMicros > dayCapMicros) {
-      throw new BudgetExceededError('Gateway paid budget cap exceeded', Math.max(run, day) * 100, Math.min(opts.runCapUsd, opts.dayCapUsd) * 100);
+      throw new BudgetExceededError(
+        'Gateway paid budget cap exceeded',
+        Math.max(run, day),
+        Math.min(opts.runCapUsd, opts.dayCapUsd) * 100,
+      );
     }
     await sql`
       INSERT INTO mcp_spend_log (client_id, token_name, operation, spend_cents, provider, model, created_at)
