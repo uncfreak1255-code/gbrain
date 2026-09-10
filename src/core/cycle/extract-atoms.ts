@@ -846,7 +846,7 @@ export async function runPhaseExtractAtoms(
     const configuredBudget = await engine.getConfig('cycle.extract_atoms.budget_usd');
     if (configuredBudget) {
       const n = Number(configuredBudget);
-      if (Number.isFinite(n) && n > 0) { budgetCap = n; explicitBudget = true; }
+      if (Number.isFinite(n) && n >= 0) { budgetCap = n; explicitBudget = true; }
     }
     // #4529: legacy input-cap key (its own floor of 500 chars, as landed).
     // Read FIRST so the newer #4540 max_input_chars key below wins when
