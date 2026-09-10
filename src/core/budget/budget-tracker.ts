@@ -34,6 +34,7 @@ import { gbrainPath } from '../config.ts';
 import { ANTHROPIC_PRICING, type ModelPricing } from '../anthropic-pricing.ts';
 import { EMBEDDING_PRICING, lookupEmbeddingPrice } from '../embedding-pricing.ts';
 import { canonicalLookup } from '../model-pricing.ts';
+import { parsePricingOverrides } from './gateway-spend.ts';
 import { splitProviderModelId } from '../model-id.ts';
 import { isoWeekFilename, resolveAuditDir } from '../audit-week-file.ts';
 import {
@@ -80,6 +81,8 @@ export interface BudgetSnapshot {
 }
 
 export interface BudgetTrackerOpts {
+  /** Explicit operator rates, validated with the paid gateway's parser. */
+  pricingOverrides?: Record<string, ModelPricing>;
   /** USD cap. When undefined, cost gate disabled; pricing misses warn-once. */
   maxCostUsd?: number;
   /** Wall-clock cap in milliseconds. When undefined, runtime gate disabled. */
@@ -256,8 +259,9 @@ function costForUsage(
   kind: BudgetKind,
   cacheReadTokens = 0,
   cacheCreationTokens = 0,
+  pricingOverrides?: Record<string, ModelPricing>,
 ): number | null {
-  const p = lookupPricing(modelId, kind);
+  const p = pricingOverrides?.[modelId.trim().toLowerCase()] ?? lookupPricing(modelId, kind);
   if (!p) return null;
   const inputCost = (inputTokens / 1_000_000) * p.input;
   const outputCost = (outputTokens / 1_000_000) * p.output;
@@ -285,8 +289,13 @@ export class BudgetTracker {
   private readonly opts: BudgetTrackerOpts;
 
   constructor(opts: BudgetTrackerOpts) {
+    for (const key of ['maxCostUsd', 'maxRuntimeMs'] as const) {
+      const value = opts[key];
+      if (value !== undefined && (!Number.isFinite(value) || value < 0)) throw new TypeError(`Invalid ${key}`);
+    }
     this.opts = {
       ...opts,
+      pricingOverrides: parsePricingOverrides(opts.pricingOverrides),
       monthlyBudget: opts.monthlyBudget ?? _budgetTrackerDefaults.monthlyBudget,
     };
     this.startedAt = Date.now();
@@ -330,6 +339,9 @@ export class BudgetTracker {
    * (legacy behavior preserved for non-priced providers).
    */
   reserve(estimate: BudgetEstimate): void {
+    if (![estimate.estimatedInputTokens, estimate.maxOutputTokens].every(n => Number.isSafeInteger(n) && n >= 0)) {
+      throw new TypeError('Budget token bounds must be non-negative safe integers');
+    }
     this.assertRuntime(estimate.modelId);
 
     const projected = costForUsage(
@@ -337,6 +349,7 @@ export class BudgetTracker {
       estimate.estimatedInputTokens,
       estimate.maxOutputTokens,
       estimate.kind,
+      0, 0, this.opts.pricingOverrides,
     );
 
     if (projected === null) {
@@ -432,6 +445,10 @@ export class BudgetTracker {
    * only metadata.
    */
   record(actual: BudgetActualUsage & { kind?: BudgetKind }): void {
+    if (![actual.inputTokens, actual.outputTokens ?? 0, actual.cacheReadTokens ?? 0, actual.cacheCreationTokens ?? 0]
+      .every(n => Number.isSafeInteger(n) && n >= 0)) {
+      throw new TypeError('Budget usage tokens must be non-negative safe integers');
+    }
     this.callsRecorded++;
     const kind: BudgetKind = actual.kind ?? 'chat';
     const cacheReadTokens = actual.cacheReadTokens ?? 0;
@@ -443,6 +460,7 @@ export class BudgetTracker {
       kind,
       cacheReadTokens,
       cacheCreationTokens,
+      this.opts.pricingOverrides,
     );
 
     if (cost === null) {
@@ -723,7 +741,7 @@ export function extractUsageFromErrorWithSource(
 }
 
 function numericOrNull(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
 }
 
 /** Re-export the pricing maps for introspection / test setup. */

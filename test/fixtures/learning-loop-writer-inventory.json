@@ -1759,7 +1759,7 @@
       "primitive": "fs:appendFileSync",
       "count": 1,
       "lines": [
-        141
+        144
       ],
       "classification": "non_live_or_configuration",
       "boundary": "checked_inventory",
@@ -1989,7 +1989,7 @@
       "primitive": "db:putPage",
       "count": 1,
       "lines": [
-        643
+        651
       ],
       "classification": "db_first_content",
       "boundary": "engine_collision_guard",

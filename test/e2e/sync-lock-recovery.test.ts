@@ -68,7 +68,7 @@ beforeEach(async () => {
   try { await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id LIKE 'gbrain-sync:%'`; } catch { /* */ }
 });
 
-function runCli(args: string[], env: Record<string, string | undefined> = {}): { code: number; stdout: string; stderr: string } {
+function runCli(args: string[], env: Record<string, string | undefined> = {}, timeoutMs = 30_000): { code: number; stdout: string; stderr: string } {
   const fullEnv: Record<string, string | undefined> = {
     ...(process.env as Record<string, string | undefined>),
     GBRAIN_HOME: tmpHome,
@@ -80,7 +80,7 @@ function runCli(args: string[], env: Record<string, string | undefined> = {}): {
     env: fullEnv as Record<string, string>,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
-    timeout: 30_000,
+    timeout: timeoutMs,
   });
   return { code: res.status ?? -1, stdout: res.stdout, stderr: res.stderr };
 }
@@ -120,7 +120,9 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     expect(handle).not.toBeNull();
 
     try {
-      const result = runCli(['sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default']);
+      // Canonical source locking waits up to 30s before reporting busy.
+      // Let the CLI finish that wait and print its error before the harness kills it.
+      const result = runCli(['sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default'], {}, 45_000);
       expect(result.code).not.toBe(0);
       const msg = result.stderr + result.stdout;
       expect(msg).toMatch(new RegExp(`pid ${process.pid}`));

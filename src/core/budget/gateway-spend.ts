@@ -135,7 +135,7 @@ export function assertLocalPaidPolicy(cfg: AIGatewayConfig, model: string, kind:
   }
 }
 
-function parsePricingOverrides(raw: unknown): Record<string, ModelPricing> | undefined {
+export function parsePricingOverrides(raw: unknown): Record<string, ModelPricing> | undefined {
   let value = raw;
   if (typeof value === 'string') {
     try { value = JSON.parse(value); } catch { throw new Error('Invalid pricing.overrides'); }
