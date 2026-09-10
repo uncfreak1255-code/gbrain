@@ -34,6 +34,7 @@ import { gbrainPath } from '../config.ts';
 import { ANTHROPIC_PRICING, type ModelPricing } from '../anthropic-pricing.ts';
 import { EMBEDDING_PRICING, lookupEmbeddingPrice } from '../embedding-pricing.ts';
 import { canonicalLookup } from '../model-pricing.ts';
+import { parsePricingOverrides } from './gateway-spend.ts';
 import { splitProviderModelId } from '../model-id.ts';
 import { isoWeekFilename, resolveAuditDir } from '../audit-week-file.ts';
 import {
@@ -80,6 +81,8 @@ export interface BudgetSnapshot {
 }
 
 export interface BudgetTrackerOpts {
+  /** Explicit operator rates, validated with the paid gateway's parser. */
+  pricingOverrides?: Record<string, ModelPricing>;
   /** USD cap. When undefined, cost gate disabled; pricing misses warn-once. */
   maxCostUsd?: number;
   /** Wall-clock cap in milliseconds. When undefined, runtime gate disabled. */
@@ -256,8 +259,9 @@ function costForUsage(
   kind: BudgetKind,
   cacheReadTokens = 0,
   cacheCreationTokens = 0,
+  pricingOverrides?: Record<string, ModelPricing>,
 ): number | null {
-  const p = lookupPricing(modelId, kind);
+  const p = pricingOverrides?.[modelId.trim().toLowerCase()] ?? lookupPricing(modelId, kind);
   if (!p) return null;
   const inputCost = (inputTokens / 1_000_000) * p.input;
   const outputCost = (outputTokens / 1_000_000) * p.output;
@@ -291,6 +295,7 @@ export class BudgetTracker {
     }
     this.opts = {
       ...opts,
+      pricingOverrides: parsePricingOverrides(opts.pricingOverrides),
       monthlyBudget: opts.monthlyBudget ?? _budgetTrackerDefaults.monthlyBudget,
     };
     this.startedAt = Date.now();
@@ -344,6 +349,7 @@ export class BudgetTracker {
       estimate.estimatedInputTokens,
       estimate.maxOutputTokens,
       estimate.kind,
+      0, 0, this.opts.pricingOverrides,
     );
 
     if (projected === null) {
@@ -454,6 +460,7 @@ export class BudgetTracker {
       kind,
       cacheReadTokens,
       cacheCreationTokens,
+      this.opts.pricingOverrides,
     );
 
     if (cost === null) {

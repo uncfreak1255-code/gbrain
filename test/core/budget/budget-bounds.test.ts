@@ -28,3 +28,12 @@ test.each([NaN, Infinity, -1, 0.5])('invalid recorded usage never changes spend:
     expect(tracker.totalSpent).toBe(0);
   }
 });
+
+test('declared prices apply to admission and recorded usage', () => {
+  const tracker = new BudgetTracker({ label: 'prices', maxCostUsd: 0.002, auditPath: '/dev/null',
+    pricingOverrides: { 'example:custom': { input: 10, output: 20 } } });
+  tracker.reserve({ modelId: 'example:custom', kind: 'chat', estimatedInputTokens: 100, maxOutputTokens: 50 });
+  tracker.record({ modelId: 'example:custom', inputTokens: 100, outputTokens: 50 });
+  expect(tracker.totalSpent).toBeCloseTo(0.002, 8);
+  expect(() => tracker.reserve({ modelId: 'example:custom', kind: 'chat', estimatedInputTokens: 1, maxOutputTokens: 0 })).toThrow();
+});

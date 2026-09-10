@@ -39,6 +39,7 @@ import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
 import { chat as gatewayChat, getCurrentBudgetTracker, withBudgetTracker } from '../ai/gateway.ts';
 import { BudgetExhausted, BudgetTracker, CompositeBudgetTracker } from '../budget/budget-tracker.ts';
+import { parsePricingOverrides } from '../budget/gateway-spend.ts';
 import {
   buildExtractRunId,
   writeReceipt,
@@ -547,7 +548,8 @@ export async function runPhaseExtractAtoms(
   if (configuredBudget !== null && (!configuredBudget.trim() || !Number.isFinite(budgetCap) || budgetCap < 0)) {
     throw new Error('Invalid cycle.extract_atoms.budget_usd');
   }
-  const phaseBudget = new BudgetTracker({ label: 'cycle.extract_atoms', maxCostUsd: budgetCap });
+  const pricingOverrides = parsePricingOverrides(await engine.getConfig('pricing.overrides'));
+  const phaseBudget = new BudgetTracker({ label: 'cycle.extract_atoms', maxCostUsd: budgetCap, pricingOverrides });
   const outerBudget = getCurrentBudgetTracker();
   const budget = outerBudget ? new CompositeBudgetTracker([outerBudget, phaseBudget]) : phaseBudget;
   let budgetExhausted = false;

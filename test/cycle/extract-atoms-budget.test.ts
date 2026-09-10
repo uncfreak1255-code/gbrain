@@ -16,6 +16,7 @@ afterAll(async () => { await engine.disconnect(); rmSync(auditDir, { recursive: 
 beforeEach(async () => {
   calls = 0;
   await engine.unsetConfig('cycle.extract_atoms.budget_usd');
+  await engine.unsetConfig('pricing.overrides');
   configureGateway({ chat_model: 'anthropic:claude-sonnet-4-6', env: {} });
   __setChatTransportForTests(async () => {
     calls++;
@@ -57,6 +58,16 @@ test('unpriced model retains the phase cap', async () => {
 test('phase cap is checked against projected cost before transport', async () => {
   await engine.setConfig('cycle.extract_atoms.budget_usd', '0.0001');
   await run();
+  expect(calls).toBe(0);
+});
+test('declared prices take precedence over built-in prices', async () => {
+  await engine.setConfig('pricing.overrides', JSON.stringify({ 'anthropic:claude-sonnet-4-6': { input: 1000, output: 1000 } }));
+  await run();
+  expect(calls).toBe(0);
+});
+test('invalid declared prices refuse instead of falling back', async () => {
+  await engine.setConfig('pricing.overrides', '{"anthropic:claude-sonnet-4-6":{"input":-1,"output":1}}');
+  await expect(run()).rejects.toThrow('pricing.overrides');
   expect(calls).toBe(0);
 });
 test('phase accounting uses the model price and preserves the outer budget', async () => {

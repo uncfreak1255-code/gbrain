@@ -210,6 +210,6 @@ gbrain config unset budget.monthly.chat_max_usd
 
 ### Phase and expansion caps
 
-`cycle.extract_atoms.budget_usd` defaults to `0.30` USD per source/run. A zero cap stops extraction; invalid or unreadable values refuse inference. Extraction reserves against the configured chat model before each call and preserves an active outer budget. Models without known prices refuse under this phase cap. The result reports the tracker's model-priced usage.
+`cycle.extract_atoms.budget_usd` defaults to `0.30` USD per source/run. A zero cap stops extraction; invalid or unreadable values refuse inference. Extraction reserves against the configured chat model before each call and preserves an active outer budget. `pricing.overrides` uses the same strict parser as the paid gateway and takes precedence over built-in prices. Invalid or unreadable overrides refuse; models without known or declared prices also refuse under this phase cap. The result reports the tracker's model-priced usage.
 
 Query expansion honors an active `withBudgetTracker` scope. It reserves before the SDK request, makes one attempt, and records usage or a pessimistic ceiling on failure. If admission fails, search keeps the original query. Budget caps must be finite and non-negative, and token estimates must be non-negative safe integers.
