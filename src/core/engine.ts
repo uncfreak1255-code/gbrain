@@ -2195,7 +2195,7 @@ export interface BrainEngine {
   countUnconsolidatedFacts(source_id: string): Promise<number>;
 
   /**
-   * Find candidate duplicates for a new fact within a source+entity bucket.
+   * Find candidate duplicates within a source+entity+optional-visibility bucket.
    * Entity-prefilter is mandatory (bounds the contradiction-classifier blast
    * radius). Hard cap k=5 by default. Embedding-cosine when both sides have
    * embeddings; recency fallback otherwise.
@@ -2204,7 +2204,7 @@ export interface BrainEngine {
     source_id: string,
     entitySlug: string,
     factText: string,
-    opts?: { k?: number; embedding?: Float32Array },
+    opts?: { k?: number; embedding?: Float32Array; visibility?: FactVisibility },
   ): Promise<FactRow[]>;
 
   /**

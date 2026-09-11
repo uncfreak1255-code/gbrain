@@ -5202,7 +5202,7 @@ export class PGLiteEngine implements BrainEngine {
     source_id: string,
     entitySlug: string,
     factText: string,
-    opts?: { k?: number; embedding?: Float32Array },
+    opts?: { k?: number; embedding?: Float32Array; visibility?: import('./engine.ts').FactVisibility },
   ): Promise<FactRow[]> {
     return factsImpl.findCandidateDuplicates(this.factsDeps, source_id, entitySlug, factText, opts);
   }

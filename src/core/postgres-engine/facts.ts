@@ -462,10 +462,11 @@ export async function findCandidateDuplicates(
     source_id: string,
     entitySlug: string,
     factText: string,
-    opts?: { k?: number; embedding?: Float32Array },
+    opts?: { k?: number; embedding?: Float32Array; visibility?: FactVisibility },
   ): Promise<FactRow[]> {
     const sql = deps.sql;
     const k = Math.min(Math.max(opts?.k ?? 5, 1), 20);
+    const visibilities: FactVisibility[] = opts?.visibility ? [opts.visibility] : ['private', 'world'];
     // Validity-lapsed rows are not dedup candidates: a re-stated fact after
     // its valid_until lapses re-inserts fresh (WP5 read-time TTL honesty).
     if (opts?.embedding) {
@@ -477,6 +478,7 @@ export async function findCandidateDuplicates(
           AND expired_at IS NULL
           AND (valid_until IS NULL OR valid_until > now())
           AND embedding IS NOT NULL
+          AND visibility = ANY(${visibilities})
         ORDER BY embedding <=> ${sql.unsafe(`'${lit}'::vector`)}
         LIMIT ${k}
       `;
@@ -488,6 +490,7 @@ export async function findCandidateDuplicates(
         AND entity_slug = ${entitySlug}
         AND expired_at IS NULL
         AND (valid_until IS NULL OR valid_until > now())
+        AND visibility = ANY(${visibilities})
       ORDER BY created_at DESC, id DESC
       LIMIT ${k}
     `;

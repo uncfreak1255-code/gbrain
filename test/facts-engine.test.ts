@@ -299,6 +299,21 @@ describe('findCandidateDuplicates', () => {
     expect(result.length).toBe(3);
   });
 
+  test('visibility filter keeps dedup candidates inside the requested memory boundary', async () => {
+    const slug = `visibility-candidates-${Math.random().toString(36).slice(2, 10)}`;
+    await engine.insertFact(
+      { fact: 'private candidate', kind: 'fact', entity_slug: slug, source: 'test', visibility: 'private' },
+      { source_id: 'default' },
+    );
+    await engine.insertFact(
+      { fact: 'world candidate', kind: 'fact', entity_slug: slug, source: 'test', visibility: 'world' },
+      { source_id: 'default' },
+    );
+
+    const result = await engine.findCandidateDuplicates('default', slug, 'x', { visibility: 'world' });
+    expect(result.map((row) => row.fact)).toEqual(['world candidate']);
+  });
+
   test('embedding cosine ordering when both sides have embeddings', async () => {
     // Use per-run unique entity_slug so the assertion is immune to any
     // cross-test pollution (no other test in the file uses 'embed-test',
