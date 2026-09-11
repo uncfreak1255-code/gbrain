@@ -25,6 +25,7 @@ import {
   recordChatUsage,
   estimateChatCostUsd,
   makeEngineChatUsageSink,
+  usageForBudgetRecord,
   type ChatUsageRecord,
 } from '../src/core/ai/chat-usage.ts';
 import { operationsByName, type OperationContext } from '../src/core/operations.ts';
@@ -130,6 +131,32 @@ describe('estimateChatCostUsd — canonical pricing incl. cache tokens', () => {
     expect(
       estimateChatCostUsd('acme:unpriced-model-9000', { input_tokens: 10, output_tokens: 10 }),
     ).toBeNull();
+  });
+
+  test('recordChatUsage prices the same sanitized token counts it stores', () => {
+    const records: ChatUsageRecord[] = [];
+    setChatUsageSink((r) => { records.push(r); });
+    recordChatUsage({
+      model: 'anthropic:claude-haiku-4-5',
+      usage: { input_tokens: -1_000_000, output_tokens: 1_000_000 },
+    });
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.input_tokens).toBe(0);
+    expect(records[0]!.output_tokens).toBe(1_000_000);
+    expect(records[0]!.cost_usd).toBeCloseTo(5, 8);
+  });
+
+  test('cache-creation-only usage is known input telemetry, not a projection fallback', () => {
+    const charge = usageForBudgetRecord(
+      { inputTokens: 0, outputTokens: 40, cacheReadTokens: 0, cacheCreationTokens: 2_000 },
+      { inputTokens: 8_000, outputTokens: 200 },
+    );
+    expect(charge.inputTokens).toBe(0);
+    expect(charge.cacheCreationTokens).toBe(2_000);
+    expect(charge.cacheReadTokens).toBe(0);
+    expect(charge.outputTokens).toBe(40);
+    expect(charge.unmetered).toBe(false);
   });
 });
 

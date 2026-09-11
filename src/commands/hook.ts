@@ -60,11 +60,7 @@ import {
   type ContextPackResponse,
 } from '../core/context/resolve-ipc.ts';
 import type { WindowTurn } from '../core/context/entity-salience.ts';
-import {
-  confineTranscriptPath,
-  parseTranscript,
-  toCorpusText,
-} from '../core/transcripts/claude-code-jsonl.ts';
+import { toCorpusText } from '../core/transcripts/claude-code-jsonl.ts';
 import {
   bankCompactSegment,
   bankWritebackTurn,
@@ -72,6 +68,8 @@ import {
   gcCorpusArtifacts,
   HARVEST_RECEIPT_SUFFIX,
   segmentHash,
+  segmentFileName,
+  sessionCorpusFileName,
 } from '../core/context/corpus-segments.ts';
 import { gateWritebackTurn, WRITEBACK_SKIP_REASONS } from '../core/facts/writeback-gate.ts';
 import { resolveWritebackConfigFromFile } from '../core/facts/writeback-config.ts';
@@ -1130,12 +1128,12 @@ async function hookUserPrompt(io: HookIo): Promise<number> {
     let turns: WindowTurn[] = [];
     let priorContextText: string | undefined;
     if (j.transcript_path !== undefined && j.transcript_path !== null) {
-      const conf = confineTranscriptPath(j.transcript_path, {
+      const conf = captureSpecFor(io.harness).confine(j.transcript_path, {
         ...(io.transcriptRoot ? { root: io.transcriptRoot } : {}),
       });
       if (!conf.ok) return { outcome: 'degraded', reason: `transcript_${conf.reason}` };
       try {
-        const parsed = parseTranscript(conf.path, { maxBytes: USER_PROMPT_TRANSCRIPT_MAX_BYTES });
+        const parsed = captureSpecFor(io.harness).parse(conf.path, { maxBytes: USER_PROMPT_TRANSCRIPT_MAX_BYTES });
         turns = parsed.turns.slice(-USER_PROMPT_WINDOW_TURNS);
         // Cross-turn dedupe: feed the blocks WE previously injected this
         // session back as priorContextText (slug-only suppression + volunteer
@@ -1333,12 +1331,12 @@ async function hookCompact(io: HookIo): Promise<number> {
     let boundaryTurnIndexes: number[] = [];
     let allTurns: WindowTurn[] = [];
     if (j.transcript_path !== undefined && j.transcript_path !== null) {
-      const conf = confineTranscriptPath(j.transcript_path, {
+      const conf = captureSpecFor(io.harness).confine(j.transcript_path, {
         ...(io.transcriptRoot ? { root: io.transcriptRoot } : {}),
       });
       if (!conf.ok) { outcome = 'degraded'; reason = `transcript_${conf.reason}`; return; }
       try {
-        const parsed = parseTranscript(conf.path, { maxBytes: USER_PROMPT_TRANSCRIPT_MAX_BYTES });
+        const parsed = captureSpecFor(io.harness).parse(conf.path, { maxBytes: USER_PROMPT_TRANSCRIPT_MAX_BYTES });
         allTurns = parsed.turns;
         boundaryTurnIndexes = parsed.boundaryTurnIndexes;
         turns = parsed.turns.slice(-COMPACT_WINDOW_TURNS);
@@ -1364,6 +1362,7 @@ async function hookCompact(io: HookIo): Promise<number> {
     // when serve/IPC is unavailable). Per-step deadline degrades — a scan that
     // can't finish skips the segment ENTIRELY (never write unscanned content).
     const banked = await bankCompactSegment(await corpusDir(cfg), sessionId, allTurns, boundaryTurnIndexes, {
+      sourceId: process.env.GBRAIN_SOURCE,
       remainingMs: remaining,
       minScanMs: SEGMENT_MIN_BUDGET_MS,
       minWriteMs: SEGMENT_WRITE_MIN_BUDGET_MS,
@@ -1467,7 +1466,7 @@ async function hookStop(io: HookIo): Promise<number> {
       if (sid === 'unknown') return 'no_session';
       const tp = j?.transcript_path;
       if (tp === undefined || tp === null) return 'no_transcript';
-      const conf = confineTranscriptPath(tp as string, {
+      const conf = captureSpecFor(io.harness).confine(tp, {
         ...(io.transcriptRoot ? { root: io.transcriptRoot } : {}),
       });
       if (!conf.ok) return `transcript_${conf.reason}`;
@@ -1488,11 +1487,11 @@ async function hookStop(io: HookIo): Promise<number> {
         // wide parse only ever runs when the cheap one failed, so the common
         // path keeps the 128KB cost inside this lane's 2s budget.
         lastUser = findLastUser(
-          parseTranscript(conf.path, { maxBytes: WRITEBACK_TRANSCRIPT_TAIL_BYTES }).turns,
+          captureSpecFor(io.harness).parse(conf.path, { maxBytes: WRITEBACK_TRANSCRIPT_TAIL_BYTES }).turns,
         );
         if (!lastUser) {
           lastUser = findLastUser(
-            parseTranscript(conf.path, { maxBytes: USER_PROMPT_TRANSCRIPT_MAX_BYTES }).turns,
+            captureSpecFor(io.harness).parse(conf.path, { maxBytes: USER_PROMPT_TRANSCRIPT_MAX_BYTES }).turns,
           );
         }
       } catch {
@@ -1753,7 +1752,7 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
           // the rename so the sweep re-processes the appended transcript (a
           // resumed session's new turns were being permanently skipped when the
           // completion sidecar survived the overwrite).
-          const corpusFile = join(dir, `${sessionId}.txt`);
+          const corpusFile = join(dir, sessionCorpusFileName(sessionId, process.env.GBRAIN_SOURCE));
           const tmpCorpus = `${corpusFile}.tmp-${process.pid}`;
           writeFileSync(tmpCorpus, text, { mode: 0o600 });
           renameSync(tmpCorpus, corpusFile);

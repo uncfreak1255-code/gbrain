@@ -54,7 +54,7 @@ const LONG_BODY = 'thin-client provenance meeting note about acme-example '.repe
 function chatStub(fact: string) {
   __setChatTransportForTests(async (): Promise<ChatResult> => ({
     text: JSON.stringify({
-      facts: [{ fact, kind: 'fact', entity: null, confidence: 1.0, notability: 'medium' }],
+      facts: [{ fact, kind: 'fact', entity: null, confidence: 1.0, notability: 'medium', lifetime: 'durable' }],
     }),
     blocks: [],
     stopReason: 'end',

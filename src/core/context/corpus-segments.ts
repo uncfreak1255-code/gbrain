@@ -68,8 +68,29 @@ export function segmentHash(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, SEGMENT_HASH_LEN);
 }
 
-export function segmentFileName(sessionId: string, hash: string): string {
-  return `${safeIdComponent(sessionId)}.seg-${hash.replace(/[^0-9a-f]/g, '')}.txt`;
+export function segmentFileName(sessionId: string, hash: string, sourceId?: string | null): string {
+  const src = sourceId && sourceId !== 'default' ? `.src-${safeIdComponent(sourceId)}` : '';
+  return `${safeIdComponent(sessionId)}.seg-${hash.replace(/[^0-9a-f]/g, '')}${src}.txt`;
+}
+
+/** Delimiter that cannot appear in `safeIdComponent` output (`A-Za-z0-9._-`).
+ * `.src-` is illegal here: a session id can itself end in `.src-<source>`. */
+const SESSION_SOURCE_MARK = '~src-';
+
+/** Stable session-end corpus filename. Unlike checkpoint segments, a resumed
+ * session overwrites this file, so content must not participate in identity. */
+export function sessionCorpusFileName(sessionId: string, sourceId?: string | null): string {
+  const src = sourceId && sourceId !== 'default' ? `${SESSION_SOURCE_MARK}${safeIdComponent(sourceId)}` : '';
+  return `${safeIdComponent(sessionId)}${src}.txt`;
+}
+
+/** Parse the stable session-end filename. More specific segment/writeback
+ * parsers must run first because their basenames also end in `.txt`. */
+export function parseSessionCorpusFileName(name: string): { sessionId: string; sourceId?: string } | null {
+  const sourced = /^(.+)~src-([A-Za-z0-9._-]+)\.txt$/.exec(name);
+  if (sourced) return { sessionId: sourced[1]!, sourceId: sourced[2]! };
+  const plain = /^(.+)\.txt$/.exec(name);
+  return plain && !plain[1]!.includes(SESSION_SOURCE_MARK) ? { sessionId: plain[1]! } : null;
 }
 
 export function ledgerFileName(sessionId: string): string {
@@ -89,9 +110,9 @@ export const HARVEST_RECEIPT_SUFFIX = '.receipt.json';
  */
 export function parseSegmentFileName(
   name: string,
-): { sessionId: string; hash: string } | null {
-  const m = /^(.+)\.seg-([0-9a-f]{12,64})\.txt$/.exec(name);
-  return m ? { sessionId: m[1], hash: m[2] } : null;
+): { sessionId: string; hash: string; sourceId?: string } | null {
+  const m = /^(.+)\.seg-([0-9a-f]{12,64})(?:\.src-([A-Za-z0-9._-]+))?\.txt$/.exec(name);
+  return m ? { sessionId: m[1], hash: m[2], ...(m[3] ? { sourceId: m[3] } : {}) } : null;
 }
 
 /**
@@ -189,9 +210,10 @@ export function writeSegment(
   dir: string,
   sessionId: string,
   text: string,
+  sourceId?: string | null,
 ): { file: string; hash: string; existed: boolean } {
   const hash = segmentHash(text);
-  const file = join(dir, segmentFileName(sessionId, hash));
+  const file = join(dir, segmentFileName(sessionId, hash, sourceId));
   if (existsSync(file)) return { file, hash, existed: true };
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, text, { mode: 0o600 });
@@ -383,7 +405,7 @@ export async function bankCompactSegment(
   sessionId: string,
   allTurns: WindowTurn[],
   boundaryTurnIndexes: number[],
-  opts: { remainingMs: () => number; minScanMs: number; minWriteMs: number; maxTurns?: number },
+  opts: { remainingMs: () => number; minScanMs: number; minWriteMs: number; maxTurns?: number; sourceId?: string | null },
 ): Promise<{ segment: string; flushCorpusFile?: string; hash?: string; ordinal?: number }> {
   try {
     const windowTurns = sliceBoundaryWindow(allTurns, boundaryTurnIndexes, {
@@ -395,11 +417,11 @@ export async function bankCompactSegment(
     if (!rendered) return { segment: 'scan_unavailable' };
     if (!rendered.text.trim()) return { segment: 'empty_window' };
     if (opts.remainingMs() < opts.minWriteMs) return { segment: 'deadline_write' };
-    const w = writeSegment(dir, sessionId, rendered.text);
+    const w = writeSegment(dir, sessionId, rendered.text, opts.sourceId);
     const ordinal = appendSegmentLedger(dir, sessionId, w.hash);
     return {
       segment: w.existed ? 'segment_dup' : 'segment_banked',
-      flushCorpusFile: segmentFileName(sessionId, w.hash),
+      flushCorpusFile: segmentFileName(sessionId, w.hash, opts.sourceId),
       hash: w.hash,
       ordinal,
     };

@@ -64,6 +64,22 @@ d("Cross-session recall test (Postgres)", () => {
     expect(old!.superseded_by).toBe(r2.id);
   });
 
+  test('dedup candidates stay inside the requested visibility on real Postgres', async () => {
+    const engine = getEngine();
+    const entitySlug = 'candidate-visibility-postgres';
+    await engine.insertFact(
+      { fact: 'private candidate', kind: 'fact', entity_slug: entitySlug, source: 'test', visibility: 'private' },
+      { source_id: 'default' },
+    );
+    await engine.insertFact(
+      { fact: 'world candidate', kind: 'fact', entity_slug: entitySlug, source: 'test', visibility: 'world' },
+      { source_id: 'default' },
+    );
+
+    const candidates = await engine.findCandidateDuplicates('default', entitySlug, 'x', { visibility: 'world' });
+    expect(candidates.map((row) => row.fact)).toEqual(['world candidate']);
+  });
+
   // Mirrors test/facts-separation-pglite.test.ts. extract-conversation-facts
   // writes durable audit checkpoint rows (source = TERMINAL_AUDIT_SOURCE /
   // NON_EXTRACTABLE_AUDIT_SOURCE) into the facts table; excludeAuditRows

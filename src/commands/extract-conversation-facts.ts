@@ -699,6 +699,7 @@ async function deleteOrphanFactsForPage(
        WHERE source_id = $1
          AND source_markdown_slug = $2
          AND source LIKE 'cli:extract-conversation-facts%'
+         AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > NOW())
        RETURNING 1
      )
      SELECT COUNT(*)::text AS count FROM del`,
@@ -1038,11 +1039,8 @@ async function processPage(
     return { newEndIso: null };
   }
 
-  // D11: delete-orphans-first replay safety. Wipes any facts written by
-  // a prior crashed / killed / partial run for this (sourceId, slug)
-  // pair before we re-extract. The lock we hold (D2 + D12 refreshing
-  // lock above the caller) guarantees no other worker is writing to
-  // this page right now, so the DELETE+INSERT pair is safe.
+  // Under the page lock, remove partial active rows before replay.
+  // Keep retired rows as correction history.
   if (!state.dryRun) {
     const cleaned = await deleteOrphanFactsForPage(state.engine, state.sourceId, page.slug);
     if (cleaned > 0) {
@@ -1053,12 +1051,8 @@ async function processPage(
     }
   }
 
-  // Page-global row_num: after delete-orphans-first the table has no
-  // rows for this (sourceId, slug), so we always start from 0. Peek
-  // is kept as a defensive fallback for dry-run + non-deleting paths.
-  let rowNum = state.dryRun
-    ? await peekRowNumStart(state.engine, state.sourceId, page.slug)
-    : 0;
+  // Retired rows survive cleanup as replay tombstones; allocate past them.
+  let rowNum = await peekRowNumStart(state.engine, state.sourceId, page.slug);
   let newestEnd: string | null = null;
   let segmentsThisPage = 0;
   let pageInsertedTotal = 0;
@@ -1134,12 +1128,19 @@ async function processPage(
       state.result.resolution_errors += segmentResolution.resolution_errors;
     };
 
+    // Imports cannot establish a fresh reversal of a retired user claim.
+    const { findRecordedFact } = await import('../core/facts/write-single.ts');
+    const admitted = [];
+    for (const fact of extracted) {
+      if (!await findRecordedFact(state.engine, state.sourceId, {
+        fact: fact.fact, entity: fact.entity_slug ?? null, kind: fact.kind ?? 'fact',
+        provenance: fact.source, matchAnyHistorical: true,
+        visibility: fact.visibility ?? 'private',
+      })) admitted.push(fact);
+    }
+    extracted = admitted;
     if (!state.dryRun && extracted.length > 0) {
-      // Eng-v2 C1 / E11: page-global row_num stays unique across segments.
-      // entity_slug is already canonical here — resolveExtractedEntitiesForSave
-      // (above) ran every fact through the shipped resolver cascade (#3729/#4052),
-      // so master's per-row resolveEntitySlug mapper (#4567's independent fix for
-      // the same issue) is superseded rather than layered on top.
+      // Page-global row numbers stay unique; entities were resolved above.
       const rows = extracted.map((fact, i) => ({
         ...fact,
         row_num: rowNum + i,

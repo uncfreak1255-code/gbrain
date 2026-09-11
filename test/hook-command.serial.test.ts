@@ -679,6 +679,32 @@ describe('session-end', () => {
     expect(readFileSync(join(corpusDir, 'sess-dup.txt'), 'utf8')).toContain('resumed pass content');
   });
 
+  test('source-qualified resumed session keeps one stable corpus filename', async () => {
+    process.env.GBRAIN_SOURCE = 'wiki';
+    const projRoot = join(tmp, 'projects');
+    const ws = join(tmp, 'ws');
+    mkdirSync(ws, { recursive: true });
+    const transcript = join(projRoot, 'p1', 'source.jsonl');
+    seedTranscript(join(projRoot, 'p1'), 'source.jsonl', [userLine('first source pass')]);
+    await runHook(['session-end'], {
+      stdin: JSON.stringify({ session_id: 'sess-source', transcript_path: transcript, cwd: ws }),
+      transcriptRoot: projRoot,
+    });
+    seedTranscript(join(projRoot, 'p1'), 'source.jsonl', [
+      userLine('first source pass'),
+      assistantLine('resumed source pass'),
+    ]);
+    await runHook(['session-end'], {
+      stdin: JSON.stringify({ session_id: 'sess-source', transcript_path: transcript, cwd: ws }),
+      transcriptRoot: projRoot,
+    });
+
+    const corpusDir = join(home(), 'transcripts', 'corpus');
+    const files = readdirSync(corpusDir).filter((f) => f.startsWith('sess-source'));
+    expect(files).toEqual(['sess-source~src-wiki.txt']);
+    expect(readFileSync(join(corpusDir, files[0]!), 'utf8')).toContain('resumed source pass');
+  });
+
   test('resumed session rewrite drops the stale .ingested/.in-progress sidecars so the sweep re-ingests', async () => {
     const projRoot = join(tmp, 'projects');
     const ws = join(tmp, 'ws');

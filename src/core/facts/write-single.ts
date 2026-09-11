@@ -24,6 +24,7 @@
  */
 
 import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
+import type { ResolutionSource } from '../entities/resolve.ts';
 
 const DEDUP_THRESHOLD = 0.95;
 const DEDUP_CANDIDATE_LIMIT = 5;
@@ -77,9 +78,8 @@ export async function writeSingleFact(
   input: SingleFactInput,
 ): Promise<SingleFactResult> {
   const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
-  const { cosineSimilarity } = await import('./classify.ts');
-  const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
   const { isAvailable, embedOne } = await import('../ai/gateway.ts');
+  const { withPageLock } = await import('../page-lock.ts');
 
   const factText = input.fact.trim();
   const kind = input.kind ?? 'fact';
@@ -92,22 +92,17 @@ export async function writeSingleFact(
       'Remember a corrected claim. Repeating the old claim does not restore withdrawn memory.');
   }
 
-  // #4755: normalize null-like entity refs to ABSENT before resolution so
-  // the `resolved?.slug ?? entityRef` fallback can never adopt "null" as a
-  // slug. Applied here (not only at the verb boundary) so every
-  // writeSingleFact caller (google/loops-extract, future verbs) gets the
-  // same guard.
+  // Resolve before taking the write lock so aliases converge on one entity
+  // bucket without holding a cross-process lock across provider work.
   const entityRef = isNullLikeEntity(input.entity) ? null : input.entity!.trim();
   const resolved = entityRef
     ? await resolveEntitySlugWithSource(engine, sourceId, entityRef)
     : null;
   const resolvedSlug = entityRef ? (resolved?.slug ?? entityRef) : null;
-  // #4108: provenance for the fence writer's stub guard. Null when the
-  // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
 
-  // Embedding (NOT an LLM call): powers dedup + downstream recall. Fail-soft —
-  // a missing/failing provider degrades dedup, never the write.
+  // Embedding is slow provider work. Keep it outside the critical section;
+  // the locked dedup query below re-reads current rows before any write.
   let embedding: Float32Array | null = null;
   let degradedDedup = false;
   if (isAvailable('embedding')) {
@@ -120,12 +115,57 @@ export async function writeSingleFact(
     degradedDedup = true;
   }
 
+  // Serialize only facts that can participate in the same dedup/supersession
+  // decision. Different entities and visibility tiers remain independent.
+  const lockBucket = JSON.stringify([sourceId, visibility, resolvedSlug]);
+  return withPageLock(`fact-write:${lockBucket}`, () => writeSingleFactLocked(
+    engine,
+    sourceId,
+    input,
+    { factText, kind, visibility, validUntil, resolvedSlug, resolutionSource, embedding, degradedDedup },
+  ));
+}
+
+async function writeSingleFactLocked(
+  engine: BrainEngine,
+  sourceId: string,
+  input: SingleFactInput,
+  prepared: {
+    factText: string;
+    kind: NonNullable<NewFact['kind']>;
+    visibility: 'private' | 'world';
+    validUntil: Date | null;
+    resolvedSlug: string | null;
+    resolutionSource: ResolutionSource | null;
+    embedding: Float32Array | null;
+    degradedDedup: boolean;
+  },
+): Promise<SingleFactResult> {
+  const { cosineSimilarity } = await import('./classify.ts');
+  const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
+  const {
+    factText, kind, visibility, validUntil, resolvedSlug, resolutionSource,
+    embedding, degradedDedup,
+  } = prepared;
+
+  // A replay must see historical rows too. Similarity candidates contain only
+  // current beliefs; otherwise replaying a corrected claim corrects it BACK.
+  const recorded = await findRecordedFact(engine, sourceId, {
+    fact: factText, entity: resolvedSlug, kind, provenance: input.provenance,
+    sessionId: input.sessionId, visibility,
+  });
+  if (recorded) return {
+    id: recorded.id, status: 'duplicate', entity_slug: resolvedSlug,
+    valid_until: recorded.valid_until, degraded_dedup: false,
+  };
+
   // Dedup + supersession decision (same candidates + threshold as the pipeline).
   let supersedeId: number | null = null;
   if (resolvedSlug && embedding) {
     const candidates = await engine.findCandidateDuplicates(sourceId, resolvedSlug, factText, {
       embedding,
       k: DEDUP_CANDIDATE_LIMIT,
+      visibility,
     });
     let top: (typeof candidates)[number] | null = null;
     let topScore = -1;
@@ -262,4 +302,33 @@ async function expireSuperseded(engine: BrainEngine, oldId: number, newId: numbe
 
 function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** Active exact claims deduplicate across capture lanes. Historical replay
+ * identity includes provenance, session, and visibility so a new statement
+ * can revisit an old belief without a private row suppressing a world write.
+ * Extraction can match all historical rows: an import cannot establish a
+ * fresh user reversal. Source/entity stay confined. */
+export async function findRecordedFact(
+  engine: BrainEngine,
+  sourceId: string,
+  input: { fact: string; entity: string | null; kind: string; provenance: string; visibility: 'private' | 'world'; sessionId?: string | null; matchAnyHistorical?: boolean },
+): Promise<{ id: number; valid_until: Date | null } | null> {
+  const rows = await engine.executeRaw<{ id: number; valid_until: Date | string | null }>(
+    `SELECT id, valid_until FROM facts
+     WHERE source_id = $1 AND entity_slug IS NOT DISTINCT FROM $2::text
+       AND kind = $3 AND lower(regexp_replace(btrim(fact), '[[:space:]]+', ' ', 'g')) = $4
+       AND visibility = $8
+       AND ((expired_at IS NULL AND (valid_until IS NULL OR valid_until > NOW()))
+         OR $7::boolean
+         OR (source = $5 AND source_session IS NOT DISTINCT FROM $6::text
+           AND ($6::text IS NOT NULL OR superseded_by IS NOT NULL)))
+     ORDER BY
+       CASE WHEN expired_at IS NULL AND (valid_until IS NULL OR valid_until > NOW()) THEN 0 ELSE 1 END,
+       id DESC
+     LIMIT 1`,
+    [sourceId, input.entity, input.kind, collapse(input.fact), input.provenance, input.sessionId ?? null, input.matchAnyHistorical ?? false, input.visibility],
+  );
+  const row = rows[0];
+  return row ? { id: Number(row.id), valid_until: row.valid_until ? new Date(row.valid_until) : null } : null;
 }

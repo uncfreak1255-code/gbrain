@@ -41,6 +41,22 @@ function readHooks(): { description?: string; hooks?: Record<string, Array<{ hoo
 }
 
 describe('writeCodexHooks', () => {
+  test('wires prompt recall and bounded turn checkpoints, preserving foreign hooks on every event', () => {
+    const events = ['SessionEnd', 'UserPromptSubmit', 'Stop', 'PreCompact', 'Interrupt'];
+    writeFileSync(hooksPath, JSON.stringify({ hooks: Object.fromEntries(events.map(event => [event, [{ hooks: [{ type: 'command', command: 'foreign-tool', timeout: 1 }] }]])) }));
+    expect(writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath }).ok).toBe(true);
+    expect(writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath }).ok).toBe(true);
+    for (const event of events) {
+      const groups = readHooks().hooks![event]!;
+      expect(groups).toHaveLength(2);
+      expect(groups[0]!.hooks[0]!.command).toBe('foreign-tool');
+      expect(groups[1]!.hooks[0]!.timeout).toBeLessThanOrEqual(5);
+    }
+    expect(readHooks().hooks!.UserPromptSubmit![1]!.hooks[0]!.command).toContain('hook user-prompt --harness codex');
+    removeCodexHooks({ hooksPath, configPath });
+    for (const event of events) expect(readHooks().hooks![event]).toHaveLength(1);
+  });
+
   test('fresh write: hooks.json created with description + our entry; trust entry with the recipe hash', () => {
     const res = writeCodexHooks({ gbrainBin: BIN, hooksPath, configPath });
     expect(res.ok).toBe(true);
@@ -73,7 +89,7 @@ describe('writeCodexHooks', () => {
     expect(readHooks().hooks!.SessionEnd!).toHaveLength(1);
     const cfg = readFileSync(configPath, 'utf8');
     expect(cfg.match(/gbrain:codex-hooks-trust \(managed/g)).toHaveLength(1);
-    expect(cfg.match(/trusted_hash/g)).toHaveLength(1);
+    expect(cfg.match(/trusted_hash/g)).toHaveLength(5);
   });
 
   test('foreign SessionEnd groups keep their positions (ours appends LAST, key index shifts to match)', () => {

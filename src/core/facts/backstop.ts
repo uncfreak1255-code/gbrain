@@ -631,6 +631,17 @@ async function runPipelineBodyInner(
     const resolvedSlug = resolved?.slug ?? null;
     const resolutionSource = resolved?.source ?? null;
 
+    const { findRecordedFact } = await import('./write-single.ts');
+    const recorded = await findRecordedFact(ctx.engine, ctx.sourceId, {
+      fact: f.fact, entity: resolvedSlug, kind: f.kind ?? 'fact', provenance: f.source,
+      sessionId: f.source_session, matchAnyHistorical: true, visibility,
+    });
+    if (recorded) {
+      duplicate += 1;
+      fact_ids.push(recorded.id);
+      continue;
+    }
+
     // Dedup against DB candidates (correct per Codex Q7: fence rows
     // have no embeddings; FS lock + sync invariant means DB == fence
     // at write time). Threshold 0.95 unchanged.
@@ -640,7 +651,7 @@ async function runPipelineBodyInner(
         ctx.sourceId,
         resolvedSlug,
         f.fact,
-        { embedding: f.embedding, k: DEDUP_CANDIDATE_LIMIT },
+        { embedding: f.embedding, k: DEDUP_CANDIDATE_LIMIT, visibility },
       );
       let topId: number | null = null;
       let topScore = -1;

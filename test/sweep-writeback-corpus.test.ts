@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runMaintenanceSweep, CORPUS_INGESTED_SUFFIX } from '../src/core/sweep.ts';
-import { bankWritebackTurn } from '../src/core/context/corpus-segments.ts';
+import { bankWritebackTurn, bankCompactSegment } from '../src/core/context/corpus-segments.ts';
 import { gateWritebackTurn } from '../src/core/facts/writeback-gate.ts';
 import { __setChatTransportForTests, type ChatResult } from '../src/core/ai/gateway.ts';
 import type { CapabilityReport } from '../src/core/capability.ts';
@@ -51,6 +51,10 @@ beforeEach(async () => {
   corpusDir = mkdtempSync(join(tmpdir(), 'gbrain-sweep-wb-'));
   tmpDirs.push(corpusDir);
   await engine.setConfig('dream.synthesize.session_corpus_dir', corpusDir);
+  // Paid corpus ingest requires BOTH spend ceilings (fail-closed by design).
+  await engine.setConfig('facts.sweep_max_usd', '1');
+  await engine.setConfig('facts.sweep_max_usd_per_day', '5');
+  await engine.unsetConfig('facts.sweep_spend_ledger');
 });
 
 afterEach(async () => {
@@ -67,6 +71,23 @@ async function bankWb(sessionId: string, turn: string): Promise<string> {
 }
 
 describe('runMaintenanceSweep — ambient-writeback turn files (OV2-11)', () => {
+  test('an offline compaction checkpoint retains its personal source through recovery and replay', async () => {
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('personal-test', 'personal-test') ON CONFLICT (id) DO NOTHING`);
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({ facts: [{ fact: 'Completed the synthetic migration', kind: 'event', lifetime: 'durable', notability: 'high' }] }),
+      blocks: [], stopReason: 'end', model: 'anthropic:test-stub', providerId: 'anthropic',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    }));
+    const turns = [{ role: 'user' as const, text: 'I completed the synthetic migration.' }];
+    const opts = { sourceId: 'personal-test', remainingMs: () => 1000, minScanMs: 0, minWriteMs: 0 };
+    const first = await bankCompactSegment(corpusDir, 'offline-session', turns, [], opts);
+    expect(first.flushCorpusFile).toMatch(/\.src-personal-test\.txt$/);
+    await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED });
+    await bankCompactSegment(corpusDir, 'offline-session', turns, [], opts);
+    await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYED });
+    const rows = await engine.executeRaw<{ source_id: string }>('SELECT source_id FROM facts');
+    expect(rows).toEqual([{ source_id: 'personal-test' }]);
+  });
   test('gate OFF: terminal writeback_off sidecar, zero LLM, zero facts', async () => {
     let chatCalls = 0;
     __setChatTransportForTests(async (): Promise<ChatResult> => {
@@ -93,8 +114,8 @@ describe('runMaintenanceSweep — ambient-writeback turn files (OV2-11)', () => 
       return {
         text: JSON.stringify({
           facts: [
-            { fact: 'prefers dark mode in every editor', kind: 'preference', entity: null, confidence: 0.9, notability: 'medium' },
-            { fact: 'the sky was cloudy this morning', kind: 'fact', entity: null, confidence: 0.9, notability: 'low' },
+            { fact: 'prefers dark mode in every editor', kind: 'preference', lifetime: 'durable', entity: null, confidence: 0.9, notability: 'medium' },
+            { fact: 'the sky was cloudy this morning', kind: 'fact', lifetime: 'durable', entity: null, confidence: 0.9, notability: 'low' },
           ],
         }),
         blocks: [],
@@ -153,7 +174,7 @@ describe('runMaintenanceSweep — ambient-writeback turn files (OV2-11)', () => 
     await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('wiki', 'wiki') ON CONFLICT (id) DO NOTHING`);
     __setChatTransportForTests(async (): Promise<ChatResult> => ({
       text: JSON.stringify({
-        facts: [{ fact: 'runs the wiki working group on Tuesdays', kind: 'fact', entity: null, confidence: 0.9, notability: 'medium' }],
+        facts: [{ fact: 'runs the wiki working group on Tuesdays', kind: 'fact', lifetime: 'durable', entity: null, confidence: 0.9, notability: 'medium' }],
       }),
       blocks: [],
       stopReason: 'end',

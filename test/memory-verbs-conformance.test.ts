@@ -707,6 +707,13 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
       `SELECT id, superseded_by FROM facts WHERE id = $1`, [a.id],
     );
     expect(rows[0].superseded_by).toBe(updated.id);
+    const replay = await writeSingleFact(engine, 'default', {
+      fact: 'SUPERSEDE-PAIR alice works at acme-example',
+      provenance: 'test', entity: 'people/supersede-test', kind: 'fact',
+    });
+    expect(replay.status).toBe('duplicate');
+    const current = await engine.listFactsByEntity('default', 'people/supersede-test');
+    expect(current.map(f => f.fact)).toEqual(['SUPERSEDE-PAIR alice LEFT acme-example, now at widget-co']);
   });
 
   it('reports degraded_dedup when no embedding provider is configured', async () => {
@@ -718,6 +725,152 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
     );
     expect(r.status).toBe('inserted');
     expect(r.degraded_dedup).toBe(true);
+  });
+
+  it('concurrent copies of one attributed statement produce one fact without embeddings', async () => {
+    const input = { fact: 'Concurrent replay uses one durable record.', provenance: 'same-event', kind: 'fact' as const };
+    const results = await withNoEmbeddingProvider(() => Promise.all([
+      writeSingleFact(engine, 'default', input), writeSingleFact(engine, 'default', input),
+    ]));
+    expect(new Set(results.map(r => r.id)).size).toBe(1);
+    expect(results.map(r => r.status).sort()).toEqual(['duplicate', 'inserted']);
+  });
+
+  it('unrelated entities do not wait behind another fact embedding in the same source', async () => {
+    const DIM = 1536;
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-small',
+      embedding_dimensions: DIM,
+      env: { OPENAI_API_KEY: 'sk-test-deterministic' },
+    });
+
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>(resolve => { releaseSlow = resolve; });
+    let markSlowStarted!: () => void;
+    const slowStarted = new Promise<void>(resolve => { markSlowStarted = resolve; });
+    let markFastStarted!: () => void;
+    const fastStarted = new Promise<void>(resolve => { markFastStarted = resolve; });
+
+    __setEmbedTransportForTests((async (opts: { values: string[] }) => {
+      if (opts.values.some(value => value.includes('slow entity'))) {
+        markSlowStarted();
+        await slowGate;
+      } else {
+        markFastStarted();
+      }
+      return { embeddings: opts.values.map(() => {
+        const vector = new Array(DIM).fill(0);
+        vector[0] = 1;
+        return vector;
+      }) };
+    }) as never);
+
+    const slow = writeSingleFact(engine, 'default', {
+      fact: 'A slow entity fact.', provenance: 'test', entity: 'people/slow-lock-test',
+    });
+    await slowStarted;
+    const fast = writeSingleFact(engine, 'default', {
+      fact: 'A fast entity fact.', provenance: 'test', entity: 'people/fast-lock-test',
+    });
+
+    try {
+      const enteredEmbedding = await Promise.race([
+        fastStarted.then(() => true),
+        Bun.sleep(500).then(() => false),
+      ]);
+      expect(enteredEmbedding).toBe(true);
+    } finally {
+      releaseSlow();
+      await Promise.allSettled([slow, fast]);
+      resetGateway();
+      __setEmbedTransportForTests(null);
+    }
+  });
+
+  it('active exact claims deduplicate across lanes; historical replay differs from a new statement', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const input = { fact: 'The standing report heading is amber.', provenance: 'original-session', sessionId: 'session-1', kind: 'preference' as const };
+      const first = await writeSingleFact(engine, 'default', input);
+      const otherLane = await writeSingleFact(engine, 'default', { ...input, provenance: 'deferred-capture' });
+      expect(otherLane.id).toBe(first.id);
+      await engine.expireFact(first.id);
+      const replay = await writeSingleFact(engine, 'default', input);
+      expect(replay.status).toBe('duplicate');
+      expect(replay.id).toBe(first.id);
+      const restated = await writeSingleFact(engine, 'default', { ...input, provenance: 'new-session' });
+      expect(restated.status).toBe('inserted');
+      expect(restated.id).not.toBe(first.id);
+    });
+  });
+
+  it('a private exact match does not suppress a world remember of the same claim', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const claim = {
+        fact: 'The cabin lock code is 9494.',
+        provenance: 'local capture',
+        kind: 'fact' as const,
+      };
+      const priv = await writeSingleFact(engine, 'default', { ...claim, visibility: 'private' });
+      expect(priv.status).toBe('inserted');
+
+      const world = await writeSingleFact(engine, 'default', { ...claim, visibility: 'world' });
+      expect(world.status).toBe('inserted');
+      expect(world.id).not.toBe(priv.id);
+    });
+  });
+
+  it('cosine dedup stays inside the requested visibility tier', async () => {
+    installDeterministicEmbedder();
+    const claim = {
+      fact: 'SUPERSEDE-PAIR cabin lock remains 9494',
+      provenance: 'local capture',
+      entity: 'people/visibility-dedup',
+      kind: 'fact' as const,
+    };
+    const priv = await writeSingleFact(engine, 'default', { ...claim, visibility: 'private' });
+    expect(priv.status).toBe('inserted');
+    expect(priv.degraded_dedup).toBe(false);
+
+    const world = await writeSingleFact(engine, 'default', { ...claim, visibility: 'world' });
+    expect(world.status).toBe('inserted');
+    expect(world.id).not.toBe(priv.id);
+  });
+
+  it('an exact rematch prefers the active row over an older expired duplicate', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const claim = {
+        fact: 'The weekly status heading is amber.',
+        provenance: 'original-session',
+        kind: 'fact' as const,
+      };
+      const expired = await writeSingleFact(engine, 'default', { ...claim, sessionId: 'sess-order' });
+      await engine.expireFact(expired.id);
+
+      const active = await writeSingleFact(engine, 'default', claim);
+      expect(active.status).toBe('inserted');
+      expect(active.id).not.toBe(expired.id);
+
+      const rematch = await writeSingleFact(engine, 'default', { ...claim, sessionId: 'sess-order' });
+      expect(rematch.status).toBe('duplicate');
+      expect(rematch.id).toBe(active.id);
+    });
+  });
+
+  it('an expired transient fact can be recorded again without a replay session id', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const input = {
+        fact: 'The operator is traveling this week.',
+        provenance: 'codex session same-day',
+        kind: 'fact' as const,
+        validUntil: new Date(Date.now() + 60_000),
+      };
+      const first = await writeSingleFact(engine, 'default', input);
+      await engine.expireFact(first.id);
+
+      const restated = await writeSingleFact(engine, 'default', input);
+      expect(restated.status).toBe('inserted');
+      expect(restated.id).not.toBe(first.id);
+    });
   });
 });
 
