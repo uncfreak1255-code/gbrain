@@ -651,7 +651,7 @@ async function runPipelineBodyInner(
         ctx.sourceId,
         resolvedSlug,
         f.fact,
-        { embedding: f.embedding, k: DEDUP_CANDIDATE_LIMIT },
+        { embedding: f.embedding, k: DEDUP_CANDIDATE_LIMIT, visibility },
       );
       let topId: number | null = null;
       let topScore = -1;

@@ -148,6 +148,7 @@ async function writeSingleFactLocked(
     const candidates = await engine.findCandidateDuplicates(sourceId, resolvedSlug, factText, {
       embedding,
       k: DEDUP_CANDIDATE_LIMIT,
+      visibility,
     });
     let top: (typeof candidates)[number] | null = null;
     let topScore = -1;
@@ -305,7 +306,10 @@ export async function findRecordedFact(
          OR $7::boolean
          OR (source = $5 AND source_session IS NOT DISTINCT FROM $6::text
            AND ($6::text IS NOT NULL OR superseded_by IS NOT NULL)))
-     ORDER BY id LIMIT 1`,
+     ORDER BY
+       CASE WHEN expired_at IS NULL AND (valid_until IS NULL OR valid_until > NOW()) THEN 0 ELSE 1 END,
+       id DESC
+     LIMIT 1`,
     [sourceId, input.entity, input.kind, collapse(input.fact), input.provenance, input.sessionId ?? null, input.matchAnyHistorical ?? false, input.visibility],
   );
   const row = rows[0];

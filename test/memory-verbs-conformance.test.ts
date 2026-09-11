@@ -768,6 +768,43 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
     });
   });
 
+  it('cosine dedup stays inside the requested visibility tier', async () => {
+    installDeterministicEmbedder();
+    const claim = {
+      fact: 'SUPERSEDE-PAIR cabin lock remains 9494',
+      provenance: 'local capture',
+      entity: 'people/visibility-dedup',
+      kind: 'fact' as const,
+    };
+    const priv = await writeSingleFact(engine, 'default', { ...claim, visibility: 'private' });
+    expect(priv.status).toBe('inserted');
+    expect(priv.degraded_dedup).toBe(false);
+
+    const world = await writeSingleFact(engine, 'default', { ...claim, visibility: 'world' });
+    expect(world.status).toBe('inserted');
+    expect(world.id).not.toBe(priv.id);
+  });
+
+  it('an exact rematch prefers the active row over an older expired duplicate', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const claim = {
+        fact: 'The weekly status heading is amber.',
+        provenance: 'original-session',
+        kind: 'fact' as const,
+      };
+      const expired = await writeSingleFact(engine, 'default', { ...claim, sessionId: 'sess-order' });
+      await engine.expireFact(expired.id);
+
+      const active = await writeSingleFact(engine, 'default', claim);
+      expect(active.status).toBe('inserted');
+      expect(active.id).not.toBe(expired.id);
+
+      const rematch = await writeSingleFact(engine, 'default', { ...claim, sessionId: 'sess-order' });
+      expect(rematch.status).toBe('duplicate');
+      expect(rematch.id).toBe(active.id);
+    });
+  });
+
   it('an expired transient fact can be recorded again without a replay session id', async () => {
     await withNoEmbeddingProvider(async () => {
       const input = {
