@@ -43,11 +43,20 @@ describe('content addressing + ledger', () => {
   test('session-end corpus names stay stable across content changes and preserve source identity', () => {
     const first = sessionCorpusFileName('session-1', 'wiki');
     const resumed = sessionCorpusFileName('session-1', 'wiki');
-    expect(first).toBe('session-1.src-wiki.txt');
+    expect(first).toBe('session-1~src-wiki.txt');
     expect(resumed).toBe(first);
     expect(parseSessionCorpusFileName(first)).toEqual({ sessionId: 'session-1', sourceId: 'wiki' });
     expect(parseSessionCorpusFileName(sessionCorpusFileName('session-1'))).toEqual({ sessionId: 'session-1' });
     expect(parseSessionCorpusFileName('not-corpus.json')).toBeNull();
+  });
+
+  test('a session id that looks like .src-<source> does not steal the source slot', () => {
+    const name = sessionCorpusFileName('run.src-private', 'default');
+    expect(name).toBe('run.src-private.txt');
+    expect(parseSessionCorpusFileName(name)).toEqual({ sessionId: 'run.src-private' });
+    const sourced = sessionCorpusFileName('run.src-private', 'wiki');
+    expect(sourced).toBe('run.src-private~src-wiki.txt');
+    expect(parseSessionCorpusFileName(sourced)).toEqual({ sessionId: 'run.src-private', sourceId: 'wiki' });
   });
 
   test('same text ⇒ same name ⇒ existed=true, no rewrite; ledger append is idempotent', () => {

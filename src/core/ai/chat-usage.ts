@@ -225,7 +225,8 @@ export function makeEngineChatUsageSink(engine: {
  * `number | undefined`), and a tracked call whose output side settles at $0
  * turns every cap on that lane off. Rules, per side:
  *   - input is known when a finite, non-negative count is reported and
- *     (uncached input + cache reads) > 0 — a fully cached prompt is fine;
+ *     (uncached input + cache reads + cache writes) > 0 — a fully cached
+ *     prompt or a cache-creation-only report is usable telemetry;
  *   - output is known when a finite count > 0 is reported — a completion that
  *     produced text but reports 0 output tokens is charged the projection;
  *   - a negative or non-finite count anywhere marks that side unknown.
@@ -240,7 +241,7 @@ export function usageForBudgetRecord(
   const cacheRead = actual.cacheReadTokens ?? 0;
   const cacheCreation = actual.cacheCreationTokens ?? 0;
   const inputKnown = !bad(actual.inputTokens) && !bad(cacheRead) && !bad(cacheCreation)
-    && (actual.inputTokens > 0 || cacheRead > 0);
+    && (actual.inputTokens > 0 || cacheRead > 0 || cacheCreation > 0);
   const outputKnown = !bad(actual.outputTokens) && actual.outputTokens > 0;
   return {
     inputTokens: inputKnown ? actual.inputTokens : pessimistic.inputTokens,

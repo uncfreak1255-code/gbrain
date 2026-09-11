@@ -634,7 +634,7 @@ async function runPipelineBodyInner(
     const { findRecordedFact } = await import('./write-single.ts');
     const recorded = await findRecordedFact(ctx.engine, ctx.sourceId, {
       fact: f.fact, entity: resolvedSlug, kind: f.kind ?? 'fact', provenance: f.source,
-      sessionId: f.source_session, matchAnyHistorical: true,
+      sessionId: f.source_session, matchAnyHistorical: true, visibility,
     });
     if (recorded) {
       duplicate += 1;

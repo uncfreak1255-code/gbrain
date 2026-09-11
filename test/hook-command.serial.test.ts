@@ -701,7 +701,7 @@ describe('session-end', () => {
 
     const corpusDir = join(home(), 'transcripts', 'corpus');
     const files = readdirSync(corpusDir).filter((f) => f.startsWith('sess-source'));
-    expect(files).toEqual(['sess-source.src-wiki.txt']);
+    expect(files).toEqual(['sess-source~src-wiki.txt']);
     expect(readFileSync(join(corpusDir, files[0]!), 'utf8')).toContain('resumed source pass');
   });
 

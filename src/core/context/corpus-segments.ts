@@ -73,18 +73,24 @@ export function segmentFileName(sessionId: string, hash: string, sourceId?: stri
   return `${safeIdComponent(sessionId)}.seg-${hash.replace(/[^0-9a-f]/g, '')}${src}.txt`;
 }
 
+/** Delimiter that cannot appear in `safeIdComponent` output (`A-Za-z0-9._-`).
+ * `.src-` is illegal here: a session id can itself end in `.src-<source>`. */
+const SESSION_SOURCE_MARK = '~src-';
+
 /** Stable session-end corpus filename. Unlike checkpoint segments, a resumed
  * session overwrites this file, so content must not participate in identity. */
 export function sessionCorpusFileName(sessionId: string, sourceId?: string | null): string {
-  const src = sourceId && sourceId !== 'default' ? `.src-${safeIdComponent(sourceId)}` : '';
+  const src = sourceId && sourceId !== 'default' ? `${SESSION_SOURCE_MARK}${safeIdComponent(sourceId)}` : '';
   return `${safeIdComponent(sessionId)}${src}.txt`;
 }
 
 /** Parse the stable session-end filename. More specific segment/writeback
  * parsers must run first because their basenames also end in `.txt`. */
 export function parseSessionCorpusFileName(name: string): { sessionId: string; sourceId?: string } | null {
-  const m = /^(.+?)(?:\.src-([A-Za-z0-9._-]+))?\.txt$/.exec(name);
-  return m ? { sessionId: m[1], ...(m[2] ? { sourceId: m[2] } : {}) } : null;
+  const sourced = /^(.+)~src-([A-Za-z0-9._-]+)\.txt$/.exec(name);
+  if (sourced) return { sessionId: sourced[1]!, sourceId: sourced[2]! };
+  const plain = /^(.+)\.txt$/.exec(name);
+  return plain && !plain[1]!.includes(SESSION_SOURCE_MARK) ? { sessionId: plain[1]! } : null;
 }
 
 export function ledgerFileName(sessionId: string): string {

@@ -121,7 +121,7 @@ async function writeSingleFactLocked(
   // current beliefs; otherwise replaying a corrected claim corrects it BACK.
   const recorded = await findRecordedFact(engine, sourceId, {
     fact: factText, entity: resolvedSlug, kind, provenance: input.provenance,
-    sessionId: input.sessionId,
+    sessionId: input.sessionId, visibility,
   });
   if (recorded) return {
     id: recorded.id, status: 'duplicate', entity_slug: resolvedSlug,
@@ -287,24 +287,26 @@ function collapse(s: string): string {
 }
 
 /** Active exact claims deduplicate across capture lanes. Historical replay
- * identity includes provenance and session so a new statement can revisit an
- * old belief. Extraction can match all historical rows: an import cannot
- * establish a fresh user reversal. Source/entity stay confined. */
+ * identity includes provenance, session, and visibility so a new statement
+ * can revisit an old belief without a private row suppressing a world write.
+ * Extraction can match all historical rows: an import cannot establish a
+ * fresh user reversal. Source/entity stay confined. */
 export async function findRecordedFact(
   engine: BrainEngine,
   sourceId: string,
-  input: { fact: string; entity: string | null; kind: string; provenance: string; sessionId?: string | null; matchAnyHistorical?: boolean },
+  input: { fact: string; entity: string | null; kind: string; provenance: string; visibility: 'private' | 'world'; sessionId?: string | null; matchAnyHistorical?: boolean },
 ): Promise<{ id: number; valid_until: Date | null } | null> {
   const rows = await engine.executeRaw<{ id: number; valid_until: Date | string | null }>(
     `SELECT id, valid_until FROM facts
      WHERE source_id = $1 AND entity_slug IS NOT DISTINCT FROM $2::text
        AND kind = $3 AND lower(regexp_replace(btrim(fact), '[[:space:]]+', ' ', 'g')) = $4
+       AND visibility = $8
        AND ((expired_at IS NULL AND (valid_until IS NULL OR valid_until > NOW()))
          OR $7::boolean
          OR (source = $5 AND source_session IS NOT DISTINCT FROM $6::text
            AND ($6::text IS NOT NULL OR superseded_by IS NOT NULL)))
      ORDER BY id LIMIT 1`,
-    [sourceId, input.entity, input.kind, collapse(input.fact), input.provenance, input.sessionId ?? null, input.matchAnyHistorical ?? false],
+    [sourceId, input.entity, input.kind, collapse(input.fact), input.provenance, input.sessionId ?? null, input.matchAnyHistorical ?? false, input.visibility],
   );
   const row = rows[0];
   return row ? { id: Number(row.id), valid_until: row.valid_until ? new Date(row.valid_until) : null } : null;

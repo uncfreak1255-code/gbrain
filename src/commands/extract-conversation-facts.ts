@@ -1135,6 +1135,7 @@ async function processPage(
       if (!await findRecordedFact(state.engine, state.sourceId, {
         fact: fact.fact, entity: fact.entity_slug ?? null, kind: fact.kind ?? 'fact',
         provenance: fact.source, matchAnyHistorical: true,
+        visibility: fact.visibility ?? 'private',
       })) admitted.push(fact);
     }
     extracted = admitted;

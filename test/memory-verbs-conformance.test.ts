@@ -752,6 +752,22 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
     });
   });
 
+  it('a private exact match does not suppress a world remember of the same claim', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const claim = {
+        fact: 'The cabin lock code is 9494.',
+        provenance: 'local capture',
+        kind: 'fact' as const,
+      };
+      const priv = await writeSingleFact(engine, 'default', { ...claim, visibility: 'private' });
+      expect(priv.status).toBe('inserted');
+
+      const world = await writeSingleFact(engine, 'default', { ...claim, visibility: 'world' });
+      expect(world.status).toBe('inserted');
+      expect(world.id).not.toBe(priv.id);
+    });
+  });
+
   it('an expired transient fact can be recorded again without a replay session id', async () => {
     await withNoEmbeddingProvider(async () => {
       const input = {
