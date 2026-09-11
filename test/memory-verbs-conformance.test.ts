@@ -736,6 +736,57 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
     expect(results.map(r => r.status).sort()).toEqual(['duplicate', 'inserted']);
   });
 
+  it('unrelated entities do not wait behind another fact embedding in the same source', async () => {
+    const DIM = 1536;
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-small',
+      embedding_dimensions: DIM,
+      env: { OPENAI_API_KEY: 'sk-test-deterministic' },
+    });
+
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>(resolve => { releaseSlow = resolve; });
+    let markSlowStarted!: () => void;
+    const slowStarted = new Promise<void>(resolve => { markSlowStarted = resolve; });
+    let markFastStarted!: () => void;
+    const fastStarted = new Promise<void>(resolve => { markFastStarted = resolve; });
+
+    __setEmbedTransportForTests((async (opts: { values: string[] }) => {
+      if (opts.values.some(value => value.includes('slow entity'))) {
+        markSlowStarted();
+        await slowGate;
+      } else {
+        markFastStarted();
+      }
+      return { embeddings: opts.values.map(() => {
+        const vector = new Array(DIM).fill(0);
+        vector[0] = 1;
+        return vector;
+      }) };
+    }) as never);
+
+    const slow = writeSingleFact(engine, 'default', {
+      fact: 'A slow entity fact.', provenance: 'test', entity: 'people/slow-lock-test',
+    });
+    await slowStarted;
+    const fast = writeSingleFact(engine, 'default', {
+      fact: 'A fast entity fact.', provenance: 'test', entity: 'people/fast-lock-test',
+    });
+
+    try {
+      const enteredEmbedding = await Promise.race([
+        fastStarted.then(() => true),
+        Bun.sleep(500).then(() => false),
+      ]);
+      expect(enteredEmbedding).toBe(true);
+    } finally {
+      releaseSlow();
+      await Promise.allSettled([slow, fast]);
+      resetGateway();
+      __setEmbedTransportForTests(null);
+    }
+  });
+
   it('active exact claims deduplicate across lanes; historical replay differs from a new statement', async () => {
     await withNoEmbeddingProvider(async () => {
       const input = { fact: 'The standing report heading is amber.', provenance: 'original-session', sessionId: 'session-1', kind: 'preference' as const };

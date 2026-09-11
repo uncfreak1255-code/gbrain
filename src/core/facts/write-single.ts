@@ -24,6 +24,7 @@
  */
 
 import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
+import type { ResolutionSource } from '../entities/resolve.ts';
 
 const DEDUP_THRESHOLD = 0.95;
 const DEDUP_CANDIDATE_LIMIT = 5;
@@ -76,21 +77,9 @@ export async function writeSingleFact(
   sourceId: string,
   input: SingleFactInput,
 ): Promise<SingleFactResult> {
-  const { withPageLock } = await import('../page-lock.ts');
-  // Reuse the cross-process lock owner. This is distinct from the inner
-  // Markdown page lock, and covers DB-only writes as well as fence writes.
-  return withPageLock(`fact-write:${sourceId}`, () => writeSingleFactLocked(engine, sourceId, input));
-}
-
-async function writeSingleFactLocked(
-  engine: BrainEngine,
-  sourceId: string,
-  input: SingleFactInput,
-): Promise<SingleFactResult> {
   const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
-  const { cosineSimilarity } = await import('./classify.ts');
-  const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
   const { isAvailable, embedOne } = await import('../ai/gateway.ts');
+  const { withPageLock } = await import('../page-lock.ts');
 
   const factText = input.fact.trim();
   const kind = input.kind ?? 'fact';
@@ -103,33 +92,17 @@ async function writeSingleFactLocked(
       'Remember a corrected claim. Repeating the old claim does not restore withdrawn memory.');
   }
 
-  // #4755: normalize null-like entity refs to ABSENT before resolution so
-  // the `resolved?.slug ?? entityRef` fallback can never adopt "null" as a
-  // slug. Applied here (not only at the verb boundary) so every
-  // writeSingleFact caller (google/loops-extract, future verbs) gets the
-  // same guard.
+  // Resolve before taking the write lock so aliases converge on one entity
+  // bucket without holding a cross-process lock across provider work.
   const entityRef = isNullLikeEntity(input.entity) ? null : input.entity!.trim();
   const resolved = entityRef
     ? await resolveEntitySlugWithSource(engine, sourceId, entityRef)
     : null;
   const resolvedSlug = entityRef ? (resolved?.slug ?? entityRef) : null;
-  // #4108: provenance for the fence writer's stub guard. Null when the
-  // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
 
-  // A replay must see historical rows too. Similarity candidates contain only
-  // current beliefs; otherwise replaying a corrected claim corrects it BACK.
-  const recorded = await findRecordedFact(engine, sourceId, {
-    fact: factText, entity: resolvedSlug, kind, provenance: input.provenance,
-    sessionId: input.sessionId, visibility,
-  });
-  if (recorded) return {
-    id: recorded.id, status: 'duplicate', entity_slug: resolvedSlug,
-    valid_until: recorded.valid_until, degraded_dedup: false,
-  };
-
-  // Embedding (NOT an LLM call): powers dedup + downstream recall. Fail-soft —
-  // a missing/failing provider degrades dedup, never the write.
+  // Embedding is slow provider work. Keep it outside the critical section;
+  // the locked dedup query below re-reads current rows before any write.
   let embedding: Float32Array | null = null;
   let degradedDedup = false;
   if (isAvailable('embedding')) {
@@ -141,6 +114,50 @@ async function writeSingleFactLocked(
   } else {
     degradedDedup = true;
   }
+
+  // Serialize only facts that can participate in the same dedup/supersession
+  // decision. Different entities and visibility tiers remain independent.
+  const lockBucket = JSON.stringify([sourceId, visibility, resolvedSlug]);
+  return withPageLock(`fact-write:${lockBucket}`, () => writeSingleFactLocked(
+    engine,
+    sourceId,
+    input,
+    { factText, kind, visibility, validUntil, resolvedSlug, resolutionSource, embedding, degradedDedup },
+  ));
+}
+
+async function writeSingleFactLocked(
+  engine: BrainEngine,
+  sourceId: string,
+  input: SingleFactInput,
+  prepared: {
+    factText: string;
+    kind: NonNullable<NewFact['kind']>;
+    visibility: 'private' | 'world';
+    validUntil: Date | null;
+    resolvedSlug: string | null;
+    resolutionSource: ResolutionSource | null;
+    embedding: Float32Array | null;
+    degradedDedup: boolean;
+  },
+): Promise<SingleFactResult> {
+  const { cosineSimilarity } = await import('./classify.ts');
+  const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
+  const {
+    factText, kind, visibility, validUntil, resolvedSlug, resolutionSource,
+    embedding, degradedDedup,
+  } = prepared;
+
+  // A replay must see historical rows too. Similarity candidates contain only
+  // current beliefs; otherwise replaying a corrected claim corrects it BACK.
+  const recorded = await findRecordedFact(engine, sourceId, {
+    fact: factText, entity: resolvedSlug, kind, provenance: input.provenance,
+    sessionId: input.sessionId, visibility,
+  });
+  if (recorded) return {
+    id: recorded.id, status: 'duplicate', entity_slug: resolvedSlug,
+    valid_until: recorded.valid_until, degraded_dedup: false,
+  };
 
   // Dedup + supersession decision (same candidates + threshold as the pipeline).
   let supersedeId: number | null = null;
