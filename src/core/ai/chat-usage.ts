@@ -167,15 +167,18 @@ export function recordChatUsage(input: {
   const sink = _sinks.length > 0 ? _sinks[_sinks.length - 1]!.sink : null;
   if (!sink) return;
   try {
-    const record: ChatUsageRecord = {
-      model: input.model,
-      provider: input.provider ?? null,
-      phase: currentChatPhase(),
+    const sanitizedUsage = {
       input_tokens: Math.max(0, Math.round(input.usage.input_tokens || 0)),
       output_tokens: Math.max(0, Math.round(input.usage.output_tokens || 0)),
       cache_read_tokens: Math.max(0, Math.round(input.usage.cache_read_tokens || 0)),
       cache_write_tokens: Math.max(0, Math.round(input.usage.cache_write_tokens || 0)),
-      cost_usd: estimateChatCostUsd(input.model, input.usage),
+    };
+    const record: ChatUsageRecord = {
+      model: input.model,
+      provider: input.provider ?? null,
+      phase: currentChatPhase(),
+      ...sanitizedUsage,
+      cost_usd: estimateChatCostUsd(input.model, sanitizedUsage),
     };
     void Promise.resolve(sink(record)).catch(() => {
       /* fail-open: accounting must never break a chat call */

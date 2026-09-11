@@ -73,6 +73,20 @@ export function segmentFileName(sessionId: string, hash: string, sourceId?: stri
   return `${safeIdComponent(sessionId)}.seg-${hash.replace(/[^0-9a-f]/g, '')}${src}.txt`;
 }
 
+/** Stable session-end corpus filename. Unlike checkpoint segments, a resumed
+ * session overwrites this file, so content must not participate in identity. */
+export function sessionCorpusFileName(sessionId: string, sourceId?: string | null): string {
+  const src = sourceId && sourceId !== 'default' ? `.src-${safeIdComponent(sourceId)}` : '';
+  return `${safeIdComponent(sessionId)}${src}.txt`;
+}
+
+/** Parse the stable session-end filename. More specific segment/writeback
+ * parsers must run first because their basenames also end in `.txt`. */
+export function parseSessionCorpusFileName(name: string): { sessionId: string; sourceId?: string } | null {
+  const m = /^(.+?)(?:\.src-([A-Za-z0-9._-]+))?\.txt$/.exec(name);
+  return m ? { sessionId: m[1], ...(m[2] ? { sourceId: m[2] } : {}) } : null;
+}
+
 export function ledgerFileName(sessionId: string): string {
   return `${safeIdComponent(sessionId)}.ledger.json`;
 }

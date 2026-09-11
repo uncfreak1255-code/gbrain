@@ -570,6 +570,35 @@ describe('BudgetTracker outstanding reservations (#4365)', () => {
     expect(() => t.reserve(estimate)).not.toThrow();
   });
 
+  test('canonical record settles the matching pre-resolution alias reservation', () => {
+    const t = new BudgetTracker({ maxCostUsd: 0.0605, label: 'test', auditPath });
+    t.reserve({
+      modelId: 'claude-cli:opus',
+      estimatedInputTokens: 10_000,
+      maxOutputTokens: 0,
+      kind: 'chat',
+    });
+    t.reserve({
+      modelId: 'claude-cli:haiku',
+      estimatedInputTokens: 10_000,
+      maxOutputTokens: 0,
+      kind: 'chat',
+    });
+
+    // The cheaper Haiku call finishes first. Its canonical response model
+    // must release the Haiku projection, not the older Opus projection.
+    t.record({
+      modelId: 'anthropic:claude-haiku-4-5-20251001',
+      pricingModelId: 'claude-cli:haiku',
+      inputTokens: 1_000,
+      outputTokens: 0,
+      kind: 'chat',
+    });
+
+    expect(() => t.reserve({ ...estimate, estimatedInputTokens: 10_000, maxOutputTokens: 0 }))
+      .toThrow(BudgetExhausted);
+  });
+
   test('unreserved records (expand/OCR) never drive outstanding negative', () => {
     const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
     // Two records with no prior reserve — the pop must be a no-op both times.

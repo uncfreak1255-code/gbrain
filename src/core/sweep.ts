@@ -973,7 +973,7 @@ async function runCorpusIngestPass(
   // OFF retires banked turns even when the brain cannot extract — otherwise
   // the files linger eligible and a later re-enable would extract turns the
   // operator already revoked (codex re-review, this wave).
-  const { parseWbFileName, parseSegmentFileName, writebackOffSidecarJson } = await import('./context/corpus-segments.ts');
+  const { parseWbFileName, parseSegmentFileName, parseSessionCorpusFileName, writebackOffSidecarJson } = await import('./context/corpus-segments.ts');
   const { resolveWritebackConfig } = await import('./facts/writeback-config.ts');
   const { loadConfig: loadFileCfg } = await import('./config.ts');
   const { isValidSourceId } = await import('./source-id.ts');
@@ -1111,7 +1111,8 @@ async function runCorpusIngestPass(
       // the turn into the SAME source the prompt-time IPC lane would have —
       // never the pass's source. Validated before use (source-isolation
       // invariant); a legacy/invalid segment falls back to the pass source.
-      const bankedSource = wbMeta?.sourceId ?? parseSegmentFileName(name)?.sourceId;
+      const bankedSource = wbMeta?.sourceId ?? parseSegmentFileName(name)?.sourceId ??
+        parseSessionCorpusFileName(name)?.sourceId;
       const corpusSourceId = bankedSource && isValidSourceId(bankedSource)
         ? bankedSource
         : sourceId;

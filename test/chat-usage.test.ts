@@ -131,6 +131,20 @@ describe('estimateChatCostUsd — canonical pricing incl. cache tokens', () => {
       estimateChatCostUsd('acme:unpriced-model-9000', { input_tokens: 10, output_tokens: 10 }),
     ).toBeNull();
   });
+
+  test('recordChatUsage prices the same sanitized token counts it stores', () => {
+    const records: ChatUsageRecord[] = [];
+    setChatUsageSink((r) => { records.push(r); });
+    recordChatUsage({
+      model: 'anthropic:claude-haiku-4-5',
+      usage: { input_tokens: -1_000_000, output_tokens: 1_000_000 },
+    });
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.input_tokens).toBe(0);
+    expect(records[0]!.output_tokens).toBe(1_000_000);
+    expect(records[0]!.cost_usd).toBeCloseTo(5, 8);
+  });
 });
 
 describe('gateway.chat() success boundary — direct vs job callers', () => {

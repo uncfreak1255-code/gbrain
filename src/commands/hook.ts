@@ -69,6 +69,7 @@ import {
   HARVEST_RECEIPT_SUFFIX,
   segmentHash,
   segmentFileName,
+  sessionCorpusFileName,
 } from '../core/context/corpus-segments.ts';
 import { gateWritebackTurn, WRITEBACK_SKIP_REASONS } from '../core/facts/writeback-gate.ts';
 import { resolveWritebackConfigFromFile } from '../core/facts/writeback-config.ts';
@@ -1751,9 +1752,7 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
           // the rename so the sweep re-processes the appended transcript (a
           // resumed session's new turns were being permanently skipped when the
           // completion sidecar survived the overwrite).
-          const corpusFile = join(dir, process.env.GBRAIN_SOURCE
-            ? segmentFileName(sessionId, segmentHash(text), process.env.GBRAIN_SOURCE)
-            : `${sessionId}.txt`);
+          const corpusFile = join(dir, sessionCorpusFileName(sessionId, process.env.GBRAIN_SOURCE));
           const tmpCorpus = `${corpusFile}.tmp-${process.pid}`;
           writeFileSync(tmpCorpus, text, { mode: 0o600 });
           renameSync(tmpCorpus, corpusFile);

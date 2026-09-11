@@ -300,7 +300,9 @@ export async function findRecordedFact(
      WHERE source_id = $1 AND entity_slug IS NOT DISTINCT FROM $2::text
        AND kind = $3 AND lower(regexp_replace(btrim(fact), '[[:space:]]+', ' ', 'g')) = $4
        AND ((expired_at IS NULL AND (valid_until IS NULL OR valid_until > NOW()))
-         OR $7::boolean OR (source = $5 AND source_session IS NOT DISTINCT FROM $6::text))
+         OR $7::boolean
+         OR (source = $5 AND source_session IS NOT DISTINCT FROM $6::text
+           AND ($6::text IS NOT NULL OR superseded_by IS NOT NULL)))
      ORDER BY id LIMIT 1`,
     [sourceId, input.entity, input.kind, collapse(input.fact), input.provenance, input.sessionId ?? null, input.matchAnyHistorical ?? false],
   );

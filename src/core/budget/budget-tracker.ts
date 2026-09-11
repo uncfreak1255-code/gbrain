@@ -644,7 +644,11 @@ export class BudgetTracker {
       return;
     }
 
-    this.settleReservation(actual.modelId, kind);
+    // The gateway reserves with the pre-resolution model id and carries that
+    // exact identity as pricingModelId after the provider returns a canonical
+    // model id. Settle that reservation first so concurrent aliases cannot
+    // release one another's differently priced projections.
+    this.settleReservation(actual.pricingModelId ?? actual.modelId, kind);
     this.cumulativeUsd += cost;
     appendAuditLine(this.auditPath, {
       schema_version: 1,

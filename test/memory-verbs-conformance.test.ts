@@ -738,7 +738,7 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
 
   it('active exact claims deduplicate across lanes; historical replay differs from a new statement', async () => {
     await withNoEmbeddingProvider(async () => {
-      const input = { fact: 'The standing report heading is amber.', provenance: 'original-session', kind: 'preference' as const };
+      const input = { fact: 'The standing report heading is amber.', provenance: 'original-session', sessionId: 'session-1', kind: 'preference' as const };
       const first = await writeSingleFact(engine, 'default', input);
       const otherLane = await writeSingleFact(engine, 'default', { ...input, provenance: 'deferred-capture' });
       expect(otherLane.id).toBe(first.id);
@@ -747,6 +747,23 @@ describe('writeSingleFact — supersession rule [X1] + degraded dedup', () => {
       expect(replay.status).toBe('duplicate');
       expect(replay.id).toBe(first.id);
       const restated = await writeSingleFact(engine, 'default', { ...input, provenance: 'new-session' });
+      expect(restated.status).toBe('inserted');
+      expect(restated.id).not.toBe(first.id);
+    });
+  });
+
+  it('an expired transient fact can be recorded again without a replay session id', async () => {
+    await withNoEmbeddingProvider(async () => {
+      const input = {
+        fact: 'The operator is traveling this week.',
+        provenance: 'codex session same-day',
+        kind: 'fact' as const,
+        validUntil: new Date(Date.now() + 60_000),
+      };
+      const first = await writeSingleFact(engine, 'default', input);
+      await engine.expireFact(first.id);
+
+      const restated = await writeSingleFact(engine, 'default', input);
       expect(restated.status).toBe('inserted');
       expect(restated.id).not.toBe(first.id);
     });
