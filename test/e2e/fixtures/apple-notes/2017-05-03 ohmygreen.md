@@ -14,7 +14,5 @@ it one-click ordering for office managers.
 
 ---
 
-## Timeline
-
-- **2017-05-03** | markdown - Met Emily to discuss expansion plans and potential grocery partnerships.
-- **2017-06-15** | markdown - Launched an enterprise plan with custom branding.
+2017-05-03: Meeting with Emily about expansion plans. Considering grocery partnerships.
+2017-06-15: Launched enterprise plan with custom branding.

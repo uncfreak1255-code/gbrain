@@ -68,14 +68,6 @@ describe('shouldRunNightly (pure function, rate-limit logic)', () => {
     expect(r).toEqual({ run: false, reason: 'rate_limited' });
   });
 
-  test('recent rate_limited skip does not reset cadence by itself', () => {
-    const r = shouldRunNightly(
-      new Date('2026-05-22T00:00:00Z'),
-      [{ outcome: 'rate_limited', ts: '2026-05-21T23:00:00Z' }],
-    );
-    expect(r).toEqual({ run: true });
-  });
-
   test('corrupt timestamp → ignored (does not rate-limit)', () => {
     const r = shouldRunNightly(
       new Date('2026-05-22T00:00:00Z'),
@@ -140,17 +132,20 @@ describe('runNightlyQualityProbe (DI stub harness)', () => {
     });
   });
 
-  test('enabled + recent run within 24h → outcome: rate_limited', async () => {
+  test('enabled + recent run within 24h → outcome: rate_limited, NO audit row', async () => {
     // Pre-seed a recent audit event by running the probe once first.
     await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
       // First run succeeds.
       await runNightlyQualityProbe(makeDeps());
-      // Second run, same hour → rate_limited.
+      // Second run, same hour → rate_limited. A skip is a non-event: the
+      // autopilot loop invokes the probe every cycle (~5-10 min), so
+      // logging each skip would flood the audit file and flip doctor's
+      // any-non-pass-is-bad filter to a permanent WARN.
       const r2 = await runNightlyQualityProbe(makeDeps());
       expect(r2.outcome).toBe('rate_limited');
       const events = await readEvents();
-      expect(events.length).toBe(2);
-      expect(events[1].outcome).toBe('rate_limited');
+      expect(events.length).toBe(1);
+      expect(events[0].outcome).toBe('pass');
     });
   });
 
@@ -167,14 +162,38 @@ describe('runNightlyQualityProbe (DI stub harness)', () => {
     });
   });
 
+  test('threads live search-mode/reranker snapshot into LongMemEval', async () => {
+    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
+      let seenSnapshot: Record<string, string> | undefined;
+      const r = await runNightlyQualityProbe(makeDeps({
+        resolveSearchConfigSnapshot: async () => ({
+          'search.mode': 'balanced',
+          'search.reranker.enabled': 'true',
+          'search.reranker.model': 'llama-server-reranker:qwen3-reranker-4b',
+          'search.reranker.timeout_ms': '30000',
+        }),
+        runLongMemEval: async (args) => {
+          seenSnapshot = args.searchConfigSnapshot;
+        },
+      }));
+
+      expect(r.outcome).toBe('pass');
+      expect(seenSnapshot).toEqual({
+        'search.mode': 'balanced',
+        'search.reranker.enabled': 'true',
+        'search.reranker.model': 'llama-server-reranker:qwen3-reranker-4b',
+        'search.reranker.timeout_ms': '30000',
+      });
+    });
+  });
+
   test('enabled + FAIL summary → outcome: fail', async () => {
     await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
       const r = await runNightlyQualityProbe(makeDeps({
         runCrossModalBatch: async () => ({
           exitCode: 1,
           summary: {
-            total: 10,
-            pass_count: 6, fail_count: 4, inconclusive_count: 0, error_count: 0,
+            pass_count: 7, fail_count: 3, inconclusive_count: 0, error_count: 0,
             est_cost_usd: 0.42, verdict: 'fail',
           },
         }),
@@ -183,48 +202,7 @@ describe('runNightlyQualityProbe (DI stub harness)', () => {
       expect(r.exit_code).toBe(1);
       const events = await readEvents();
       expect(events[0].outcome).toBe('fail');
-      expect(events[0].fail_count).toBe(4);
-    });
-  });
-
-  test('FAIL summary above min pass-rate threshold → outcome: pass with detail', async () => {
-    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
-      const r = await runNightlyQualityProbe(makeDeps({
-        resolveMinPassRate: async () => 0.7,
-        runCrossModalBatch: async () => ({
-          exitCode: 1,
-          summary: {
-            total: 10,
-            pass_count: 7, fail_count: 3, inconclusive_count: 0, error_count: 0,
-            est_cost_usd: 0.70, verdict: 'fail',
-          },
-        }),
-      }));
-      expect(r.outcome).toBe('pass');
-      expect(r.exit_code).toBe(0);
-      expect(r.detail).toContain('benchmark pass rate met');
-      const events = await readEvents();
-      expect(events[0].outcome).toBe('pass');
       expect(events[0].fail_count).toBe(3);
-      expect(events[0].detail).toContain('benchmark pass rate met');
-    });
-  });
-
-  test('FAIL summary below min pass-rate threshold → outcome: fail', async () => {
-    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
-      const r = await runNightlyQualityProbe(makeDeps({
-        resolveMinPassRate: async () => 0.8,
-        runCrossModalBatch: async () => ({
-          exitCode: 1,
-          summary: {
-            total: 10,
-            pass_count: 7, fail_count: 3, inconclusive_count: 0, error_count: 0,
-            est_cost_usd: 0.70, verdict: 'fail',
-          },
-        }),
-      }));
-      expect(r.outcome).toBe('fail');
-      expect(r.exit_code).toBe(1);
     });
   });
 
@@ -261,50 +239,6 @@ describe('runNightlyQualityProbe (DI stub harness)', () => {
       expect(events[0].fixture_sha8).toMatch(/^[0-9a-f]{8}$/);
     });
   });
-
-  test('passes answer-focused LongMemEval dimensions to cross-modal batch', async () => {
-    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
-      let seenDimensions: string[] | undefined;
-      const r = await runNightlyQualityProbe(makeDeps({
-        runCrossModalBatch: async (args) => {
-          seenDimensions = args.dimensions;
-          return {
-            exitCode: 0,
-            summary: {
-              pass_count: 5, fail_count: 0, inconclusive_count: 0, error_count: 0,
-              est_cost_usd: 0.35, verdict: 'pass',
-            },
-          };
-        },
-      }));
-      expect(r.outcome).toBe('pass');
-      expect(seenDimensions).toBeDefined();
-      expect(seenDimensions?.join('\n')).toContain('ANSWER_MATCH');
-      expect(seenDimensions?.join('\n')).not.toContain('SOURCING');
-    });
-  });
-
-  test('passes live reranker config to LongMemEval benchmark brain', async () => {
-    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
-      let seenArgs: Parameters<NightlyProbeDeps['runLongMemEval']>[0] | undefined;
-      const r = await runNightlyQualityProbe(makeDeps({
-        longMemEvalRerankerModel: 'llama-server-reranker:bge-reranker-v2-m3',
-        longMemEvalRerankerEnabled: true,
-        longMemEvalRerankerTimeoutMs: 60000,
-        longMemEvalRerankerTopNIn: 25,
-        longMemEvalRerankerTopNOut: null,
-        runLongMemEval: async (args) => {
-          seenArgs = args;
-        },
-      }));
-      expect(r.outcome).toBe('pass');
-      expect(seenArgs?.rerankerModel).toBe('llama-server-reranker:bge-reranker-v2-m3');
-      expect(seenArgs?.rerankerEnabled).toBe(true);
-      expect(seenArgs?.rerankerTimeoutMs).toBe(60000);
-      expect(seenArgs?.rerankerTopNIn).toBe(25);
-      expect(seenArgs?.rerankerTopNOut).toBe(null);
-    });
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -329,18 +263,6 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
     expect(check.status).toBe('ok');
     expect(check.message).toMatch(/disabled \(opt-in\)/);
     expect(check.message).toMatch(/gbrain config set autopilot\.nightly_quality_probe\.enabled true/);
-  });
-
-  test('disabled + recent non-pass events still reads disabled', async () => {
-    const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
-    const events = [
-      { outcome: 'rate_limited', ts: '2026-05-21T03:00:00Z' },
-      { outcome: 'no_embedding_key', ts: '2026-05-22T03:00:00Z' },
-    ];
-    const check = computeNightlyQualityProbeHealthCheck(false, events);
-    expect(check.status).toBe('ok');
-    expect(check.message).toMatch(/disabled \(opt-in\)/);
-    expect(check.message).not.toMatch(/non-PASS/);
   });
 
   test('enabled + no events → ok pending', async () => {
@@ -373,7 +295,7 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
     ];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/3 warning-worthy runs/);
+    expect(check.message).toMatch(/3 non-PASS runs/);
     expect(check.message).toMatch(/pass=1/);
     expect(check.message).toMatch(/fail=1/);
     expect(check.message).toMatch(/error=1/);
@@ -393,12 +315,45 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
     expect(check.message).toContain('no embedding provider');
   });
 
-  test('single warning-worthy event uses singular grammar', async () => {
+  test('single non-PASS event uses singular grammar', async () => {
     const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
     const events = [{ outcome: 'fail', ts: '2026-05-22T03:00:00Z' }];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/1 warning-worthy run /); // "run " not "runs "
+    expect(check.message).toMatch(/1 non-PASS run /); // "run " not "runs "
+  });
+
+  test('cross-week ordering: reader sorts chronologically so "Latest" is the newest run', async () => {
+    // Regression: the reader walks the CURRENT week's file first, then the
+    // previous week's. Without sorting, the array tail — which this check
+    // reports as "Latest:" — was the OLDEST in-window event whenever last
+    // week's file had entries (observed live: counts updated as new runs
+    // landed while "Latest" stayed pinned days behind).
+    const { computeQualityProbeAuditFilename, readRecentQualityProbeEvents } =
+      await import('../src/core/audit-quality-probe.ts');
+    const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
+    const now = new Date('2026-07-23T12:00:00Z');
+    const thisWeekFile = computeQualityProbeAuditFilename(now);
+    const prevWeekFile = computeQualityProbeAuditFilename(new Date(now.getTime() - 7 * 86400000));
+    writeFileSync(join(auditTmp, thisWeekFile), [
+      JSON.stringify({ outcome: 'fail', ts: '2026-07-22T08:00:00Z' }),
+      JSON.stringify({ outcome: 'fail', ts: '2026-07-23T08:00:00Z' }),
+    ].join('\n') + '\n');
+    writeFileSync(join(auditTmp, prevWeekFile), [
+      JSON.stringify({ outcome: 'fail', ts: '2026-07-17T08:00:00Z' }),
+      JSON.stringify({ outcome: 'fail', ts: '2026-07-18T08:00:00Z' }),
+    ].join('\n') + '\n');
+    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
+      const events = readRecentQualityProbeEvents(7, now);
+      expect(events.map(e => e.ts)).toEqual([
+        '2026-07-17T08:00:00Z',
+        '2026-07-18T08:00:00Z',
+        '2026-07-22T08:00:00Z',
+        '2026-07-23T08:00:00Z',
+      ]);
+      const check = computeNightlyQualityProbeHealthCheck(true, events);
+      expect(check.message).toContain('Latest: fail at 2026-07-23T08:00:00Z');
+    });
   });
 
   test('single PASS event uses singular grammar', async () => {
@@ -411,11 +366,11 @@ describe('computeNightlyQualityProbeHealthCheck — pure doctor branch coverage'
 });
 
 // ---------------------------------------------------------------------------
-// 4. Codex CDX-5 — doctor flags quality/config warning outcomes while keeping
-// cadence-only rate limiting informational.
+// 4. Codex CDX-5 — doctor flags ALL non-PASS outcomes (no_embedding_key,
+// rate_limited, inconclusive must trip warn, not get silently reported as PASS)
 // ---------------------------------------------------------------------------
 
-describe('codex CDX-5 — doctor health: warning outcomes surface without cadence noise', () => {
+describe('codex CDX-5 — doctor health: every non-PASS outcome surfaces', () => {
   test('no_embedding_key outcome → warn (was silently PASS before CDX-5 fix)', async () => {
     const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
     const events = [{ outcome: 'no_embedding_key', ts: '2026-05-22T03:00:00Z' }];
@@ -424,25 +379,12 @@ describe('codex CDX-5 — doctor health: warning outcomes surface without cadenc
     expect(check.message).toMatch(/no_embed_key=1/);
   });
 
-  test('rate_limited-only outcome → warn liveness issue', async () => {
+  test('rate_limited outcome → warn', async () => {
     const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
     const events = [{ outcome: 'rate_limited', ts: '2026-05-22T03:00:00Z' }];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/no real probe result/);
     expect(check.message).toMatch(/rate_limited=1/);
-  });
-
-  test('mixed pass and rate_limited reports latest actual skip', async () => {
-    const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
-    const events = [
-      { outcome: 'rate_limited', ts: '2026-05-22T03:00:00Z' },
-      { outcome: 'pass', ts: '2026-05-22T04:00:00Z' },
-    ];
-    const check = computeNightlyQualityProbeHealthCheck(true, events);
-    expect(check.status).toBe('ok');
-    expect(check.message).toContain('latest skip at 2026-05-22T03:00:00Z');
-    expect(check.message).not.toContain('latest skip at 2026-05-22T04:00:00Z');
   });
 
   test('inconclusive outcome → warn', async () => {
@@ -451,15 +393,6 @@ describe('codex CDX-5 — doctor health: warning outcomes surface without cadenc
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
     expect(check.message).toMatch(/inconclusive=1/);
-  });
-
-  test('unknown non-pass outcome → warn', async () => {
-    const { computeNightlyQualityProbeHealthCheck } = await import('../src/commands/doctor.ts');
-    const events = [{ outcome: 'future_outcome', ts: '2026-05-22T03:00:00Z' }];
-    const check = computeNightlyQualityProbeHealthCheck(true, events);
-    expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/unknown=1/);
-    expect(check.message).toContain('Latest: future_outcome at 2026-05-22T03:00:00Z');
   });
 
   test('counts include the new outcome buckets when mixed with pass/fail/error', async () => {
@@ -475,7 +408,7 @@ describe('codex CDX-5 — doctor health: warning outcomes surface without cadenc
     ];
     const check = computeNightlyQualityProbeHealthCheck(true, events);
     expect(check.status).toBe('warn');
-    expect(check.message).toMatch(/5 warning-worthy runs/); // rate_limited is cadence-only
+    expect(check.message).toMatch(/6 non-PASS runs/); // 7 total, 1 pass, 6 bad
     expect(check.message).toMatch(/pass=1/);
     expect(check.message).toMatch(/fail=1/);
     expect(check.message).toMatch(/error=1/);

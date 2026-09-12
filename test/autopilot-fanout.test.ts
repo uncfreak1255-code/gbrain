@@ -11,21 +11,18 @@
  * No engine; queue + engine are stubbed.
  */
 import { describe, test, expect } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import {
   readLastFullCycleAt,
   isSourceStale,
   selectSourcesForDispatch,
   resolveFanoutMax,
   dispatchPerSource,
-  readLiveAutopilotCycleSourceIds,
-  isSyncableSourcePath,
-  isAutopilotSyncableSource,
 } from '../src/commands/autopilot-fanout.ts';
-import { LAST_GLOBAL_AT_KEY } from '../src/core/cycle.ts';
-import type { FanoutOpts } from '../src/commands/autopilot-fanout.ts';
+import {
+  autopilotRemediationIdempotencyKey,
+  shouldRunAutopilotFullCycle,
+  shouldSleepHealthyAutopilot,
+} from '../src/commands/autopilot-remediation-policy.ts';
 import type { SourceRow, BrainEngine } from '../src/core/engine.ts';
 
 function src(id: string, last_full_cycle_at?: string | null, extra: Record<string, unknown> = {}): SourceRow {
@@ -67,10 +64,6 @@ describe('isSourceStale', () => {
     const past = new Date(NOW - 30 * 60_000).toISOString();
     expect(isSourceStale(src('a', past), NOW)).toBe(false);
   });
-  test('source-scoped cycle timestamp is fresh even without legacy full-cycle timestamp', () => {
-    const past = new Date(NOW - 30 * 60_000).toISOString();
-    expect(isSourceStale(src('a', null, { last_source_cycle_at: past }), NOW)).toBe(false);
-  });
   test('source cycled exactly at floor (60min) is stale (>=)', () => {
     const past = new Date(NOW - 60 * 60_000).toISOString();
     expect(isSourceStale(src('a', past), NOW)).toBe(true);
@@ -83,6 +76,66 @@ describe('isSourceStale', () => {
     const past = new Date(NOW - 6 * 60_000).toISOString();
     expect(isSourceStale(src('a', past), NOW, 5)).toBe(true);
     expect(isSourceStale(src('a', past), NOW, 60)).toBe(false);
+  });
+});
+
+describe('Autopilot remediation policy (#4046)', () => {
+  test('targeted remediation keys reopen in each dispatch interval', () => {
+    const recommendationKey = 'default:sync:deadbeef';
+    const firstSlot = '2026-08-13T06:00:00.000Z';
+    const nextSlot = '2026-08-13T06:05:00.000Z';
+
+    expect(autopilotRemediationIdempotencyKey(recommendationKey, firstSlot)).toBe(
+      'default:sync:deadbeef:autopilot:2026-08-13T06:00:00.000Z',
+    );
+    expect(autopilotRemediationIdempotencyKey(recommendationKey, nextSlot)).not.toBe(
+      autopilotRemediationIdempotencyKey(recommendationKey, firstSlot),
+    );
+  });
+
+  test('an overdue full cycle wins even while a small remediation plan exists', () => {
+    expect(shouldRunAutopilotFullCycle({
+      score: 94,
+      planLength: 2,
+      estimatedSeconds: 30,
+      minutesSinceLastFull: 61,
+    })).toBe(true);
+  });
+
+  test('a fresh small remediation plan stays targeted', () => {
+    expect(shouldRunAutopilotFullCycle({
+      score: 94,
+      planLength: 2,
+      estimatedSeconds: 30,
+      minutesSinceLastFull: 10,
+    })).toBe(false);
+  });
+
+  test('only a fresh healthy brain with no plan sleeps', () => {
+    expect(shouldSleepHealthyAutopilot(95, 0, 59)).toBe(true);
+    expect(shouldSleepHealthyAutopilot(95, 0, 60)).toBe(false);
+    expect(shouldSleepHealthyAutopilot(95, 1, 10)).toBe(false);
+  });
+
+  test('large, slow, or severely degraded plans still use the full cycle', () => {
+    expect(shouldRunAutopilotFullCycle({
+      score: 90,
+      planLength: 4,
+      estimatedSeconds: 30,
+      minutesSinceLastFull: 10,
+    })).toBe(true);
+    expect(shouldRunAutopilotFullCycle({
+      score: 90,
+      planLength: 2,
+      estimatedSeconds: 300,
+      minutesSinceLastFull: 10,
+    })).toBe(true);
+    expect(shouldRunAutopilotFullCycle({
+      score: 69,
+      planLength: 1,
+      estimatedSeconds: 30,
+      minutesSinceLastFull: 10,
+    })).toBe(true);
   });
 });
 
@@ -170,7 +223,7 @@ describe('resolveFanoutMax', () => {
 describe('dispatchPerSource — integration with stubbed engine + queue', () => {
   type AddedJob = { name: string; data: unknown; opts: Record<string, unknown> };
 
-  function makeStubs(sources: SourceRow[], opts?: { listThrows?: boolean; liveSourceIds?: string[] }) {
+  function makeStubs(sources: SourceRow[], opts?: { listThrows?: boolean }) {
     const added: AddedJob[] = [];
     let nextId = 100;
     const engine = {
@@ -178,13 +231,6 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
       listAllSources: async () => {
         if (opts?.listThrows) throw new Error('sources table missing');
         return sources;
-      },
-      getConfig: async (key: string) => key === LAST_GLOBAL_AT_KEY ? new Date().toISOString() : null,
-      executeRaw: async (sql: string) => {
-        if (String(sql).includes(`data->>'source_id'`)) {
-          return (opts?.liveSourceIds ?? []).map((source_id) => ({ source_id }));
-        }
-        return [];
       },
     } as unknown as BrainEngine;
     const queue = {
@@ -195,7 +241,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     } as unknown as Parameters<typeof dispatchPerSource>[1];
     const events: string[] = [];
     const logs: string[] = [];
-    const fanoutOpts: FanoutOpts = {
+    const fanoutOpts = {
       repoPath: '/tmp/brain',
       slot: '2026-05-22T12:00:00.000Z',
       timeoutMs: 600_000,
@@ -203,7 +249,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
       jsonMode: true,
       emit: (line: string) => events.push(line),
       log: (line: string) => logs.push(line),
-      isSourceSyncable: (_source: SourceRow) => true,
+      pathExists: (_path: string) => true,
     };
     return { engine, queue, added, events, logs, fanoutOpts };
   }
@@ -242,36 +288,92 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(sourceIds).toEqual(['alpha', 'beta']);
   });
 
-  test('unsyncable source is skipped without hiding stored source rows', async () => {
-    const { engine, queue, added, events, fanoutOpts } = makeStubs([src('missing'), src('valid')]);
-    fanoutOpts.isSourceSyncable = (source) => source.id === 'valid';
+  test('sources whose local_path is missing on this machine are skipped before dispatch', async () => {
+    const present = src('present');
+    present.local_path = '/present/brain';
+    const missing = src('foreign');
+    missing.local_path = '/foreign/brain';
+    const { engine, queue, added, events, fanoutOpts } = makeStubs([present, missing]);
+    fanoutOpts.pathExists = (p) => p === '/present/brain';
 
     const result = await dispatchPerSource(engine, queue, fanoutOpts);
 
-    expect(result.dispatched).toEqual(['valid']);
-    expect(result.skipped_unsyncable).toEqual(['missing']);
+    expect(result.dispatched).toEqual(['present']);
+    expect(result.skipped_unavailable_path).toEqual(['foreign']);
     expect(added.length).toBe(1);
-    expect((added[0].data as Record<string, unknown>).source_id).toBe('valid');
-    const skipEvent = events.find(e => e.includes('fanout_unsyncable_skipped'));
-    expect(skipEvent).toBeDefined();
-    expect(JSON.parse(skipEvent!).sources).toEqual(['missing']);
+    expect((added[0].data as Record<string, unknown>).source_id).toBe('present');
+    const skipped = events.find(e => e.includes('fanout_source_path_skipped'));
+    expect(skipped).toBeDefined();
+    expect(JSON.parse(skipped!).source_id).toBe('foreign');
   });
 
-  test('fanout does not enqueue missing owned remote clones', async () => {
+  test('missing managed remote clones still dispatch so sync can re-clone them', async () => {
     const managed = src('managed', undefined, {
       remote_url: 'https://github.com/example/repo',
       managed_clone: true,
     });
-    managed.local_path = '/path/that/does/not/exist';
+    managed.local_path = '/missing/managed';
     const { engine, queue, added, fanoutOpts } = makeStubs([managed]);
-    delete fanoutOpts.isSourceSyncable;
+    fanoutOpts.pathExists = () => false;
 
     const result = await dispatchPerSource(engine, queue, fanoutOpts);
 
-    expect(isAutopilotSyncableSource(managed)).toBe(true);
+    expect(result.dispatched).toEqual(['managed']);
+    expect(result.skipped_unavailable_path).toEqual([]);
+    expect(added.length).toBe(1);
+  });
+
+  test('all unavailable non-managed sources are handled but not called fresh', async () => {
+    const missing = src('foreign');
+    missing.local_path = '/foreign/brain';
+    const { engine, queue, added, fanoutOpts } = makeStubs([missing]);
+    fanoutOpts.pathExists = () => false;
+
+    const result = await dispatchPerSource(engine, queue, fanoutOpts);
+
     expect(result.dispatched).toEqual([]);
-    expect(result.skipped_unsyncable).toEqual(['managed']);
+    expect(result.skipped_unavailable_path).toEqual(['foreign']);
+    expect(result.all_sources_fresh).toBe(false);
+    expect(result.all_sources_handled).toBe(true);
     expect(added.length).toBe(0);
+  });
+
+  test('fresh plus unavailable sources are handled without implying every source is fresh', async () => {
+    const NOW = Date.now();
+    const fresh = src('fresh', new Date(NOW - 5 * 60_000).toISOString());
+    const missing = src('foreign');
+    missing.local_path = '/foreign/brain';
+    const { engine, queue, added, fanoutOpts } = makeStubs([fresh, missing]);
+    fanoutOpts.pathExists = (p) => p === fresh.local_path;
+
+    const result = await dispatchPerSource(engine, queue, fanoutOpts);
+
+    expect(result.skipped_fresh).toEqual(['fresh']);
+    expect(result.skipped_unavailable_path).toEqual(['foreign']);
+    expect(result.all_sources_fresh).toBe(false);
+    expect(result.all_sources_handled).toBe(true);
+    expect(added.length).toBe(0);
+  });
+
+  test('relative local_path rows are skipped by the same fan-out guard', () => {
+    const relative = src('legacy');
+    relative.local_path = 'notes/brain';
+    const result = selectSourcesForDispatch(
+      [src('present'), relative],
+      10,
+      Date.parse('2026-05-22T12:00:00.000Z'),
+      60,
+      new Map(),
+      { baseMin: 0, capMin: 120 },
+      () => true,
+    );
+
+    expect(result.dispatch.map(s => s.id)).toEqual(['present']);
+    expect(result.skippedUnavailablePath.map(s => s.id)).toEqual(['legacy']);
+    // The row carries the warning that excluded it (dispatchPerSource logs it
+    // directly rather than recomputing it with a second path probe).
+    expect(result.skippedUnavailablePath[0].skip_warning).toContain('legacy');
+    expect(result.skippedUnavailablePath[0].skip_warning).toContain('notes/brain');
   });
 
   test('pull: true only when source.config.remote_url is set', async () => {
@@ -286,6 +388,14 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect((byId.get('local')!.data as Record<string, unknown>).pull).toBe(false);
   });
 
+  test('pull: true when PGLite returns source.config as a JSON string', async () => {
+    const remote = src('remote');
+    remote.config = '{"remote_url":"https://github.com/x/y"}' as unknown as SourceRow['config'];
+    const { engine, queue, added, fanoutOpts } = makeStubs([remote]);
+    await dispatchPerSource(engine, queue, fanoutOpts);
+    expect((added[0].data as Record<string, unknown>).pull).toBe(true);
+  });
+
   test('fanoutMax cap: 3 sources, fanoutMax=1, 1 dispatched + 2 in skippedCap', async () => {
     const { engine, queue, added, fanoutOpts } = makeStubs([src('a'), src('b'), src('c')]);
     fanoutOpts.fanoutMax = 1;
@@ -293,164 +403,6 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(result.dispatched.length).toBe(1);
     expect(result.skipped_cap.length).toBe(2);
     expect(added.length).toBe(1);
-  });
-
-  test('live source-cycle jobs are skipped before applying fanout cap', async () => {
-    const { engine, queue, added, fanoutOpts } = makeStubs([src('a'), src('b'), src('c')], { liveSourceIds: ['a'] });
-    fanoutOpts.fanoutMax = 1;
-    const result = await dispatchPerSource(engine, queue, fanoutOpts);
-
-    expect(result.dispatched).toEqual(['b']);
-    expect(result.skipped_active).toEqual(['a']);
-    expect(result.skipped_cap).toEqual(['c']);
-    expect(added.length).toBe(1);
-    expect((added[0].data as Record<string, unknown>).source_id).toBe('b');
-  });
-
-  test('live source-cycle jobs defer global maintenance', async () => {
-    const added: AddedJob[] = [];
-    const engine = {
-      kind: 'postgres' as const,
-      listAllSources: async () => [src('a')],
-      getConfig: async () => null,
-      executeRaw: async (sql: string) => {
-        if (String(sql).includes(`data->>'source_id'`)) return [{ source_id: 'a' }];
-        return [];
-      },
-    } as unknown as BrainEngine;
-    const queue = {
-      add: async (name: string, data: unknown, opts: Record<string, unknown>) => {
-        added.push({ name, data, opts });
-        return { id: added.length, parent_job_id: opts.parent_job_id ?? null };
-      },
-    } as unknown as Parameters<typeof dispatchPerSource>[1];
-    const result = await dispatchPerSource(engine, queue, {
-      repoPath: '/tmp',
-      slot: 's',
-      timeoutMs: 1,
-      fanoutMax: 4,
-      jsonMode: true,
-      emit: () => {},
-      log: () => {},
-      isSourceSyncable: (_source: SourceRow) => true,
-    });
-
-    expect(result.skipped_active).toEqual(['a']);
-    expect(result.global_maintenance).toEqual({ dispatched: false, reason: 'deferred' });
-    expect(added.length).toBe(0);
-  });
-
-  test('live unsyncable source-cycle jobs still defer global maintenance', async () => {
-    const added: AddedJob[] = [];
-    const engine = {
-      kind: 'postgres' as const,
-      listAllSources: async () => [src('a')],
-      getConfig: async () => null,
-      executeRaw: async (sql: string) => {
-        if (String(sql).includes(`data->>'source_id'`)) return [{ source_id: 'a' }];
-        return [];
-      },
-    } as unknown as BrainEngine;
-    const queue = {
-      add: async (name: string, data: unknown, opts: Record<string, unknown>) => {
-        added.push({ name, data, opts });
-        return { id: added.length, parent_job_id: opts.parent_job_id ?? null };
-      },
-    } as unknown as Parameters<typeof dispatchPerSource>[1];
-    const result = await dispatchPerSource(engine, queue, {
-      repoPath: '/tmp',
-      slot: 's',
-      timeoutMs: 1,
-      fanoutMax: 4,
-      jsonMode: true,
-      emit: () => {},
-      log: () => {},
-      isSourceSyncable: (_source: SourceRow) => false,
-    });
-
-    expect(result.skipped_unsyncable).toEqual(['a']);
-    expect(result.skipped_active).toEqual(['a']);
-    expect(result.global_maintenance).toEqual({ dispatched: false, reason: 'deferred' });
-    expect(added.length).toBe(0);
-  });
-
-  test('source dispatch does not create a global maintenance parent in the same tick', async () => {
-    const added: AddedJob[] = [];
-    const engine = {
-      kind: 'postgres' as const,
-      listAllSources: async () => [src('a')],
-      getConfig: async () => null,
-      executeRaw: async () => [],
-    } as unknown as BrainEngine;
-    const queue = {
-      add: async (name: string, data: unknown, opts: Record<string, unknown>) => {
-        added.push({ name, data, opts });
-        return { id: added.length, idempotency_key: opts.idempotency_key };
-      },
-    } as unknown as Parameters<typeof dispatchPerSource>[1];
-    const result = await dispatchPerSource(engine, queue, {
-      repoPath: '/tmp',
-      slot: 's',
-      timeoutMs: 1,
-      fanoutMax: 4,
-      jsonMode: true,
-      emit: () => {},
-      log: () => {},
-      isSourceSyncable: () => true,
-    });
-
-    expect(result.dispatched).toEqual(['a']);
-    expect(result.skipped_active).toEqual([]);
-    expect(result.global_maintenance).toEqual({ dispatched: false, reason: 'deferred' });
-    expect(added.map((j) => j.name)).toEqual(['autopilot-cycle']);
-    expect(added[0]!.opts.parent_job_id).toBeUndefined();
-  });
-
-  test('cooldown-only source blockers still allow global maintenance', async () => {
-    const added: AddedJob[] = [];
-    const engine = {
-      kind: 'postgres' as const,
-      listAllSources: async () => [src('a')],
-      getConfig: async (key: string) => {
-        if (key === 'autopilot.failure_cooldown_min') return '60';
-        if (key === 'autopilot.failure_cooldown_cap_min') return '60';
-        if (key === LAST_GLOBAL_AT_KEY) return null;
-        return null;
-      },
-      executeRaw: async (sql: string) => {
-        const text = String(sql);
-        if (text.includes('fail_count')) {
-          return [{
-            source_id: 'a',
-            fail_count: 1,
-            last_failed_at: new Date().toISOString(),
-          }];
-        }
-        return [];
-      },
-    } as unknown as BrainEngine;
-    const queue = {
-      add: async (name: string, data: unknown, opts: Record<string, unknown>) => {
-        added.push({ name, data, opts });
-        return { id: added.length };
-      },
-    } as unknown as Parameters<typeof dispatchPerSource>[1];
-
-    const result = await dispatchPerSource(engine, queue, {
-      repoPath: '/tmp',
-      slot: 's',
-      timeoutMs: 1,
-      fanoutMax: 4,
-      jsonMode: true,
-      emit: () => {},
-      log: () => {},
-      isSourceSyncable: () => true,
-    });
-
-    expect(result.dispatched).toEqual([]);
-    expect(result.skipped_cooldown).toEqual(['a']);
-    expect(result.global_maintenance).toEqual({ dispatched: true, reason: 'stale', job_id: 1 });
-    expect(added.map((j) => j.name)).toEqual(['autopilot-global-maintenance']);
   });
 
   test('per-submit error does NOT abort the tick', async () => {
@@ -461,8 +413,6 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     const engine = {
       kind: 'postgres' as const,
       listAllSources: async () => sources,
-      getConfig: async (key: string) => key === LAST_GLOBAL_AT_KEY ? new Date().toISOString() : null,
-      executeRaw: async () => [],
     } as unknown as BrainEngine;
     const queue = {
       add: async (name: string, data: unknown, opts: Record<string, unknown>) => {
@@ -474,8 +424,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     } as unknown as Parameters<typeof dispatchPerSource>[1];
     const result = await dispatchPerSource(engine, queue, {
       repoPath: '/tmp', slot: 's', timeoutMs: 1, fanoutMax: 4, jsonMode: true,
-      emit: (l) => events.push(l), log: () => {},
-      isSourceSyncable: () => true,
+      emit: (l) => events.push(l), log: () => {}, pathExists: () => true,
     });
     // 2 of 3 dispatched (alpha + charlie); boom failed but didn't abort
     expect(result.dispatched.sort()).toEqual(['alpha', 'charlie']);
@@ -494,20 +443,61 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(parsed.pending.length).toBe(2);
   });
 
-  test('per-source submit MUST NOT pass maxWaiting (regression — coalesces all sources to one job)', async () => {
-    // Direct unit-stub queues can't enforce maxWaiting semantics (the
+  test('per-source submit MUST NOT pass maxWaiting, MUST pass maxPending: 1 (fan-out preserved + single-flight)', async () => {
+    // Direct unit-stub queues can't enforce backpressure semantics (the
     // production MinionQueue implementation does), so this catches the
     // regression by inspecting the submit opts at the dispatch boundary.
-    // If a future refactor re-adds maxWaiting:1 to the per-source path,
-    // the production fan-out would silently coalesce N sources to ONE
-    // waiting job per tick — killing the entire feature. The e2e test
-    // also catches this against a real queue, but this guard fires in
-    // unit tests too so the bug surfaces 100x faster.
+    // maxWaiting's NULL-as-wildcard source scope would coalesce N per-source
+    // jobs sharing name='autopilot-cycle' down to ONE waiting job — killing
+    // the fan-out. maxPending is required instead: its EXACT source scope
+    // keeps N independent per-source caps while suppressing cross-slot
+    // re-dispatch when a source's cycle is still in flight (upstream
+    // issue #2). The e2e test also pins both against a real queue.
     const { engine, queue, added, fanoutOpts } = makeStubs([src('a'), src('b'), src('c')]);
     await dispatchPerSource(engine, queue, fanoutOpts);
+    expect(added.length).toBe(3);
     for (const job of added) {
       expect(job.opts.maxWaiting).toBeUndefined();
+      expect(job.opts.maxPending).toBe(1);
     }
+  });
+
+  test('legacy fallback submit passes maxPending: 1 (cross-slot single-flight) and no maxWaiting', async () => {
+    const { engine, queue, added, fanoutOpts } = makeStubs([]);
+    await dispatchPerSource(engine, queue, fanoutOpts);
+    expect(added.length).toBe(1);
+    expect(added[0].opts.maxPending).toBe(1);
+    expect(added[0].opts.maxWaiting).toBeUndefined();
+  });
+
+  test('coalesced submissions are reported separately and emit dispatch_coalesced', async () => {
+    // Stub queue marks the second source's job as coalesced (already in
+    // flight) — the fanout must not claim it as a dispatch.
+    const added: Array<{ name: string; data: Record<string, unknown>; opts: Record<string, unknown> }> = [];
+    const events: string[] = [];
+    let nextId = 200;
+    const engine = {
+      kind: 'postgres' as const,
+      listAllSources: async () => [src('a'), src('b')],
+      getConfig: async () => null,
+      executeRaw: async () => [],
+    } as unknown as BrainEngine;
+    const queue = {
+      add: async (name: string, data: Record<string, unknown>, addOpts: Record<string, unknown>) => {
+        added.push({ name, data, opts: addOpts });
+        const coalesce = data.source_id === 'b';
+        return { id: nextId++, ...(coalesce ? { coalesced: true } : {}) };
+      },
+    } as unknown as Parameters<typeof dispatchPerSource>[1];
+    const result = await dispatchPerSource(engine, queue, {
+      repoPath: '/tmp/brain', slot: 's', timeoutMs: 1, fanoutMax: 4, jsonMode: true,
+      emit: (l: string) => events.push(l), log: () => {}, pathExists: () => true,
+    });
+    expect(result.dispatched).toEqual(['a']);
+    expect(result.coalesced).toEqual(['b']);
+    const kinds = events.map(e => JSON.parse(e).event);
+    expect(kinds).toContain('dispatched');
+    expect(kinds).toContain('dispatch_coalesced');
   });
 
   test('all-fresh tick dispatches nothing (no jobs added)', async () => {
@@ -518,69 +508,21 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     const result = await dispatchPerSource(engine, queue, fanoutOpts);
     expect(result.dispatched.length).toBe(0);
     expect(result.skipped_fresh.length).toBe(2);
+    expect(result.all_sources_fresh).toBe(true);
+    expect(result.all_sources_handled).toBe(true);
     expect(added.length).toBe(0);
   });
-});
 
-describe('readLiveAutopilotCycleSourceIds', () => {
-  test('returns non-empty source ids from non-terminal autopilot-cycle jobs', async () => {
-    const engine = {
-      executeRaw: async () => [
-        { source_id: 'alpha' },
-        { source_id: null },
-        { source_id: 'beta' },
-      ],
-    } as unknown as BrainEngine;
-    expect(await readLiveAutopilotCycleSourceIds(engine)).toEqual(new Set(['alpha', 'beta']));
-  });
+  test('a failed stale-source submission is not misclassified as all fresh', async () => {
+    const { engine, fanoutOpts } = makeStubs([src('stale')]);
+    const queue = {
+      add: async () => { throw new Error('queue unavailable'); },
+    } as unknown as Parameters<typeof dispatchPerSource>[1];
 
-  test('fails open to an empty set when job readback is unavailable', async () => {
-    const engine = {
-      executeRaw: async () => { throw new Error('old schema'); },
-    } as unknown as BrainEngine;
-    expect(await readLiveAutopilotCycleSourceIds(engine)).toEqual(new Set());
-  });
-});
+    const result = await dispatchPerSource(engine, queue, fanoutOpts);
 
-describe('isSyncableSourcePath', () => {
-  test('missing path and non-git directory are not syncable', () => {
-    expect(isSyncableSourcePath('/path/that/does/not/exist')).toBe(false);
-    expect(isSyncableSourcePath('/tmp')).toBe(false);
-  });
-
-  test('requires the source path itself to be the git root, not a subdirectory', () => {
-    const root = mkdtempSync(join(tmpdir(), 'gbrain-syncable-'));
-    try {
-      mkdirSync(join(root, '.git'));
-      mkdirSync(join(root, 'docs'));
-
-      expect(isSyncableSourcePath(root)).toBe(true);
-      expect(isSyncableSourcePath(join(root, 'docs'))).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
-
-describe('isAutopilotSyncableSource', () => {
-  test('allows a missing gbrain-owned remote clone so sync can reclone it', () => {
-    const ownedRemote = src('managed', undefined, {
-      remote_url: 'https://github.com/example/repo',
-      managed_clone: true,
-    });
-    ownedRemote.local_path = '/path/that/does/not/exist';
-
-    expect(isSyncableSourcePath(ownedRemote.local_path)).toBe(false);
-    expect(isAutopilotSyncableSource(ownedRemote)).toBe(true);
-  });
-
-  test('skips a missing unowned remote source instead of creating doomed jobs', () => {
-    const unownedRemote = src('federated', undefined, {
-      remote_url: 'https://github.com/example/repo',
-      federated: true,
-    });
-    unownedRemote.local_path = '/path/that/does/not/exist';
-
-    expect(isAutopilotSyncableSource(unownedRemote)).toBe(false);
+    expect(result.dispatched).toEqual([]);
+    expect(result.all_sources_fresh).toBe(false);
+    expect(result.all_sources_handled).toBe(false);
   });
 });

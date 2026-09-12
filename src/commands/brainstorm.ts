@@ -25,7 +25,8 @@ import {
 import { loadConfig } from '../core/config.ts';
 import { StructuredAgentError } from '../core/errors.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
-import { importAndWriteCanonicalPage, type WriteThroughResult } from '../core/write-through.ts';
+import { importFromContent } from '../core/import-file.ts';
+import { writePageThrough, type WriteThroughResult } from '../core/write-through.ts';
 import { randomBytes } from 'crypto';
 
 export interface BrainstormCliArgs {
@@ -359,30 +360,25 @@ export async function persistSavedIdea(
   args: { slug: string; content: string; sourceId?: string; provenanceVia: string },
 ): Promise<SaveOutcome> {
   const sourceId = args.sourceId ?? 'default';
+  let dbSaved = false;
+  let dbError: string | undefined;
   try {
-    const persisted = await importAndWriteCanonicalPage(engine, args.slug, {
+    await importFromContent(engine, args.slug, args.content, {
+      noEmbed: true,
       sourceId,
-      content: args.content,
-      frontmatterOverrides: {
-        source_kind: args.provenanceVia,
-        ingested_via: args.provenanceVia,
-      },
-      importOptions: {
-        noEmbed: true,
-        sourceId,
-        sourcePath: `${args.slug}.md`,
-        source_kind: args.provenanceVia,
-        ingested_via: args.provenanceVia,
-      },
+      sourcePath: `${args.slug}.md`,
     });
-    return { dbSaved: persisted.result.status !== 'error', writeThrough: persisted.writeThrough };
+    dbSaved = true;
   } catch (err) {
-    return {
-      dbSaved: false,
-      dbError: err instanceof Error ? err.message : String(err),
-      writeThrough: { written: false, skipped: 'page_not_found_after_write' },
-    };
+    dbError = err instanceof Error ? err.message : String(err);
   }
+  const writeThrough: WriteThroughResult = dbSaved
+    ? await writePageThrough(engine, args.slug, {
+        sourceId,
+        frontmatterOverrides: { source_kind: args.provenanceVia },
+      })
+    : { written: false, skipped: 'page_not_found_after_write' };
+  return { dbSaved, dbError, writeThrough };
 }
 
 /**

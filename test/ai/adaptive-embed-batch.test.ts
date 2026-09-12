@@ -28,18 +28,29 @@
  *      (excluding the OpenAI canonical fast-path recipe).
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
   configureGateway,
   resetGateway,
   embed,
   splitByTokenBudget,
+  capBatchItems,
   isTokenLimitError,
   __setEmbedTransportForTests,
   __getShrinkStateForTests,
 } from '../../src/core/ai/gateway.ts';
 import { AIConfigError, AITransientError } from '../../src/core/ai/errors.ts';
-import { SourceEmbeddingLeaseLostError } from '../../src/core/source-embedding-lease.ts';
+import { __setTestRecipesForTests } from '../../src/core/ai/recipes/index.ts';
+import type { Recipe } from '../../src/core/ai/types.ts';
+
+// The last test in this file leaves the gateway configured with a remote
+// provider + fake key and a REAL embed transport. Without a final reset,
+// that config leaks into whichever test file the shard runs next — the
+// first downstream embed then makes a live HTTP call (broke master shard 6
+// when #3022's new test file reshuffled shard composition). The bunfig
+// legacy-embedding preload only re-applies its default when the gateway is
+// UNCONFIGURED, so a configured-but-stale slot survives file boundaries.
+afterAll(() => resetGateway());
 
 // --------- Test helpers ---------
 
@@ -82,6 +93,31 @@ function configureGoogle(): void {
     embedding_model: 'google:gemini-embedding-001',
     embedding_dimensions: 768,
     env: { GOOGLE_GENERATIVE_AI_API_KEY: 'fake' },
+  });
+}
+
+// A recipe that declares an embedding touchpoint but omits every batch cap.
+// Every shipped recipe now declares one (google gained max_batch_tokens), so
+// the startup warning is exercised against this synthetic cap-less recipe —
+// injected into the registry only for the duration of the test that needs it.
+const CAPLESS_RECIPE: Recipe = {
+  id: 'synthetic-capless',
+  name: 'Synthetic cap-less (test fixture)',
+  tier: 'openai-compat',
+  implementation: 'openai-compatible',
+  touchpoints: {
+    embedding: {
+      models: ['synthetic-embed-1'],
+      default_dims: 768,
+    },
+  },
+};
+
+function configureCapless(): void {
+  configureGateway({
+    embedding_model: 'synthetic-capless:synthetic-embed-1',
+    embedding_dimensions: 768,
+    env: {},
   });
 }
 
@@ -140,6 +176,41 @@ describe('splitByTokenBudget (pure helper)', () => {
     const texts = ['a'.repeat(40_000)];
     expect(splitByTokenBudget(texts, 96_000, 0)).toEqual(splitByTokenBudget(texts, 96_000, 4));
     expect(splitByTokenBudget(texts, 96_000, -1)).toEqual(splitByTokenBudget(texts, 96_000, 4));
+  });
+});
+
+describe('capBatchItems (hard COUNT cap helper)', () => {
+  test('batch at or under the cap is returned as a single batch (no copy of contents)', () => {
+    const texts = ['a', 'b', 'c'];
+    expect(capBatchItems(texts, 3)).toEqual([texts]);
+    expect(capBatchItems(texts, 10)).toEqual([texts]);
+  });
+
+  test('oversized batch splits into chunks of at most maxItems', () => {
+    const texts = Array.from({ length: 100 }, (_, i) => `t${i}`);
+    const result = capBatchItems(texts, 32);
+    expect(result.map(b => b.length)).toEqual([32, 32, 32, 4]);
+    expect(result.every(b => b.length <= 32)).toBe(true);
+  });
+
+  test('exact multiple splits evenly with no trailing empty batch', () => {
+    const texts = Array.from({ length: 64 }, (_, i) => `t${i}`);
+    expect(capBatchItems(texts, 32).map(b => b.length)).toEqual([32, 32]);
+  });
+
+  test('order is preserved across the split (concatenation round-trips)', () => {
+    const texts = Array.from({ length: 70 }, (_, i) => `t${i}`);
+    expect(capBatchItems(texts, 32).flat()).toEqual(texts);
+  });
+
+  test('maxItems <= 0 is a no-op (single batch) — never produces empty/infinite batches', () => {
+    const texts = ['a', 'b', 'c'];
+    expect(capBatchItems(texts, 0)).toEqual([texts]);
+    expect(capBatchItems(texts, -5)).toEqual([texts]);
+  });
+
+  test('empty input returns a single empty batch', () => {
+    expect(capBatchItems([], 32)).toEqual([[]]);
   });
 });
 
@@ -211,65 +282,6 @@ describe('embed() recursion via stubbed transport', () => {
     const callLengths = stub.mock.calls.map(([arg]) => (arg as { values: string[] }).values.length);
     expect(callLengths.sort((a, b) => a - b)).toEqual([25, 25, 50]);
     expect(result).toHaveLength(50);
-  });
-
-  test('reacquires the provider fence for the failed batch and every recursive half', async () => {
-    configureVoyage();
-
-    const fencedBatchSizes: number[] = [];
-    const transportSignals: Array<AbortSignal | undefined> = [];
-    const stub = mock(async ({ values, abortSignal }: {
-      values: string[];
-      abortSignal?: AbortSignal;
-    }) => {
-      transportSignals.push(abortSignal);
-      if (values.length === 8) throw VOYAGE_TOKEN_LIMIT_ERROR;
-      return fakeEmbeddings(values, 1024);
-    });
-    __setEmbedTransportForTests(stub as any);
-
-    const result = await embed(
-      Array.from({ length: 8 }, (_, i) => `fenced-${i}`),
-      {
-        withProviderSubmission: async (texts, submit) => {
-          fencedBatchSizes.push(texts.length);
-          return submit(new AbortController().signal);
-        },
-      },
-    );
-
-    expect(result).toHaveLength(8);
-    expect(fencedBatchSizes).toEqual([8, 4, 4]);
-    expect(transportSignals).toHaveLength(3);
-    expect(transportSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
-  });
-
-  test('lease loss after a failed request wins and prevents recursive provider retries', async () => {
-    configureVoyage();
-
-    let fenceCalls = 0;
-    const stub = mock(async () => { throw VOYAGE_TOKEN_LIMIT_ERROR; });
-    __setEmbedTransportForTests(stub as any);
-
-    await expect(embed(['left', 'right'], {
-      withProviderSubmission: async (_texts, submit) => {
-        fenceCalls++;
-        try {
-          return await submit(new AbortController().signal);
-        } catch (cause) {
-          // Models a drain winning between provider settlement and durable
-          // lease completion. The stale provider error must not trigger the
-          // gateway's token-limit recursion after ownership was lost.
-          throw new SourceEmbeddingLeaseLostError(
-            'provider output discarded after source drain',
-            { cause },
-          );
-        }
-      },
-    })).rejects.toBeInstanceOf(SourceEmbeddingLeaseLostError);
-
-    expect(fenceCalls).toBe(1);
-    expect(stub).toHaveBeenCalledTimes(1);
   });
 
   test('preserves input order across halving boundaries', async () => {
@@ -444,20 +456,22 @@ describe('startup warning for recipes missing max_batch_tokens', () => {
   beforeEach(() => resetGateway());
 
   test('configured missing-cap recipe warns once; unrelated recipes stay quiet', () => {
+    __setTestRecipesForTests([CAPLESS_RECIPE]);
     const warnings: string[] = [];
     const original = console.warn;
     console.warn = (msg: string) => warnings.push(String(msg));
     try {
       configureOpenAI();
       expect(warnings.length).toBe(0);
-      configureGoogle();
+      configureCapless();
       const firstCallCount = warnings.length;
-      // Reconfigure: the warning should NOT re-fire for the same recipes
+      // Reconfigure: the warning should NOT re-fire for the same recipe
       // within one process (we already told the operator).
-      configureGoogle();
+      configureCapless();
       expect(warnings.length).toBe(firstCallCount);
     } finally {
       console.warn = original;
+      __setTestRecipesForTests([]);
     }
 
     // The warning text should match the documented contract.
@@ -466,11 +480,12 @@ describe('startup warning for recipes missing max_batch_tokens', () => {
     );
     expect(contractMatch.length).toBe(1);
 
-    // Voyage declares max_batch_tokens → suppressed. OpenAI is the
-    // canonical fast-path recipe → also suppressed by id. Both must be
-    // absent from the warnings.
+    // Voyage + google declare max_batch_tokens → suppressed. OpenAI is the
+    // canonical fast-path recipe → also suppressed by id. Only the synthetic
+    // cap-less recipe warns.
     expect(warnings.find(w => w.includes('"voyage"'))).toBeUndefined();
     expect(warnings.find(w => w.includes('"openai"'))).toBeUndefined();
-    expect(warnings.find(w => w.includes('"google"'))).toBeDefined();
+    expect(warnings.find(w => w.includes('"google"'))).toBeUndefined();
+    expect(warnings.find(w => w.includes('"synthetic-capless"'))).toBeDefined();
   });
 });

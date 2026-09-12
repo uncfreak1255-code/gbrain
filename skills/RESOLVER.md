@@ -2,6 +2,13 @@
 
 This is the dispatcher. Skills are the implementation. **Read the skill file before acting.** If two skills could match, read both. They are designed to chain (e.g., ingest then enrich for each entity).
 
+**Routing contract:** each skill's frontmatter `triggers:` array is the
+authoritative routing signal — harnesses match inbound messages against it
+(see `skills/_AGENT_README.md`). This file is the human-readable dispatch
+map of the same routing: one place to scan every skill and its trigger
+phrases. If a row here and a skill's frontmatter disagree, the frontmatter
+wins; fix the row.
+
 ## Always-on (every message)
 
 | Trigger | Skill |
@@ -49,6 +56,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | "bulk ingest", "bulk import", "ingest all", "ingestion pipeline" | `skills/bulk-ingestion/SKILL.md` |
 | "ingest this publication", "ingest this whole blog", "ingest this feed", "ingest this newsletter archive" | `skills/blog-ingest/SKILL.md` |
 | "chatgpt export", "claude export", "perplexity export", "conversation history" | `skills/conversation-archive/SKILL.md` |
+| "connect my chatgpt", "connect my claude account", "sync my chat history", "chatgpt oauth", "auto-import my chats", "keep my conversations synced" | `skills/chat-connectors/SKILL.md` |
 
 ## Thinking skills (from GStack)
 
@@ -60,8 +68,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | "Retro", "what shipped", "retrospective" | GStack: retro |
 
 > These skills come from GStack. If GStack is installed, the agent reads them directly.
-> If not, use native agent reasoning for these tasks. Missing GStack skills do
-> not block coding, debugging, review, or release work. GBrain skills remain usable.
+> If not, brain-only mode still works (brain skills function without thinking skills).
 
 ## Operational
 
@@ -70,16 +77,18 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | Task add/remove/complete/defer/review | `skills/daily-task-manager/SKILL.md` |
 | Morning prep, meeting context, day planning | `skills/daily-task-prep/SKILL.md` |
 | Daily briefing, "what's happening today" | `skills/briefing/SKILL.md` |
+| "connect gmail" / "connect google", "who is waiting on me", "open loops", "unanswered email" | `skills/google-loops/SKILL.md` |
 | Cron scheduling, quiet hours, job staggering | `skills/cron-scheduler/SKILL.md` |
 | "get more out of gbrain", "is my brain set up right", "weekly brain checkup", "advise me on my brain", "gbrain advisor" | `skills/gbrain-advisor/SKILL.md` |
 | Save or load reports | `skills/reports/SKILL.md` |
-| "Create a skill", "extend this skill" | `skills/skill-creator/SKILL.md` |
-| "Optimize this skill", "improve this skill", "make the skill better", "run skillopt" | `skills/skill-optimizer/SKILL.md` |
+| "Create a skill", "improve this skill" | `skills/skill-creator/SKILL.md` |
 | "Skillify this", "is this a skill?", "make this proper" | `skills/skillify/SKILL.md` |
+| "optimize this skill", "tune the skill against the benchmark", "run skillopt", "make the skill better" | `skills/skill-optimizer/SKILL.md` |
 | "Compress my resolver", "AGENTS.md too large", "RESOLVER.md too big", "functional area dispatcher", "shrink routing table" | `skills/functional-area-resolver/SKILL.md` |
 | "Is gbrain healthy?", morning health check, skillpack-check | `skills/skillpack-check/SKILL.md` |
 | "harvest this skill into gbrain", "publish this skill to gbrain", "lift this skill upstream", "share this skill with other gbrain clients", "promote my skill to gbrain" | `skills/skillpack-harvest/SKILL.md` |
 | Post-restart health + auto-fix, "did the container restart break anything", smoke test | `skills/smoke-test/SKILL.md` |
+| `GBRAIN_DB_ACCESS`, "gbrain database error", "gbrain connection refused", "brain database is down", "cannot reach the brain database", "fix gbrain database access", "repair gbrain postgres" | `skills/db-repair/SKILL.md` |
 | Cross-modal review, second opinion | `skills/cross-modal-review/SKILL.md` |
 | "Validate skills", skill health check | `skills/testing/SKILL.md` |
 | Webhook setup, external event processing | `skills/webhook-transforms/SKILL.md` |
@@ -90,26 +99,20 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | "context audit", "context diet", "system prompt audit", "prompt compression" | `skills/context-audit/SKILL.md` |
 | "skill autobench", "autobench", "write the eval from usage history", "synthesize an eval for this skill" | `skills/skill-autobench/SKILL.md` |
 
-## Repo-local loop defaults
-
-| Trigger | Skill |
-|---------|-------|
-| `gbrain doctor` warnings, remediation triage, daily brain health loop | `skills/maintain/SKILL.md` + `docs/guides/loop-routing.md` (doctor health loop) |
-| docs drift, docs pass, refresh docs from code, regenerate `llms.txt`, refresh `llms-full.txt` | Use the docs and llms loop in `docs/guides/loop-routing.md`, then run the repo-native proof path |
-| "is Dream helping?", Dream quality, widen Dream, Dream tuning, bounded Dream run | `skills/maintain/SKILL.md` + `docs/guides/loop-routing.md` (Dream value loop) |
-| fresh clone, setup docs may lie, install promise, onboarding proof | `skills/setup/SKILL.md` + `docs/guides/loop-routing.md` (fresh clone loop) |
-| upstream drift, fork patch queue, should we keep this downstream patch | `docs/operations/fork-upstream-policy.md` (existing propagation-compliance loop) |
-
 ## Setup & migration
 
 | Trigger | Skill |
 |---------|-------|
 | "Set up GBrain", first boot | `skills/setup/SKILL.md` |
-| "Now what?", "fill my brain", "cold start", "bootstrap", "import my data", "what should I import first" | `skills/cold-start/SKILL.md` |
+| "Now what?", "fill my brain", "cold start", "bootstrap my data", "import my data", "what should I import first" | `skills/cold-start/SKILL.md` |
+| "agent workspace bootstrap", "install gbrain into this agent workspace", "gbrain bootstrap", "paste-in install", "set up the maintenance sweep" | Run `gbrain bootstrap` (paste-in workspace install: interview + identity files + hooks + sweep). See `docs/guides/bootstrap.md` |
+| "wire this box's coding agents to the brain", "framework-spawned sessions need brain access", "wire gbrain hooks without a workspace", "hook Claude Code/Codex to the running serve" | Run `gbrain bootstrap harness --yes` (machine-level wiring to a running `serve --http`: scoped token + user-scope MCP + headless pre-approval + hooks; no agent.json). See the "Local harness mode" section of `docs/guides/bootstrap.md` |
+| "which gbrain engine", "pglite or postgres", "gbrain engine status", "upgrade to postgres", "switch gbrain to postgres", "install postgres for gbrain", "move my brain to supabase", "set up postgres for the brain" | `skills/postgres-adopt/SKILL.md` |
 | "Migrate from Obsidian/Notion/Logseq" | `skills/migrate/SKILL.md` |
+| "Switch embedding provider" / "migrate my embeddings" / "switch reranker" / "ZeroEntropy" / "provider_sunset" / "search stopped working after a provider shutdown" | `skills/migrations/v0.46.3.0.md` |
 | Brain health check, maintenance run | `skills/maintain/SKILL.md` |
 | "Extract links", "build link graph", "populate timeline" | `skills/maintain/SKILL.md` (extraction sections) |
-| "Run dream", "process today's session", "synthesize my conversations", "consolidate yesterday's conversations", "what patterns did you see", "did the dream cycle run" | `skills/maintain/SKILL.md` (dream cycle section) |
+| "Run dream", "process today's session", "synthesize my conversations", "consolidate yesterday's conversations", "what patterns did you see", "did the dream cycle run", "retriage the backlog", "re-score the triage" | `skills/maintain/SKILL.md` (dream cycle section) |
 | "Brain health", "what features am I missing", "brain score" | Run `gbrain features --json` |
 | "Set up autopilot", "run brain maintenance", "keep brain updated" | Run `gbrain autopilot --install --repo ~/brain` |
 | "Upgrade gbrain", "update gbrain", "gbrain update available", `UPGRADE_AVAILABLE`, "is gbrain up to date" | `skills/gbrain-upgrade/SKILL.md` |
@@ -134,7 +137,7 @@ When multiple skills could match:
 3. If the user mentions a person/company, check if enrich or query fits better
 4. Chaining is explicit in each skill's Phases section
 5. When in doubt, ask the user (see `skills/ask-user/SKILL.md` for the choice-gate pattern)
-6. Publication/feed URL or a whole blog archive → blog-ingest; a single article/tweet URL → idea-ingest; video/audio/PDF → media-ingest; AI-chat exports or session transcripts → conversation-archive
+6. Publication/feed URL or a whole blog archive → blog-ingest; a single article/tweet URL → idea-ingest; video/audio/PDF → media-ingest; AI-chat export FILE or session transcripts → conversation-archive; CONNECT an account for live/automatic sync ("connect my chatgpt", "keep synced") → chat-connectors
 7. Identity/personality content (who the agent is, voice, persona) → soul-audit; token/structure hygiene of the always-loaded context stack → context-audit
 8. "Why is X slow/stale" measurement-first ops triage → measure-before-you-fix; code debugging ("why is this function broken") → investigate (GStack)
 
@@ -166,4 +169,4 @@ These apply to ALL brain-writing skills:
 | "make pdf from brain", "brain pdf", "convert brain page to pdf", "publish this page as pdf", "export brain page" | `skills/brain-pdf/SKILL.md` |
 | "voice note", "ingest this voice memo", "transcribe and file", "voice note ingest", "save this audio note" | `skills/voice-note-ingest/SKILL.md` |
 | "add a page type", "add a type to my schema", "schema author", "schema mutate", "schema pack add", "my brain has untyped pages", "propose new types from my corpus", "backfill page types", "evolve my schema", "researcher type", "make X an expert type" (dispatcher for: gbrain schema active/list/show/validate/graph/lint/stats/explain/use/downgrade/reload/init/fork/edit/diff/add-type/remove-type/update-type/add-alias/remove-alias/add-prefix/remove-prefix/add-link-type/remove-link-type/set-extractable/set-expert-routing/detect/suggest/review-candidates/review-orphans/sync) | `skills/schema-author/SKILL.md` |
-| "unify my types", "migrate to gbrain-base-v2", "94 types to 14", "apply canonical taxonomy", "clean up my page types", "pack upgrade", "shrink type proliferation", "consolidate page types", "retype pages to canonical" (dispatcher for: gbrain onboard --check, gbrain onboard --check --explain, gbrain jobs submit unify-types, gbrain pages restore) | `skills/schema-unify/SKILL.md` |
+| "unify my types", "migrate to gbrain-base-v2", "94 types to 14", "apply canonical taxonomy", "clean up my page types", "pack upgrade", "shrink type proliferation", "consolidate page types", "retype pages to canonical" (dispatcher for: gbrain onboard --check, gbrain onboard --check --explain, gbrain jobs submit unify-types, gbrain restore) | `skills/schema-unify/SKILL.md` |

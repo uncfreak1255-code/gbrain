@@ -52,38 +52,22 @@ Hard rules:
   rather than asserting it as established. Confidence is part of the data.
 - If two takes contradict (different holders, opposite claims), surface BOTH in a "Conflicts"
   section. Never silently pick one.
-- If you cannot answer because the brain doesn't contain the relevant data, say so in the
-  "Gaps" section. List the specific missing pieces. Do not make up answers.
+- If the brain doesn't contain data needed to answer, do NOT make it up. Record each
+  missing piece in the structured "gaps" array (below), not as a section in the answer prose.
 - Never instruct the user (no "you should" / "I recommend X"). The brain reports; the user decides.
 - Output MUST be valid JSON matching the schema below. No prose outside JSON.
 
 Output schema:
 {
-  "answer": "<markdown body. Inline citations like [slug#row] or [slug]. Sections: Answer, Conflicts (optional), Gaps>",
+  "answer": "<markdown body. Inline citations like [slug#row] or [slug]. Sections: Answer, Conflicts (optional). Do NOT add a Gaps section here — gaps belong in the gaps array.>",
   "citations": [
     {"page_slug": "people/alice-example", "row_num": 3, "citation_index": 1},
     {"page_slug": "companies/acme-example", "row_num": null, "citation_index": 2}
   ],
-  "gaps": ["specific missing data point 1", "specific missing data point 2"]
+  "gaps": ["a specific, self-contained missing-or-stale data point, citing the [slug] where relevant", "another specific gap"]
 }
 
-The "row_num" field is required for take citations and MUST be null for page-only citations.
-
-Preserve the scope of the evidence. A speaker not knowing a date does not establish that no date is
-scheduled. A report not containing evidence of an event does not establish that the event did not
-happen. Distinguish a reported claim, an explicit observation, and a fact about what the speaker
-knows. Keep explicit negative observations and settled decisions definite; keep the condition on a
-conditional commitment. Do not infer completed actions, implementation state, or user commitments
-from an assistant's future intentions. Distinguish current measured quantities from future targets
-and decision thresholds. Put facts missing from the evidence in gaps without asserting they are
-absent from the world.
-Answer only the questions asked; omit unrelated assistant narration. Every claim about missing
-evidence must name the scope: "not shown in the supplied evidence", not "does not exist" or "has not
-happened". Retrieved excerpts do not establish absence across the whole brain. For example, "I do
-not know the launch date" supports "the speaker does not know; a scheduled date may still exist",
-never "no launch date is established". "Assistant: I will book the room" supports "the assistant
-intends to book it; booking status is not shown", never "the room has not been booked". A
-conditional future event is not proof that the event is scheduled.`;
+The "row_num" field is required for take citations and MUST be null for page-only citations.`;
 
 export function buildThinkSystemPrompt(opts: ThinkSystemPromptOpts = {}): string {
   const lines = [THINK_SYSTEM_PROMPT_BASE];
@@ -99,7 +83,7 @@ export function buildThinkSystemPrompt(opts: ThinkSystemPromptOpts = {}): string
     lines.push(`\nThis is a temporal question. Order key claims chronologically when it helps the reader.`);
   }
   if (opts.willSave) {
-    lines.push(`\nThis synthesis will be persisted as a brain page. Aim for completeness — cover Answer, Conflicts, and Gaps thoroughly.`);
+    lines.push(`\nThis synthesis will be persisted as a brain page. Aim for completeness — cover the Answer and any Conflicts thoroughly, and list every missing piece in the structured "gaps" array.`);
   }
   if (opts.withCalibration) {
     lines.push(
@@ -108,7 +92,7 @@ export function buildThinkSystemPrompt(opts: ThinkSystemPromptOpts = {}): string
     lines.push(`- Name both the user's PRIOR (default reasoning) AND the COUNTER-PRIOR from their hedged-domain self.`);
     lines.push(`- Reference active bias tags by name when relevant ("this fits the over-confident-geography pattern").`);
     lines.push(`- Do NOT silently substitute the debiased answer. ALWAYS surface both priors transparently.`);
-    lines.push(`- Track-record sentences belong in a "Calibration" section in the answer body, between Conflicts and Gaps.`);
+    lines.push(`- Track-record sentences belong in a "Calibration" section in the answer body, after the Conflicts section (if present).`);
   }
   return lines.join('\n');
 }

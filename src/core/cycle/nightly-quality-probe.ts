@@ -31,18 +31,17 @@ const NIGHTLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Default max spend per run; matches eval-cross-modal --max-usd default. */
 const DEFAULT_MAX_USD = 5.0;
 
-/** Default benchmark gate: tolerate a few judged misses, fail on broad regression. */
-const DEFAULT_MIN_PASS_RATE = 0.7;
-
 /** Committed fixture used as the probe's input dataset. */
 const NIGHTLY_FIXTURE_REL_PATH = 'test/fixtures/longmemeval-nightly.jsonl';
 
-/** Nightly LongMemEval answers are memory lookups, not cited essays. */
-export const NIGHTLY_LONGMEMEVAL_DIMENSIONS: string[] = [
-  'ANSWER_MATCH — Does the output match the expected answer in the task?',
-  'QUESTION_FOCUS — Does the output answer only the asked question without drift?',
-  'SPECIFICITY — Is the answer concrete enough to be useful?',
-];
+export const NIGHTLY_PROBE_SEARCH_CONFIG_KEYS: ReadonlyArray<string> = Object.freeze([
+  'search.mode',
+  'search.reranker.enabled',
+  'search.reranker.model',
+  'search.reranker.top_n_in',
+  'search.reranker.top_n_out',
+  'search.reranker.timeout_ms',
+]);
 
 /** Result reported back to the cycle dispatcher / Minion handler. */
 export interface NightlyProbeResult {
@@ -58,45 +57,56 @@ export interface NightlyProbeDeps {
   hasEmbeddingProvider: () => boolean | Promise<boolean>;
   /** Resolves the cost cap (config override OR DEFAULT_MAX_USD). */
   resolveMaxUsd: () => number | Promise<number>;
-  /** Resolves the benchmark pass-rate threshold (0-1). */
-  resolveMinPassRate?: () => number | Promise<number>;
   /** Resolves the repo root so we can find the committed fixture. */
   resolveRepoRoot: () => string | Promise<string>;
+  /** Resolves live search-mode/reranker overrides copied into the isolated benchmark brain. */
+  resolveSearchConfigSnapshot?: () => Record<string, string> | Promise<Record<string, string>>;
   /** Runs the longmemeval command; returns the path to the JSONL output. */
-  runLongMemEval: (args: {
-    fixturePath: string;
-    outputPath: string;
-    model?: string;
-    extractorModel?: string;
-    rerankerModel?: string;
-    rerankerEnabled?: boolean;
-    rerankerTimeoutMs?: number;
-    rerankerTopNIn?: number;
-    rerankerTopNOut?: number | null;
-  }) => Promise<void>;
+  runLongMemEval: (args: { fixturePath: string; outputPath: string; searchConfigSnapshot?: Record<string, string> }) => Promise<void>;
   /** Runs the cross-modal batch; returns exit code (0/1/2). */
   runCrossModalBatch: (args: {
     batchPath: string;
     summaryPath: string;
     maxUsd: number;
-    slotAModel?: string;
-    slotBModel?: string;
-    slotCModel?: string;
-    dimensions?: string[];
-  }) => Promise<{ exitCode: number; summary?: { total?: number; pass_count: number; fail_count: number; inconclusive_count: number; error_count: number; est_cost_usd: number; verdict: string } }>;
+  }) => Promise<{ exitCode: number; summary?: { pass_count: number; fail_count: number; inconclusive_count: number; error_count: number; est_cost_usd: number; verdict: string } }>;
   /** Now provider — overridable for tests of the 24h rate limit. */
   now: () => Date;
-  /** Optional cross-modal judge model overrides. Omit to use eval defaults. */
-  slotAModel?: string;
-  slotBModel?: string;
-  slotCModel?: string;
-  longMemEvalModel?: string;
-  longMemEvalExtractorModel?: string;
-  longMemEvalRerankerModel?: string;
-  longMemEvalRerankerEnabled?: boolean;
-  longMemEvalRerankerTimeoutMs?: number;
-  longMemEvalRerankerTopNIn?: number;
-  longMemEvalRerankerTopNOut?: number | null;
+}
+
+/**
+ * Dual-plane flag resolution (same precedent as `mcp.publish_skills` in
+ * serve-http.ts): the DB config row — what `gbrain config set` writes —
+ * wins when present; the file plane (~/.gbrain/config.json) is the
+ * fallback. Doctor's paste-ready enable hint says `gbrain config set
+ * autopilot.nightly_quality_probe.enabled true`, so the gate MUST read
+ * the DB plane — a file-only read turns that hint into a silent no-op.
+ */
+export function resolveProbeEnabled(
+  dbVal: string | null | undefined,
+  fileVal: unknown,
+): boolean {
+  if (dbVal != null) return dbVal === 'true';
+  return fileVal === true;
+}
+
+/**
+ * Same dual-plane rule for the per-run cost cap. Malformed or negative
+ * values on either plane fall through to the next plane / the default.
+ */
+export function resolveProbeMaxUsd(
+  dbVal: string | null | undefined,
+  fileVal: unknown,
+  fallback: number = DEFAULT_MAX_USD,
+): number {
+  if (dbVal != null) {
+    const n = Number(dbVal);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  if (fileVal != null) {
+    const n = Number(fileVal);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return fallback;
 }
 
 /**
@@ -105,12 +115,11 @@ export interface NightlyProbeDeps {
  */
 export function shouldRunNightly(
   now: Date,
-  recentEvents: ReadonlyArray<{ ts: string; outcome?: string }>,
+  recentEvents: ReadonlyArray<{ ts: string }>,
   windowMs: number = NIGHTLY_WINDOW_MS,
 ): { run: true } | { run: false; reason: 'rate_limited' } {
   const cutoff = now.getTime() - windowMs;
   for (const ev of recentEvents) {
-    if (ev.outcome === 'rate_limited') continue;
     const ts = Date.parse(ev.ts);
     if (Number.isFinite(ts) && ts >= cutoff) {
       return { run: false, reason: 'rate_limited' };
@@ -139,21 +148,17 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
     return { outcome: 'disabled', exit_code: 0, detail: 'feature flag off' };
   }
 
-  // 24h rate limit — skip + audit "rate_limited".
+  // 24h rate limit — skip WITHOUT an audit row. The autopilot loop invokes
+  // the probe every cycle (~5-10 min), so all but one invocation per day
+  // lands here; logging each skip floods the audit file (~hundreds of
+  // rows/day) and — because doctor treats any non-pass outcome as bad
+  // signal — flips nightly_quality_probe_health to a permanent WARN the
+  // moment the probe is enabled. A skip is a non-event: the real runs are
+  // the signal, and their rows are what gates the next 24h window.
   const now = deps.now();
   const recent = readRecentQualityProbeEvents(2, now); // 2-day window is enough for 24h check
   const decision = shouldRunNightly(now, recent);
   if (!decision.run) {
-    logQualityProbeEvent({
-      outcome: 'rate_limited',
-      exit_code: 0,
-      pass_count: 0,
-      fail_count: 0,
-      inconclusive_count: 0,
-      error_count: 0,
-      est_cost_usd: 0,
-      detail: 'already ran within 24h window',
-    });
     return { outcome: 'rate_limited', exit_code: 0, detail: 'already ran within 24h' };
   }
 
@@ -162,7 +167,7 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
   if (!hasEmbed) {
     process.stderr.write(
       `[nightly-quality-probe] no embedding provider configured; skipping. ` +
-      `Configure OPENAI_API_KEY / VOYAGE_API_KEY / ZEROENTROPY_API_KEY and re-enable.\n`,
+      `Configure VOYAGE_API_KEY / OPENAI_API_KEY and re-enable.\n`,
     );
     logQualityProbeEvent({
       outcome: 'no_embedding_key',
@@ -197,9 +202,6 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
 
   const fixtureSha8 = sha8File(fixturePath);
   const maxUsd = (await deps.resolveMaxUsd()) ?? DEFAULT_MAX_USD;
-  const minPassRate = clampPassRate(
-    deps.resolveMinPassRate ? await deps.resolveMinPassRate() : DEFAULT_MIN_PASS_RATE,
-  );
 
   // Tempdir for the per-question hypothesis JSONL + batch summary.
   const workDir = fs.mkdtempSync(path.join(tmpdir(), 'nightly-probe-'));
@@ -207,31 +209,19 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
   const summaryPath = path.join(workDir, 'summary.json');
 
   try {
-    await deps.runLongMemEval({
-      fixturePath,
-      outputPath: lmeOutPath,
-      model: deps.longMemEvalModel,
-      extractorModel: deps.longMemEvalExtractorModel,
-      rerankerModel: deps.longMemEvalRerankerModel,
-      rerankerEnabled: deps.longMemEvalRerankerEnabled,
-      rerankerTimeoutMs: deps.longMemEvalRerankerTimeoutMs,
-      rerankerTopNIn: deps.longMemEvalRerankerTopNIn,
-      rerankerTopNOut: deps.longMemEvalRerankerTopNOut,
-    });
+    const searchConfigSnapshot = deps.resolveSearchConfigSnapshot
+      ? await deps.resolveSearchConfigSnapshot()
+      : undefined;
+    await deps.runLongMemEval({ fixturePath, outputPath: lmeOutPath, searchConfigSnapshot });
     const { exitCode, summary } = await deps.runCrossModalBatch({
       batchPath: lmeOutPath,
       summaryPath,
       maxUsd,
-      slotAModel: deps.slotAModel,
-      slotBModel: deps.slotBModel,
-      slotCModel: deps.slotCModel,
-      dimensions: NIGHTLY_LONGMEMEVAL_DIMENSIONS,
     });
 
     const outcome: NightlyProbeResult['outcome'] = (() => {
       if (summary) {
         if (summary.verdict === 'pass') return 'pass';
-        if (summary.verdict === 'fail' && meetsPassRate(summary, minPassRate)) return 'pass';
         if (summary.verdict === 'fail') return 'fail';
         if (summary.verdict === 'inconclusive') return 'inconclusive';
         if (summary.verdict === 'error') return 'error';
@@ -243,25 +233,16 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
 
     logQualityProbeEvent({
       outcome,
-      exit_code: outcome === 'pass' ? 0 : exitCode,
+      exit_code: exitCode,
       pass_count: summary?.pass_count ?? 0,
       fail_count: summary?.fail_count ?? 0,
       inconclusive_count: summary?.inconclusive_count ?? 0,
       error_count: summary?.error_count ?? 0,
       est_cost_usd: summary?.est_cost_usd ?? 0,
       fixture_sha8: fixtureSha8,
-      detail: summary?.verdict === 'fail' && outcome === 'pass'
-        ? `benchmark pass rate met (${summary.pass_count}/${summary.total ?? totalFromSummary(summary)} >= ${minPassRate})`
-        : undefined,
     });
 
-    return {
-      outcome,
-      exit_code: outcome === 'pass' ? 0 : exitCode,
-      ...(summary?.verdict === 'fail' && outcome === 'pass'
-        ? { detail: `benchmark pass rate met (${summary.pass_count}/${summary.total ?? totalFromSummary(summary)} >= ${minPassRate})` }
-        : {}),
-    };
+    return { outcome, exit_code: exitCode };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[nightly-quality-probe] runtime error: ${detail}\n`);
@@ -282,36 +263,4 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
       fs.rmSync(workDir, { recursive: true, force: true });
     } catch { /* best-effort */ }
   }
-}
-
-function clampPassRate(raw: number): number {
-  if (!Number.isFinite(raw)) return DEFAULT_MIN_PASS_RATE;
-  if (raw < 0) return 0;
-  if (raw > 1) return 1;
-  return raw;
-}
-
-function totalFromSummary(summary: {
-  total?: number;
-  pass_count: number;
-  fail_count: number;
-  inconclusive_count: number;
-  error_count: number;
-}): number {
-  const explicit = Number(summary.total);
-  if (Number.isFinite(explicit) && explicit > 0) return explicit;
-  return summary.pass_count + summary.fail_count + summary.inconclusive_count + summary.error_count;
-}
-
-function meetsPassRate(summary: {
-  total?: number;
-  pass_count: number;
-  fail_count: number;
-  inconclusive_count: number;
-  error_count: number;
-}, minPassRate: number): boolean {
-  if (summary.error_count > 0 || summary.inconclusive_count > 0) return false;
-  const total = totalFromSummary(summary);
-  if (total <= 0) return false;
-  return summary.pass_count / total >= minPassRate;
 }

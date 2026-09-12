@@ -10,7 +10,7 @@
 
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { resetGateway } from '../src/core/ai/gateway.ts';
+import { resetGateway, __setChatTransportForTests } from '../src/core/ai/gateway.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 
 let engine: PGLiteEngine;
@@ -29,19 +29,32 @@ beforeAll(async () => {
 // 401. Reset the gateway before each test so isAvailable('embedding') is
 // deterministically false → put_page uses noEmbed → the import never embeds →
 // we exercise only the backstop gating the suite is about.
-beforeEach(() => { resetGateway(); });
+//
+// Chat transport stub: the backstop now gates on extraction availability
+// BEFORE enqueueing (keyless installs skip instead of minting doomed work).
+// This suite asserts eligibility/kill-switch/enqueue behavior, not
+// availability — install the transport seam so the availability gate passes
+// deterministically regardless of shard env keys.
+beforeEach(() => {
+  resetGateway();
+  __setChatTransportForTests(async () => ({
+    text: '[]',
+    blocks: [{ type: 'text', text: '[]' }],
+    stopReason: 'end' as const,
+    usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    model: 'anthropic:claude-sonnet-4-6',
+    providerId: 'anthropic',
+  }));
+});
+afterAll(() => { __setChatTransportForTests(null); });
 
 afterAll(async () => {
   await engine.disconnect();
 });
 
-async function putAndReadBackstop(
-  slug: string,
-  content: string,
-  opts: { remote?: boolean } = {},
-): Promise<{ queued: boolean } | { skipped: string } | undefined> {
+async function putAndReadBackstop(slug: string, content: string): Promise<{ queued: boolean } | { skipped: string } | undefined> {
   const r = await dispatchToolCall(engine, 'put_page', { slug, content }, {
-    remote: opts.remote ?? false,
+    remote: false,
     sourceId: 'default',
   });
   // Diagnostic: print the actual error content when the call fails, so CI
@@ -80,27 +93,6 @@ describe('put_page facts backstop', () => {
       `---\ntype: note\ntitle: Dream\ndream_generated: true\n---\n${'this is some content. '.repeat(20)}`,
     );
     expect(result).toEqual({ skipped: 'dream_generated' });
-  });
-
-  test('skipped on facts_backstop_skip:true frontmatter', async () => {
-    const result = await putAndReadBackstop(
-      'note/rollup',
-      `---\ntype: note\ntitle: Rollup\nfacts_backstop_skip: true\n---\n${'this is some operating summary content. '.repeat(20)}`,
-    );
-    expect(result).toEqual({ skipped: 'facts_backstop_skip' });
-  });
-
-  test('remote caller cannot suppress facts backstop with facts_backstop_skip:true', async () => {
-    const result = await putAndReadBackstop(
-      'note/remote-rollup',
-      `---\ntype: note\ntitle: Remote Rollup\nfacts_backstop_skip: true\n---\n${'this is some operating summary content. '.repeat(20)}`,
-      { remote: true },
-    );
-    expect(result).toBeDefined();
-    if (result && 'skipped' in result) {
-      expect(result.skipped).not.toBe('facts_backstop_skip');
-      expect(result.skipped).not.toMatch(/^eligibility_failed:facts_backstop_skip$/);
-    }
   });
 
   test('queued for an eligible substantive note', async () => {

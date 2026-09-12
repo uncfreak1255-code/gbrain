@@ -161,48 +161,33 @@ describeIfDB('Postgres parity — updateSourceConfig', () => {
     expect(rows[0]?.value).toBe('2026-05-22T12:00:00.000Z');
   });
 
-  test('normalizes mixed JSONB arrays before merging patch', async () => {
-    const eng = engine as unknown as { sql: (...args: unknown[]) => Promise<{ count?: number }> };
-    await (eng.sql as any)`
-      INSERT INTO sources (id, name, local_path, config, archived, created_at)
-      VALUES (
-        ${'mixed-array'},
-        ${'mixed-array'},
-        ${'/tmp/mixed-array'},
-        jsonb_build_array(
-          to_jsonb(${'{"federated":true,"last_full_cycle_at":"2026-01-01T00:00:00.000Z"}'}::text),
-          jsonb_build_object('remote_url', 'https://example.test'),
-          to_jsonb(${'not json'}::text),
-          jsonb_build_object('last_full_cycle_at', '2026-02-02T00:00:00.000Z')
-        ),
-        false,
-        NOW()
-      )
-    `;
-
-    const updated = await engine.updateSourceConfig('mixed-array', {
-      last_full_cycle_at: '2026-05-22T13:00:00.000Z',
-      tracked_branch: 'main',
-    });
-
-    expect(updated).toBe(true);
-    const rows = await engine.executeRaw<{
-      typeof: string;
-      config: Record<string, unknown> | string;
-      value: string | null;
-    }>(
-      `SELECT jsonb_typeof(config) AS typeof, config, config->>'last_full_cycle_at' AS value
-         FROM sources WHERE id = 'mixed-array'`,
+  test('#2251: mixed-array config (non-object elements) merges instead of throwing, and self-heals to a flat object', async () => {
+    await seedSource('mixed');
+    // The historical bad shape that permanently blocked last_full_cycle_at
+    // writes: a JSONB array holding a non-object element. The bare
+    // jsonb_each(elem) threw 'cannot call jsonb_each on a non-object'
+    // DURING row production, failing every subsequent updateSourceConfig.
+    await engine.executeRaw(
+      `UPDATE sources
+          SET config = '["stray-string", {"remote_url": "https://kept"}, 42]'::jsonb
+        WHERE id = 'mixed'`,
     );
-    // executeRaw exposes the postgres driver shape directly; JSONB may arrive
-    // as a string even though the engine's public row mapper normalizes it.
-    const config = typeof rows[0]?.config === 'string'
-      ? JSON.parse(rows[0].config) as Record<string, unknown>
-      : rows[0]?.config;
+
+    const ok = await engine.updateSourceConfig('mixed', {
+      last_full_cycle_at: '2026-07-09T00:00:00.000Z',
+    });
+    expect(ok).toBe(true);
+
+    const rows = await engine.executeRaw<{ typeof: string; cycle: string | null; kept: string | null }>(
+      `SELECT jsonb_typeof(config) AS typeof,
+              config->>'last_full_cycle_at' AS cycle,
+              config->>'remote_url' AS kept
+         FROM sources WHERE id = 'mixed'`,
+    );
+    // Self-healed: flat object, patch applied, object elements' keys recovered,
+    // non-object stragglers dropped.
     expect(rows[0]?.typeof).toBe('object');
-    expect(config?.federated).toBe(true);
-    expect(config?.remote_url).toBe('https://example.test');
-    expect(config?.tracked_branch).toBe('main');
-    expect(rows[0]?.value).toBe('2026-05-22T13:00:00.000Z');
+    expect(rows[0]?.cycle).toBe('2026-07-09T00:00:00.000Z');
+    expect(rows[0]?.kept).toBe('https://kept');
   });
 });

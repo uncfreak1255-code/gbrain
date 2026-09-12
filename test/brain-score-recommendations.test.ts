@@ -3,12 +3,10 @@ import {
   computeRecommendations,
   classifyChecks,
   maxReachableScore,
-  maxReachableScoreFromRecommendations,
   estimateAnthropicCost,
   embeddingProviderConfigured,
   HOSTED_EMBED_KEY_CONFIG,
 } from '../src/core/brain-score-recommendations.ts';
-import { makeRemediationStep } from '../src/core/remediation-step.ts';
 import type { BrainHealth } from '../src/core/types.ts';
 
 /**
@@ -62,10 +60,59 @@ describe('embeddingProviderConfigured (recipe-aware helper)', () => {
   test('HOSTED_EMBED_KEY_CONFIG only maps gateway-propagated config keys', () => {
     expect(HOSTED_EMBED_KEY_CONFIG.OPENAI_API_KEY).toBe('openai_api_key');
     expect(HOSTED_EMBED_KEY_CONFIG.ZEROENTROPY_API_KEY).toBe('zeroentropy_api_key');
-    // Not propagated to the gateway today → must NOT be backed by a config field
-    // (producer closures fall through to process.env only for these).
-    expect(HOSTED_EMBED_KEY_CONFIG.VOYAGE_API_KEY).toBeUndefined();
-    expect(HOSTED_EMBED_KEY_CONFIG.GOOGLE_GENERATIVE_AI_API_KEY).toBeUndefined();
+    // #2662: buildGatewayConfig now folds voyage_api_key → VOYAGE_API_KEY,
+    // so this producer-facing map must recognize it as gateway-propagated.
+    expect(HOSTED_EMBED_KEY_CONFIG.VOYAGE_API_KEY).toBe('voyage_api_key');
+    // #3500: buildGatewayConfig now folds google_api_key and
+    // dashscope_api_key, so both are gateway-propagated and must be mapped
+    // (a config-plane key is genuinely usable by the gateway).
+    expect(HOSTED_EMBED_KEY_CONFIG.GOOGLE_GENERATIVE_AI_API_KEY).toBe('google_api_key');
+    expect(HOSTED_EMBED_KEY_CONFIG.DASHSCOPE_API_KEY).toBe('dashscope_api_key');
+  });
+
+  // #2662: end-to-end regression through the REAL file-plane loader
+  // (`loadConfigFileOnly`, the same helper src/core/remediation/context.ts
+  // calls) and the REAL gateway-config builder. Writes an actual
+  // ~/.gbrain/config.json whose ONLY source of the Voyage key is the
+  // config-plane field (no process.env export — the launchd/daemon/MCP
+  // scenario from the bug report). Note: `resolveKey` below still mirrors
+  // (does not literally invoke) context.ts's closure shape, since the real
+  // loadRecommendationContext() needs a live BrainEngine; what this test
+  // adds over the plain unit test above is exercising the real
+  // loadConfigFileOnly() → buildGatewayConfig() file-plane path end to end.
+  test('config-plane-only voyage_api_key: real config.json flows through loadConfigFileOnly + buildGatewayConfig', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+    const { withEnv } = await import('./helpers/with-env.ts');
+    const tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-voyage-cfg-test-'));
+    try {
+      mkdirSync(join(tmpHome, '.gbrain'), { recursive: true });
+      writeFileSync(
+        join(tmpHome, '.gbrain', 'config.json'),
+        JSON.stringify({ engine: 'pglite', database_path: '/tmp/x', voyage_api_key: 'pa-config-plane-only' }),
+      );
+      await withEnv({ GBRAIN_HOME: tmpHome, VOYAGE_API_KEY: undefined }, async () => {
+        const { loadConfigFileOnly } = await import('../src/core/config.ts');
+        const { buildGatewayConfig } = await import('../src/core/ai/build-gateway-config.ts');
+        const fileCfg = loadConfigFileOnly();
+        expect(fileCfg?.voyage_api_key).toBe('pa-config-plane-only');
+
+        // Same resolveKey shape as loadRecommendationContext (context.ts).
+        const resolveKey = (envVar: string) => {
+          const cfgField = HOSTED_EMBED_KEY_CONFIG[envVar];
+          const fromCfg = cfgField ? (fileCfg as Record<string, unknown> | null)?.[cfgField] : undefined;
+          return !!(process.env[envVar] || fromCfg);
+        };
+        expect(embeddingProviderConfigured('voyage:voyage-3', resolveKey)).toBe(true);
+
+        // The actual gateway builder must receive the key too.
+        const gwCfg = buildGatewayConfig(fileCfg!);
+        expect(gwCfg.env.VOYAGE_API_KEY).toBe('pa-config-plane-only');
+      });
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
   });
 });
 
@@ -79,6 +126,7 @@ describe('embeddingProviderConfigured (recipe-aware helper)', () => {
 function makeHealth(overrides: Partial<BrainHealth> = {}): BrainHealth {
   return {
     page_count: 100,
+    linkable_page_count: 100,
     embed_coverage: 1.0,
     stale_pages: 0,
     orphan_pages: 0,
@@ -86,6 +134,7 @@ function makeHealth(overrides: Partial<BrainHealth> = {}): BrainHealth {
     brain_score: 100,
     dead_links: 0,
     link_coverage: 1.0,
+    entity_page_count: 10,
     timeline_coverage: 1.0,
     most_connected: [],
     embed_coverage_score: 35,
@@ -121,95 +170,32 @@ describe('computeRecommendations', () => {
     expect(recs.find((r) => r.id === 'embed.stale')).toBeUndefined();
   });
 
-  test('sync freshness + extraction lag produce sync + backlinks + extract', () => {
+  test('stale pages + dead links produce sync + backlinks + extract', () => {
     const health = makeHealth({
+      stale_pages: 25,
       dead_links: 8,
       brain_score: 70,
     });
-    const recs = computeRecommendations(health, {
-      repoPath: '/brain',
-      repoNeedsSync: true,
-      staleExtractionPages: 25,
-      staleExtractionTotalPages: 100,
-      embeddingProviderConfigured: true,
-    });
+    const recs = computeRecommendations(health, { repoPath: '/brain', embeddingProviderConfigured: true });
     const ids = recs.map((r) => r.id);
     expect(ids).toContain('sync.repo');
     expect(ids).toContain('backlinks.fix');
-    expect(ids).toContain('extract.stale');
+    expect(ids).toContain('extract.all');
   });
 
-  test('BrainHealth.stale_pages alone does not trigger sync or extraction', () => {
-    const health = makeHealth({ stale_pages: 25 });
+  test('extract.all depends on sync.repo (D14: stable ids)', () => {
+    const health = makeHealth({ stale_pages: 10 });
     const recs = computeRecommendations(health, { repoPath: '/brain', embeddingProviderConfigured: true });
-    const ids = recs.map((r) => r.id);
-    expect(ids).not.toContain('sync.repo');
-    expect(ids).not.toContain('extract.stale');
-  });
-
-  test('extract.stale depends on sync.repo when sync is also needed (D14: stable ids)', () => {
-    const health = makeHealth();
-    const recs = computeRecommendations(health, {
-      repoPath: '/brain',
-      repoNeedsSync: true,
-      staleExtractionPages: 10,
-      staleExtractionTotalPages: 100,
-      embeddingProviderConfigured: true,
-    });
-    const extract = recs.find((r) => r.id === 'extract.stale');
+    const extract = recs.find((r) => r.id === 'extract.all');
     expect(extract?.depends_on).toContain('sync.repo');
-  });
-
-  test('dependencies are ordered before their dependents', () => {
-    const health = makeHealth({
-      missing_embeddings: 100,
-    });
-    const recs = computeRecommendations(health, {
-      repoPath: '/brain',
-      repoNeedsSync: true,
-      staleExtractionPages: 10,
-      staleExtractionTotalPages: 100,
-      embeddingProviderConfigured: true,
-    });
-    const ids = recs.map((r) => r.id);
-    const syncIdx = ids.indexOf('sync.repo');
-    expect(syncIdx).toBeGreaterThanOrEqual(0);
-    expect(syncIdx).toBeLessThan(ids.indexOf('extract.stale'));
-    expect(syncIdx).toBeLessThan(ids.indexOf('embed.stale'));
-  });
-
-  test('extract.stale does not need sync when only DB extraction watermark lag exceeds doctor threshold', () => {
-    const health = makeHealth();
-    const recs = computeRecommendations(health, {
-      staleExtractionPages: 25,
-      staleExtractionTotalPages: 100,
-      embeddingProviderConfigured: true,
-    });
-    const extract = recs.find((r) => r.id === 'extract.stale');
-    expect(extract?.depends_on).toEqual([]);
-    expect(extract?.params.stale).toBe(true);
-  });
-
-  test('extract.stale stays out of the plan below the doctor warning threshold', () => {
-    const health = makeHealth({ page_count: 5546, brain_score: 54 });
-    const recs = computeRecommendations(health, {
-      staleExtractionPages: 22,
-      staleExtractionTotalPages: 5546,
-      extractionLagWarnPct: 20,
-      embeddingProviderConfigured: true,
-    });
-    expect(recs.find((r) => r.id === 'extract.stale')).toBeUndefined();
   });
 
   test('embed.stale depends on sync.repo when sync also needed', () => {
     const health = makeHealth({
+      stale_pages: 10,
       missing_embeddings: 100,
     });
-    const recs = computeRecommendations(health, {
-      repoPath: '/brain',
-      repoNeedsSync: true,
-      embeddingProviderConfigured: true,
-    });
+    const recs = computeRecommendations(health, { repoPath: '/brain', embeddingProviderConfigured: true });
     const embed = recs.find((r) => r.id === 'embed.stale');
     expect(embed?.depends_on).toContain('sync.repo');
   });
@@ -221,97 +207,10 @@ describe('computeRecommendations', () => {
     expect(embed?.depends_on).toEqual([]);
   });
 
-  test('extract_atoms backlog emits protected per-source drain jobs when pack does not run the phase', () => {
-    const health = makeHealth({ brain_score: 54 });
-    const recs = computeRecommendations(health, {
-      repoPath: '/brain',
-      embeddingProviderConfigured: true,
-      extractAtomsPackDeclaresPhase: false,
-      extractAtomsWarnThreshold: 10,
-      extractAtomsDrainWindowSeconds: 120,
-      extractAtomsBacklogBySource: [
-        { sourceId: 'default', backlog: 44, repoPath: '/brain' },
-        { sourceId: 'gbrain', backlog: 8, repoPath: '/Users/sawbeck/gbrain' },
-      ],
-    });
-
-    const drainRecs = recs.filter((r) => r.job === 'extract-atoms-drain');
-    expect(drainRecs.map((r) => r.id)).toEqual([
-      'extract_atoms.drain.default',
-      'extract_atoms.drain.gbrain',
-    ]);
-    for (const rec of drainRecs) {
-      expect(rec.protected).toBe(true);
-      expect(rec.est_usd_cost).toBe(0.3);
-      expect(rec.params.window).toBe(120);
-    }
-    expect(drainRecs[0]?.params.repoPath).toBe('/brain');
-    expect(drainRecs[1]?.params.sourceId).toBe('gbrain');
-  });
-
-  test('extract_atoms backlog stays out of the plan below the doctor warning threshold', () => {
-    const health = makeHealth({ brain_score: 95 });
-    const recs = computeRecommendations(health, {
-      embeddingProviderConfigured: true,
-      extractAtomsPackDeclaresPhase: false,
-      extractAtomsWarnThreshold: 10,
-      extractAtomsBacklogBySource: [
-        { sourceId: 'small-source', backlog: 10 },
-      ],
-    });
-    expect(recs.find((r) => r.job === 'extract-atoms-drain')).toBeUndefined();
-  });
-
-  test('unresolved source recovery suppresses paid and protected remediation', () => {
-    const health = makeHealth({ missing_embeddings: 100, brain_score: 50 });
-    const recs = computeRecommendations(health, {
-      repoPath: '/missing-brain',
-      embeddingProviderConfigured: true,
-      extractAtomsPackDeclaresPhase: false,
-      extractAtomsWarnThreshold: 10,
-      extractAtomsBacklogBySource: [
-        { sourceId: 'default', backlog: 44, repoPath: '/missing-brain' },
-      ],
-      sourceHygiene: {
-        schema_version: 1,
-        filesystem_inspected: true,
-        sources: [{
-          source_id: 'default',
-          archived: false,
-          draining: false,
-          has_local_path: true,
-          shared_path_source_count: 1,
-          repo_state: 'missing',
-          remote_recovery_configured: false,
-          managed_clone: false,
-          configured_default: true,
-          configured_default_known: true,
-          source_config_known: true,
-          dependent_row_count: 443,
-          dependent_data_known: true,
-          nonterminal_work_count: 0,
-          work_state_known: true,
-          live_sync_lock: false,
-          lock_state_known: true,
-          live_cycle_lock: false,
-          cycle_lock_state_known: true,
-          classification: 'recovery_required',
-          recovery_mode: 'manual',
-          proposed_command_argv: null,
-          veto_reasons: ['default_source', 'source_has_dependent_data'],
-          safe_for_agent_review: false,
-        }],
-      },
-    });
-
-    expect(recs.find((rec) => rec.job === 'embed')).toBeUndefined();
-    expect(recs.find((rec) => rec.job === 'extract-atoms-drain')).toBeUndefined();
-  });
-
   test('severity ordering: critical before high before medium', () => {
     const health = makeHealth({
       missing_embeddings: 100,  // critical
-      dead_links: 80,           // high
+      stale_pages: 80,          // high
     });
     const recs = computeRecommendations(health, { repoPath: '/brain', embeddingProviderConfigured: true });
     const critIdx = recs.findIndex((r) => r.severity === 'critical');
@@ -322,17 +221,11 @@ describe('computeRecommendations', () => {
   // D6 #5 — THE critical regression test for the agent contract.
   test('D6 #5: determinism — same input twice produces identical output', () => {
     const health = makeHealth({
+      stale_pages: 10,
       missing_embeddings: 50,
       dead_links: 3,
     });
-    const ctx = {
-      repoPath: '/brain',
-      repoNeedsSync: true,
-      staleExtractionPages: 10,
-      staleExtractionTotalPages: 100,
-      embeddingProviderConfigured: true,
-      sourceId: 'default',
-    };
+    const ctx = { repoPath: '/brain', embeddingProviderConfigured: true, sourceId: 'default' };
     const run1 = computeRecommendations(health, ctx);
     const run2 = computeRecommendations(health, ctx);
     expect(JSON.stringify(run1)).toBe(JSON.stringify(run2));
@@ -404,63 +297,6 @@ describe('classifyChecks (D13)', () => {
     expect(result[0]?.status).toBe('human_only');
   });
 
-  test('blocked: source_path_health names source-specific recovery mode', () => {
-    const result = classifyChecks([{ name: 'source_path_health', status: 'fail' }], {
-      sourceHygiene: {
-        schema_version: 1,
-        filesystem_inspected: true,
-        sources: [{
-          source_id: 'default',
-          archived: false,
-          draining: false,
-          has_local_path: true,
-          shared_path_source_count: 1,
-          repo_state: 'missing',
-          remote_recovery_configured: false,
-          managed_clone: false,
-          configured_default: true,
-          configured_default_known: true,
-          source_config_known: true,
-          dependent_row_count: 443,
-          dependent_data_known: true,
-          nonterminal_work_count: 0,
-          work_state_known: true,
-          live_sync_lock: false,
-          lock_state_known: true,
-          live_cycle_lock: false,
-          cycle_lock_state_known: true,
-          classification: 'recovery_required',
-          recovery_mode: 'manual',
-          proposed_command_argv: null,
-          veto_reasons: ['default_source'],
-          safe_for_agent_review: false,
-        }],
-      },
-    });
-
-    expect(result[0]).toMatchObject({
-      check: 'source_path_health',
-      status: 'blocked',
-    });
-    expect(result[0]?.reason).toContain('default: manual');
-  });
-
-  test('remediable: extract_atoms_backlog when pack does not run phase and backlog exists', () => {
-    const result = classifyChecks([{ name: 'extract_atoms_backlog', status: 'warn' }], {
-      extractAtomsPackDeclaresPhase: false,
-      extractAtomsBacklogBySource: [{ sourceId: 'default', backlog: 11 }],
-    });
-    expect(result[0]?.status).toBe('remediable');
-  });
-
-  test('human_only: extract_atoms_backlog when active pack already runs phase', () => {
-    const result = classifyChecks([{ name: 'extract_atoms_backlog', status: 'warn' }], {
-      extractAtomsPackDeclaresPhase: true,
-      extractAtomsBacklogBySource: [{ sourceId: 'default', backlog: 11 }],
-    });
-    expect(result[0]?.status).toBe('human_only');
-  });
-
   test('human_only: unknown check defaults to operator judgment', () => {
     const result = classifyChecks([{ name: 'mystery_check', status: 'warn' }], {});
     expect(result[0]?.status).toBe('human_only');
@@ -499,75 +335,6 @@ describe('maxReachableScore (D13)', () => {
   });
 });
 
-describe('maxReachableScoreFromRecommendations', () => {
-  test('extract-capable plan lifts link and timeline components', () => {
-    const health = makeHealth({
-      embed_coverage_score: 35,
-      link_density_score: 4,
-      timeline_coverage_score: 0,
-      no_orphans_score: 2,
-      no_dead_links_score: 10,
-    });
-    const recs = [
-      makeRemediationStep({
-        id: 'sync.repo',
-        job: 'sync',
-        params: {},
-        severity: 'medium',
-        est_seconds: 10,
-        est_usd_cost: 0,
-        rationale: 'sync',
-        status: 'remediable',
-      }),
-      makeRemediationStep({
-        id: 'extract.stale',
-        job: 'extract',
-        params: {},
-        severity: 'medium',
-        est_seconds: 10,
-        est_usd_cost: 0,
-        rationale: 'extract',
-        status: 'remediable',
-      }),
-    ];
-    expect(maxReachableScoreFromRecommendations(health, recs)).toBe(87);
-  });
-
-  test('narrow meeting timeline remediation does not inflate the whole-brain timeline ceiling', () => {
-    const health = makeHealth({
-      embed_coverage_score: 35,
-      link_density_score: 25,
-      timeline_coverage_score: 0,
-      no_orphans_score: 10,
-      no_dead_links_score: 10,
-    });
-    const recs = [
-      makeRemediationStep({
-        id: 'onboard.extract_timeline_from_meetings',
-        job: 'extract-timeline-from-meetings',
-        params: {},
-        severity: 'medium',
-        est_seconds: 10,
-        est_usd_cost: 0,
-        rationale: 'timeline',
-        status: 'remediable',
-      }),
-    ];
-    expect(maxReachableScoreFromRecommendations(health, recs)).toBe(80);
-  });
-
-  test('no recommendations leaves the current score ceiling intact', () => {
-    const health = makeHealth({
-      embed_coverage_score: 20,
-      link_density_score: 12,
-      timeline_coverage_score: 7,
-      no_orphans_score: 5,
-      no_dead_links_score: 9,
-    });
-    expect(maxReachableScoreFromRecommendations(health, [])).toBe(53);
-  });
-});
-
 describe('estimateAnthropicCost', () => {
   test('returns 0 for unknown model', () => {
     expect(estimateAnthropicCost('unknown-model', 10)).toBe(0);
@@ -576,5 +343,39 @@ describe('estimateAnthropicCost', () => {
   test('returns positive for known model', () => {
     const cost = estimateAnthropicCost('claude-sonnet-4-6', 10);
     expect(cost).toBeGreaterThan(0);
+  });
+});
+
+describe('D12 — NULL-signature cohort widens embed.stale', () => {
+  const makeHealth = (over: Partial<import('../src/core/types.ts').BrainHealth> = {}) => ({
+    page_count: 100, embed_coverage: 1, stale_pages: 0, orphan_pages: 0,
+    dead_links: 0, missing_embeddings: 0, link_count: 50, link_coverage: 1,
+    timeline_coverage: 1, most_connected: [], brain_score: 90,
+    ...over,
+  }) as import('../src/core/types.ts').BrainHealth;
+
+  test('cohort > 0 with zero missing embeddings still fires embed.stale, widened + costed', () => {
+    const recs = computeRecommendations(makeHealth(), {
+      embeddingModel: 'openai:text-embedding-3-small',
+      embeddingDimensions: 1536,
+      embeddingProviderConfigured: true,
+      nullSignatureCohort: 563,
+    });
+    const rec = recs.find((r) => r.id === 'embed.stale');
+    expect(rec).toBeDefined();
+    expect((rec!.params as { includeNullSignature?: boolean }).includeNullSignature).toBe(true);
+    expect(rec!.est_usd_cost).toBeGreaterThan(0); // the cohort is real spend
+    expect(rec!.rationale).toContain('563');
+    expect(rec!.rationale).toContain('no recorded embedding signature');
+  });
+
+  test('no cohort ⇒ params unchanged (no includeNullSignature key, idempotency stable)', () => {
+    const recs = computeRecommendations(makeHealth({ missing_embeddings: 10 }), {
+      embeddingModel: 'openai:text-embedding-3-small',
+      embeddingDimensions: 1536,
+      embeddingProviderConfigured: true,
+    });
+    const rec = recs.find((r) => r.id === 'embed.stale')!;
+    expect('includeNullSignature' in (rec.params as Record<string, unknown>)).toBe(false);
   });
 });

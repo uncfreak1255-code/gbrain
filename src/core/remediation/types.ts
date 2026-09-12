@@ -20,20 +20,12 @@ export interface RemediationPlanOpts {
   /**
    * v0.41.18.0 (A2 + codex #3): caller-supplied RemediationStep entries
    * threaded into the planner via the third arg of computeRecommendations.
-   * Onboard wires the check helpers (embed_staleness,
-   * entity_link_coverage, timeline_coverage, takes_count, and type-unification
-   * checks) here. Doctor filters those extras through the onboard runnable
-   * policy before previewing or executing them.
+   * Onboard wires the 4 new check helpers (embed_staleness,
+   * entity_link_coverage, timeline_coverage, takes_count) here. doctor's
+   * existing --remediation-plan call passes empty (preserving legacy
+   * behavior).
    */
   extraRemediations?: RemediationStep[];
-  /**
-   * Trusted local callers may opt in to inspecting stored source paths.
-   * Remote/MCP callers must leave this false so database-supplied paths are
-   * never walked on their behalf.
-   */
-  inspectLocalSourcePaths?: boolean;
-  /** Internal reuse seam so one run binds planning to one hygiene snapshot. */
-  sourceHygienePacket?: import('../source-hygiene.ts').SourceHygienePacket;
 }
 
 /**
@@ -61,14 +53,6 @@ export interface RemediationPlan {
 export interface RemediationOpts {
   /** Target brain_score (default: 90). */
   targetScore?: number;
-  /**
-   * Caller-supplied remediation steps discovered outside the hardcoded
-   * doctor planner. Onboard and MCP use this to execute the same extra
-   * plan entries they previewed.
-   */
-  extraRemediations?: RemediationStep[];
-  /** Trusted-local source-path inspection; false by default. */
-  inspectLocalSourcePaths?: boolean;
   /** Cap inner loop iterations (default: Infinity). */
   maxJobs?: number;
   /** USD cap for total plan cost. Pre-flight refuse + mid-run BudgetExhausted gate. */
@@ -79,6 +63,16 @@ export interface RemediationOpts {
   resumePlanHash?: string;
   /** Whether to attempt resume at all (default false). */
   resume?: boolean;
+  /**
+   * Caller-supplied RemediationStep entries threaded into the planner.
+   * Mirrors RemediationPlanOpts.extraRemediations so onboard's --apply
+   * --auto path (and MCP run_onboard auto modes) forward the same
+   * onboard-check remediations the --check path already passes through
+   * computeRemediationPlan. Without this the runner saw only generic
+   * brain_score remediations and reported "Nothing to do" whenever the
+   * only applicable work was an extra (e.g. extract-ner).
+   */
+  extraRemediations?: RemediationStep[];
 }
 
 /**
@@ -90,6 +84,13 @@ export interface StepResult {
   id: string;
   job_id: number | null;
   status: string;
+  /** True when the submit deduped onto an existing IN-FLIGHT (waiting/active)
+   *  row — job_id is that row; no new work was inserted (#3626). */
+  coalesced?: boolean;
+  /** #3626: set when a prior run's terminal (completed/failed) row still held
+   *  the content-hash key. Carries that stale row's id; the step re-ran for
+   *  real under a `:r:<doctor_run_id>`-rotated key (job_id is the fresh job). */
+  deduped_job_id?: number;
 }
 
 /**

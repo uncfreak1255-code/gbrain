@@ -56,10 +56,42 @@ export interface BasePhaseOpts {
   /** Optional injected BudgetMeter (tests). When set, replaces the default constructed one. */
   meter?: BudgetMeter;
   /**
-   * Optional keepalive hook from the outer cycle. Long-running phase loops pulse
-   * this so the cycle DB lock stays fresh while they work.
+   * Absolute wall-clock deadline (epoch ms) inherited from the owning job's
+   * claim-time `timeout_at` (gbrain#4168). Phases with their own relative
+   * deadline (e.g. propose_takes' 30-min cap) clamp it via
+   * `effectivePhaseDeadlineMs()` so the clean partial-exit path fires BEFORE
+   * the worker's kill switch — without this, a phase default equal to (or,
+   * since phases start mid-cycle, always trailing) the job timeout makes the
+   * clean exit unreachable and the job dead-letters instead of banking
+   * partial work. Null/undefined = no job deadline (interactive CLI runs).
    */
-  yieldDuringPhase?: () => Promise<void>;
+  deadlineAtMs?: number | null;
+}
+
+/**
+ * Stop-margin reserved under the job deadline when deriving a phase's
+ * effective relative deadline. Guarantees the phase's clean exit + result
+ * write unwind before the worker's abort fires: wait poll interval (5s) +
+ * worker force-evict grace (30s) + lock and DB cleanup headroom. Lives here
+ * (not patterns.ts) because every deadline-aware phase consumes it;
+ * patterns.ts re-exports for back-compat.
+ */
+export const CYCLE_DEADLINE_RESERVE_MS = 60 * 1000;
+
+/**
+ * Effective relative deadline for a phase: the phase's own default, clamped
+ * to the time remaining under the job's absolute deadline minus the reserve.
+ * Returns 0 when the job budget is already inside the reserve — callers
+ * treat that as "exit cleanly now with deadline_hit", never as unlimited.
+ */
+export function effectivePhaseDeadlineMs(
+  phaseDefaultMs: number,
+  deadlineAtMs: number | null | undefined,
+  nowMs: number,
+): number {
+  if (deadlineAtMs == null) return phaseDefaultMs;
+  const remaining = deadlineAtMs - CYCLE_DEADLINE_RESERVE_MS - nowMs;
+  return Math.max(0, Math.min(phaseDefaultMs, remaining));
 }
 
 export abstract class BaseCyclePhase {
@@ -112,25 +144,6 @@ export abstract class BaseCyclePhase {
   protected tick(opts: BasePhaseOpts, message?: string, delta = 1): void {
     if (!opts.reporter) return;
     opts.reporter.tick(delta, message);
-  }
-
-  /**
-   * Tick progress and pulse the outer keepalive. Keepalive failures are best-effort:
-   * the phase keeps running so one missed refresh attempt doesn't abort useful work.
-   */
-  protected async tickWithYield(
-    opts: BasePhaseOpts,
-    message?: string,
-    delta = 1,
-  ): Promise<void> {
-    this.tick(opts, message, delta);
-    if (!opts.yieldDuringPhase) return;
-    try {
-      await opts.yieldDuringPhase();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[${this.name}] yieldDuringPhase failed (non-fatal): ${msg}`);
-    }
   }
 
   /**

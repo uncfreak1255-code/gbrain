@@ -2,7 +2,7 @@
 # CI guard (#1647 / #171): every trigger function in the canonical schema base
 # files MUST pin `SET search_path`. Without it, an unqualified reference inside
 # the function body resolves through the caller's search_path, so a same-named
-# object in a user-controlled schema could shadow it. Migration v121 ALTERs
+# object in a user-controlled schema could shadow it. Migration v120 ALTERs
 # existing brains; this guard keeps fresh-install function definitions correct
 # so a NEW trigger function can't reintroduce the gap. Mirrors the
 # check-jsonb-pattern.sh guard philosophy (a written rule caused the disease;
@@ -21,27 +21,19 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT"
 
-FILES="src/schema.sql src/core/pglite-schema.ts src/core/schema-embedded.ts"
+FILES="src/schema.sql src/core/pglite-schema.ts src/core/schema-embedded.generated.ts"
 
-# Trigger headers may span several lines. Read each file as one record and
-# inspect the complete header through its AS delimiter so multiline functions
-# cannot evade the guard.
-BAD="$(perl -0777 -ne '
-  while (/CREATE OR REPLACE FUNCTION\s+([a-z_]+)\(\)\s+RETURNS\s+trigger(.*?)(?=\bAS\s+\\?\$[A-Za-z_]*\\?\$)/gsi) {
-    my ($name, $options) = ($1, $2);
-    next if $options =~ /SET\s+search_path\s*=/i;
-    my $prefix = substr($_, 0, $-[0]);
-    my $line = 1 + ($prefix =~ tr/\n/\n/);
-    print "$ARGV:$line:$name\n";
-  }
-' $FILES)"
+# A hardened header reads `... RETURNS trigger SET search_path = ... AS $tag$`.
+# An UNHARDENED one reads `... RETURNS trigger AS $tag$` — match that form and
+# (belt-and-suspenders) drop any line that already mentions search_path.
+BAD="$(grep -nEi 'CREATE OR REPLACE FUNCTION [a-z_]+\(\) RETURNS trigger AS ' $FILES 2>/dev/null | grep -vi 'search_path' || true)"
 
 if [ -n "$BAD" ]; then
   echo "ERROR: trigger function(s) missing SET search_path in schema base files:"
   echo "$BAD"
   echo
-  echo "Add 'SET search_path = pg_catalog, public, pg_temp' to the function header, e.g.:"
-  echo "  CREATE OR REPLACE FUNCTION foo() RETURNS trigger SET search_path = pg_catalog, public, pg_temp AS \$\$"
+  echo "Add 'SET search_path = pg_catalog, public' to the function header, e.g.:"
+  echo "  CREATE OR REPLACE FUNCTION foo() RETURNS trigger SET search_path = pg_catalog, public AS \$\$"
   echo "See #1647 / #171."
   exit 1
 fi

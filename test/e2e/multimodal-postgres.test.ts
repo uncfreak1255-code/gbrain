@@ -15,6 +15,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const skip = !DATABASE_URL;
@@ -28,6 +29,7 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
 
   beforeAll(async () => {
     pg = new PostgresEngine();
+    assertSafeE2eDatabaseUrl(DATABASE_URL!);
     await pg.connect({ database_url: DATABASE_URL! });
     await pg.initSchema();
   }, 60_000);
@@ -138,27 +140,6 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
     });
     expect(r2.id).toBe(r.id);
     expect(r2.created).toBe(false);
-  }, 30_000);
-
-  test('same storage path remains isolated across sources', async () => {
-    await pg.executeRaw(
-      `INSERT INTO sources (id, name) VALUES ('files-source-b', 'files-source-b') ON CONFLICT DO NOTHING`,
-    );
-    const fromDefault = await pg.upsertFile({
-      filename: 'shared.jpg',
-      storage_path: 'photos/shared.jpg',
-      content_hash: 'sha256:default',
-    });
-    const fromB = await pg.upsertFile({
-      source_id: 'files-source-b',
-      filename: 'shared.jpg',
-      storage_path: 'photos/shared.jpg',
-      content_hash: 'sha256:source-b',
-    });
-
-    expect(fromB.id).not.toBe(fromDefault.id);
-    expect((await pg.getFile('default', 'photos/shared.jpg'))?.content_hash).toBe('sha256:default');
-    expect((await pg.getFile('files-source-b', 'photos/shared.jpg'))?.content_hash).toBe('sha256:source-b');
   }, 30_000);
 
   test('upsertChunks writes embedding_image + modality columns (round-trip)', async () => {

@@ -18,17 +18,44 @@
 import { describe, test, expect, afterEach } from 'bun:test';
 import {
   __setChatTransportForTests,
+  __setEmbedTransportForTests,
+  configureGateway,
   resetGateway,
   type ChatResult,
 } from '../src/core/ai/gateway.ts';
-import { extractFactsFromTurn } from '../src/core/facts/extract.ts';
+import {
+  extractFactsFromTurn,
+  extractFactsFromTurnWithOutcome,
+} from '../src/core/facts/extract.ts';
 
 afterEach(() => {
   __setChatTransportForTests(null);
+  __setEmbedTransportForTests(null);
   resetGateway();
 });
 
 describe('extractFactsFromTurn — B1 end-to-end smoke', () => {
+  test('temporary and unknown-lifetime claims are omitted before embedding, including delayed imports', async () => {
+    const embedded: string[] = [];
+    configureGateway({ embedding_model: 'zeroentropyai:zembed-1', embedding_dimensions: 1280, env: { ZEROENTROPY_API_KEY: 'test' } });
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({ facts: [
+        { fact: 'Prefers concise reports', kind: 'preference', lifetime: 'durable' },
+        { fact: 'Deployment is blocked pending checks', kind: 'fact', lifetime: 'transient' },
+        { fact: 'Currently traveling', kind: 'fact', lifetime: 'unknown' },
+        { fact: 'Waiting for review', kind: 'fact' },
+      ] }),
+      blocks: [], stopReason: 'end', model: 'test:stub', providerId: 'test',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    }));
+    __setEmbedTransportForTests((async ({ values }: { values: string[] }) => {
+      embedded.push(...values);
+      return { embeddings: values.map(() => Array.from({ length: 1280 }, () => 0.1)) };
+    }) as never);
+    const facts = await extractFactsFromTurn({ turnText: 'Archived conversation from a prior month.', source: 'deferred-import' });
+    expect(facts.map(f => f.fact)).toEqual(['Prefers concise reports']);
+    expect(embedded).toEqual(['Prefers concise reports']);
+  });
   test('notability:high from stubbed LLM survives all the way to ExtractedFact', async () => {
     // Stub the LLM to return what a well-tuned Sonnet would emit for a
     // life-event input.
@@ -36,7 +63,7 @@ describe('extractFactsFromTurn — B1 end-to-end smoke', () => {
       text: JSON.stringify({
         facts: [
           {
-            fact: 'Sold the company today',
+            lifetime: 'durable', fact: 'Sold the company today',
             kind: 'event',
             entity: null,
             confidence: 1.0,
@@ -69,7 +96,7 @@ describe('extractFactsFromTurn — B1 end-to-end smoke', () => {
       text: JSON.stringify({
         facts: [
           {
-            fact: 'we ate at Tartine',
+            lifetime: 'durable', fact: 'we ate at Tartine',
             kind: 'event',
             entity: null,
             confidence: 0.9,
@@ -99,7 +126,7 @@ describe('extractFactsFromTurn — B1 end-to-end smoke', () => {
     __setChatTransportForTests(async (): Promise<ChatResult> => ({
       text: JSON.stringify({
         facts: [
-          { fact: 'something happened', kind: 'event', entity: null, confidence: 1.0 },
+          { lifetime: 'durable', fact: 'something happened', kind: 'event', entity: null, confidence: 1.0 },
         ],
       }),
       blocks: [],
@@ -122,9 +149,9 @@ describe('extractFactsFromTurn — B1 end-to-end smoke', () => {
     __setChatTransportForTests(async (): Promise<ChatResult> => ({
       text: JSON.stringify({
         facts: [
-          { fact: 'separation', kind: 'event', entity: null, confidence: 1.0, notability: 'high' },
-          { fact: 'I prefer dark roast', kind: 'preference', entity: null, confidence: 0.9, notability: 'medium' },
-          { fact: 'parking spot 4B', kind: 'fact', entity: null, confidence: 0.8, notability: 'low' },
+          { lifetime: 'durable', fact: 'separation', kind: 'event', entity: null, confidence: 1.0, notability: 'high' },
+          { lifetime: 'durable', fact: 'I prefer dark roast', kind: 'preference', entity: null, confidence: 0.9, notability: 'medium' },
+          { lifetime: 'durable', fact: 'parking spot 4B', kind: 'fact', entity: null, confidence: 0.8, notability: 'low' },
         ],
       }),
       blocks: [],
@@ -141,5 +168,79 @@ describe('extractFactsFromTurn — B1 end-to-end smoke', () => {
 
     expect(facts).toHaveLength(3);
     expect(facts.map(f => f.notability)).toEqual(['high', 'medium', 'low']);
+  });
+
+  test('high-only admission embeds only high-tier candidates', async () => {
+    const embeddedTexts: string[] = [];
+    configureGateway({
+      embedding_model: 'zeroentropyai:zembed-1',
+      embedding_dimensions: 1280,
+      env: { ZEROENTROPY_API_KEY: 'test' },
+    });
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({
+        facts: [
+          { lifetime: 'durable', fact: 'H', kind: 'event', notability: 'high' },
+          { lifetime: 'durable', fact: 'M', kind: 'fact', notability: 'medium' },
+          { lifetime: 'durable', fact: 'L', kind: 'fact', notability: 'low' },
+          { lifetime: 'durable', fact: 'missing', kind: 'fact' },
+          { lifetime: 'durable', fact: 'unknown', kind: 'fact', notability: 'critical' },
+        ],
+      }),
+      blocks: [],
+      stopReason: 'end',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'test:stub',
+      providerId: 'test',
+    }));
+    __setEmbedTransportForTests((async ({ values }: { values: string[] }) => {
+      embeddedTexts.push(...values);
+      return { embeddings: values.map(() => Array.from({ length: 1280 }, () => 0.1)) };
+    }) as never);
+
+    const outcome = await extractFactsFromTurnWithOutcome({
+      turnText: 'content',
+      source: 'test',
+      notabilityAdmission: { allowed: ['high'], invalid: 'drop' },
+    });
+
+    expect(outcome).toEqual(expect.objectContaining({ ok: true }));
+    expect(embeddedTexts).toEqual(['H']);
+  });
+
+  test('without admission, high, medium, low, and absent tiers embed', async () => {
+    const embeddedTexts: string[] = [];
+    configureGateway({
+      embedding_model: 'zeroentropyai:zembed-1',
+      embedding_dimensions: 1280,
+      env: { ZEROENTROPY_API_KEY: 'test' },
+    });
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({
+        facts: [
+          { lifetime: 'durable', fact: 'H', kind: 'event', notability: 'high' },
+          { lifetime: 'durable', fact: 'M', kind: 'fact', notability: 'medium' },
+          { lifetime: 'durable', fact: 'L', kind: 'fact', notability: 'low' },
+          { lifetime: 'durable', fact: 'missing', kind: 'fact' },
+        ],
+      }),
+      blocks: [],
+      stopReason: 'end',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'test:stub',
+      providerId: 'test',
+    }));
+    __setEmbedTransportForTests((async ({ values }: { values: string[] }) => {
+      embeddedTexts.push(...values);
+      return { embeddings: values.map(() => Array.from({ length: 1280 }, () => 0.1)) };
+    }) as never);
+
+    const outcome = await extractFactsFromTurnWithOutcome({
+      turnText: 'content',
+      source: 'test',
+    });
+
+    expect(outcome).toEqual(expect.objectContaining({ ok: true }));
+    expect(embeddedTexts).toEqual(['H', 'M', 'L', 'missing']);
   });
 });

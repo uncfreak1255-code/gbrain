@@ -38,33 +38,16 @@ mount, CEO-class with multiple team brains) and
 
 ## Architecture
 
-Contract-first: `src/core/operations.ts` defines ~92 shared operations (notable:
-`get_recent_salience`, `find_anomalies`, `get_recent_transcripts`, `find_trajectory`,
-`volunteer_context` — push-based context, see `docs/guides/push-context.md`). CLI and MCP
+Contract-first: `src/core/operations.ts` defines 100+ shared operations (including `volunteer_context` — push-based context, see `docs/guides/push-context.md` — and the seven frozen MEMORY_VERBS `recall`/`remember`/`entity`/`synthesize`/`forget`/`context_pack`/`delta` — the last two are v0.45.7 ambient-recall boundary verbs (budget-packed pack + "what changed since"), all seven stamp `protocol_version: 1`, servable alone via `gbrain serve --surface verbs`, see `docs/protocol/MEMORY_VERBS_v1.md` + `docs/guides/ambient-recall.md`). CLI and MCP
 server are both generated from this single source. Engine factory (`src/core/engine-factory.ts`)
 dynamically imports the configured engine (`'pglite'` or `'postgres'`). Skills are fat
 markdown files (tool-agnostic, work with both CLI and plugin contexts).
-
-Some agent-facing surfaces are CLI-only (not ops): `gbrain autopilot` (self-maintaining
-brain daemon — sync → extract → embed on an interval, durable via the minion queue), the
-durability/push path (`gbrain sources harden`), and the deterministic ingestion collectors
-(`gbrain drive ingest`, `gbrain outlook scan` — code collects + classifies, LLM judges).
 
 **Trust boundary:** `OperationContext.remote` distinguishes trusted local CLI callers
 (`remote: false` set by `src/cli.ts`) from untrusted agent-facing callers
 (`remote: true` set by `src/mcp/server.ts`). Security-sensitive operations like
 `file_upload` tighten filesystem confinement when `remote=true` and default to
 strict behavior when unset.
-
-**Brain-repo push + credentials (secure by default).** `gbrain sources harden` /
-`--pat-file` on `sources add` is gbrain's first push path and first credential storage.
-The GitHub token is wired per-repo (least-privilege; reuses an existing credential helper
-when present) and NEVER enters the repo, the tracked remote URL, logs, or any run report.
-Push automation is installed locally per-machine, not committed. Hardening proves push
-works with a `pushProbe` dry-run before declaring done, so a read-only token or protected
-branch surfaces immediately instead of silently dropping writes. `git-remote.ts` keeps the
-SSRF-hardened flags on every git invocation. See the `git-remote.ts` / `sources-harden.ts`
-entries in `KEY_FILES.md`.
 
 **Cross-cutting invariants (must-never-violate, regardless of which file you touch).**
 These used to be buried across the per-file index; they live here so they always load.
@@ -75,10 +58,39 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   sites; `ctx.remote !== false` for untrust-unless-explicit-false). Don't default it falsy.
 - **Source isolation.** Every read-side op routes through `sourceScopeOpts(ctx)`; precedence
   is federated array (`ctx.auth.allowedSources`) > scalar (`ctx.sourceId`) > nothing. Don't
-  hand-roll source filtering — a missed thread is a cross-source data leak.
-- **JSONB: never `JSON.stringify` into a `::jsonb` cast.** postgres.js double-encodes it;
-  PGLite hides the bug. Pass raw objects to `engine.executeRaw`, or use `executeRawJsonb`.
-  Guarded by `scripts/check-jsonb-pattern.sh`.
+  hand-roll source filtering — a missed thread is a cross-source data leak. Corollary
+  (unscoped-check/scoped-write): `engine.getPage` with no opts matches ANY source while
+  `putPage` defaults to `'default'` — an existence check + write pair must scope the read
+  to the write's source (`getPage(slug, { sourceId: x ?? 'default' })`). Guarded by
+  `scripts/check-getpage-scoped-write.mjs` (opt-out marker
+  `gbrain-allow-unscoped-getpage` for read-only first-match sites).
+- **JSONB: never `JSON.stringify` into a `::jsonb` cast.** postgres.js double-encodes it (a jsonb
+  string scalar); PGLite hides the bug. This bites BOTH spellings — the template form
+  (`${JSON.stringify(x)}::jsonb`) AND the positional form (`executeRaw(\`…$N::jsonb\`, [JSON.stringify(x)])`,
+  the #2339 class that aborted every sync). Fix: pass a raw object to `engine.executeRaw` / use
+  `executeRawJsonb` / `sql.json()`; or for the positional path bind through `$N::text::jsonb` (binds as
+  text, the cast parses it). Guarded by `scripts/check-jsonb-pattern.sh` (template grep) +
+  `scripts/check-jsonb-params.mjs` (positional AST scanner); the real backstop is the DATABASE_URL-gated
+  e2e parity tests, since PGLite can't surface the bug. Full rule in `docs/ENGINES.md`.
+- **Engine-live paths avoid runtime dynamic `import()` for helper dependencies.** In
+  `src/core/pglite-engine.ts`, `src/core/postgres-engine.ts`, and
+  `src/core/migrate.ts`, dependencies previously reached through runtime dynamic
+  imports use static top-level imports. Besides the snapshot loader's lazy
+  `require()` cluster in `pglite-engine.ts:tryLoadSnapshot` (fs/crypto + one
+  gateway shape lookup — lazy so production builds without the test-fixture
+  path don't eager-load; the snapshot hash reads migrate.ts/pglite-schema.ts
+  FILE BYTES, never the loaded modules, so coverage instrumentation can't
+  skew it; the guard now matches `require()` calls too), the only
+  dynamic-`import()` exceptions
+  are the four `ai/gateway.ts` lookups in both engines'
+  `initSchema()` and `_upsertChunksOnce()` methods; each remains lazy inside a
+  local `try/catch` because the gateway has a large provider/config closure and,
+  more importantly, eager evaluation would occur before the catch and could
+  turn a recoverable default/config-row fallback into a module-load failure.
+  Every exception carries `engine-dynamic-import-ok` on the import line.
+  `scripts/check-engine-dynamic-import.sh` enforces the rule. For history, use
+  `git log -G'await[[:space:]]+import\\('`, not `git log -S`: a dynamic-to-static
+  rewrite can preserve the searched token while changing its context.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
@@ -100,6 +112,27 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   (fail-closed vs warn-only vs null), not its own numbers. Pinned by `test/model-pricing.test.ts`
   (drift guard asserts each view equals canonical). Embeddings price separately in
   `embedding-pricing.ts` (different unit).
+- **Module-size ratchet.** `scripts/module-size-limits.tsv` pins per-file line ceilings
+  (`check:module-size` in verify): growth over a ceiling, >50 lines of stale slack after a
+  shrink, a row for a deleted file, and any UNLISTED src file over 1,500 lines all fail.
+  Raise a ceiling only via a reviewer-visible TSV edit in the same commit; lower it in the
+  same commit as any peel. migrate.ts is `region-exempt` (the MIGRATIONS array grows freely;
+  the runner logic around it is ratcheted).
+- **Peeled façades keep their surface.** operations.ts (`src/core/ops/*`), doctor.ts
+  (`src/commands/doctor/*`), sync.ts (`src/core/sync-*`), skillpack.ts
+  (`src/commands/skillpack/*`), and both engines
+  (`src/core/{postgres,pglite}-engine/*`) are façades re-exporting everything they always
+  exported — import sites and published package exports never chase the peel. New code goes
+  in the module dirs, not back into the façades. Engine modules take narrow explicit deps
+  (never an engine-shaped bag); doctor source-text guards read `test/helpers/doctor-source.ts`,
+  and the flag-registry generator's `facadeExpansion` keeps peeled flag text in each command's
+  scan surface.
+- **Coverage is measured, honestly.** CI merges per-lane lcov (`scripts/merge-lcov.ts`) into
+  a PR-corpus report on every run (advisory until the diff gate graduates via
+  `COVERAGE_GATE_ENFORCE`) and a nightly fullCorpus number incl. the full e2e glob. bun
+  facts: unique `--coverage-dir` per process (reuse overwrites lcov.info), line records only
+  (JSC omits function names), no subprocess coverage (cli.ts is exempt as a documented
+  undercount), never-loaded files are a count+list, never fake all-files math.
 
 
 ## Reference map (load on demand)
@@ -113,23 +146,34 @@ detail on demand.)
 |---|---|
 | any file in `src/` (what it does + its invariants) | `docs/architecture/KEY_FILES.md` — find the file's entry |
 | search / ranking / hybrid / retrieval | `docs/architecture/RETRIEVAL.md` + the `search/*` entries in `KEY_FILES.md` |
-| search mode bundles (`conservative`/`balanced`/`tokenmax`) / cost knobs / `knobs_hash` | `docs/architecture/search-mode-config.md` |
-| which search COMMAND to use (keyword vs hybrid vs direct get) | `docs/guides/search-modes.md` |
+| search modes / cost knobs | `docs/guides/search-modes.md` |
+| engine detection / Postgres adoption / DB-access repair / degraded serve (`engine status`, `db-repair`, `init --prefer-postgres`, `GBRAIN_DB_ACCESS`) | `docs/ENGINES.md` ("Engine detection and access repair" + "Local Postgres") |
 | embedding spend gates / cost gate / `spend.posture` / off switches | `docs/operations/spend-controls.md` |
+| the monthly backup-coverage check (`gbrain backup`, render channels, nag budget) | `docs/operations/backup-check.md` + the `backup/*` entries in `KEY_FILES.md` |
 | push-based context (volunteer/watch/reflex window) | `docs/guides/push-context.md` |
-| deterministic ingestion collectors (Drive, Outlook, code-collects-LLM-judges) | `docs/guides/deterministic-collectors.md` + the `drive.ts`/`outlook.ts` entries in `KEY_FILES.md` |
-| brain-repo durability / push / credential storage | the `git-remote.ts`/`sources-harden.ts` entries in `KEY_FILES.md` |
-| self-maintaining brain daemon | the `autopilot.ts` entries in `KEY_FILES.md` |
-| DB-contention-aware backfill pacing | `docs/operations/pace-mode.md` + `src/core/pace-mode.ts`, `db-pacer.ts` |
+| checkpoint compaction / compiled context files (`gbrain compile-context`) | `docs/guides/checkpoint-compaction.md` + `docs/guides/ambient-recall.md` |
+| ambient memory writeback (opt-in unprompted fact capture — `memory.auto_writeback`, harness instruction blocks, Stop-hook backstop, read-time TTL) | `docs/guides/ambient-writeback.md` + the ambient-writeback cluster in `KEY_FILES.md` |
+| Memorable integration / session receipts / relay consent (`integrations.memorable.*`) | `docs/memorable-agents.md` + the hook-heartbeat/capture-spec/codex-hooks entries in `KEY_FILES.md` |
+| chat connectors (live ChatGPT/Claude history sync — `gbrain connectors`) | `docs/guides/chat-connectors.md` + the `src/core/connectors/*` entries in `KEY_FILES.md` |
 | schema packs / page types / extraction | `docs/architecture/schema-packs.md`, `type-taxonomy.md`, `lens-packs.md` |
 | thin-client / remote MCP / cross-modal | `docs/architecture/thin-client.md` |
+| memory verbs / MCP tool surface (`--surface`) / conformance | `docs/protocol/MEMORY_VERBS_v1.md` + the `verbs*`/`surface.ts`/`protocol.ts` entries in `KEY_FILES.md` |
 | the CLI surface (commands + flags) | `gbrain --help` / `gbrain --tools-json`, plus the relevant `KEY_FILES.md` entry |
 | running or writing tests | `docs/TESTING.md` |
 | bulk-command progress wiring | `docs/progress-events.md` |
 | eval methodology / metrics | `docs/eval/` |
 | brains vs sources / topology | `docs/architecture/brains-and-sources.md`, `topologies.md` |
+| google connector (Gmail/Calendar/Contacts, OAuth) / credential vault | `docs/guides/google-connect.md` + the `creds/*` + `google/*` entries in `KEY_FILES.md` |
+| open loops / `gbrain waiting` / commitment extraction | `docs/guides/open-loops.md` + the `loops*` entries in `KEY_FILES.md` |
 | skill routing | `skills/RESOLVER.md` |
+| agent bootstrap (paste-in install, hooks, `gbrain bootstrap`, sweep, keyless) | `docs/guides/bootstrap.md` + `docs/designs/AGENT_BOOTSTRAP_PLAN.md` + the KEY_FILES bootstrap cluster |
 | shipping a release / CHANGELOG / PR conventions | `docs/RELEASING.md` (ship IRON RULES stay inline below) |
+
+The per-file index (`## Key files`), the thin-client routing seam, and the testing
+discipline used to live inline here. They moved to the docs above so this file
+stays small enough to load every session. Nothing was lost — the pre-move content
+is in git, and the docs carry every load-bearing invariant (compressed to
+current-state).
 
 ## Maintaining CLAUDE.md and the reference docs
 
@@ -155,15 +199,57 @@ gbrain exists to fix. The rules that keep it from recurring:
 
 ## Search Mode (v0.32.3)
 
-GBrain ships three named search modes — `conservative` / `balanced` / `tokenmax`
-— that bundle the search-lite knobs into a single config key. Pick one at install
-time; the rest of the project resolves through `src/core/search/mode.ts`.
+GBrain ships three named search modes that bundle the search-lite knobs from
+PR #897 into a single config key. Pick one at install time; the rest of the
+project resolves through `src/core/search/mode.ts`.
 
-**Read `docs/architecture/search-mode-config.md` before touching any of it**: the
-per-knob bundle table, the cost-anchor matrices (25x corner-to-corner; the same
-matrix is duplicated verbatim in the `gbrain init` cost picker — update both), the
-`knobs_hash` cache-contamination rules, relational retrieval, and the three
-`gbrain search modes|stats|tune` CLI surfaces all live there.
+| Knob                          | `conservative` | `balanced` | `tokenmax`     |
+|-------------------------------|----------------|------------|----------------|
+| `cache.enabled`               | true           | true       | true           |
+| `cache.similarity_threshold`  | 0.92           | 0.92       | 0.92           |
+| `cache.ttl_seconds`           | 3600           | 3600       | 3600           |
+| `intentWeighting`             | true           | true       | true           |
+| `tokenBudget`                 | **4000**       | **12000**  | **off**        |
+| `expansion` (LLM multi-query) | false          | false      | **true**       |
+| `relationalRetrieval`         | false          | **true**   | **true**       |
+| `relational_rerank_pin`       | 3              | 3          | 3              |
+| `metadata_boost_gate`         | lexical        | lexical    | lexical        |
+| `autocut` (rerank-cliff cut)  | off            | off        | off            |
+| `searchLimit` default         | 10             | 25         | 50             |
+
+**Cost anchors (downstream agent input cost — gbrain itself is rounding error).**
+The corner-to-corner spread is 25x once you pair mode with downstream model.
+Chunks ~400 tokens avg. Per-query cost @ 10K queries/month (typical
+single-user volume), full search payload, no cache savings:
+
+| Mode \ Downstream | Haiku 4.5 (\$1/M) | Sonnet 4.6 (\$3/M) | Opus 4.7 (\$5/M) |
+|---|---|---|---|
+| conservative (~4K) | **\$40/mo** | \$120/mo | \$200/mo |
+| balanced (~10K) | \$100/mo | \$300/mo | \$500/mo |
+| tokenmax (~20K) | \$200/mo | \$600/mo | **\$1,000/mo** |
+
+Scales linearly: multiply by 10 for 100K/mo (heavy power user / multi-user
+fleet); divide by 10 for 1K/mo (light usage). Natural pairings span ~4x.
+Mismatches (tokenmax+Haiku, conservative+Opus) waste capacity differently
+— too-big payload overwhelms a cheap model; too-small payload starves an
+expensive one.
+
+tokenmax adds ~\$1.50 per 1K queries in Haiku expansion calls on top of
+the matrix (\$15/mo @ 10K). Semantic result caching is temporarily disabled; budget for fresh retrieval on every query. **The matrix
+has three verbatim homes: this section, the `gbrain init` picker copy
+(`src/commands/init-mode-picker.ts`), and `INSTALL_FOR_AGENTS.md` Step
+3.5** — update all three when refreshing.
+
+**Per-query math vs real-world spend.** The matrix above is what an
+isolated benchmark would measure. Real agent loops with disciplined
+Anthropic prompt caching see 50-80% discount on top through lower
+cached-input charges. This is separate from GBrain's disabled semantic result
+cache. The realistic-scale anchor in
+`docs/eval/SEARCH_MODE_METHODOLOGY.md` walks the natural pairings at
+single-power-user volume (~860 turns/mo): tokenmax+Opus ~\$700/mo,
+balanced+Sonnet ~\$430/mo, conservative+Haiku ~\$170/mo. Setups WITHOUT
+cache-aware prompt layout (frequent prefix churn) see the per-query
+matrix dominate — mode + model choice matters more there.
 
 **Resolution chain** (matches the v0.31.12 model-tier pattern at
 `src/core/model-config.ts:resolveModel`):
@@ -176,12 +262,36 @@ per `[CDX-5+6]` in `~/.claude/plans/lets-take-a-look-validated-parrot.md` — so
 `gbrain eval replay` and `gbrain eval longmemeval` test the same mode-affected
 behavior as the production `query` op.
 
-**Cache keys are knob-scoped.** `query_cache.knobs_hash` folds the mode knobs, the
-active embedding column + provider, and the relational knob + depth into the
-lookup filter, so a tokenmax write can never be served to a conservative read (or
-a Voyage-embedded row to an OpenAI-embedded query).
-`mode.ts:KNOBS_HASH_VERSION` is the single source of truth — bumping it costs a
-one-time miss spike on upgrade. Details in `search-mode-config.md`.
+**Effective cache availability:** semantic result lookup and writes are temporarily disabled in the shared wrapper, regardless of mode, config, or `use_cache`. Stored rows and maintenance commands remain. `cache.status`, cache statistics and the mode dashboard report disabled. The following cache-key notes describe retained storage machinery, not active response reuse.
+
+**Cache key.** The `query_cache` lookup filters on `knobs_hash`
+(`WHERE source_id = $ AND knobs_hash = $ AND embedding similarity < $`) so a
+tokenmax write can't be served to a conservative read. `mode.ts:KNOBS_HASH_VERSION`
+is the single source of truth; every result-affecting knob folds into `knobsHash`
+(a version bump is a one-time cache-miss spike on upgrade); the version-by-version
+rationale lives in the comment chain at `test/search/knobs-hash-reranker.test.ts`.
+
+**Relational retrieval (v0.42.34.0).** `relationalRetrieval` (on for
+balanced/tokenmax) adds a fourth recall arm: a relational query ("who invested
+in X", "what connects A and B") resolves its seed entity and walks the typed-edge
+graph (`src/core/search/relational-recall.ts` + `relational-intent.ts`,
+`engine.relationalFanout`), injecting edge-derived answers into RRF. Within-source,
+deterministic, mentions-excluded by default, pure no-op for non-relational queries.
+The `query` op's `relational` flag forces it on/off per call. After the
+reranker, up to `relational_rerank_pin` (3 in every bundle) arm rows are re-pinned
+above the reranked text rows (`relational-rerank-pin.ts`);
+`gbrain config set search.relational_rerank_pin off` restores the pre-pin order.
+
+**Three CLI surfaces:**
+
+    gbrain search modes              # what is running, with per-knob attribution
+    gbrain search modes --reset      # clear search.* overrides (mode bundle wins)
+    gbrain search stats [--days N]   # cache hit rate, intent mix, budget drops
+    gbrain search tune [--apply]     # data-driven recommendations
+
+The install picker fires inside `gbrain init` AFTER `engine.initSchema()`
+(non-TTY auto-selects). The upgrade banner fires once via `runPostUpgrade`
+in `src/commands/upgrade.ts`, gated by `search.mode_upgrade_notice_shown`.
 
 ## Eval discipline (v0.32.3)
 
@@ -203,25 +313,25 @@ audit trail lives in the source repo's git history.
 
 ## Skills
 
-Read the skill files in `skills/` before doing brain operations. `skills/RESOLVER.md`
-is the router and the authoritative inventory — read it rather than trusting a list
-here (`AGENTS.md` is also accepted as of v0.19). Skills are fat markdown:
-tool-agnostic, working with both CLI and plugin contexts. `minion-orchestrator` is
-the single unified skill for BOTH lanes of background work — shell jobs via
-`gbrain jobs submit shell` and LLM subagents via `gbrain agent run`.
+Read the skill files in `skills/` before doing brain operations. GBrain ships 50+ skills
+(the current list lives in `skills/manifest.json`) organized by `skills/RESOLVER.md`
+(`AGENTS.md` is also accepted as of v0.19):
 
-**Conventions:** `skills/conventions/` has cross-cutting rules (quality, brain-first,
-model-routing, test-before-bulk, cross-modal). `skills/_brain-filing-rules.md` and
-`skills/_output-rules.md` are shared references.
+**Original 8 (conformance-migrated):** ingest (thin router), query, maintain, enrich,
+briefing, migrate, setup, publish.
 
-**Routing-table compression:** `skills/functional-area-resolver/` is a two-layer
-dispatch pattern for shrinking large AGENTS.md / RESOLVER.md files (>=12KB) without
-losing routing accuracy — one entry per functional area instead of one row per skill.
-The `(dispatcher for: ...)` clause is the LOAD-BEARING signal: strip it and lenient
-routing accuracy collapses to 41.7% on Sonnet. Method, cross-model receipts, and the
-reproduce command live in `evals/functional-area-resolver/README.md` (kept outside
-`skills/` deliberately so the skillpack bundler doesn't ship eval infrastructure
-downstream).
+**Brain skills (ported from an upstream agent fork):** signal-detector, brain-ops, idea-ingest, media-ingest,
+meeting-ingestion, citation-fixer, repo-architecture, skill-creator, daily-task-manager.
+
+**Operational + identity:** daily-task-prep, cross-modal-review, cron-scheduler, reports,
+testing, soul-audit, webhook-transforms, data-research, minion-orchestrator. As of
+v0.20.4, `minion-orchestrator` is the single unified skill for both lanes of background
+work (shell jobs via `gbrain jobs submit shell`, LLM subagents via `gbrain agent run`) ...
+the prior `gbrain-jobs` skill was merged in, Preconditions are shared, and trigger
+routing is narrowed to what the skill actually covers.
+
+**Skillify loop (v0.19):** skillify (the markdown orchestration), skillpack-check
+(agent-readable health report).
 
 **Brain-resident skillpacks + advisor (v0.42.47.0, #2180):** A brain repo can carry its
 own publishable skillpack (`brain_resident: true` in `skillpack.json` + `schema_pack`);
@@ -234,29 +344,71 @@ state (8 collectors in `src/core/advisor/`); `--json`+exit codes for CI/cron, lo
 `--apply <id>` behind confirm, exposed over MCP behind `mcp.publish_advisor` (default off,
 read-only on remote). Thin-client binary install stays deferred to PR2 `build_skillpack`.
 
-**Operational health (v0.19.1):** smoke-test (8 post-restart health checks with auto-fix
-for Bun, CLI, DB, worker, Zod CJS, gateway, API key, brain repo; user-extensible via
-`~/.gbrain/smoke-tests.d/*.sh`).
+**Routing-table compression (v0.32.3.0):** `skills/functional-area-resolver/` —
+two-layer dispatch pattern for shrinking large AGENTS.md / RESOLVER.md files
+(>=12KB) without losing routing accuracy. Replaces one row per skill with one
+entry per functional area, where each area declares its sub-skills in a
+`(dispatcher for: ...)` clause. The static-prompt analog of hierarchical agent
+routing (AnyTool [arXiv:2402.04253](https://arxiv.org/abs/2402.04253), RAG-MCP
+[arXiv:2505.03275](https://arxiv.org/html/2505.03275v1), Anthropic Agent Skills
+progressive disclosure). Empirically validated across Opus 4.7 / Sonnet 4.6 /
+Haiku 4.5: +13 to +17pp over the verbose baseline at 48% the size (25KB → 13KB
+on a real fork). The `(dispatcher for: ...)` clause is the load-bearing signal
+— strip it and lenient accuracy collapses to 41.7% on Sonnet (the
+`resolver-of-resolvers` ablation case). A/B eval surface lives at
+`evals/functional-area-resolver/` (outside `skills/` deliberately so the
+skillpack bundler doesn't ship eval infrastructure to downstream installs):
+gateway-routed TypeScript harness, 20 training + 5 held-out fixtures, strict +
+lenient scoring, three committed cross-model receipts in `baseline-runs/`.
+Receipt header binds (model, prompt_template_hash, fixtures_hash, harness_sha,
+ts) so future contributors can verify reproduction. Companion `rescore.mjs`
+re-scores existing JSONL with lenient tolerance for zero API cost. Reproduce
+with `cd evals/functional-area-resolver && node harness.mjs --model
+{opus|sonnet|haiku}` (~$0.30–1.70 per model). Nine v0.33.x follow-up TODOs
+filed for held-out corpus growth, cross-vendor verification, hierarchical
+area-of-areas, embedding-based pre-router, and the run-1 vs run-2
+prompt-design ablation methodology.
+
+**Operational health (v0.19.1):** smoke-test (8 post-restart health checks; bounded
+auto-fix for Bun, CLI, and Zod CJS; read-only worker topology via native supervisor
+status with duplicate detection; DB, gateway, API key, brain repo; user-extensible
+via `~/.gbrain/smoke-tests.d/*.sh`).
+
+**Conventions:** `skills/conventions/` has cross-cutting rules (quality, brain-first,
+model-routing, test-before-bulk, cross-modal). `skills/_brain-filing-rules.md` and
+`skills/_output-rules.md` are shared references.
 
 ## Bulk-action progress reporting
 
-All bulk commands stream progress through the shared reporter at
-`src/core/progress.ts`. Agents get heartbeats within 1 second of every iteration
-regardless of how slow the underlying work is. **Wiring instructions, the command
-list, and the event schema are in `docs/progress-events.md` — read it before
-adding a new bulk command.** The rules that must hold regardless:
+All bulk commands (doctor, embed, import, export, sync, extract, migrate,
+repair-jsonb, orphans, check-backlinks, lint, integrity auto, eval, files
+sync, and apply-migrations) stream progress through the shared reporter
+at `src/core/progress.ts`. Agents get heartbeats within 1 second of every
+iteration regardless of how slow the underlying work is.
 
+Rules:
 - Progress always writes to **stderr**. Stdout stays clean for data output
   (`--json` payloads, final summaries, JSON action events from `extract`).
-  Never call `process.stdout.write('\r...')` in bulk paths —
-  `scripts/check-progress-to-stdout.sh` is a CI guard wired into `bun run test`
-  that fails the build on it.
 - Non-TTY default: plain one-line-per-event human text. JSON requires the
   explicit `--progress-json` flag.
 - Global flags (`--quiet`, `--progress-json`, `--progress-interval=<ms>`)
   are parsed by `src/core/cli-options.ts` BEFORE command dispatch.
 - Phase names are machine-stable `snake_case.dot.path` (e.g.
-  `doctor.db_checks`, `sync.imports`); additive changes only.
+  `doctor.db_checks`, `sync.imports`). Documented in
+  `docs/progress-events.md`; additive changes only.
+- `scripts/check-progress-to-stdout.sh` is a CI guard that fails the build
+  if any new code writes `\r` progress to stdout. Wired into `bun run test`.
+- Minion handlers pass `job.updateProgress` as the `onProgress` callback
+  to core functions (DB-backed primary progress channel); stderr from
+  `jobs work` stays coarse for daemon liveness only.
+
+When wiring a new bulk command: `import { createProgress } from '../core/progress.ts'`
+and `import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'`.
+Create a reporter with `createProgress(cliOptsToProgressOptions(getCliOptions()))`,
+`start(phase, total?)` before the loop, `tick()` inside it, `finish()` after.
+For single long-running queries, use `startHeartbeat(reporter, note)` with a
+try/finally to guarantee cleanup. Never call `process.stdout.write('\r...')`
+in bulk paths, the CI guard will fail the build.
 
 ## Capturing test output (NEVER pipe through `tail` / `head`)
 
@@ -277,10 +429,11 @@ grep -E '(fail\)|✗|error:' /tmp/ship_units.txt | head -30
 bun test 2>&1 | tail -10
 ```
 
-The pipe form hides failures and can report a false success because:
+The pipe form silently breaks /ship Step T1 (test failure ownership triage) and
+the test verification gate (Step 16) because:
 - `$?` after a pipe is the LAST command's exit code (`tail` → 0), not bun's
 - bun prints failure details before the summary line, so `tail -N` drops them
-- Triage needs the full failure list to distinguish changed behavior from baseline failures
+- Step T1 needs the full failure list to classify in-branch vs pre-existing
 
 This bit us during v0.26.2 ship: `bun test 2>&1 | tail -10` reported "3911 pass / 23 fail"
 but no failure details survived, forcing a 23-minute re-run to triage.
@@ -298,7 +451,7 @@ Progress banks into the append-only `op_checkpoint_paths` table (one row per dra
 path, written via the direct session pool so it survives `EMAXCONNSESSION`); a killed
 run resumes from the checkpoint and `last_commit` only advances on true completion. The
 per-source lock heartbeats through the direct pool and refuses to steal a live,
-recently-refreshed holder. Five env knobs tune it (all env-only, incident-time escape
+recently-refreshed holder. Six env knobs tune it (all env-only, incident-time escape
 hatches — no config-dashboard surface by design):
 
 | Env var | Default | What it does |
@@ -308,6 +461,7 @@ hatches — no config-dashboard surface by design):
 | `GBRAIN_SYNC_MAX_CHECKPOINT_FAILURES` | 3 | Consecutive failed flushes (each already retried ~12s) before the run aborts with `reason: 'checkpoint_unavailable'` instead of importing work it can never bank. |
 | `GBRAIN_SYNC_YIELD_EVERY` | 64 | Yield the event loop (`setTimeout(0)`, NOT `setImmediate` — Bun starves the timers phase under a tight setImmediate loop) every N files so the lock-refresh `setInterval` heartbeat fires mid-import. |
 | `GBRAIN_LOCK_STEAL_GRACE_SECONDS` | derived (~600 at 30min TTL) | A holder that refreshed within this window is NOT stolen even if its TTL lapsed (starved-but-alive). Dead holders stop refreshing, age past the grace, and become stealable; TTL stays the backstop. |
+| `GBRAIN_SYNC_STALL_ABORT_SECONDS` | 900 | Progress-aware stall watchdog (#1950): if the import drain makes no forward progress (keyed on file-import progress, NOT the lock heartbeat) for N seconds, abort the run and release the per-source lock so the next `gbrain sync` resumes from the checkpoint. Reports `reason: 'stall_timeout'`. Observed BETWEEN files; a hang inside one file's import isn't interrupted until it returns (the wall-clock hard deadline is that backstop). 0 disables. |
 
 ## Pace Mode (DB-contention-aware backfill pacing)
 
@@ -316,23 +470,60 @@ transaction-mode pooler and starve the minion supervisor's lock renewals
 (`lock-renewal-failed` → dead jobs). Pacing is the native, composable fix — it
 replaces external SIGSTOP/SIGCONT wrapper scripts. **Opt-in: default mode `off`.**
 
-Two invariants that hold wherever you touch it: the pacer is **fail-open** (a
-pacer bug never kills a backfill and never throws an unhandledRejection), and
-bundles resolve with **env ABOVE config** (incident escape hatch), unlike search
-mode:
+The composable primitive is `src/core/db-pacer.ts` (`createDbPacer`):
+- **Concurrency cap is the real lever** (caps simultaneous in-flight DB writes =
+  pooler slots held). Embed paths set their worker count to `maxConcurrency`
+  (single pool, no permit); `sync` uses the shared `acquire()` **permit** because
+  each parallel worker owns a separate engine (one budget must span pools).
+- **In-band signal** (`observe(ms)` EWMA from the work's own queries — never
+  blind the way an out-of-band probe pool was). **No probe loop, no
+  `probeLatency` engine method.**
+- **Cooperative `pace()` sleep** on `setTimeout` (keeps the lock heartbeat
+  firing), jittered to avoid a thundering-herd resume. `acquire()`/`pace()` throw
+  `AbortError` on cancel; everything else is fail-open (a pacer bug never kills a
+  backfill, never throws an unhandledRejection).
+
+Named bundles resolve through `src/core/pace-mode.ts` (`resolvePaceMode`), mirror
+of the search-mode pattern but with **env ABOVE config** (incident escape hatch):
 
     per-call flag → GBRAIN_PACE_* env → config (pace.*) → PACE_BUNDLES[mode] → off
 
-The `gentle`/`balanced`/`aggressive` knob table, the `db-pacer.ts` primitive, the
-CLI + job surfaces, and the correctness fixes that longer paced runs widen
-(embed-backfill lock sharing, bounded keyset re-entry, budget-timer re-arming)
-are in `docs/operations/pace-mode.md`.
+| Knob | off | gentle | balanced | aggressive |
+|---|---|---|---|---|
+| `maxConcurrency` | (off) | 4 | 8 | 16 |
+| `paceAtMs` (EWMA → sleep) | — | 250 | 500 | 1000 |
+| `maxSleepMs` (jittered cap) | — | 2000 | 1500 | 1000 |
+
+**Surfaces.** `gbrain embed --stale --pace[=mode]` (bare `--pace` = balanced),
+`--pace-max-concurrency=N`. `--background` carries explicit pace OVERRIDES (not
+the resolved bundle) into the `embed` job payload; the handler re-resolves
+env>config>bundle at execution so `GBRAIN_PACE_*` still wins (CX5). Config-level
+`pace.mode` paces EVERY `runEmbedCore` caller (cycle embed, embed-catch-up,
+sync-auto-embed) and the prod `embed-backfill` job automatically. `sync` reads
+env/config. PGLite / mode `off` → no-op pacer.
+
+**Correctness fixes pacing bundles** (longer paced runs widen these): CLI
+`embed --stale` single-flights via the SAME per-source lock key as the
+`embed-backfill` handler (`src/core/embed-backfill-lock.ts`; all-source runs lock
+every source in sorted order) so a hand-run backfill and a queued job can't race
+the NULL→non-NULL upsert (`TODOS:2299`); a **bounded** end-of-run keyset re-entry
+(max 3 + forward-progress, paced runs only) catches rows inserted behind the
+cursor (`TODOS:2301`); and the embed wall-clock budget timer is re-armed around
+`pace()` sleeps so paced time doesn't burn the work budget.
+
+`EmbedResult.pacing` carries the end-of-run telemetry (cap, samples, EWMA, slept
+ms, max waiters) for `--json`; a one-line summary prints to stderr.
+
+## Build
+
+`bun build --compile --outfile bin/gbrain src/cli.ts`
 
 ## Version locations (single source of truth: `VERSION` file)
 
-Every release keeps **five release-metadata files** in sync using the commands
-below and the CI version gate. The canonical list lives here so release
-preparation can run in any agent host.
+Every release advances the version in **every file in the table below at
+once**. Keep these in sync. `/ship` enforces this via Step 12's idempotency check (VERSION vs
+package.json drift), but the canonical list lives here so future runs and
+the auto-update agent know where to look.
 
 **Version format is mandatory: `MAJOR.MINOR.PATCH.MICRO` (four numeric
 segments, dot-separated, no leading `v`).** Every new release MUST use the
@@ -345,25 +536,30 @@ four numeric segments are required first. Historical 3-segment versions
 (`0.31.3`, `0.22.1`) remain valid in `git log` and migration filenames
 (`skills/migrations/v0.21.0.md`); do NOT rewrite them. Going forward only.
 
-**Required release metadata (every release must update all five):**
+**Required (every release must update every row):**
 
 | File | What lives there | Format |
 |---|---|---|
-| `VERSION` | The single source of truth. Read by the binary and CI version-gate. | Bare 4-segment string `MAJOR.MINOR.PATCH.MICRO` (e.g. `0.31.4.1`), no leading `v`. |
+| `VERSION` | The single source of truth. Read first by `/ship`, the binary, and CI version-gate. | Bare 4-segment string `MAJOR.MINOR.PATCH.MICRO` (e.g. `0.31.4.1`), no leading `v`. |
 | `package.json` | Bun/npm package version. `gbrain --version` reads it via the compiled binary's bundled package metadata. CI version-gate cross-checks this against `VERSION` and fails if they drift. | `"version": "0.31.4.1"` |
-| `openclaw.plugin.json` | OpenClaw/ClawHub bundle manifest version. The release-workflow guard cross-checks it against `VERSION`. | `"version": "0.31.4.1"` |
-| `skills/manifest.json` | Bundled skill-manifest version. The release-workflow guard cross-checks it against `VERSION`. | `"version": "0.31.4.1"` |
 | `CHANGELOG.md` | Top entry header `## [0.31.4.1] - YYYY-MM-DD` plus the "To take advantage of v0.31.4.1" block. | Standard Keep-a-Changelog header. |
-
-**Conditional release documentation (update only when affected):**
-
-| File | What lives there | Format |
-|---|---|---|
 | `TODOS.md` | Any TODO entries that mention "follow-up from vX.Y.Z.W" use the version of the release that filed them. Update only when filing NEW follow-up TODOs. | Inline `vX.Y.Z.W` references in TODO bodies. |
 | `CLAUDE.md` | The Key Files section's per-file annotations carry `vX.Y.Z.W (#NNN)` tags noting which release introduced a behavior. Update whenever a wave's annotations get folded in. | Inline `vX.Y.Z.W (#NNN, contributed by @user)` references. |
+| `openclaw.plugin.json` | OpenClaw plugin manifest (v0.45.6.0, #4033). Hand-maintained; `test/openclaw-plugin-manifest.test.ts` fails the suite if it drifts from `package.json`. Merges from master auto-resolve it to master's version — re-bump it with the trio. | `"version": "0.45.12.0"` |
+| `.codex-plugin/plugin.json` + `.claude-plugin/plugin.json` | Codex + Claude Code plugin manifests. Hand-maintained; `test/codex-plugin-manifest.test.ts` fails the suite when either drifts from `package.json` (the bump is now a FIVE-file lockstep: VERSION, package.json, openclaw.plugin.json, and both plugin manifests). Merges from master auto-resolve them to master's version — re-bump with the version set. | `"version": "0.46.7.0"` |
+| `BOOTSTRAP_FOR_AGENTS.md` | Runbook stamp on line 1. `scripts/check-bootstrap-tag.sh` (in `bun run verify` + CI) fails when it drifts from `VERSION`; refresh it in the same commit as the bump. | `<!-- gbrain-runbook-stamp: X.Y.Z.W -->` |
+| `templates/bootstrap/template-repo/` | Vendored template tree with an embedded version stamp. Auto-derived, but NOT by `bun install`: run `bun run scripts/generate-template-repo.ts --out templates/bootstrap/template-repo` after the bump; `scripts/check-bootstrap-templates.sh` fails CI on drift. | `<!-- gbrain-template-stamp: X.Y.Z.W -->` in generated files. |
 
 **Auto-derived (no manual edit; refreshed by their own commands):**
 
+- `plugin/` + `plugin-variants/` — the committed codex/claude plugin skill
+  tree AND the persona variant trees (gbrain-coding, gbrain-daily) embed a
+  `gbrain-plugin-tree-stamp: X.Y.Z.W` (the variants' generated plugin
+  manifests carry the version too), so every version bump drifts them.
+  Regenerate after the bump: `bun run scripts/generate-plugin-tree.ts --out
+  plugin --variants-out plugin-variants` (guarded by
+  `scripts/check-plugin-tree.sh` in `bun run verify`; the release
+  `publish-codex-plugin` job also drift-gates it before publishing).
 - `bun.lock` — root-package version is auto-pinned from `package.json`. After
   bumping `package.json`, run `bun install` to refresh the lockfile.
 - `llms-full.txt` / `llms.txt` — auto-generated documentation bundles. **Any
@@ -392,53 +588,133 @@ four numeric segments are required first. Historical 3-segment versions
   (e.g. "v0.21.0 Code Cathedral"); update only when the README's marketing
   copy is intentionally being refreshed, NOT on every micro/patch bump.
 
-**The CI version-gate** checks `VERSION` against `package.json` and the
-release base. `test/scripts/release-workflow.test.ts` also checks both bundled
-manifests. If another release claims the selected version, choose the next
-valid version and update all five release-metadata files before publication.
-No external version allocator is required.
+**The /ship workflow's version idempotency check:** Step 12 reads
+`VERSION` and `package.json`, classifies as FRESH / ALREADY_BUMPED /
+DRIFT_STALE_PKG / DRIFT_UNEXPECTED, and refuses to proceed on
+DRIFT_UNEXPECTED. This is why the two must move together.
 
-### Mandatory version-consistency audit (run after EVERY merge or commit that touches release metadata)
+**The CI version-gate** rejects pushes where `VERSION` and
+`package.json` disagree, OR where `VERSION` is not strictly greater
+than master's VERSION. If a queue collision claims your version on
+master before yours lands, /ship's queue-aware allocator (Step 12)
+will detect drift and re-bump on the next run.
 
-**All five release-metadata files MUST agree.** Every merge from master can
-conflict on release metadata because master ships its own version bumps.
-Auto-merge sometimes resolves these silently in unexpected ways. After any
-merge, branch update, or version-related edit, run this audit. It's five lines
-and never lies:
+### Mandatory version-consistency audit (run after EVERY merge or commit that touches VERSION, package.json, or CHANGELOG)
+
+**The trio MUST agree.** Every merge from master will hit conflicts on
+VERSION + package.json + CHANGELOG.md because master ships its own
+version bumps. Auto-merge sometimes resolves these silently in unexpected
+ways. After any merge, branch update, or version-related edit, run this
+audit. It's three lines and never lies:
 
 ```bash
 echo "VERSION:     $(cat VERSION)"
 echo "package.json: $(node -e 'process.stdout.write(require("./package.json").version)')"
-echo "openclaw.plugin.json: $(node -e 'process.stdout.write(require("./openclaw.plugin.json").version)')"
-echo "skills/manifest.json: $(node -e 'process.stdout.write(require("./skills/manifest.json").version)')"
 grep -E "^## \[" CHANGELOG.md | head -1
 ```
 
-All five MUST show the same `MAJOR.MINOR.PATCH.MICRO`. If any one disagrees,
-you have not finished the merge. Fix it before pushing or shipping. There is
-no situation in which "I'll fix it next push" is OK, because:
+All three MUST show the same `MAJOR.MINOR.PATCH.MICRO`. If any one
+disagrees, you have not finished the merge. Fix it before pushing or
+shipping. There is no situation in which "I'll fix it next push" is OK,
+because:
 
-- A `VERSION`/`package.json` mismatch fails the CI version-gate, while either
-  bundled-manifest mismatch fails the release-workflow regression test.
+- A green local test run with mismatched VERSION/package.json still
+  fails the CI version-gate.
 - A green CHANGELOG entry under the wrong version header silently lies
   to release-notes consumers.
+- /ship's Step 12 idempotency check classifies a mismatch as
+  `DRIFT_UNEXPECTED` and HALTS — but only if you remember to run /ship
+  before pushing. Manual `git push` skips the check.
 
-### Merge-conflict recovery on release metadata
+### Merge-conflict recovery procedure (memorize this)
 
-Every merge from master can conflict on those five files, because master ships
-its own version bumps, and auto-merge sometimes resolves them silently in
-unexpected ways. **The exact 9-step resolution order — including the sed patterns
-and the `git checkout --ours/--theirs` anti-pattern — is in
-`docs/RELEASING.md`.** Run the 5-line audit above after resolving, and again
-before pushing any merge commit; if it doesn't show your version on all five
-lines, you have not finished the merge.
+When `git merge origin/master` reports conflicts on VERSION,
+package.json, or CHANGELOG.md, resolve in this exact order:
 
-## App-specific workspace behavior
+1. **VERSION** — overwrite with the wave's version (`echo -n "X.Y.Z.W"
+   > VERSION`). Highest semver wins; do NOT take master's lower version.
+2. **package.json** — strip the conflict markers, keep the wave's
+   version line. Sed pattern:
+   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/,/^>>>>>>> /d' package.json && rm package.json.bak`
+   (assumes ours is above the `=======`).
+3. **CHANGELOG.md** — strip ALL three conflict markers; both your entry
+   and master's entry stay. Sed pattern:
+   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/master$/d' CHANGELOG.md && rm CHANGELOG.md.bak`
+   Then verify your entry is the topmost `## [X.Y.Z.W]` and master's
+   newer-than-yours entries (if any) sit below.
+4. **Run the 3-line audit above.** If it doesn't show your version on
+   all three lines, you missed a marker.
+5. **Run `bun install`** to refresh `bun.lock` against the resolved
+   `package.json`. Stage and commit if it changed.
+6. **Run `bun run typecheck`** before committing the merge.
+7. Only THEN run `git commit` for the merge.
 
-Branch naming is governed by the repository and the active workspace. Apply
-Conductor-specific naming only when this task actually runs in Conductor and
-the current app requires it. Do not rename branches, delete remote refs, or
-recreate PRs to satisfy an inactive app's historical convention.
+If the audit shows drift after step 4, do NOT proceed to step 5. Re-run
+steps 1-3 against the actual file content; you missed a marker or
+resolved one in the wrong direction.
+
+**Anti-pattern to avoid:** Resolving via `git checkout --ours package.json`
+and `git checkout --theirs scripts/test-shard.sh` mixed in the same
+commit. The selective directional resolution is fine, but on
+VERSION/package.json/CHANGELOG specifically, ALWAYS use the explicit
+`echo > VERSION` + sed-strip-markers pattern above. The directional
+checkout flags have bitten us when the conflict shape was unexpected
+(e.g. master stripped a section we expected to keep).
+
+### Pre-push gate (manual; tighten when you remember to)
+
+Before any `git push` of a merge commit, run the audit one more time:
+
+```bash
+echo "VERSION:     $(cat VERSION)"
+echo "package.json: $(node -e 'process.stdout.write(require("./package.json").version)')"
+grep -E "^## \[" CHANGELOG.md | head -1
+```
+
+If you've been editing the branch via `/ship` you can rely on Step 12's
+idempotency check. If you've been editing manually (merge resolution,
+conflict fix, version bump), the audit is the last line of defense
+before CI yells at you.
+
+## Conductor branch-name = workspace-name (IRON RULE)
+
+Conductor workspaces expect the git branch name to match the workspace
+directory name. When they disagree, Conductor silently fails to render the
+PR view + show ship state, leading to "did you actually push?" confusion.
+
+**Check this FIRST on every ship and BEFORE creating any PR:**
+
+```bash
+WORKSPACE=$(basename "$PWD")              # e.g. puebla-v4
+BRANCH=$(git branch --show-current)        # e.g. garrytan/gstack-requests
+case "$BRANCH" in
+  */"$WORKSPACE") echo "OK: branch tail matches workspace" ;;
+  "$WORKSPACE")   echo "OK: branch == workspace" ;;
+  *)              echo "MISMATCH: branch=$BRANCH workspace=$WORKSPACE — RENAME BEFORE SHIPPING" ;;
+esac
+```
+
+If MISMATCH (branch is `garrytan/foo` but workspace is `puebla-v4`):
+
+```bash
+# Rename local, push under new name, delete old remote (and old PR if it
+# was already created — github auto-closes it when head ref dies).
+git branch -m garrytan/<workspace-name>
+git push -u origin garrytan/<workspace-name>
+git push origin --delete <old-branch-name>
+# If a PR existed against the old branch:
+#   gh pr comment <old-pr> --body "Superseded by #<new>: branch renamed to match Conductor workspace."
+#   gh pr create --base master --title "..." --body "..."  # recreate from renamed branch
+```
+
+Caught the hard way on v0.41.9.0 ship: workspace `puebla-v4` but branch
+`garrytan/gstack-requests` produced PR #1439 that Conductor wouldn't
+display. Renamed to `garrytan/puebla-v4`; recreated as #1440.
+
+The /ship workflow's Step 1 should be augmented to run the mismatch
+check; until that lands upstream, ALWAYS run the check above before
+`/ship` invokes its first push or PR-create step.
+
 
 ## Releasing
 
@@ -446,31 +722,84 @@ Before any ship, read **[docs/RELEASING.md](docs/RELEASING.md)** in full. It car
 full release + contributor process: pre-ship test requirements (`bun run ci:local` / the
 E2E lifecycle), the CHANGELOG voice + release-summary template, the "To take advantage of
 vX" self-repair block, version migrations, the GitHub Actions SHA refresh, PR conventions,
-and the community-PR-wave process. Use the native repository commands and
-GitHub workflow there; external skills are optional helpers.
+and the community-PR-wave process. **Use `/ship` — never hand-roll a release.** Every
+community wave runs `bun run wave-security-scan <base>..<head>` (RELEASING.md step 5) before
+ship — the repeatable mechanical sweep (obfuscation/eval, gitleaks with the test/skills
+allowlist stripped, committed `admin/dist` changes as alarms; new endpoints/spawns/env/deps
+as context).
 
 The ship-critical IRON RULES stay inline in this file (do NOT relocate them): the
-Version-locations table above (the 5-file release-metadata sync + the 5-line audit),
-the documentation checks (below),
+Version-locations table above (the 5-file sync + the 3-line VERSION/package.json/CHANGELOG
+audit), the Conductor branch=workspace rule (above), Post-ship `/document-release` (below),
 the Privacy + Responsible-disclosure rules (below), and the PR-title-version-first rule
 (below).
 
-## Release documentation
+## Post-ship requirements (MANDATORY)
 
-Inspect the release diff and update the documentation affected by its behavior,
-commands, or setup changes. Regenerate committed bundles when their sources
-change. No separate documentation skill or scan of every Markdown file is
-required. An unchanged, accurate document needs no edit.
+After EVERY /ship, you MUST run /document-release. This is NOT optional. Do NOT
+skip it. Do NOT say "docs look fine" without running it. The skill reads every .md
+file in the project, cross-references the diff, and updates anything that drifted.
 
-Check the relevant owners for the changed behavior:
+If /ship's Step 8.5 triggers document-release automatically, that counts. But if
+it gets skipped for ANY reason (timeout, error, oversight), you MUST run it manually
+before considering the ship complete.
+
+Files that MUST be checked on every ship:
 - README.md — does it reflect new features, commands, or setup steps?
-- CLAUDE.md — does it reflect new files, test files, or architecture changes?
+- `docs/architecture/KEY_FILES.md` — new or changed files in `src/`, and their
+  invariants, are recorded HERE. This is the on-demand layer behind the Reference
+  map, and it is where per-file and per-version detail belongs.
+- CLAUDE.md — only if an always-loaded rule, the Reference map, or the dispatcher
+  changed. **CLAUDE.md is a map, not a log**: it is read in full at the start of every
+  session, so entries are condensed or deleted as they go stale, never appended to.
+  If an update adds a file inventory, a test inventory, or an "as of vX.Y.Z" note,
+  it belongs in the on-demand layer above instead.
 - CHANGELOG.md — does it cover every commit?
 - TODOS.md — are completed items marked done?
 - docs/ — do any guides need updating?
 
-A release with inaccurate affected documentation is incomplete.
+A ship without updated docs is an incomplete ship. Period.
 
+
+## "Say to your agent" rule: every feature doc addresses the END USER (IRON RULE)
+
+GBrain is installed and operated by an AI agent. Most users never type a
+`gbrain` command — they talk to their harness (Claude Code, Codex, OpenClaw,
+Hermes, Cursor). Documentation that only shows CLI blocks serves the operator
+and abandons the end user.
+
+**The rule:** whenever a feature is added or explained in a public-facing doc
+(README, CHANGELOG, docs/guides, tutorials), include the common end-user block:
+
+    **Say to your agent:** *"<natural-language prompt>"* — *"<optional second phrasing>"*
+
+- 1-3 quoted phrases a user can literally type into ANY harness (a 4th is fine
+  when it hands off to an adjacent skill, e.g. a capture block that also points
+  at cold-start's "fill my brain"). Plain English, outcome-framed ("connect my
+  chatgpt account and pull my whole history into the brain"); don't dress a bare
+  command name as a sentence.
+- **When a skill backs the feature, the phrases MUST come from (or contain) the
+  skill's frontmatter `triggers:`** — those are what the harness actually
+  routes on (baseline routing is substring match), so the doc and the router can
+  never drift apart. Verify each phrase against the real trigger before shipping.
+  The skills section of README points at `skills/RESOLVER.md` as the full
+  phrasebook.
+- **When NO skill backs the feature (a CLI-only path), be honest:** the phrase
+  states the outcome and names the command the agent runs for it ("Run a search
+  benchmark against LongMemEval — your agent runs `gbrain eval longmemeval`"),
+  rather than implying a trigger that doesn't exist.
+- Grouping two phrases for the SAME skill with a `/` (e.g. *"Brain health"* /
+  *"check backlinks"*) is allowed; separate distinct destinations with an em-dash.
+- CLI blocks stay — they serve operators and the agents themselves. The say
+  block sits adjacent, not instead.
+- CHANGELOG: every feature entry's "To take advantage of vX" block carries a
+  say line alongside the commands.
+- Same privacy bar as everything else public: generic placeholders in the
+  phrases, never real names.
+
+Litmus test: a non-technical user reads the section and knows the exact
+sentence to type into their agent. If they'd have to translate a flag into
+English themselves, the section fails.
 
 ## Privacy rule: scrub real names from public docs
 
@@ -590,20 +919,35 @@ read version-first. A title with the version parenthesized at the end
 (`feat(search): autocut ... (v0.42.3.0)`) is WRONG — fix it with
 `gh pr edit <N> --title "vX.Y.Z.W <type>: <summary>"`.
 
-This applies to any tool that creates or edits a PR title: the version is the
-first token. Same rule for the
+This applies to `gh pr create` and every `gh pr edit --title`. When `/ship`
+(or any flow) sets a PR title, the version is the first token. Same rule for the
 final commit subject that carries the version bump.
 
 
 ## Skill routing
 
-Use native agent reasoning and the repository commands as the default. Apply an
-available skill when the user requests it or its actual task trigger fits. Read
-`skills/RESOLVER.md` for GBrain-specific operations. Do not assume a host exposes
-a tool named `Skill` or requires an external GStack workflow.
+When the user's request matches an available skill, ALWAYS invoke it using the Skill
+tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
+The skill has specialized workflows that produce better results than ad-hoc answers.
 
-A historical skill name is not a prerequisite or approval gate. If an optional
-helper is unavailable, complete the authorized work with the current tools and
-preserve the underlying tests, review, privacy, and authorization requirements.
-Publication does not authorize runtime installation, service restart, spending,
-or production data changes.
+**NEVER hand-roll ship operations.** Do not manually run git commit + push + gh pr
+create when /ship is available. /ship handles VERSION bump, CHANGELOG, document-release,
+pre-landing review, test coverage audit, and adversarial review. Manually creating a PR
+skips all of these. If the user says "commit and ship", "push and ship", "bisect and
+ship", or any combination that ends with shipping — invoke /ship and let it handle
+everything including the commits. If the branch name contains a version (e.g.
+`v0.5-live-sync`), /ship should use that version for the bump.
+
+Key routing rules:
+- Product ideas, "is this worth building", brainstorming → invoke office-hours
+- Bugs, errors, "why is this broken", 500 errors → invoke investigate
+- Ship, deploy, push, create PR, "commit and ship", "push and ship" → invoke ship
+- QA, test the site, find bugs → invoke qa
+- Code review, check my diff → invoke review
+- Update docs after shipping → invoke document-release
+- Weekly retro → invoke retro
+- Design system, brand → invoke design-consultation
+- Visual audit, design polish → invoke design-review
+- Architecture review → invoke plan-eng-review
+- Save progress, checkpoint, resume → invoke checkpoint
+- Code quality, health check → invoke health

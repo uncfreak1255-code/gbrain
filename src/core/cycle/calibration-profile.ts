@@ -25,11 +25,11 @@
  * profiles per source for the same holder.
  */
 
-import { BaseCyclePhase, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
+import { BaseCyclePhase, effectivePhaseDeadlineMs, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
+import { resolveOwnerHolder } from '../owner-holder.ts';
+import { chat as gatewayChat, getChatModel } from '../ai/gateway.ts';
 import { gateVoice, type VoiceGateGenerator, type VoiceGateJudge } from '../calibration/voice-gate.ts';
 import { patternStatementTemplate, type PatternStatementSlots } from '../calibration/templates.ts';
-import { executeRawJsonb } from '../sql-query.ts';
 // v0.41 T10 — domain widening. The aggregator module resolves the active
 // pack's calibration_domains declarations into per-domain Brier+accuracy+
 // extras scorecards stored in calibration_profiles.domain_scorecards JSONB.
@@ -90,13 +90,15 @@ export type PatternStatementsGenerator = (input: {
   holder: string;
   attempt: number;
   feedback?: string;
+  /** Provider-prefixed model the phase resolved; drives the generator's chat call. */
+  modelHint?: string;
 }) => Promise<string[]>;
 
 /** Generator function for bias tags (test seam). */
 export type BiasTagsGenerator = (patterns: string[]) => Promise<string[]>;
 
 export interface CalibrationProfileOpts extends BasePhaseOpts {
-  /** Holder to generate the profile for. Default 'garry'. */
+  /** Holder to generate the profile for. Default resolves via resolveOwnerHolder (config emotional_weight.user_holder, else 'self'). */
   holder?: string;
   /** Inject the patterns generator (tests). */
   patternsGenerator?: PatternStatementsGenerator;
@@ -141,7 +143,6 @@ export async function defaultPatternsGenerator(input: {
   const result = await gatewayChat({
     messages: [{ role: 'user', content: prompt + feedbackSuffix }],
     ...(input.modelHint ? { model: input.modelHint } : {}),
-    budgetLabel: 'cycle.calibration_profile.patterns',
     maxTokens: 500,
   });
   return parsePatternStatementsOutput(result.text);
@@ -156,7 +157,6 @@ export async function defaultBiasTagsGenerator(patterns: string[]): Promise<stri
   );
   const result = await gatewayChat({
     messages: [{ role: 'user', content: prompt }],
-    budgetLabel: 'cycle.calibration_profile.bias_tags',
     maxTokens: 200,
   });
   return parseBiasTagsOutput(result.text);
@@ -229,9 +229,19 @@ class CalibrationProfilePhase extends BaseCyclePhase {
     _ctx: OperationContext,
     opts: CalibrationProfileOpts,
   ): Promise<{ summary: string; details: Record<string, unknown>; status?: PhaseStatus }> {
-    const holder = opts.holder ?? 'garry';
+    const holder = resolveOwnerHolder({
+      override: opts.holder,
+      configValue: await engine.getConfig('emotional_weight.user_holder'),
+    });
     const promptVersion = opts.promptVersion ?? CALIBRATION_PROFILE_PROMPT_VERSION;
-    const modelId = opts.model ?? 'claude-sonnet-4-6';
+    // Follow the gateway's configured chat model, matching propose_takes
+    // (v0.42.62) and grade_takes: previously the generator stayed pinned to
+    // the TIER_DEFAULTS.reasoning constant, ignoring a configured
+    // chat_model. getChatModel() is provider-prefixed, preserving the #2451
+    // contract (a bare id fed back into gateway.chat() throws), and its
+    // default IS 'anthropic:claude-sonnet-4-6' — identical to the old
+    // constant — so stock installs are unchanged.
+    const modelId = opts.model ?? getChatModel();
     const gradeCompletion = opts.gradeCompletion ?? 1.0;
     const patternsGenerator = opts.patternsGenerator ?? defaultPatternsGenerator;
     const biasTagsGenerator = opts.biasTagsGenerator ?? defaultBiasTagsGenerator;
@@ -246,6 +256,24 @@ class CalibrationProfilePhase extends BaseCyclePhase {
       brier: null,
       warnings: [],
     };
+
+    // gbrain#4168: this phase runs last in the calibration trio and makes
+    // 1-2 LLM calls with no interior loop to break out of — so the deadline
+    // check is a pre-flight gate: if the job budget is already inside the
+    // reserve, skip cleanly (the next cycle regenerates from fresher data
+    // anyway) instead of starting an LLM call the worker will kill mid-write.
+    const remainingMs = effectivePhaseDeadlineMs(
+      Number.MAX_SAFE_INTEGER,
+      opts.deadlineAtMs,
+      Date.now(),
+    );
+    if (remainingMs <= 0) {
+      return {
+        summary: 'calibration_profile: skipped — job deadline inside the reserve window',
+        details: { ...result, deadline_hit: true },
+        status: 'warn',
+      };
+    }
 
     // Load the holder's scorecard.
     const scorecard = await engine.getScorecard({ holder }, undefined);
@@ -267,6 +295,9 @@ class CalibrationProfilePhase extends BaseCyclePhase {
         scorecard,
         holder,
         attempt,
+        // The same resolved string that is persisted to model_id drives the
+        // generator's chat call — the phase can't record a model it didn't run.
+        modelHint: modelId,
         ...(feedback !== undefined ? { feedback } : {}),
       });
       return lines.join('\n');
@@ -350,8 +381,7 @@ class CalibrationProfilePhase extends BaseCyclePhase {
       );
     }
 
-    await executeRawJsonb(
-      engine,
+    await engine.executeRaw(
       `INSERT INTO calibration_profiles (
          source_id, holder, generated_at, published,
          total_resolved, brier, accuracy, partial_rate, grade_completion,
@@ -360,11 +390,9 @@ class CalibrationProfilePhase extends BaseCyclePhase {
          active_bias_tags, model_id, cost_usd, judge_model_agreement
        ) VALUES ($1, $2, now(), false,
                  $3, $4, $5, $6, $7,
-                 $11::jsonb,
-                 ARRAY(SELECT jsonb_array_elements_text(($12::jsonb)->'pattern_statements')),
-                 $8, $9,
-                 ARRAY(SELECT jsonb_array_elements_text(($13::jsonb)->'active_bias_tags')),
-                 $10, NULL, NULL)`,
+                 $8::text::jsonb, $9::text[],
+                 $10, $11,
+                 $12::text[], $13, NULL, NULL)`,
       [
         sourceId,
         holder,
@@ -373,17 +401,15 @@ class CalibrationProfilePhase extends BaseCyclePhase {
         scorecard.accuracy,
         scorecard.partial_rate,
         gradeCompletion,
-        result.voice_gate_passed,
-        result.voice_gate_attempts,
-        modelId,
-      ],
-      [
         // v0.41 T10 — domain_scorecards JSONB populated by the
         // domain-aggregators pass above. Empty {} when no active pack
         // declares calibration_domains (R1 byte-identical regression).
-        domainScorecards,
-        { pattern_statements: result.pattern_statements },
-        { active_bias_tags: result.active_bias_tags },
+        JSON.stringify(domainScorecards),
+        result.pattern_statements,
+        result.voice_gate_passed,
+        result.voice_gate_attempts,
+        result.active_bias_tags,
+        modelId,
       ],
     );
     result.profile_written = true;

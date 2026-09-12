@@ -409,10 +409,12 @@ describe('PGLiteEngine.disconnect() — v0.41.8.0 lifecycle invariants', () => {
     });
   }, 30_000);
 
-  test('#12 WATCHDOG ENV MATRIX (#4284): off variants stay off, garbage warns, grace 0 is honored', async () => {
+  test('#12 WATCHDOG ENV MATRIX (#4284): off-variants stay off, garbage warns, grace 0 is honored', async () => {
     const { backgroundWorkSinkCount } = await import('../src/core/background-work.ts');
+    // The engine-only import graph registers no sinks, so with close-timeout
+    // 1000 the lethal-knob floor is max(5000, sinks*2000 + 1000 + 2000).
     const floor = Math.max(5000, backgroundWorkSinkCount() * 2000 + 1000 + 2000);
-    const deadline = String(floor + 1000);
+    const DEADLINE = String(floor + 1000); // above the floor: no clamp warn expected
 
     async function healthyDisconnect(env: Record<string, string | undefined>): Promise<string[]> {
       return withEnv({ GBRAIN_PGLITE_CLOSE_TIMEOUT_MS: '1000', ...env }, async () => {
@@ -424,31 +426,41 @@ describe('PGLiteEngine.disconnect() — v0.41.8.0 lifecycle invariants', () => {
       });
     }
 
+    // Deliberate OFF spellings: no arm, no complaint.
     for (const off of ['0', '-5']) {
       const warns = await healthyDisconnect({ GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: off });
       expect(warns.filter((w) => w.includes('watchdog')).length).toBe(0);
     }
 
-    const invalidDeadlineWarns = await healthyDisconnect({ GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: '30s' });
-    expect(invalidDeadlineWarns.filter((w) => w.includes('is not a number')).length).toBe(1);
-    expect(invalidDeadlineWarns.filter((w) => w.includes('watchdog armed')).length).toBe(0);
+    // Garbage ("30s" units typo) must NOT silently disarm: loud warn, still off.
+    {
+      const warns = await healthyDisconnect({ GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: '30s' });
+      expect(warns.filter((w) => w.includes('is not a number')).length).toBe(1);
+      expect(warns.filter((w) => w.includes('watchdog armed')).length).toBe(0);
+    }
 
-    const zeroGraceWarns = await healthyDisconnect({
-      GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: deadline,
-      GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: '0',
-    });
-    const zeroGraceArmed = zeroGraceWarns.filter((w) => w.includes('watchdog armed'));
-    expect(zeroGraceArmed.length).toBe(1);
-    expect(zeroGraceArmed[0]).toContain(`SIGTERM at ${deadline}ms, SIGKILL at ${deadline}ms`);
+    // Explicit grace 0 is honored: SIGKILL lands AT the deadline.
+    {
+      const warns = await healthyDisconnect({
+        GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: DEADLINE,
+        GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: '0',
+      });
+      const armed = warns.filter((w) => w.includes('watchdog armed'));
+      expect(armed.length).toBe(1);
+      expect(armed[0]).toContain(`SIGTERM at ${DEADLINE}ms, SIGKILL at ${DEADLINE}ms`);
+    }
 
-    const invalidGraceWarns = await healthyDisconnect({
-      GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: deadline,
-      GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: 'oops',
-    });
-    expect(invalidGraceWarns.filter((w) => w.includes('Ignoring invalid GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS')).length).toBe(1);
-    const invalidGraceArmed = invalidGraceWarns.filter((w) => w.includes('watchdog armed'));
-    expect(invalidGraceArmed.length).toBe(1);
-    expect(invalidGraceArmed[0]).toContain(`SIGKILL at ${Number(deadline) + 30_000}ms`);
+    // Garbage grace warns and falls back to the 30000 default.
+    {
+      const warns = await healthyDisconnect({
+        GBRAIN_PGLITE_CLOSE_WATCHDOG_MS: DEADLINE,
+        GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS: 'oops',
+      });
+      expect(warns.filter((w) => w.includes('Ignoring invalid GBRAIN_PGLITE_CLOSE_WATCHDOG_GRACE_MS')).length).toBe(1);
+      const armed = warns.filter((w) => w.includes('watchdog armed'));
+      expect(armed.length).toBe(1);
+      expect(armed[0]).toContain(`SIGKILL at ${Number(DEADLINE) + 30_000}ms`);
+    }
   }, 60_000);
 
   test('#11 FLOOR BRANCH (#4284): env below the 1000ms floor is floored, not applied literally', async () => {

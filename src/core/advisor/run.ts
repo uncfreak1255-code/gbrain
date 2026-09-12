@@ -13,24 +13,28 @@ import { collectMigration } from './collect-migration.ts';
 import { collectSchemaPack } from './collect-schema-pack.ts';
 import { collectStalledJobs } from './collect-stalled-jobs.ts';
 import { collectUsageShape } from './collect-usage-shape.ts';
-import { collectSeascapeWritebacks } from './collect-seascape-writebacks.ts';
 import { collectSetupSmells } from './collect-setup-smells.ts';
 import { collectUninstalledBrainPack } from './collect-uninstalled-brain-pack.ts';
 import { collectUninstalledBundled } from './collect-uninstalled-bundled.ts';
-import { collectSourceHygiene } from './collect-source-hygiene.ts';
+import { collectChronicle } from './collect-chronicle.ts';
+import { collectMcpClientFit } from './collect-mcp-client-fit.ts';
+import { collectBackupCoverage } from './collect-backup-coverage.ts';
+import { collectWritebackConsent } from './collect-writeback-consent.ts';
 
 /** Deterministic v1 collector order (also the secondary sort key for ranking). */
 export const COLLECTORS: AdvisorCollector[] = [
-  collectSourceHygiene,
   collectVersion,
   collectMigration,
   collectSchemaPack,
   collectStalledJobs,
   collectUsageShape,
-  collectSeascapeWritebacks,
   collectSetupSmells,
   collectUninstalledBrainPack,
   collectUninstalledBundled,
+  collectChronicle,
+  collectMcpClientFit,
+  collectBackupCoverage,
+  collectWritebackConsent,
 ];
 
 const SEV_RANK: Record<AdvisorSeverity, number> = { critical: 0, warn: 1, info: 2 };
@@ -63,13 +67,9 @@ export function rankFindings(findings: AdvisorFinding[], opts: { infoCap?: numbe
  * Run every collector and return a ranked report. Resilient: a collector that
  * throws contributes nothing and never aborts the others.
  */
-export async function runAdvisor(
-  ctx: AdvisorContext,
-  opts: { collectors?: AdvisorCollector[] } = {},
-): Promise<AdvisorReport> {
+export async function runAdvisor(ctx: AdvisorContext): Promise<AdvisorReport> {
   const all: AdvisorFinding[] = [];
-  const collectors = opts.collectors ?? COLLECTORS;
-  for (const c of collectors) {
+  for (const c of COLLECTORS) {
     try {
       const found = await c.collect(ctx);
       for (const f of found) {
@@ -77,16 +77,8 @@ export async function runAdvisor(
         if (ctx.remote && f.workspace_dependent) continue;
         all.push(f);
       }
-    } catch (err) {
-      all.push({
-        id: `collector_failed:${c.id}`,
-        severity: 'warn',
-        title: `Advisor collector "${c.id}" failed; this is not a trustworthy all-clear.`,
-        detail: `Collector error: ${(err as Error).message || 'unknown error'}`,
-        fix: { command_argv: null },
-        collector: c.id,
-        ask_user: true,
-      });
+    } catch {
+      // one collector failing must not kill the report
     }
   }
   const ranked = rankFindings(all);

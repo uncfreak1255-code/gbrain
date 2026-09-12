@@ -21,13 +21,7 @@ import { readFileSync, existsSync } from 'node:fs';
 export interface LongMemEvalProbeArgs {
   fixturePath: string;
   outputPath: string;
-  model?: string;
-  extractorModel?: string;
-  rerankerModel?: string;
-  rerankerEnabled?: boolean;
-  rerankerTimeoutMs?: number;
-  rerankerTopNIn?: number;
-  rerankerTopNOut?: number | null;
+  searchConfigSnapshot?: Record<string, string>;
 }
 
 /** Arguments accepted by the cross-modal adapter. */
@@ -35,15 +29,10 @@ export interface CrossModalProbeArgs {
   batchPath: string;
   summaryPath: string;
   maxUsd: number;
-  slotAModel?: string;
-  slotBModel?: string;
-  slotCModel?: string;
-  dimensions?: string[];
 }
 
 /** Cross-modal batch summary shape (matches `runEvalCrossModal --batch --json`'s envelope). */
 export interface CrossModalBatchSummary {
-  total: number;
   pass_count: number;
   fail_count: number;
   inconclusive_count: number;
@@ -66,24 +55,10 @@ export interface CrossModalBatchSummary {
  */
 export async function runLongMemEvalForProbe(args: LongMemEvalProbeArgs): Promise<void> {
   const { runEvalLongMemEval } = await import('../../commands/eval-longmemeval.ts');
-  const modelArgs = args.model ? ['--model', args.model] : [];
-  const rerankerArgs = [
-    ...(args.rerankerModel ? ['--reranker-model', args.rerankerModel] : []),
-    ...(args.rerankerEnabled !== undefined ? ['--reranker-enabled', args.rerankerEnabled ? 'true' : 'false'] : []),
-    ...(args.rerankerTimeoutMs !== undefined ? ['--reranker-timeout-ms', String(args.rerankerTimeoutMs)] : []),
-    ...(args.rerankerTopNIn !== undefined ? ['--reranker-top-n-in', String(args.rerankerTopNIn)] : []),
-    ...(args.rerankerTopNOut !== undefined ? ['--reranker-top-n-out', args.rerankerTopNOut === null ? 'null' : String(args.rerankerTopNOut)] : []),
-  ];
-  await runEvalLongMemEval([
-    args.fixturePath,
-    ...modelArgs,
-    ...rerankerArgs,
-    '--by-type',
-    '--output',
-    args.outputPath,
-  ], {
-    extractorModel: args.extractorModel,
-  });
+  await runEvalLongMemEval(
+    [args.fixturePath, '--output', args.outputPath],
+    { searchConfigSnapshot: args.searchConfigSnapshot },
+  );
 }
 
 /**
@@ -99,25 +74,41 @@ export async function runLongMemEvalForProbe(args: LongMemEvalProbeArgs): Promis
  * the batch input) or unparseable (cross-modal wrote garbage). Both
  * cases are paste-ready in the error message.
  */
+/**
+ * QA-shaped judge dimensions for the nightly probe. The batch judge's
+ * DEFAULT_DIMENSIONS rubric (DEPTH / SOURCING / SPECIFICITY / …) is built
+ * for rich agent responses; LongMemEval hypotheses are deliberately terse
+ * factual answers ("in widget-co") that can never score ≥7 on DEPTH or
+ * SOURCING — so with the default rubric the probe FAILs every night even
+ * when retrieval + answering are perfectly healthy. The probe owns its
+ * invocation of the eval tool and passes dimensions matching the
+ * fixture's QA shape instead.
+ *
+ * NOTE: the `--dimensions` CLI flag splits on commas, so these dimension
+ * descriptions must stay comma-free.
+ */
+export const PROBE_QA_DIMENSIONS: string[] = [
+  // No faithfulness/grounding dimension on purpose: the judge never sees
+  // the haystack, so any accurate detail beyond the terse gold label reads
+  // as "invented" and correct answers fail (verified empirically — a
+  // correct "before + dates" answer scored 4/10 on such a dimension).
+  'CORRECTNESS — Does the hypothesis state the same fact as the expected answer? A terse direct answer is ideal.',
+  'DIRECTNESS — Does it answer THIS question without hedging or padding or answering something else?',
+];
+
 export async function runCrossModalBatchForProbe(
   args: CrossModalProbeArgs,
 ): Promise<{ exitCode: number; summary: CrossModalBatchSummary }> {
   const { runEvalCrossModal } = await import('../../commands/eval-cross-modal.ts');
-  const slotArgs = [
-    ...(args.slotAModel ? ['--slot-a-model', args.slotAModel] : []),
-    ...(args.slotBModel ? ['--slot-b-model', args.slotBModel] : []),
-    ...(args.slotCModel ? ['--slot-c-model', args.slotCModel] : []),
-  ];
-  const dimensionArgs = args.dimensions?.length ? ['--dimensions', args.dimensions.join(',')] : [];
   const exitCode = await runEvalCrossModal([
     '--batch',
     args.batchPath,
-    ...slotArgs,
-    ...dimensionArgs,
     '--output',
     args.summaryPath,
     '--max-usd',
     String(args.maxUsd),
+    '--dimensions',
+    PROBE_QA_DIMENSIONS.join(','),
     '--yes',
     '--json',
   ]);
@@ -161,7 +152,6 @@ export async function runCrossModalBatchForProbe(
   // being slightly larger (e.g. per-question receipts inline).
   const obj = parsed as Record<string, unknown>;
   const summary: CrossModalBatchSummary = {
-    total: Number(obj.total ?? 0),
     pass_count: Number(obj.pass_count ?? 0),
     fail_count: Number(obj.fail_count ?? 0),
     inconclusive_count: Number(obj.inconclusive_count ?? 0),

@@ -8,15 +8,10 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { writeFileSync, mkdtempSync, rmSync, readFileSync } from 'fs';
+import { writeFileSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import {
-  buildPrivacySafeReplayDrill,
-  replayExpansionOpts,
-  runEvalReplay,
-  type ReplayRowResult,
-} from '../src/commands/eval-replay.ts';
+import { runEvalReplay } from '../src/commands/eval-replay.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { SearchResult } from '../src/core/types.ts';
 
@@ -25,7 +20,7 @@ import type { SearchResult } from '../src/core/types.ts';
 function makeStubEngine(returns: Record<string, SearchResult[]>): BrainEngine {
   return {
     kind: 'pglite',
-    searchKeyword: async (q: string, opts?: { limit?: number }) => (returns[q] ?? []).slice(0, opts?.limit),
+    searchKeyword: async (q: string) => returns[q] ?? [],
     searchVector: async () => [],
   } as unknown as BrainEngine;
 }
@@ -51,7 +46,6 @@ function makeCapturedRow(over: Partial<{
   detail: 'low' | 'medium' | 'high' | null;
   expand_enabled: boolean | null;
   latency_ms: number;
-  replay_surface: unknown;
 }>) {
   return {
     schema_version: 1,
@@ -71,7 +65,6 @@ function makeCapturedRow(over: Partial<{
     job_id: null,
     subagent_id: null,
     created_at: '2026-04-25T00:00:00Z',
-    ...(over.replay_surface !== undefined ? { replay_surface: over.replay_surface } : {}),
   };
 }
 
@@ -131,7 +124,7 @@ describe('gbrain eval replay — happy path', () => {
       });
 
       const cap = captureStdoutStderr();
-      await runEvalReplay(engine, ['--against', file, '--json', '--verbose']);
+      await runEvalReplay(engine, ['--against', file, '--json']);
       const { stdout } = cap.restore();
       const out = JSON.parse(stdout);
       expect(out.schema_version).toBe(1);
@@ -156,7 +149,7 @@ describe('gbrain eval replay — happy path', () => {
       });
 
       const cap = captureStdoutStderr();
-      await runEvalReplay(engine, ['--against', file, '--json', '--verbose']);
+      await runEvalReplay(engine, ['--against', file, '--json']);
       const { stdout } = cap.restore();
       const out = JSON.parse(stdout);
       expect(out.summary.mean_jaccard).toBe(0);
@@ -252,217 +245,6 @@ describe('gbrain eval replay — happy path', () => {
     });
   });
 
-  test('--compare-limit captured compares current results at each captured row count', async () => {
-    await withTmp(async (dir) => {
-      const ndjson = JSON.stringify(makeCapturedRow({
-        query: 'q',
-        retrieved_slugs: ['a', 'b'],
-      })) + '\n';
-      const file = join(dir, 'baseline.ndjson');
-      writeFileSync(file, ndjson);
-
-      const engine = makeStubEngine({
-        q: [fakeResult('a'), fakeResult('b'), fakeResult('c'), fakeResult('d')],
-      });
-
-      const cap = captureStdoutStderr();
-      await runEvalReplay(engine, ['--against', file, '--json', '--verbose', '--compare-limit', 'captured']);
-      const { stdout } = cap.restore();
-      const out = JSON.parse(stdout);
-      expect(out.summary.mean_jaccard).toBe(1);
-      expect(out.results[0].current_slugs).toEqual(['a', 'b']);
-    });
-  });
-
-  test('uses captured search_op_v1 replay surface instead of legacy keyword defaults', async () => {
-    await withTmp(async (dir) => {
-      const calls: Array<{ q: string; opts?: { limit?: number; offset?: number; sourceId?: string } }> = [];
-      const ndjson = JSON.stringify(makeCapturedRow({
-        tool_name: 'search',
-        query: 'q',
-        retrieved_slugs: ['a', 'b', 'c'],
-        replay_surface: {
-          schema_version: 1,
-          pipeline: 'search_op_v1',
-          limit: 9,
-          offset: 4,
-          sourceId: 'source-a',
-          keywordOnly: true,
-        },
-      })) + '\n';
-      const file = join(dir, 'baseline.ndjson');
-      writeFileSync(file, ndjson);
-      const engine = {
-        kind: 'pglite' as const,
-        searchKeyword: async (q: string, opts?: { limit?: number; offset?: number; sourceId?: string }) => {
-          calls.push({ q, opts });
-          return [fakeResult('a'), fakeResult('b'), fakeResult('c')].slice(0, opts?.limit);
-        },
-        searchVector: async () => [],
-      } as unknown as BrainEngine;
-
-      const cap = captureStdoutStderr();
-      await runEvalReplay(engine, ['--against', file, '--json', '--verbose', '--compare-limit', 'captured']);
-      const { stdout } = cap.restore();
-      const out = JSON.parse(stdout);
-      expect(calls[0]).toEqual({ q: 'q', opts: { limit: 3, offset: 4, sourceId: 'source-a' } });
-      expect(out.summary.replay_surface_counts).toEqual({ search_op_v1: 1 });
-      expect(out.results[0].replay_surface_label).toBe('search_op_v1');
-    });
-  });
-
-  test('search_op_v1 replay preserves captured embedding column through capture and replay paths', () => {
-    const operationsSource = readFileSync(join(import.meta.dir, '../src/core/operations.ts'), 'utf8');
-    const replaySource = readFileSync(join(import.meta.dir, '../src/commands/eval-replay.ts'), 'utf8');
-
-    expect(operationsSource).toContain('capturedReplayMeta = capturedMeta as HybridSearchMeta | null');
-    expect(operationsSource).toContain('capturedEmbeddingColumn = capturedReplayMeta?.embedding_column');
-    expect(operationsSource).toContain('embeddingColumn: capturedEmbeddingColumn');
-    expect(replaySource).toContain('embeddingColumn: replaySurface.embeddingColumn ?? row.embedding_column ?? undefined');
-    expect(replaySource).toContain('current = dedupResults(raw)');
-  });
-
-  test('capture persists resolved hybrid mode into replay surfaces', () => {
-    const operationsSource = readFileSync(join(import.meta.dir, '../src/core/operations.ts'), 'utf8');
-    const replaySource = readFileSync(join(import.meta.dir, '../src/commands/eval-replay.ts'), 'utf8');
-
-    expect(operationsSource).toContain('const replayMode = capturedReplayMeta?.mode ?? perCallMode');
-    expect(operationsSource).toContain('const replayMode = meta.mode ?? perCallMode');
-    expect(operationsSource).toContain('const replayDetail = meta.detail_resolved ?? detail');
-    expect(operationsSource).toContain('...(replayMode ? { mode: replayMode } : {})');
-    expect(operationsSource).toContain('expansion: meta.expansion_applied');
-    expect(operationsSource).toContain('detail: replayDetail ?? undefined');
-    expect(replaySource).toContain('detail: replaySurface.detail ?? row.detail_resolved ?? row.detail ?? undefined');
-    expect(replaySource).toContain('mode: opts.mode ?? replaySurface.mode');
-  });
-
-  test('pinned expansion replay returns stored variants and disables semantic cache', async () => {
-    const surface = {
-      schema_version: 1 as const,
-      pipeline: 'query_op_v1' as const,
-      expansion: true,
-      useCache: true,
-      expansionQueries: ['original query', 'pinned expansion'],
-    };
-
-    const opts = replayExpansionOpts(surface, true);
-
-    expect(opts.expansion).toBe(true);
-    expect(opts.useCache).toBe(false);
-    expect(await opts.expandFn?.('ignored live query')).toEqual([
-      'original query',
-      'pinned expansion',
-    ]);
-  });
-
-  test('labels unpinned expanded replay surfaces without losing privacy state', async () => {
-    await withTmp(async (dir) => {
-      const lines = [
-        JSON.stringify(makeCapturedRow({
-          id: 1,
-          tool_name: 'query',
-          query: 'q1',
-          retrieved_slugs: ['a'],
-          replay_surface: {
-            schema_version: 1,
-            pipeline: 'query_op_v1',
-            expansion: true,
-          },
-        })),
-        JSON.stringify(makeCapturedRow({
-          id: 2,
-          tool_name: 'query',
-          query: 'q2',
-          retrieved_slugs: ['b'],
-          replay_surface: {
-            schema_version: 1,
-            pipeline: 'query_op_v1',
-            expansion: true,
-            privacy_scrubbed: true,
-          },
-        })),
-      ].join('\n') + '\n';
-      const file = join(dir, 'baseline.ndjson');
-      writeFileSync(file, lines);
-      const engine = makeStubEngine({});
-
-      const cap = captureStdoutStderr();
-      await runEvalReplay(engine, ['--against', file, '--json', '--verbose']);
-      const { stdout } = cap.restore();
-      const out = JSON.parse(stdout);
-
-      expect(out.summary.replay_surface_counts).toEqual({
-        query_op_v1_expansion_unpinned: 1,
-        query_op_v1_privacy_scrubbed_expansion_unpinned: 1,
-      });
-    });
-  });
-
-  test('uses captured replay surface limit by default', async () => {
-    await withTmp(async (dir) => {
-      const calls: Array<{ q: string; opts?: { limit?: number; offset?: number } }> = [];
-      const ndjson = JSON.stringify(makeCapturedRow({
-        tool_name: 'search',
-        query: 'q',
-        retrieved_slugs: ['a', 'b', 'c'],
-        replay_surface: {
-          schema_version: 1,
-          pipeline: 'search_op_v1',
-          limit: 9,
-          offset: 2,
-          keywordOnly: true,
-        },
-      })) + '\n';
-      const file = join(dir, 'baseline.ndjson');
-      writeFileSync(file, ndjson);
-      const engine = {
-        kind: 'pglite' as const,
-        searchKeyword: async (q: string, opts?: { limit?: number; offset?: number }) => {
-          calls.push({ q, opts });
-          return [fakeResult('a'), fakeResult('b'), fakeResult('c')];
-        },
-        searchVector: async () => [],
-      } as unknown as BrainEngine;
-
-      const cap = captureStdoutStderr();
-      await runEvalReplay(engine, ['--against', file, '--json']);
-      cap.restore();
-      expect(calls[0]).toEqual({ q: 'q', opts: { limit: 9, offset: 2 } });
-    });
-  });
-
-  test('labels privacy-scrubbed replay surfaces separately', async () => {
-    await withTmp(async (dir) => {
-      const ndjson = JSON.stringify(makeCapturedRow({
-        tool_name: 'search',
-        query: 'q',
-        retrieved_slugs: ['a'],
-        replay_surface: {
-          schema_version: 1,
-          pipeline: 'search_op_v1',
-          limit: 1,
-          keywordOnly: true,
-          privacy_scrubbed: true,
-          omittedFields: ['sourceId'],
-        },
-      })) + '\n';
-      const file = join(dir, 'baseline.ndjson');
-      writeFileSync(file, ndjson);
-      const engine = {
-        kind: 'pglite' as const,
-        searchKeyword: async () => [fakeResult('a')],
-        searchVector: async () => [],
-      } as unknown as BrainEngine;
-
-      const cap = captureStdoutStderr();
-      await runEvalReplay(engine, ['--against', file, '--json', '--verbose']);
-      const { stdout } = cap.restore();
-      const out = JSON.parse(stdout);
-      expect(out.summary.replay_surface_counts).toEqual({ search_op_v1_privacy_scrubbed: 1 });
-      expect(out.results[0].replay_surface_label).toBe('search_op_v1_privacy_scrubbed');
-    });
-  });
-
   test('empty query is skipped, not counted in replayed', async () => {
     await withTmp(async (dir) => {
       const ndjson = JSON.stringify(makeCapturedRow({ query: '', retrieved_slugs: [] })) + '\n';
@@ -536,83 +318,6 @@ describe('gbrain eval replay — happy path', () => {
       expect(stdout).toContain('Top-1 stability:');
       expect(stdout).toContain('regression');
     });
-  });
-});
-
-describe('gbrain eval replay — privacy-safe drill', () => {
-  test('reports query hashes and metrics without query text or slugs', () => {
-    const results: ReplayRowResult[] = [
-      {
-        id: 1,
-        tool_name: 'query',
-        query_hash: 'hash-low',
-        query: 'private query text',
-        jaccard: 0.1,
-        top1Match: false,
-        captured_slugs: ['private/captured'],
-        current_slugs: ['private/current'],
-        current_latency_ms: 250,
-        latency_delta_ms: 150,
-      },
-      {
-        id: 2,
-        tool_name: 'query',
-        query_hash: 'hash-good',
-        query: 'another private query',
-        jaccard: 1,
-        top1Match: true,
-        captured_slugs: ['private/same'],
-        current_slugs: ['private/same'],
-        current_latency_ms: 100,
-        latency_delta_ms: 10,
-      },
-    ];
-
-    const drill = buildPrivacySafeReplayDrill(results, { limit: 1 });
-    expect(drill.rows_considered).toBe(2);
-    expect(drill.top_low_overlap).toHaveLength(1);
-    expect(drill.top_low_overlap[0]!.query_hash).toBe('hash-low');
-    expect(drill.top_low_overlap[0]!.jaccard).toBe(0.1);
-    expect(drill.top_low_overlap[0]!.captured_count).toBe(1);
-    expect(drill.top_low_overlap[0]!.current_count).toBe(1);
-
-    const serialized = JSON.stringify(drill);
-    expect(serialized).toContain('hash-low');
-    expect(serialized).not.toContain('private query text');
-    expect(serialized).not.toContain('another private query');
-    expect(serialized).not.toContain('private/captured');
-    expect(serialized).not.toContain('private/current');
-    expect(serialized).not.toContain('private/same');
-  });
-
-  test('redacts raw error messages from errored drill rows', () => {
-    const results: ReplayRowResult[] = [
-      {
-        id: 1,
-        tool_name: 'query',
-        query_hash: 'hash-error',
-        query: 'private failing query',
-        jaccard: 0,
-        top1Match: false,
-        captured_slugs: ['private/captured'],
-        current_slugs: [],
-        current_latency_ms: 25,
-        latency_delta_ms: 10,
-        errored: true,
-        error_message: 'failed for private failing query at /Users/sawbeck/private/baseline.ndjson',
-      },
-    ];
-
-    const drill = buildPrivacySafeReplayDrill(results, { limit: 1 });
-
-    expect(drill.errored).toHaveLength(1);
-    expect(drill.errored[0]!.reason).toBe('replay_error');
-    const serialized = JSON.stringify(drill);
-    expect(serialized).toContain('hash-error');
-    expect(serialized).toContain('replay_error');
-    expect(serialized).not.toContain('private failing query');
-    expect(serialized).not.toContain('/Users/sawbeck/private/baseline.ndjson');
-    expect(serialized).not.toContain('private/captured');
   });
 });
 

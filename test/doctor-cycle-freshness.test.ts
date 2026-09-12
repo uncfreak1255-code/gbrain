@@ -29,10 +29,9 @@ beforeEach(async () => {
 const NOW = Date.parse('2026-05-22T12:00:00.000Z');
 const agoH = (h: number) => new Date(NOW - h * 3600_000).toISOString();
 
-async function seed(id: string, lastCycleAt?: string, opts: { local_path?: string | null; field?: 'last_full_cycle_at' | 'last_source_cycle_at' } = {}): Promise<void> {
-  const field = opts.field ?? 'last_full_cycle_at';
-  const config = lastCycleAt
-    ? JSON.stringify({ [field]: lastCycleAt })
+async function seed(id: string, lastFullCycleAt?: string, opts: { local_path?: string | null } = {}): Promise<void> {
+  const config = lastFullCycleAt
+    ? JSON.stringify({ last_full_cycle_at: lastFullCycleAt })
     : '{}';
   const localPath = opts.local_path === undefined ? `/tmp/${id}` : opts.local_path;
   await engine.executeRaw(
@@ -80,19 +79,38 @@ describe('doctor checkCycleFreshness', () => {
     expect(result.message).toMatch(/gbrain dream --source/);
   });
 
-  test('source with NO cycle timestamp (never cycled) returns fail', async () => {
+  test('source with NO last_full_cycle_at (never cycled) returns warn, not fail (#2540)', async () => {
+    // #2540: never-cycled used to FAIL, which turned doctor permanently red
+    // on any install that doesn't cycle every local_path source (e.g. one
+    // nightly `dream --dir <vault>` plus other federated sources) — and on
+    // any source added minutes ago. It surfaces as a warning; only a source
+    // that HAS cycled and then went stale escalates to fail.
     await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
     await seed('virgin');
     const result = await checkCycleFreshness(engine, { nowMs: NOW });
-    expect(result.status).toBe('fail');
-    expect(result.message).toMatch(/never completed a source cycle/);
+    expect(result.status).toBe('warn');
+    expect(result.message).toMatch(/never completed a full cycle/);
+    expect(result.message).toMatch(/gbrain dream --source/);
   });
 
-  test('source with last_source_cycle_at 2h ago returns ok without legacy full-cycle stamp', async () => {
+  test('reporter case (#2540): one cycled vault + never-cycled siblings is warn, not permanent fail', async () => {
     await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
-    await seed('split-fresh', agoH(2), { field: 'last_source_cycle_at' });
+    await seed('nightly-vault', agoH(2)); // the one vault dreamt via --dir
+    await seed('federated-a');            // never cycled
+    await seed('federated-b');            // never cycled
     const result = await checkCycleFreshness(engine, { nowMs: NOW });
-    expect(result.status).toBe('ok');
+    expect(result.status).toBe('warn');
+    expect(result.message).toMatch(/federated-a/);
+    expect(result.message).toMatch(/federated-b/);
+    expect(result.message).not.toMatch(/nightly-vault/);
+  });
+
+  test('a previously-cycled source gone stale still fails even next to never-cycled sources', async () => {
+    await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
+    await seed('stale', agoH(72));  // real regression signal
+    await seed('virgin');           // never cycled — warn-only
+    const result = await checkCycleFreshness(engine, { nowMs: NOW });
+    expect(result.status).toBe('fail');
   });
 
   test('mixed sources: highest severity wins (fail > warn > ok)', async () => {
@@ -110,7 +128,7 @@ describe('doctor checkCycleFreshness', () => {
     await seed('clock-skewed', future);
     const result = await checkCycleFreshness(engine, { nowMs: NOW });
     expect(result.status).toBe('warn');
-    expect(result.message).toMatch(/future cycle timestamp/);
+    expect(result.message).toMatch(/future last_full_cycle_at/);
   });
 
   test('unparseable last_full_cycle_at returns warn', async () => {

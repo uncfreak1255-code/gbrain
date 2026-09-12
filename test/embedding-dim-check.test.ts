@@ -12,6 +12,7 @@
 
 import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { withEnv } from './helpers/with-env.ts';
 import {
   readContentChunksEmbeddingDim,
   embeddingMismatchMessage,
@@ -20,7 +21,6 @@ import {
   PGVECTOR_COLUMN_MAX_DIMS,
 } from '../src/core/embedding-dim-check.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
-import { withEnv } from './helpers/with-env.ts';
 
 // Canonical pattern: single engine per file, init once, disconnect once.
 // The two tests below diverge in whether they want a migrated brain or a
@@ -73,19 +73,20 @@ describe('readContentChunksEmbeddingDim', () => {
 
   test('returns { exists: false, dims: null } on a fresh brain (no initSchema)', async () => {
     // One-off engine for the fresh-brain case. Never call initSchema so
-    // content_chunks doesn't exist yet. The CI snapshot is post-schema, so
-    // disable it for this assertion and restore the caller's setting after.
+    // content_chunks doesn't exist yet. Cleaned up at end of test.
+    // W0: the default-on snapshot loads a fully-migrated schema at connect,
+    // which breaks this test's truly-empty-DB premise — opt out for this boot.
+    const fresh = new PGLiteEngine();
     await withEnv({ GBRAIN_PGLITE_SNAPSHOT: undefined }, async () => {
-      const fresh = new PGLiteEngine();
-      try {
-        await fresh.connect({});
-        const result = await readContentChunksEmbeddingDim(fresh);
-        expect(result.exists).toBe(false);
-        expect(result.dims).toBeNull();
-      } finally {
-        await fresh.disconnect();
-      }
+      await fresh.connect({});
     });
+    try {
+      const result = await readContentChunksEmbeddingDim(fresh);
+      expect(result.exists).toBe(false);
+      expect(result.dims).toBeNull();
+    } finally {
+      await fresh.disconnect();
+    }
   }, 30000);
 });
 
@@ -261,35 +262,53 @@ describe('resolveSchemaEmbeddingDim', () => {
     if (got.ok) expect(got.dim).toBe(768);
   });
 
-  test('Ollama bge-m3 resolves to its native 1024 dims', () => {
-    const got = resolveSchemaEmbeddingDim({ embedding_model: 'ollama:bge-m3' });
-    expect(got).toEqual({
-      ok: true,
-      dim: 1024,
-      model: 'ollama:bge-m3',
-      provider: 'ollama',
-      recipeDefault: 1024,
-    });
-  });
-
-  test('Ollama :latest aliases still resolve to the canonical native dim', () => {
-    const got = resolveSchemaEmbeddingDim({ embedding_model: 'ollama:bge-m3:latest' });
-    expect(got).toEqual({
-      ok: true,
-      dim: 1024,
-      model: 'ollama:bge-m3',
-      provider: 'ollama',
-      recipeDefault: 1024,
-    });
-  });
-
-  test('Ollama nomic-embed-text still rejects an impossible 1024-dim override', () => {
+  // #2271 — trust_custom_dims passthrough for local / BYO-backend recipes.
+  test('ollama accepts a custom dim for a modern model via trust_custom_dims', () => {
     const got = resolveSchemaEmbeddingDim({
-      embedding_model: 'ollama:nomic-embed-text',
+      embedding_model: 'ollama:qwen3-embed-8b',
+      embedding_dimensions: 4096,
+    });
+    expect(got.ok).toBe(true);
+    if (got.ok) expect(got.dim).toBe(4096);
+  });
+
+  test('litellm accepts a user-declared custom dim via trust_custom_dims', () => {
+    const got = resolveSchemaEmbeddingDim({
+      embedding_model: 'litellm:bge-large',
       embedding_dimensions: 1024,
     });
+    expect(got.ok).toBe(true);
+    if (got.ok) expect(got.dim).toBe(1024);
+  });
+
+  test('llama-server accepts a user-declared custom dim via trust_custom_dims', () => {
+    const got = resolveSchemaEmbeddingDim({
+      embedding_model: 'llama-server:nomic-embed-text-v1.5',
+      embedding_dimensions: 2560,
+    });
+    expect(got.ok).toBe(true);
+    if (got.ok) expect(got.dim).toBe(2560);
+  });
+
+  test('[REGRESSION] openrouter (declares dims_options, NOT flagged) still fail-closed on an unlisted dim', () => {
+    const got = resolveSchemaEmbeddingDim({
+      embedding_model: 'openrouter:openai/text-embedding-3-small',
+      embedding_dimensions: 4096,
+    });
     expect(got.ok).toBe(false);
-    if (!got.ok) expect(got.error).toMatch(/does not support custom dimensions 1024|only emits/);
+    if (!got.ok) expect(got.error).toMatch(/rejects custom dimensions 4096|does not support custom dimensions/);
+  });
+
+  test('[REGRESSION] trust_custom_dims does NOT bypass the pgvector column cap', () => {
+    // The passthrough tier trusts the user's dim, but the pgvector cap check runs
+    // BEFORE it — pin that ordering so a future refactor can't let an oversized
+    // dim through for a trusted local recipe.
+    const got = resolveSchemaEmbeddingDim({
+      embedding_model: 'ollama:qwen3-embed-8b',
+      embedding_dimensions: PGVECTOR_COLUMN_MAX_DIMS + 1,
+    });
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.error).toMatch(/exceed pgvector|column cap/i);
   });
 
   test('unknown provider rejected with provider list hint', () => {
@@ -386,5 +405,40 @@ describe('resolveSchemaMultimodalDim', () => {
       embedding_multimodal_dimensions: PGVECTOR_COLUMN_MAX_DIMS + 1,
     });
     expect(got.ok).toBe(false);
+  });
+});
+
+describe('cased embedding configs fail loud at init (#4123 WIDE — behavior change, pinned deliberately)', () => {
+  test('cased Voyage id at an unsupported width is REJECTED with the valid-sizes hint (was: silently wrong-width vectors)', () => {
+    const got = resolveSchemaEmbeddingDim({
+      embedding_model: 'voyage:Voyage-3-Large',
+      embedding_dimensions: 1536,
+    });
+    expect(got.ok).toBe(false);
+    if (!got.ok) {
+      expect(got.error).toMatch(/256, 512, 1024, 2048/);
+    }
+  });
+
+  test('cased Voyage id at a SUPPORTED width passes', () => {
+    const got = resolveSchemaEmbeddingDim({
+      embedding_model: 'voyage:Voyage-3-Large',
+      embedding_dimensions: 1024,
+    });
+    expect(got.ok).toBe(true);
+  });
+
+  test('cased OpenAI id out of range is rejected with the allowed-sizes hint (Tier-1 recipe options)', () => {
+    const got = resolveSchemaEmbeddingDim({
+      embedding_model: 'openai:Text-Embedding-3-Small',
+      embedding_dimensions: 5000,
+    });
+    expect(got.ok).toBe(false);
+    if (!got.ok) {
+      expect(got.error).toMatch(/rejects custom dimensions 5000/);
+      expect(got.error).toMatch(/allowed: .*1536/);
+      // Paste-ready: the ORIGINAL casing survives into the message.
+      expect(got.error).toContain('Text-Embedding-3-Small');
+    }
   });
 });

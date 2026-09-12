@@ -28,10 +28,8 @@
 
 import { readFileSync, existsSync } from 'fs';
 import type { BrainEngine } from '../core/engine.ts';
-import type { EvalReplaySurface, SearchResult } from '../core/types.ts';
-import { hybridSearch, hybridSearchCached } from '../core/search/hybrid.ts';
-import { expandQuery } from '../core/search/expansion.ts';
-import { dedupResults } from '../core/search/dedup.ts';
+import type { SearchResult } from '../core/types.ts';
+import { hybridSearch } from '../core/search/hybrid.ts';
 
 interface ReplayOpts {
   help?: boolean;
@@ -43,15 +41,13 @@ interface ReplayOpts {
   /** v0.32.3 — search-lite mode to replay under. */
   mode?: 'conservative' | 'balanced' | 'tokenmax';
   /** v0.32.3 [CDX-13] — force the per-call limit to a constant across modes. */
-  compareLimit?: number | 'captured';
+  compareLimit?: number;
 }
 
-export interface ReplayRowResult {
+interface RowResult {
   /** Captured row's id, for back-referencing into the source NDJSON. */
   id: number;
   tool_name: 'query' | 'search';
-  /** Present for baseline files written by `gbrain bench publish`. */
-  query_hash?: string;
   query: string;
   /** Set-overlap score in [0, 1]. 1.0 = identical retrieved set. */
   jaccard: number;
@@ -72,34 +68,6 @@ export interface ReplayRowResult {
   /** True if the row threw during replay; current_slugs is empty. */
   errored?: boolean;
   error_message?: string;
-  replay_surface_label?: string;
-}
-
-export interface PrivacySafeReplayDrillRow {
-  id: number;
-  tool_name: 'query' | 'search';
-  query_hash: string | null;
-  jaccard: number;
-  top1_match: boolean;
-  captured_count: number;
-  current_count: number;
-  captured_latency_ms: number;
-  current_latency_ms: number;
-  latency_delta_ms: number;
-  skipped?: boolean;
-  errored?: boolean;
-  reason?: string;
-}
-
-export interface PrivacySafeReplayDrill {
-  rows_considered: number;
-  top_low_overlap: PrivacySafeReplayDrillRow[];
-  top_latency_regressions: PrivacySafeReplayDrillRow[];
-  skipped: PrivacySafeReplayDrillRow[];
-  errored: PrivacySafeReplayDrillRow[];
-  privacy: {
-    excludes: string[];
-  };
 }
 
 function parseArgs(args: string[]): ReplayOpts {
@@ -144,7 +112,7 @@ function parseArgs(args: string[]): ReplayOpts {
         break;
       case '--compare-limit':
         if (!next) break;
-        opts.compareLimit = next === 'captured' ? 'captured' : parseInt(next, 10);
+        opts.compareLimit = parseInt(next, 10);
         i++;
         break;
     }
@@ -165,10 +133,6 @@ FLAGS:
                         cap aggressively when iterating locally.
   --top-regressions K   Print the K rows with the worst Jaccard scores.
                         Default 5 in human mode, 0 in --json.
-  --compare-limit N|captured
-                        Force current replay to a fixed K, or to each row's
-                        captured result count. Useful when smart result cutting
-                        changed how many rows came back.
   --json                Emit one JSON object on stdout instead of a table.
                         Stable shape for CI consumption.
   --verbose             Include every row's per-row diff (large output).
@@ -213,14 +177,12 @@ interface CapturedRow {
   job_id?: number | null;
   subagent_id?: number | null;
   created_at?: string;
-  query_hash?: string;
   /**
    * v0.36 (D16 / CDX-10): the embedding column that ran at capture time.
    * Optional for back-compat — pre-v0.36 exports won't have it. NULL or
    * missing means "use the current default."
    */
   embedding_column?: string | null;
-  replay_surface?: EvalReplaySurface | string | null;
 }
 
 /**
@@ -273,138 +235,22 @@ function jaccardSlugs(a: string[], b: string[]): number {
   return union === 0 ? 1.0 : intersection / union;
 }
 
-function normalizeReplaySurface(raw: CapturedRow['replay_surface']): EvalReplaySurface | null {
-  if (!raw) return null;
-  if (typeof raw === 'string') {
-    try {
-      return normalizeReplaySurface(JSON.parse(raw) as EvalReplaySurface);
-    } catch {
-      return null;
-    }
-  }
-  if (typeof raw !== 'object') return null;
-  if (raw.schema_version !== 1) return null;
-  if (raw.pipeline !== 'query_op_v1' && raw.pipeline !== 'search_op_v1') return null;
-  return raw;
-}
-
-function sourceScopeFromSurface(surface: EvalReplaySurface): { sourceId?: string; sourceIds?: string[] } {
-  if (surface.sourceIds && surface.sourceIds.length > 0) {
-    return { sourceIds: surface.sourceIds };
-  }
-  if (surface.sourceId) return { sourceId: surface.sourceId };
-  return {};
-}
-
-function replaySurfaceLabel(row: CapturedRow, surface: EvalReplaySurface | null): string {
-  if (surface) {
-    const labels: string[] = [surface.pipeline];
-    if (surface.privacy_scrubbed) labels.push('privacy_scrubbed');
-    if (
-      surface.pipeline === 'query_op_v1'
-      && surface.expansion
-      && !surface.expansionQueries?.length
-    ) {
-      labels.push('expansion_unpinned');
-    }
-    return labels.join('_');
-  }
-  return row.tool_name === 'query' ? 'legacy_bare_hybrid' : 'legacy_keyword';
-}
-
-export function replayExpansionOpts(
-  surface: EvalReplaySurface,
-  rowExpandEnabled: boolean | null | undefined,
-): {
-  expansion: boolean;
-  expandFn?: (query: string) => Promise<string[]>;
-  useCache?: boolean;
-} {
-  const expansion = surface.expansion ?? rowExpandEnabled ?? false;
-  const pinnedQueries =
-    expansion && surface.expansionQueries?.length
-      ? [...surface.expansionQueries]
-      : undefined;
-
-  return {
-    expansion,
-    expandFn: expansion
-      ? pinnedQueries
-        ? async () => [...pinnedQueries]
-        : expandQuery
-      : undefined,
-    // A warm semantic-cache row can bypass expandFn entirely. Pinned replay
-    // must execute the stored variants, so it always disables the cache.
-    useCache: pinnedQueries ? false : surface.useCache,
-  };
-}
-
-async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts = {}): Promise<ReplayRowResult> {
+async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts = {}): Promise<RowResult> {
   const captured_slugs = row.retrieved_slugs ?? [];
   const startedAt = Date.now();
-  const replaySurface = normalizeReplaySurface(row.replay_surface);
-  const replay_surface_label = replaySurfaceLabel(row, replaySurface);
 
-  // Default replay limit follows the captured replay surface when present.
-  // Legacy rows keep the historical bare replay default below.
+  // Default replay limit matches hybridSearch's default (20).
   // v0.32.3 [CDX-13]: --compare-limit forces a constant K across modes so
   // Jaccard@k actually measures quality drift, not K-drift. When set, it
   // overrides the captured K and the mode's default searchLimit.
-  const limit = opts.compareLimit === 'captured'
-    ? Math.max(captured_slugs.length, 1)
-    : opts.compareLimit ?? replaySurface?.limit ?? Math.max(captured_slugs.length, 20);
+  const limit = opts.compareLimit ?? Math.max(captured_slugs.length, 20);
 
   // search → bare keyword path. query → hybrid path (vector + keyword + RRF).
   // detail and expansion are threaded in from the captured row so the same
   // logic runs that produced the original retrieval.
   let current: SearchResult[];
   try {
-    if (replaySurface?.pipeline === 'search_op_v1') {
-      if (replaySurface.keywordOnly) {
-        const raw = await engine.searchKeyword(row.query, {
-          limit,
-          offset: replaySurface.offset ?? 0,
-          ...sourceScopeFromSurface(replaySurface),
-        });
-        current = dedupResults(raw);
-      } else {
-        current = await hybridSearchCached(engine, row.query, {
-          limit,
-          offset: replaySurface.offset ?? 0,
-          expansion: false,
-          mode: opts.mode ?? replaySurface.mode,
-          embeddingColumn: replaySurface.embeddingColumn ?? row.embedding_column ?? undefined,
-          ...sourceScopeFromSurface(replaySurface),
-        });
-      }
-    } else if (replaySurface?.pipeline === 'query_op_v1') {
-      const expansionOpts = replayExpansionOpts(replaySurface, row.expand_enabled);
-      current = await hybridSearchCached(engine, row.query, {
-        limit,
-        offset: replaySurface.offset ?? 0,
-        expansion: expansionOpts.expansion,
-        expandFn: expansionOpts.expandFn,
-        detail: replaySurface.detail ?? row.detail_resolved ?? row.detail ?? undefined,
-        mode: opts.mode ?? replaySurface.mode,
-        language: replaySurface.language,
-        symbolKind: replaySurface.symbolKind,
-        nearSymbol: replaySurface.nearSymbol,
-        walkDepth: replaySurface.walkDepth,
-        salience: replaySurface.salience,
-        recency: replaySurface.recency,
-        since: replaySurface.since,
-        until: replaySurface.until,
-        tokenBudget: replaySurface.tokenBudget,
-        useCache: expansionOpts.useCache,
-        intentWeighting: replaySurface.intentWeighting,
-        crossModal: replaySurface.crossModal,
-        embeddingColumn: replaySurface.embeddingColumn ?? row.embedding_column ?? undefined,
-        adaptiveReturn: replaySurface.adaptiveReturn,
-        autocut: replaySurface.autocut,
-        relationalRetrieval: replaySurface.relationalRetrieval,
-        ...sourceScopeFromSurface(replaySurface),
-      });
-    } else if (row.tool_name === 'search') {
+    if (row.tool_name === 'search') {
       const dedupedRaw = await engine.searchKeyword(row.query, { limit });
       current = dedupedRaw;
     } else {
@@ -422,7 +268,6 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
     return {
       id: row.id,
       tool_name: row.tool_name,
-      query_hash: row.query_hash,
       query: row.query,
       jaccard: 0,
       top1Match: false,
@@ -432,7 +277,6 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
       latency_delta_ms: Date.now() - startedAt - row.latency_ms,
       errored: true,
       error_message: (err as Error).message ?? String(err),
-      replay_surface_label,
     };
   }
 
@@ -450,7 +294,6 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
   return {
     id: row.id,
     tool_name: row.tool_name,
-    query_hash: row.query_hash,
     query: row.query,
     jaccard: jaccardSlugs(captured_slugs, current_slugs),
     top1Match: captured_slugs[0] !== undefined && current_slugs[0] === captured_slugs[0],
@@ -458,7 +301,6 @@ async function replayRow(engine: BrainEngine, row: CapturedRow, opts: ReplayOpts
     current_slugs,
     current_latency_ms,
     latency_delta_ms: current_latency_ms - row.latency_ms,
-    replay_surface_label,
   };
 }
 
@@ -473,11 +315,9 @@ export interface ReplaySummary {
   mean_latency_delta_ms: number;
   /** Rows where current latency is more than 2x captured (regression alarm). */
   rows_over_2x_latency: number;
-  /** Aggregate replay-surface labels, e.g. query_op_v1 or legacy_bare_hybrid. */
-  replay_surface_counts: Record<string, number>;
 }
 
-function summarize(results: ReplayRowResult[]): ReplaySummary {
+function summarize(results: RowResult[]): ReplaySummary {
   const eligible = results.filter(r => !r.skipped && !r.errored);
   const meanJaccard = eligible.length === 0
     ? 0
@@ -492,11 +332,6 @@ function summarize(results: ReplayRowResult[]): ReplaySummary {
     const captured = results.find(x => x.id === r.id);
     return captured && captured.current_latency_ms > 2 * (captured.current_latency_ms - captured.latency_delta_ms);
   }).length;
-  const replaySurfaceCounts: Record<string, number> = {};
-  for (const r of results) {
-    const key = r.replay_surface_label ?? 'unknown';
-    replaySurfaceCounts[key] = (replaySurfaceCounts[key] ?? 0) + 1;
-  }
 
   return {
     rows_total: results.length,
@@ -507,11 +342,10 @@ function summarize(results: ReplayRowResult[]): ReplaySummary {
     top1_stability_rate: top1Rate,
     mean_latency_delta_ms: meanLatencyDelta,
     rows_over_2x_latency: over2x,
-    replay_surface_counts: replaySurfaceCounts,
   };
 }
 
-function printHumanSummary(summary: ReplaySummary, results: ReplayRowResult[], topRegressions: number): void {
+function printHumanSummary(summary: ReplaySummary, results: RowResult[], topRegressions: number): void {
   const total = summary.rows_total;
   const eligible = summary.rows_replayed;
   console.log(`Replayed ${eligible} of ${total} captured queries (${summary.rows_skipped} skipped, ${summary.rows_errored} errored)`);
@@ -561,7 +395,7 @@ function printHumanSummary(summary: ReplaySummary, results: ReplayRowResult[], t
 export async function replayCore(
   engine: BrainEngine,
   opts: ReplayOpts,
-): Promise<{ summary: ReplaySummary; results: ReplayRowResult[] }> {
+): Promise<{ summary: ReplaySummary; results: RowResult[] }> {
   if (!opts.against) {
     throw new Error('replayCore: opts.against (path to NDJSON) is required');
   }
@@ -580,13 +414,12 @@ export async function replayCore(
     try { await engine.setConfig('search.mode', opts.mode); } catch { /* swallow */ }
   }
 
-  const results: ReplayRowResult[] = [];
+  const results: RowResult[] = [];
   for (const row of capped) {
     if (!row.query || row.query.length === 0) {
       results.push({
         id: row.id,
         tool_name: row.tool_name,
-        query_hash: row.query_hash,
         query: row.query ?? '',
         jaccard: 0,
         top1Match: false,
@@ -596,7 +429,6 @@ export async function replayCore(
         latency_delta_ms: 0,
         skipped: true,
         skip_reason: 'empty query',
-        replay_surface_label: replaySurfaceLabel(row, normalizeReplaySurface(row.replay_surface)),
       });
       continue;
     }
@@ -605,57 +437,6 @@ export async function replayCore(
   }
 
   return { summary: summarize(results), results };
-}
-
-function toPrivacySafeDrillRow(row: ReplayRowResult): PrivacySafeReplayDrillRow {
-  const capturedLatency = row.current_latency_ms - row.latency_delta_ms;
-  const reason = row.skip_reason ?? (row.errored ? 'replay_error' : undefined);
-  return {
-    id: row.id,
-    tool_name: row.tool_name,
-    query_hash: row.query_hash ?? null,
-    jaccard: row.jaccard,
-    top1_match: row.top1Match,
-    captured_count: row.captured_slugs.length,
-    current_count: row.current_slugs.length,
-    captured_latency_ms: capturedLatency,
-    current_latency_ms: row.current_latency_ms,
-    latency_delta_ms: row.latency_delta_ms,
-    ...(row.skipped ? { skipped: true } : {}),
-    ...(row.errored ? { errored: true } : {}),
-    ...(reason ? { reason } : {}),
-  };
-}
-
-export function buildPrivacySafeReplayDrill(
-  results: ReplayRowResult[],
-  opts: { limit?: number } = {},
-): PrivacySafeReplayDrill {
-  const limit = Math.max(1, opts.limit ?? 5);
-  const eligible = results.filter(r => !r.skipped && !r.errored);
-  const topLowOverlap = [...eligible]
-    .sort((a, b) => {
-      if (a.jaccard !== b.jaccard) return a.jaccard - b.jaccard;
-      if (a.top1Match !== b.top1Match) return a.top1Match ? 1 : -1;
-      return b.latency_delta_ms - a.latency_delta_ms;
-    })
-    .slice(0, limit)
-    .map(toPrivacySafeDrillRow);
-  const topLatencyRegressions = [...eligible]
-    .sort((a, b) => b.latency_delta_ms - a.latency_delta_ms)
-    .slice(0, limit)
-    .map(toPrivacySafeDrillRow);
-
-  return {
-    rows_considered: results.length,
-    top_low_overlap: topLowOverlap,
-    top_latency_regressions: topLatencyRegressions,
-    skipped: results.filter(r => r.skipped).slice(0, limit).map(toPrivacySafeDrillRow),
-    errored: results.filter(r => r.errored).slice(0, limit).map(toPrivacySafeDrillRow),
-    privacy: {
-      excludes: ['query', 'retrieved_slugs', 'current_slugs', 'page_titles', 'chunk_text'],
-    },
-  };
 }
 
 export async function runEvalReplay(engine: BrainEngine, args: string[]): Promise<void> {
@@ -684,7 +465,7 @@ export async function runEvalReplay(engine: BrainEngine, args: string[]): Promis
   }
 
   let summary: ReplaySummary;
-  let results: ReplayRowResult[];
+  let results: RowResult[];
   try {
     const out = await replayCore(engine, opts);
     summary = out.summary;

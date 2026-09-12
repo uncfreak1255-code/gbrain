@@ -6,15 +6,14 @@
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import type { BrainEngine } from '../src/core/engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
   loadAllSources,
   fetchSource,
-  isSourceActive,
-  sourceDrainResumeMessage,
   parseSourceConfig,
+  normalizeSourceConfig,
   isSourceFederated,
+  sourceLocalPathSkipWarning,
 } from '../src/core/sources-load.ts';
 
 let engine: PGLiteEngine;
@@ -89,84 +88,6 @@ describe('loadAllSources', () => {
     expect(target!.config).toBeDefined();
     expect(target!.created_at).toBeDefined();
   });
-
-  test('pre-v133 fallback preserves archived while synthesizing a null drain', async () => {
-    const queries: string[] = [];
-    const legacyEngine = {
-      executeRaw: async (sql: string) => {
-        queries.push(sql);
-        if (/newest_content_at, embedding_drain_token/.test(sql)) {
-          const error = Object.assign(
-            new Error('column "embedding_drain_token" does not exist'),
-            { code: '42703' },
-          );
-          throw error;
-        }
-        return [{
-          id: 'legacy-archived',
-          name: 'Legacy Archived',
-          local_path: null,
-          last_commit: null,
-          last_sync_at: null,
-          config: {},
-          created_at: new Date(),
-          archived: true,
-          newest_content_at: null,
-          embedding_drain_token: null,
-        }];
-      },
-    } as unknown as BrainEngine;
-
-    const included = await loadAllSources(legacyEngine, { includeArchived: true });
-    expect(included).toHaveLength(1);
-    expect(included[0]).toMatchObject({
-      archived: true,
-      embedding_drain_token: null,
-    });
-    expect(await loadAllSources(legacyEngine)).toEqual([]);
-    expect(queries.some(query =>
-      query.includes('archived, newest_content_at, NULL::text AS embedding_drain_token'),
-    )).toBe(true);
-  });
-
-  test('v34-v108 fallback keeps archived after both newest-column probes fail', async () => {
-    const queries: string[] = [];
-    const legacyEngine = {
-      executeRaw: async (sql: string) => {
-        queries.push(sql);
-        if (sql.includes('archived, newest_content_at')) {
-          throw Object.assign(
-            new Error('column "newest_content_at" does not exist'),
-            { code: '42703' },
-          );
-        }
-        return [{
-          id: 'v34-archived',
-          name: 'V34 Archived',
-          local_path: null,
-          last_commit: null,
-          last_sync_at: null,
-          config: {},
-          created_at: new Date(),
-          archived: true,
-          newest_content_at: null,
-          embedding_drain_token: null,
-        }];
-      },
-    } as unknown as BrainEngine;
-
-    const included = await loadAllSources(legacyEngine, { includeArchived: true });
-    expect(included).toHaveLength(1);
-    expect(included[0]).toMatchObject({
-      archived: true,
-      newest_content_at: null,
-      embedding_drain_token: null,
-    });
-    expect(await loadAllSources(legacyEngine)).toEqual([]);
-    expect(queries.some(query =>
-      query.includes('archived, NULL::timestamptz AS newest_content_at'),
-    )).toBe(true);
-  });
 });
 
 describe('fetchSource', () => {
@@ -180,64 +101,6 @@ describe('fetchSource', () => {
   test('returns null for unknown id', async () => {
     const row = await fetchSource(engine, 'does-not-exist');
     expect(row).toBeNull();
-  });
-
-  test('pre-v133 single-row fallback keeps archived and exposes drain as null', async () => {
-    const queries: string[] = [];
-    const legacyEngine = {
-      executeRaw: async (sql: string) => {
-        queries.push(sql);
-        if (/newest_content_at, embedding_drain_token/.test(sql)) {
-          throw Object.assign(
-            new Error('column "embedding_drain_token" does not exist'),
-            { code: '42703' },
-          );
-        }
-        return [{
-          id: 'legacy-archived',
-          name: 'Legacy Archived',
-          local_path: null,
-          last_commit: null,
-          last_sync_at: null,
-          config: {},
-          created_at: new Date(),
-          archived: true,
-          newest_content_at: null,
-          embedding_drain_token: null,
-        }];
-      },
-    } as unknown as BrainEngine;
-
-    const row = await fetchSource(legacyEngine, 'legacy-archived');
-    expect(row).toMatchObject({
-      id: 'legacy-archived',
-      archived: true,
-      embedding_drain_token: null,
-    });
-    expect(queries).toHaveLength(2);
-  });
-});
-
-describe('isSourceActive', () => {
-  test('requires both unarchived state and no interrupted drain', () => {
-    expect(isSourceActive({ archived: false, embedding_drain_token: null })).toBe(true);
-    expect(isSourceActive({ archived: true, embedding_drain_token: null })).toBe(false);
-    expect(isSourceActive({ archived: false, embedding_drain_token: 'drain-token' })).toBe(false);
-    expect(isSourceActive(null)).toBe(false);
-  });
-});
-
-describe('sourceDrainResumeMessage', () => {
-  test('prints the exact command required by each drain purpose', () => {
-    expect(sourceDrainResumeMessage('manual-source', 'manual:token')).toContain(
-      '`gbrain sources archive manual-source`',
-    );
-    expect(sourceDrainResumeMessage('candidate-source', 'hygiene-candidate:token')).toContain(
-      '`gbrain sources archive candidate-source --if-hygiene-candidate`',
-    );
-    expect(sourceDrainResumeMessage('migration-source', 'migration:token')).toContain(
-      'rerun the engine migration',
-    );
   });
 });
 
@@ -259,6 +122,68 @@ describe('parseSourceConfig', () => {
   test('returns empty object on malformed JSON string', () => {
     expect(parseSourceConfig('{')).toEqual({});
   });
+
+  test('#2829: unwraps an accidental multi-layer nested string (self-heal read path)', () => {
+    const wrapped = JSON.stringify(JSON.stringify({ federated: true }));
+    expect(parseSourceConfig(wrapped)).toEqual({ federated: true });
+  });
+
+  test('recovers ordered object fragments from a historical JSONB array', () => {
+    expect(parseSourceConfig([
+      '{"remote_url":"https://example.invalid/repo"}',
+      { federated: true },
+      { tracked_branch: 'main' },
+    ])).toEqual({
+      remote_url: 'https://example.invalid/repo',
+      federated: true,
+      tracked_branch: 'main',
+    });
+  });
+});
+
+describe('normalizeSourceConfig (#2829)', () => {
+  test('passes a plain object through unchanged', () => {
+    expect(normalizeSourceConfig({ federated: true, webhook_secret: 'x' })).toEqual({
+      federated: true,
+      webhook_secret: 'x',
+    });
+  });
+
+  test('unwraps a single JSON-string layer', () => {
+    expect(normalizeSourceConfig('{"federated":true}')).toEqual({ federated: true });
+  });
+
+  test('unwraps a 5-layer nested JSON string back to the object', () => {
+    let v: unknown = { federated: true, tracked_branch: 'main' };
+    for (let i = 0; i < 5; i++) v = JSON.stringify(v); // 5 stringify passes = 5 layers
+    expect(normalizeSourceConfig(v)).toEqual({ federated: true, tracked_branch: 'main' });
+  });
+
+  test('non-object garbage resolves to {}', () => {
+    expect(normalizeSourceConfig('not json')).toEqual({});
+    expect(normalizeSourceConfig('42')).toEqual({}); // parses to a number
+    expect(normalizeSourceConfig('"just a string"')).toEqual({});
+    expect(normalizeSourceConfig(null)).toEqual({});
+    expect(normalizeSourceConfig(undefined)).toEqual({});
+    expect(normalizeSourceConfig(['a', 'b'])).toEqual({}); // array is not a plain object
+    expect(normalizeSourceConfig(JSON.stringify(['a']))).toEqual({});
+  });
+
+  test('normalizes a historical config-fragment array without dropping valid keys', () => {
+    expect(normalizeSourceConfig([
+      JSON.stringify(JSON.stringify({ remote_url: 'https://example.invalid/repo' })),
+      { federated: false },
+    ])).toEqual({
+      remote_url: 'https://example.invalid/repo',
+      federated: false,
+    });
+  });
+
+  test('respects the unwrap bound instead of spinning forever', () => {
+    let v: unknown = { federated: true };
+    for (let i = 0; i < 12; i++) v = JSON.stringify(v); // 12 layers, past the bound of 10
+    expect(normalizeSourceConfig(v)).toEqual({}); // gives up to {} once the bound is hit
+  });
 });
 
 describe('isSourceFederated', () => {
@@ -269,5 +194,52 @@ describe('isSourceFederated', () => {
     expect(isSourceFederated({ federated: 1 })).toBe(false);
     expect(isSourceFederated({})).toBe(false);
     expect(isSourceFederated(null)).toBe(false);
+    expect(isSourceFederated(['{"remote_url":"x"}', { federated: true }])).toBe(true);
+  });
+});
+
+describe('sourceLocalPathSkipWarning', () => {
+  test('keeps existing absolute checkouts dispatchable', () => {
+    expect(sourceLocalPathSkipWarning('present', '/repos/brain', (p) => p === '/repos/brain')).toBeNull();
+  });
+
+  test('skips relative local_path rows before consulting the filesystem', () => {
+    const asked: string[] = [];
+    const warn = sourceLocalPathSkipWarning('legacy', 'notes/brain', (p) => {
+      asked.push(p);
+      return true;
+    });
+    expect(asked).toEqual([]);
+    expect(warn).toContain("source 'legacy'");
+    expect(warn).toContain('relative local_path');
+  });
+
+  test('skips absolute paths missing from this machine', () => {
+    const warn = sourceLocalPathSkipWarning('foreign', '/missing/brain', () => false);
+    expect(warn).toContain("source 'foreign'");
+    expect(warn).toContain('/missing/brain');
+    expect(warn).toContain('does not exist on this machine');
+  });
+
+  test('allows missing managed remote clones to reach sync recovery', () => {
+    expect(
+      sourceLocalPathSkipWarning(
+        'managed',
+        '/missing/managed',
+        () => false,
+        { remote_url: 'https://github.com/example/repo', managed_clone: true },
+      ),
+    ).toBeNull();
+  });
+
+  test('still skips missing unowned remote-url paths', () => {
+    const warn = sourceLocalPathSkipWarning(
+      'foreign',
+      '/Users/other/repo',
+      () => false,
+      { remote_url: 'https://github.com/example/repo' },
+    );
+    expect(warn).toContain("source 'foreign'");
+    expect(warn).toContain('does not exist on this machine');
   });
 });

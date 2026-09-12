@@ -7,11 +7,6 @@
  * page_links, chunk_relations via existing FKs.
  */
 import type { BrainEngine } from '../core/engine.ts';
-import {
-  PURGE_DRY_RUN_CANDIDATE_LIMIT,
-  PURGE_LIFECYCLE_FALLBACK_ATTEMPTS,
-  PURGE_LIVE_CANDIDATE_LIMIT,
-} from '../core/purge-deleted-pages.ts';
 
 const SOFT_DELETE_TTL_HOURS_DEFAULT = 72;
 
@@ -35,32 +30,17 @@ async function runPurgeDeleted(engine: BrainEngine, args: string[]): Promise<voi
   const json = args.includes('--json');
 
   if (dryRun) {
-    const wouldPurge = await engine.purgeDeletedPages(olderThanHours, { dryRun: true });
+    // Same engine method, same WHERE predicate, same DB now() clock as the
+    // real purge — only the verb differs (SELECT, stays read-only). The old
+    // listPages enumeration capped at 10000 rows (live pages included), so
+    // brains past the cap under-reported the purge set.
+    const preview = await engine.purgeDeletedPages(olderThanHours, { dryRun: true });
     if (json) {
-      console.log(JSON.stringify({
-        dry_run: true,
-        candidate_scope: 'current_aged_candidates_excluding_draining_owners',
-        dry_run_candidate_limit: PURGE_DRY_RUN_CANDIDATE_LIMIT,
-        candidate_result_truncated: wouldPurge.truncated ?? false,
-        live_sweep_candidate_limit: PURGE_LIVE_CANDIDATE_LIMIT,
-        lifecycle_fallback_attempt_limit: PURGE_LIFECYCLE_FALLBACK_ATTEMPTS,
-        lifecycle_protected_cascades_may_be_skipped: true,
-        older_than_hours: olderThanHours,
-        count: wouldPurge.count,
-        slugs: wouldPurge.slugs,
-      }, null, 2));
+      console.log(JSON.stringify({ dry_run: true, older_than_hours: olderThanHours, count: preview.count, slugs: preview.slugs }, null, 2));
       return;
     }
-    const previewVerb = wouldPurge.truncated ? 'Showing the first' : 'Found';
-    console.log(`(dry-run) ${previewVerb} ${wouldPurge.count} current aged candidate(s) with non-draining owners, soft-deleted more than ${olderThanHours}h ago.`);
-    console.log(`Live cleanup runs in sweeps of at most ${PURGE_LIVE_CANDIDATE_LIMIT}; lifecycle-protected cascades may be retained.`);
-    if (wouldPurge.candidates) {
-      for (const candidate of wouldPurge.candidates) {
-        console.log(`  ${candidate.slug}  deleted_at=${candidate.deleted_at.toISOString()}`);
-      }
-    } else {
-      for (const slug of wouldPurge.slugs) console.log(`  ${slug}`);
-    }
+    console.log(`(dry-run) Would purge ${preview.count} page(s) soft-deleted more than ${olderThanHours}h ago.`);
+    for (const p of preview.pages ?? []) console.log(`  ${p.slug}  deleted_at=${p.deleted_at.toISOString()}`);
     return;
   }
 
@@ -90,9 +70,6 @@ Notes:
   Soft-delete a page via the MCP \`delete_page\` op. Restore via \`restore_page\`.
   This command is the manual operator escape hatch — the autopilot cycle's
   purge phase already calls the same library function on every run.
-  Dry-run lists up to 10,000 current aged candidates whose owners are not
-  draining. Live cleanup uses bounded sweeps; lifecycle-protected cascades may
-  be retained.
 `);
 }
 

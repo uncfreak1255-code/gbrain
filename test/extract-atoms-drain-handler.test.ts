@@ -7,10 +7,10 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-
-const JOBS_SOURCE = readFileSync(join(import.meta.dir, '../src/commands/jobs.ts'), 'utf8');
+import {
+  formatDrainProviderFailure,
+  type ExtractAtomsDrainResult,
+} from '../src/core/cycle/extract-atoms-drain.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -54,22 +54,22 @@ describe('extract-atoms-drain handler', () => {
     expect(job.name).toBe('extract-atoms-drain');
   });
 
-  test('handler rechecks source hygiene immediately before the spend-capable drain', () => {
-    const sharedGate = JOBS_SOURCE.slice(
-      JOBS_SOURCE.indexOf('async function executionTimeSpendBlock('),
-      JOBS_SOURCE.indexOf('async function resolveContextualReindexSourceId('),
-    );
-    expect(sharedGate).toContain('inspectSourceHygiene(engine');
-    expect(sharedGate).toContain('gateProtectedSourceWork(packet, sourceId)');
-    expect(sharedGate).toContain("reason: 'source_hygiene_blocked'");
-
-    const handler = JOBS_SOURCE.slice(JOBS_SOURCE.indexOf("registerProviderHandler('extract-atoms-drain'"));
-    const nextHandler = handler.indexOf("registerProviderHandler(\n    'embed-backfill'");
-    const body = handler.slice(0, nextHandler);
-    expect(body).toContain("job.data.sourceId : undefined");
-    expect(body).toContain('runExtractAtomsDrainForSource(engine, {\n        sourceId,');
-    expect(body).not.toContain('source_hygiene_source_id_missing');
-    expect(body).toContain("phase: 'extract_atoms'");
-    expect(body).toContain(": 'default'");
+  // #3813: the provider_failure throw is the job's error_text once it
+  // dead-letters. It carried only batches/remaining, so a missing provider key
+  // was invisible from every supported surface even though the drain result
+  // has carried a sanitized representative `last_error`.
+  test('provider_failure error text carries the drain\'s last_error', () => {
+    const result = {
+      status: 'provider_failure',
+      batches: 1,
+      remaining: 151,
+      last_error: 'concepts/alice-example: Anthropic chat requires ANTHROPIC_API_KEY.',
+    } as ExtractAtomsDrainResult;
+    const msg = formatDrainProviderFailure(result);
+    expect(msg).toContain('batches=1');
+    expect(msg).toContain('remaining=151');
+    expect(msg).toContain('ANTHROPIC_API_KEY');
+    // A clean-run shape (no representative error) keeps the original message.
+    expect(formatDrainProviderFailure({ ...result, last_error: null })).not.toContain('last error');
   });
 });

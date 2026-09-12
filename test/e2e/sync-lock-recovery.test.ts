@@ -68,7 +68,7 @@ beforeEach(async () => {
   try { await (eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id LIKE 'gbrain-sync:%'`; } catch { /* */ }
 });
 
-function runCli(args: string[], env: Record<string, string | undefined> = {}, timeoutMs = 30_000): { code: number; stdout: string; stderr: string } {
+function runCli(args: string[], env: Record<string, string | undefined> = {}): { code: number; stdout: string; stderr: string } {
   const fullEnv: Record<string, string | undefined> = {
     ...(process.env as Record<string, string | undefined>),
     GBRAIN_HOME: tmpHome,
@@ -80,14 +80,9 @@ function runCli(args: string[], env: Record<string, string | undefined> = {}, ti
     env: fullEnv as Record<string, string>,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
-    timeout: timeoutMs,
+    timeout: 30_000,
   });
   return { code: res.status ?? -1, stdout: res.stdout, stderr: res.stderr };
-}
-
-async function waitForExit(proc: ReturnType<typeof spawn>): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return;
-  await new Promise<void>(resolve => proc.once('exit', () => resolve()));
 }
 
 describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
@@ -120,9 +115,7 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     expect(handle).not.toBeNull();
 
     try {
-      // Canonical source locking waits up to 30s before reporting busy.
-      // Let the CLI finish that wait and print its error before the harness kills it.
-      const result = runCli(['sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default'], {}, 45_000);
+      const result = runCli(['sync', '--repo', repoDir, '--full', '--yes', '--no-embed']);
       expect(result.code).not.toBe(0);
       const msg = result.stderr + result.stdout;
       expect(msg).toMatch(new RegExp(`pid ${process.pid}`));
@@ -192,7 +185,7 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     // sync is fast on a 5-file repo, we use a tight polling loop with
     // an early-exit if we see the row.
     const eng = getEngine();
-    const sigtermProc = spawn(CLI[0], [...CLI.slice(1), 'sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default'], {
+    const sigtermProc = spawn(CLI[0], [...CLI.slice(1), 'sync', '--repo', repoDir, '--full', '--yes', '--no-embed'], {
       env: {
         ...process.env,
         GBRAIN_HOME: tmpHome,
@@ -211,13 +204,13 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     if (!lockSeen) {
       // Sync may have completed before we caught the lock. That's also fine.
       sigtermProc.kill('SIGTERM');
-      await waitForExit(sigtermProc);
+      await new Promise(r => sigtermProc.on('exit', r));
       // Skip the rest of the assertion.
       return;
     }
 
     sigtermProc.kill('SIGTERM');
-    await waitForExit(sigtermProc);
+    await new Promise(r => sigtermProc.on('exit', r));
 
     // Within 3s of exit, lock should be gone.
     let lockGone = false;

@@ -17,13 +17,13 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { execFileSync } from 'child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runSources } from '../src/commands/sources.ts';
 import { findMisroutedPages } from '../src/core/multi-source-drift.ts';
+import { writeSlugRootMode } from '../src/core/sync-anchor.ts';
 
 let engine: PGLiteEngine;
 const TMP_ROOTS: string[] = [];
@@ -52,17 +52,6 @@ function seedFile(root: string, relPath: string, content = 'placeholder\n'): voi
   const full = join(root, relPath);
   mkdirSync(join(full, '..'), { recursive: true });
   writeFileSync(full, content);
-}
-
-async function captureLogs<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
-  const origLog = console.log;
-  const lines: string[] = [];
-  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
-  try {
-    return { value: await fn(), lines };
-  } finally {
-    console.log = origLog;
-  }
 }
 
 describe('findMisroutedPages — heuristic correctness', () => {
@@ -115,13 +104,6 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.sample.length).toBe(2);
     const slugs = result.sample.map(s => s.slug).sort();
     expect(slugs).toEqual(['people/charlie', 'people/dana']);
-    expect(result.sources).toEqual([
-      {
-        source_id: 'src-case3',
-        local_path: root,
-        slugs: ['people/charlie', 'people/dana'],
-      },
-    ]);
     for (const s of result.sample) {
       expect(s.intended_source).toBe('src-case3');
       expect(s.local_path).toBe(root);
@@ -191,81 +173,51 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.sample[0].slug).toBe('topics/mdx-page');
   });
 
-  test('case 8: `sources rehome --json` previews candidates and does not mutate rows', async () => {
+  test('case 8 (#4712): a git-root-pinned source is skipped, not false-positived', async () => {
     const root = makeTmpRoot('case8');
-    seedFile(root, 'people/rehome-eve.md');
-    seedFile(root, 'people/rehome-finn.md');
+    seedFile(root, 'page.md');
 
     await runSources(engine, ['add', 'src-case8', '--no-federated']);
     await engine.executeRaw(
       `UPDATE sources SET local_path = $1 WHERE id = $2`,
       [root, 'src-case8'],
     );
-    await engine.putPage('people/rehome-eve', { type: 'person', title: 'Rehome Eve', compiled_truth: '.' });
-    await engine.putPage('people/rehome-finn', { type: 'person', title: 'Rehome Finn', compiled_truth: '.' });
+    await writeSlugRootMode(engine, 'src-case8', 'git-root');
+    // Sync actually produced the git-root-prefixed slug (what import.ts's
+    // importRelPath would derive) — NOT local_path-relative 'page'.
+    await engine.putPage('src-case8/page', { type: 'concept', title: 'p', compiled_truth: '.' }, { sourceId: 'src-case8' });
+    // An unrelated page legitimately owns the local_path-relative slug at
+    // default — this is exactly the #4712 false-positive shape pre-fix.
+    await engine.putPage('page', { type: 'concept', title: 'unrelated', compiled_truth: '.' });
 
-    const before = await engine.executeRaw<{ source_id: string; slug: string }>(
-      `SELECT source_id, slug FROM pages WHERE slug IN ($1, $2) ORDER BY source_id, slug`,
-      ['people/rehome-eve', 'people/rehome-finn'],
-    );
-
-    const { lines } = await captureLogs(() =>
-      runSources(engine, ['rehome', 'src-case8', '--json']),
-    );
-    const payload = JSON.parse(lines.join('\n'));
-
-    expect(payload.schema_version).toBe(1);
-    expect(payload.mode).toBe('preview');
-    expect(payload.mutation_supported).toBe(false);
-    expect(payload.walk_truncated).toBe(false);
-    expect(payload.total_candidates).toBe(2);
-    expect(payload.sources).toEqual([
-      {
-        source_id: 'src-case8',
-        local_path: root,
-        count: 2,
-        slugs: ['people/rehome-eve', 'people/rehome-finn'],
-      },
-    ]);
-
-    const after = await engine.executeRaw<{ source_id: string; slug: string }>(
-      `SELECT source_id, slug FROM pages WHERE slug IN ($1, $2) ORDER BY source_id, slug`,
-      ['people/rehome-eve', 'people/rehome-finn'],
-    );
-    expect(after).toEqual(before);
+    const result = await findMisroutedPages(engine, [{ id: 'src-case8', local_path: root }]);
+    expect(result.count).toBe(0);
+    expect(result.sample).toEqual([]);
+    expect(result.git_root_skipped).toEqual(['src-case8']);
   });
 
-  test('case 9: git-ignored markdown is not counted as drift', async () => {
-    const root = makeTmpRoot('case9');
-    execFileSync('git', ['init', '-q'], { cwd: root, stdio: 'ignore' });
-    seedFile(root, '.gitignore', 'ignored/\n');
-    seedFile(root, 'ignored/default-only.md');
-    seedFile(root, 'included/default-only.md');
+  test('case 9 (#4712): git-root skip does not mask real drift on a sibling source-root source', async () => {
+    const gitRootRoot = makeTmpRoot('case9-gitroot');
+    seedFile(gitRootRoot, 'page.md');
+    await runSources(engine, ['add', 'src-case9-gr', '--no-federated']);
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [gitRootRoot, 'src-case9-gr']);
+    await writeSlugRootMode(engine, 'src-case9-gr', 'git-root');
+    await engine.putPage('src-case9-gr/page', { type: 'concept', title: 'p', compiled_truth: '.' }, { sourceId: 'src-case9-gr' });
+    await engine.putPage('page', { type: 'concept', title: 'unrelated', compiled_truth: '.' });
 
-    await runSources(engine, ['add', 'src-case9', '--no-federated']);
-    await engine.executeRaw(
-      `UPDATE sources SET local_path = $1 WHERE id = $2`,
-      [root, 'src-case9'],
-    );
-    await engine.putPage('ignored/default-only', {
-      type: 'concept',
-      title: 'Ignored default only',
-      compiled_truth: '.',
-    });
-    await engine.putPage('included/default-only', {
-      type: 'concept',
-      title: 'Included default only',
-      compiled_truth: '.',
-    });
+    const sourceRootRoot = makeTmpRoot('case9-srcroot');
+    seedFile(sourceRootRoot, 'people/eve.md');
+    await runSources(engine, ['add', 'src-case9-sr', '--no-federated']);
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [sourceRootRoot, 'src-case9-sr']);
+    // Genuine misroute: exists at default, missing from the intended source.
+    await engine.putPage('people/eve', { type: 'person', title: 'Eve', compiled_truth: '.' });
 
-    const result = await findMisroutedPages(engine, [{ id: 'src-case9', local_path: root }]);
-    expect(result.count).toBe(1);
-    expect(result.sources).toEqual([
-      {
-        source_id: 'src-case9',
-        local_path: root,
-        slugs: ['included/default-only'],
-      },
+    const result = await findMisroutedPages(engine, [
+      { id: 'src-case9-gr', local_path: gitRootRoot },
+      { id: 'src-case9-sr', local_path: sourceRootRoot },
     ]);
+    expect(result.count).toBe(1);
+    expect(result.sample[0]).toMatchObject({ slug: 'people/eve', intended_source: 'src-case9-sr' });
+    expect(result.git_root_skipped).toEqual(['src-case9-gr']);
   });
 });

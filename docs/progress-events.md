@@ -1,8 +1,7 @@
 # Progress events
 
 Canonical reference for the JSONL progress stream that `gbrain` writes to
-`stderr` when a bulk command runs with `--progress-json`. Stable from
-v0.15.2. Additive changes only; no renames or removals without a major
+`stderr` when a bulk command runs with `--progress-json`. Additive changes only; no renames or removals without a major
 version bump.
 
 Most humans won't read this page. Agents parsing progress will.
@@ -26,7 +25,9 @@ Any of these commands stream events when `--progress-json` is set:
 - `gbrain lint`
 - `gbrain integrity auto`
 - `gbrain eval`
+- `gbrain eval brainbench`
 - `gbrain apply-migrations` (the orchestrator + every child command)
+- `gbrain transcripts ingest` (per-file ticks + a per-session heartbeat over the import set)
 
 Non-bulk commands (`stats`, `graph-query`, `get`, `put`, etc.) don't emit
 events — they return in under a second.
@@ -131,22 +132,49 @@ Phases use `snake_case.dot.path` naming. A fresh reporter starts at the
 root; `child()` composition appends to the parent's current phase, so a
 sync that calls import emits `sync.import.<file>`, not `import.<file>`.
 
-Stable phase names shipped in v0.15.2:
+Stable phase names:
 
 - `doctor.db_checks` (umbrella for all DB-side doctor checks)
+- `doctor.pglite_probe` (the scratch-store probe; only when PGLite init
+  failed with an unexplained/damage-class disk state or `--probe-pglite` was
+  passed — a cold start can take 5–20s, so the heartbeat is the only sign of
+  life)
 - `orphans.scan`
 - `embed.pages`
 - `extract.links_fs`, `extract.timeline_fs`, `extract.links_db`, `extract.timeline_db`
 - `import.files`
 - `sync.deletes`, `sync.renames`, `sync.imports`
 - `migrate.copy_pages`, `migrate.copy_links`
+- `migrate.copy_facts` (heartbeat-only, one tick per fact row; the facts
+  table re-copies fully on every run, so the tick count is the whole table)
+- `migrate.reembed` (the re-embed pass of `gbrain migrate embeddings`; total is the
+  stale-chunk backlog at the start of the pass, so it can grow slightly if a
+  writer adds chunks mid-run)
 - `repair_jsonb.run`, `repair_jsonb.<table>.<column>`
 - `backlinks.scan`
+- `backlinks.fix` — heartbeat-only (no total): the fix loop runs per-file
+  locking + parse-validation + atomic writes, so agents see forward progress
+  while it works through the gap list
 - `lint.pages`
 - `integrity.auto`
 - `eval.single`, `eval.ab`
+- `eval.brainbench` — ticks carry a `note` but no `total`: continuity pairs
+  replay once per (writer, reader) ordering, so the tick count exceeds the
+  fixture count and a percentage would lie
 - `export.pages`
 - `files.sync`
+- `transcripts.ingest` (one tick per session-log file; sessions inside a
+  multi-session file — the hermes store, consumer exports — don't get their
+  own ticks, so total = file count; each session emits a heartbeat instead)
+- `sync.github_materialize` (github-kind source sweep: the phase restarts
+  once per repo with that repo's item count as total — counts are only
+  known after each repo's enumeration — and every item ticks exactly once;
+  scope resolution, per-repo listing and detail fetches emit heartbeats)
+- `sync.google_materialize` (google-kind source sweep: no `total` — the
+  newest-first Gmail backfill drains a window whose size isn't known up
+  front — with one tick per Gmail thread materialized, `note` carrying the
+  thread id; the contacts, calendar, and gmail service sweeps each emit
+  heartbeats while they run)
 
 Sub-phases exposed via `child()`:
 
@@ -178,37 +206,6 @@ extract, import, backlinks) calls `job.updateProgress({done, total,
 
 The `jobs work` daemon itself emits coarse one-line-per-job stderr output
 for liveness only. Per-page detail lives in the DB.
-
-## Wiring a new bulk command
-
-Which commands already stream progress: doctor, embed, import, export, sync,
-extract, migrate, repair-jsonb, orphans, check-backlinks, lint, integrity auto,
-eval, files sync, and apply-migrations. All of them go through the shared
-reporter at `src/core/progress.ts`, so agents get heartbeats within 1 second of
-every iteration regardless of how slow the underlying work is.
-
-To add another:
-
-```ts
-import { createProgress } from '../core/progress.ts';
-import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
-
-const reporter = createProgress(cliOptsToProgressOptions(getCliOptions()));
-reporter.start(phase, total);   // before the loop
-reporter.tick();                // inside it
-reporter.finish();              // after
-```
-
-For single long-running queries, use `startHeartbeat(reporter, note)` with a
-try/finally to guarantee cleanup.
-
-Never call `process.stdout.write('\r...')` in bulk paths — the CI guard
-(`scripts/check-progress-to-stdout.sh`, wired into `bun run test`) will fail the
-build.
-
-Minion handlers pass `job.updateProgress` as the `onProgress` callback to core
-functions (DB-backed primary progress channel); stderr from `jobs work` stays
-coarse, for daemon liveness only.
 
 ## Compatibility
 

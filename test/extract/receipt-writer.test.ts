@@ -16,11 +16,11 @@ import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import {
   receiptSlug,
   shortRunId,
-  buildExtractRunId,
   dateFromIso,
   writeReceipt,
   type ExtractReceiptInput,
 } from '../../src/core/extract/receipt-writer.ts';
+import { slugifySegment } from '../../src/core/sync.ts';
 
 const BASE_INPUT: ExtractReceiptInput = {
   kind: 'facts.conversation',
@@ -82,18 +82,35 @@ describe('shortRunId / dateFromIso — pure helpers', () => {
     expect(shortRunId('op_check_abc')).toBe('op_check');
   });
 
+  // #3443 — a short form ending in '-' (e.g. propose-<timestamp> run ids)
+  // desynced the DB receipt slug from its Git-backed slug: slugifySegment()
+  // strips boundary hyphens during repo sync, so the write-through created a
+  // normalized sibling instead of materializing the existing page.
+  test('shortRunId is canonical under slugifySegment for every receipt-producing run-id family (#3443)', () => {
+    const familyRunIds = [
+      'propose-20260724103000-ab12cd34',           // cycle/propose-takes.ts
+      `atoms-${Date.now().toString(36)}-pers`,     // cycle/extract-atoms.ts
+      `efacts-${Date.now().toString(36)}-pers`,    // cycle/extract-facts.ts
+      `concepts-${Date.now().toString(36)}`,       // cycle/synthesize-concepts.ts
+      `ecf-${Date.now().toString(36)}-pers`,       // extract-conversation-facts.ts
+    ];
+    for (const runId of familyRunIds) {
+      const short = shortRunId(runId);
+      expect(slugifySegment(short)).toBe(short);
+      expect(short.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('shortRunId trims boundary hyphens introduced by truncation', () => {
+    expect(shortRunId('propose-20260724103000-ab12cd34')).toBe('propose');
+    // Pathological all-separator prefix still yields a non-empty segment.
+    expect(shortRunId('--------tail')).toBe('run');
+  });
+
   test('dateFromIso extracts YYYY-MM-DD prefix', () => {
     expect(dateFromIso('2026-05-27T14:30:00Z')).toBe('2026-05-27');
     expect(dateFromIso('2026-05-27T14:30:00.123456Z')).toBe('2026-05-27');
     expect(dateFromIso('2026-12-31T23:59:59Z')).toBe('2026-12-31');
-  });
-
-  test('atom run ids keep same-millisecond receipts distinct after shortRunId', () => {
-    const first = buildExtractRunId('atoms', 'default', '11111111');
-    const second = buildExtractRunId('atoms', 'default', '22222222');
-    expect(shortRunId(first)).not.toBe(shortRunId(second));
-    expect(first).toContain('-atoms-defa');
-    expect(second).toContain('-atoms-defa');
   });
 });
 
@@ -124,6 +141,11 @@ describe('writeReceipt — frontmatter D-EXTRACT-19 belt+suspenders', () => {
     // belt + suspenders: both anti-loop flags are present
     expect(page.frontmatter?.type).toBe('extract_receipt');
     expect(page.frontmatter?.dream_generated).toBe(true);
+    // #1978: receipts are operation records, not derived documents —
+    // explicit raw-trace exemption so the doctor raw_provenance check
+    // (warn-only v1) stays quiet.
+    expect(page.frontmatter?.raw_trace_exempt).toBe(true);
+    expect(typeof page.frontmatter?.raw_trace_exempt_reason).toBe('string');
   });
 
   test('stamps optional model_id + eval_pass + eval_score when supplied', async () => {
@@ -184,38 +206,5 @@ describe('writeReceipt — frontmatter D-EXTRACT-19 belt+suspenders', () => {
     expect(page.compiled_truth).toContain('default');
     expect(page.compiled_truth).toContain('claude-haiku-4-5');
     expect(page.compiled_truth).toMatch(/PASS/);
-  });
-
-  test('records partial status, deadline, and bounded redacted failure samples', async () => {
-    const { page } = await writeReceipt(engine, {
-      ...BASE_INPUT,
-      run_id: 'failure-receipt-run',
-      status: 'warn',
-      deadline_elapsed: true,
-      failure_count: 2,
-      failures: [{
-        source: 'pages/example host=db.example.com',
-        error: 'password=hunter2 Authorization: Bearer abc123DEF456ghi789 api_key=another-secret provider timeout',
-        error_class: 'AITransientError password=hunter2',
-        error_code: 'ETIMEDOUT',
-      }],
-    });
-    expect(page.frontmatter?.status).toBe('warn');
-    expect(page.frontmatter?.deadline_elapsed).toBe(true);
-    expect(page.frontmatter?.failure_count).toBe(2);
-    expect(page.frontmatter?.failures_truncated).toBe(true);
-    const failures = page.frontmatter?.failures as Array<Record<string, unknown>>;
-    expect(failures[0]?.error).toContain('<REDACTED:password>');
-    expect(failures[0]?.error).not.toContain('hunter2');
-    expect(failures[0]?.error).toContain('<REDACTED:bearer>');
-    expect(failures[0]?.error).toContain('<REDACTED:api_key>');
-    expect(failures[0]?.error).not.toContain('abc123DEF456ghi789');
-    expect(failures[0]?.error).not.toContain('another-secret');
-    expect(failures[0]?.source).toContain('<REDACTED:host>');
-    expect(failures[0]?.error_class).not.toContain('hunter2');
-    expect(page.compiled_truth).toContain('Status: **warn**');
-    expect(page.compiled_truth).toContain('Deadline: **elapsed**');
-    expect(page.compiled_truth).toContain('Failures: **2**');
-    expect(page.compiled_truth).toContain('1 additional failure(s) omitted');
   });
 });

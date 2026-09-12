@@ -19,8 +19,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import type { BrainEngine } from '../src/core/engine.ts';
-import type { SearchResult } from '../src/core/types.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { runEvalGate } from '../src/commands/eval-gate.ts';
 import {
@@ -99,27 +97,6 @@ function writeQrelsFile(dir: string, queries: unknown[]): string {
   return path;
 }
 
-function fakeSearchResult(slug: string): SearchResult {
-  return {
-    slug,
-    chunk_id: 1,
-    chunk_index: 0,
-    chunk_text: '',
-    score: 1,
-    title: slug,
-    page_kind: 'markdown',
-    source_id: 'default',
-  } as unknown as SearchResult;
-}
-
-function makeSearchStubEngine(results: SearchResult[]): BrainEngine {
-  return {
-    kind: 'pglite',
-    searchKeyword: async (_q: string, opts?: { limit?: number }) => results.slice(0, opts?.limit),
-    searchVector: async () => [],
-  } as unknown as BrainEngine;
-}
-
 // process.exit hijacker — capture exit code without actually exiting.
 function withExitCapture<T>(fn: () => Promise<T>): Promise<{ exitCode: number | null; result?: T; threw?: unknown }> {
   const realExit = process.exit;
@@ -159,6 +136,52 @@ describe('eval gate: usage errors', () => {
   test('--qrels file missing → exit 2', async () => {
     const out = await withExitCapture(() =>
       runEvalGate(engine, ['--qrels', '/tmp/does-not-exist-12345.json']),
+    );
+    expect(out.exitCode).toBe(2);
+  });
+});
+
+describe('eval gate: embedder flag validation', () => {
+  // The hermetic-canary embedder option accepts exactly one value and only
+  // composes with the correctness (qrels) gate. A regression that silently
+  // accepts a bad value would fall through to the keyed gateway path and
+  // defeat the hermetic guarantee.
+  const REAL_QRELS = 'test/fixtures/eval-baselines/qrels-search.json';
+
+  test('unsupported embedder value → exit 2', async () => {
+    const out = await withExitCapture(() =>
+      runEvalGate(engine, ['--embedder', 'semantic', '--qrels', REAL_QRELS]),
+    );
+    expect(out.exitCode).toBe(2);
+  });
+
+  test('deterministic embedder combined with the baseline gate → exit 2', async () => {
+    const out = await withExitCapture(() =>
+      runEvalGate(engine, [
+        '--embedder', 'deterministic',
+        '--baseline', '/tmp/does-not-exist-12345.ndjson',
+        '--qrels', REAL_QRELS,
+      ]),
+    );
+    expect(out.exitCode).toBe(2);
+  });
+
+  test('deterministic embedder without a qrels file → exit 2', async () => {
+    const out = await withExitCapture(() =>
+      runEvalGate(engine, ['--embedder', 'deterministic']),
+    );
+    expect(out.exitCode).toBe(2);
+  });
+
+  test('deterministic embedder with a malformed qrels file → exit 2', async () => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'gate-embedder-'));
+    const bad = join(dir, 'malformed.json');
+    writeFileSync(bad, '{"not_queries": []}');
+    const out = await withExitCapture(() =>
+      runEvalGate(engine, ['--embedder', 'deterministic', '--qrels', bad]),
     );
     expect(out.exitCode).toBe(2);
   });
@@ -246,72 +269,6 @@ describe('eval gate: JSON envelope shape', () => {
       expect(envelope.correctness_gate).toBeDefined();
       expect(envelope.regression_gate.ran).toBe(false);
       expect(envelope.correctness_gate.ran).toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('--drill adds privacy-safe row drivers without query text or slugs', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'eval-gate-test-'));
-    const row: BaselineRow = {
-      ...makeRow('private query text', ['private/captured-slug']),
-      tool_name: 'search',
-    };
-    const baseline = writeBaselineFile(dir, [row]);
-    try {
-      const realLog = console.log;
-      let captured = '';
-      console.log = (msg: string) => { captured += msg + '\n'; };
-      try {
-        await withExitCapture(() => runEvalGate(engine, [
-          '--baseline',
-          baseline,
-          '--json',
-          '--drill',
-          '--drill-limit',
-          '1',
-        ]));
-      } finally {
-        console.log = realLog;
-      }
-      const envelope = JSON.parse(captured.trim());
-      const drill = envelope.regression_gate.drill;
-      expect(drill.rows_considered).toBe(1);
-      expect(drill.top_low_overlap[0].query_hash).toBe(computeQueryHash('private query text'));
-      const serialized = JSON.stringify(drill);
-      expect(serialized).not.toContain('private query text');
-      expect(serialized).not.toContain('private/captured-slug');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('regression gate compares current rows at captured result count by default', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'eval-gate-test-'));
-    const row: BaselineRow = {
-      ...makeRow('stable short capture', ['a', 'b']),
-      tool_name: 'search',
-    };
-    const baseline = writeBaselineFile(dir, [row]);
-    const stub = makeSearchStubEngine([
-      fakeSearchResult('a'),
-      fakeSearchResult('b'),
-      fakeSearchResult('c'),
-      fakeSearchResult('d'),
-    ]);
-    try {
-      const realLog = console.log;
-      let captured = '';
-      console.log = (msg: string) => { captured += msg + '\n'; };
-      try {
-        await withExitCapture(() => runEvalGate(stub, ['--baseline', baseline, '--json', '--drill']));
-      } finally {
-        console.log = realLog;
-      }
-      const envelope = JSON.parse(captured.trim());
-      expect(envelope.verdict).toBe('pass');
-      expect(envelope.regression_gate.summary.mean_jaccard).toBe(1);
-      expect(envelope.regression_gate.drill.top_low_overlap[0].current_count).toBe(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

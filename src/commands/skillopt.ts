@@ -11,7 +11,6 @@ import { autoDetectSkillsDirReadOnly } from '../core/repo-root.ts';
 import { runBootstrap, runBootstrapFromSkill } from '../core/skillopt/bootstrap-benchmark.ts';
 import { SKILLOPT_HELP_TEXT } from '../core/skillopt/help.ts';
 import { runSkillOpt, parseSplit } from '../core/skillopt/orchestrator.ts';
-import { reviewSkillOptCandidate } from '../core/skillopt/review.ts';
 import { serializeError, StructuredAgentError } from '../core/errors.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import type { SkillOptOpts } from '../core/skillopt/types.ts';
@@ -51,10 +50,6 @@ interface ParsedFlags {
   brainWideMaxCostUsd?: number;
   /** F5: comma-separated list of target models for fleet mode. */
   targetModelsFleet?: string[];
-  /** Review/promotion route for an existing skillopt/best.md candidate. */
-  review: boolean;
-  /** Promote best.md into SKILL.md. Only meaningful with review. */
-  reviewApply: boolean;
 }
 
 export async function runSkillOptCommand(engine: BrainEngine | null, args: string[]): Promise<void> {
@@ -77,43 +72,16 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
     process.exit(0);
   }
 
+  if (!engine) {
+    process.stderr.write('gbrain skillopt: requires a configured brain (engine connection failed)\n');
+    process.exit(2);
+  }
+
   // Resolve skills dir.
   const detected = autoDetectSkillsDirReadOnly(process.cwd());
   const skillsDir = parsed.skillsDir ?? detected.dir;
   if (!skillsDir) {
     process.stderr.write(`gbrain skillopt: cannot find skills directory. Pass --skills-dir <path> or run from a workspace with a skills/ directory.\n`);
-    process.exit(2);
-  }
-
-  // ── Review/promote route (file-local; no engine/model/benchmark needed) ──
-  if (parsed.review) {
-    try {
-      const result = reviewSkillOptCandidate({
-        skillsDir,
-        skillName: parsed.skillName,
-        apply: parsed.reviewApply,
-        force: parsed.force,
-      });
-      if (parsed.json) {
-        process.stdout.write(JSON.stringify({ schema_version: 1, ok: true, ...result }) + '\n');
-      } else {
-        process.stdout.write(`[skillopt] ${result.summary}\n`);
-        process.stdout.write(`[skillopt] Recommendation: ${result.recommendation}\n`);
-        process.stdout.write(`[skillopt] Current: ${result.skill_path}\n`);
-        process.stdout.write(`[skillopt] Candidate: ${result.best_path}\n`);
-        if (result.best_sha8) {
-          const sign = (result.line_delta ?? 0) >= 0 ? '+' : '';
-          process.stdout.write(`[skillopt] Delta: ${sign}${result.line_delta ?? 0} lines (${result.current_sha8} → ${result.best_sha8})\n`);
-        }
-      }
-      process.exit(0);
-    } catch (err) {
-      handleErrorAndExit(err, parsed.json, 2);
-    }
-  }
-
-  if (!engine) {
-    process.stderr.write('gbrain skillopt: requires a configured brain (engine connection failed)\n');
     process.exit(2);
   }
 
@@ -346,6 +314,16 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
       }) + '\n');
     } else {
       process.stderr.write(`[skillopt] Outcome: ${result.outcome}\n`);
+      // #3516: never a silent failure — say WHY the run aborted/errored.
+      if (result.outcome === 'aborted' || result.outcome === 'errored') {
+        const reason = result.receipt.abort_reason ?? 'unknown';
+        const detail = result.receipt.abort_detail ?? '(no detail captured)';
+        process.stderr.write(`[skillopt] Failure reason: ${reason}\n`);
+        process.stderr.write(`[skillopt] Detail: ${detail}\n`);
+        if (detail.includes('no_pricing')) {
+          process.stderr.write(`[skillopt] Hint: model has no pricing entry; pass --no-max-cost (or --max-cost-usd 0) to run uncapped with a warn-once.\n`);
+        }
+      }
       process.stderr.write(`[skillopt] Best sel-score: ${(result.receipt.best_sel_score ?? 0).toFixed(3)}\n`);
       process.stderr.write(`[skillopt] Final cost: $${(result.receipt.final_cost_usd ?? 0).toFixed(2)}\n`);
       if (result.mutatedSkillFile) {
@@ -393,14 +371,8 @@ export function parseFlags(args: string[]): ParsedFlags {
   let all = false;
   let brainWideMaxCostUsd: number | undefined;
   let targetModelsFleet: string[] | undefined;
-  let review = false;
-  let reviewApply = false;
 
   let i = 0;
-  if (args[0] === 'review') {
-    review = true;
-    i = 1;
-  }
   while (i < args.length) {
     const a = args[i]!;
     if (a === '--help' || a === '-h') { help = true; i += 1; continue; }
@@ -436,10 +408,13 @@ export function parseFlags(args: string[]): ParsedFlags {
     if (a === '--allow-mutate-bundled') { allowMutateBundled = true; i += 1; continue; }
     if (a === '--held-out') { heldOutPath = args[++i]; i += 1; continue; }
     if (a === '--json') { json = true; i += 1; continue; }
-    if (a === '--max-cost-usd') { maxCostUsd = mustFloat(args[++i], '--max-cost-usd'); i += 1; continue; }
+    // #3516: 0 is accepted and means UNCAPPED — pricing misses for unpriced
+    // model ids (openrouter:*, litellm:*) then warn-once instead of aborting
+    // the run with BudgetExhausted(no_pricing).
+    if (a === '--max-cost-usd') { maxCostUsd = mustNonNegFloat(args[++i], '--max-cost-usd'); i += 1; continue; }
+    if (a === '--no-max-cost') { maxCostUsd = 0; i += 1; continue; }
     if (a === '--max-runtime-min') { maxRuntimeMin = mustInt(args[++i], '--max-runtime-min'); i += 1; continue; }
     if (a === '--force') { force = true; i += 1; continue; }
-    if (a === '--apply') { reviewApply = true; i += 1; continue; }
     if (a === '--resume') { resumeRunId = args[++i]; i += 1; continue; }
     if (a === '--skills-dir') { skillsDir = args[++i]; i += 1; continue; }
     if (a === '--all') { all = true; i += 1; continue; }
@@ -459,15 +434,7 @@ export function parseFlags(args: string[]): ParsedFlags {
   }
 
   // --all does NOT require a skill name (it iterates over all skills).
-  if (!all && !skillName) throw new Error(review ? 'skill name is required: gbrain skillopt review <skill>' : 'skill name is required (positional arg), or use --all for batch mode');
-  if (!review && reviewApply) throw new Error(`--apply requires 'review' subcommand`);
-  if (review) {
-    if (all) throw new Error(`review and --all are mutually exclusive`);
-    if (bootstrapFromRouting || bootstrapFromSkill || bootstrapReviewed) throw new Error(`review cannot be combined with bootstrap flags`);
-    if (benchmarkPath) throw new Error(`review does not take --benchmark; it reads skillopt/best.md`);
-    if (targetModelsFleet) throw new Error(`review and --target-models are mutually exclusive`);
-    if (resumeRunId) throw new Error(`review and --resume are mutually exclusive`);
-  }
+  if (!all && !skillName) throw new Error('skill name is required (positional arg), or use --all for batch mode');
   // Mutual-exclusion check: --benchmark and --bootstrap-from-routing.
   if (benchmarkPath && bootstrapFromRouting) {
     throw new Error(`--benchmark and --bootstrap-from-routing are mutually exclusive`);
@@ -531,8 +498,6 @@ export function parseFlags(args: string[]): ParsedFlags {
     all,
     ...(brainWideMaxCostUsd !== undefined ? { brainWideMaxCostUsd } : {}),
     ...(targetModelsFleet !== undefined ? { targetModelsFleet } : {}),
-    review,
-    reviewApply,
   };
 }
 
@@ -548,6 +513,15 @@ function mustFloat(v: string | undefined, flag: string): number {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(`${flag} requires a positive number (got '${v}')`);
+  }
+  return n;
+}
+
+/** #3516: like mustFloat but 0 is allowed (0 = uncapped for --max-cost-usd). */
+function mustNonNegFloat(v: string | undefined, flag: string): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`${flag} requires a non-negative number (got '${v}'; 0 disables the cap)`);
   }
   return n;
 }

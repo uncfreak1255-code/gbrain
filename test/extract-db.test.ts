@@ -130,36 +130,6 @@ describe('gbrain extract links --source db', () => {
     expect(links.length).toBe(0);
   });
 
-  test('--dry-run --json suppresses links already created by a real run', async () => {
-    await engine.putPage('people/alice', personPage('Alice'));
-    await engine.putPage('companies/acme', companyPage(
-      'Acme',
-      '[Alice](people/alice) joined as CEO.',
-    ));
-
-    await runExtract(engine, ['links', '--source', 'db']);
-
-    const lines: string[] = [];
-    const originalWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-      const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
-      lines.push(str);
-      return true;
-    }) as any;
-
-    try {
-      await runExtract(engine, ['links', '--source', 'db', '--dry-run', '--json']);
-    } finally {
-      process.stdout.write = originalWrite;
-    }
-
-    const actions = lines
-      .filter(l => l.trim().startsWith('{'))
-      .map(l => JSON.parse(l.trim()))
-      .filter(row => row.action === 'add_link');
-    expect(actions).toEqual([]);
-  });
-
   test('--type filter only processes matching pages', async () => {
     await engine.putPage('people/alice', personPage('Alice'));
     await engine.putPage('people/bob', personPage('Bob', '[Alice](people/alice) is great.'));
@@ -258,66 +228,6 @@ describe('gbrain extract timeline --source db', () => {
     const entries = await engine.getTimeline('people/alice');
     expect(entries.length).toBe(0);
   });
-
-  test('--dry-run --json suppresses timeline entries already created by a real run', async () => {
-    await engine.putPage('people/alice', {
-      type: 'person', title: 'Alice', compiled_truth: '',
-      timeline: '- **2026-01-15** | Test event',
-    });
-
-    await runExtract(engine, ['timeline', '--source', 'db']);
-
-    const lines: string[] = [];
-    const originalWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-      const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
-      lines.push(str);
-      return true;
-    }) as any;
-    try {
-      await runExtract(engine, ['timeline', '--source', 'db', '--dry-run', '--json']);
-    } finally {
-      process.stdout.write = originalWrite;
-    }
-
-    const actions = lines
-      .filter(l => l.trim().startsWith('{'))
-      .map(l => JSON.parse(l.trim()))
-      .filter(row => row.action === 'add_timeline');
-    expect(actions).toEqual([]);
-  });
-
-  test('--dry-run duplicate check mirrors timeline text sanitization', async () => {
-    await engine.putPage('people/alice', {
-      type: 'person', title: 'Alice', compiled_truth: '',
-      timeline: '- **2026-01-15** | Test\uD800 event',
-    });
-
-    await runExtract(engine, ['timeline', '--source', 'db']);
-
-    const entries = await engine.getTimeline('people/alice');
-    expect(entries).toHaveLength(1);
-    expect(entries[0].summary).toBe('Test\uFFFD event');
-
-    const lines: string[] = [];
-    const originalWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-      const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
-      lines.push(str);
-      return true;
-    }) as any;
-    try {
-      await runExtract(engine, ['timeline', '--source', 'db', '--dry-run', '--json']);
-    } finally {
-      process.stdout.write = originalWrite;
-    }
-
-    const actions = lines
-      .filter(l => l.trim().startsWith('{'))
-      .map(l => JSON.parse(l.trim()))
-      .filter(row => row.action === 'add_timeline');
-    expect(actions).toEqual([]);
-  });
 });
 
 describe('gbrain extract all --source db', () => {
@@ -337,5 +247,68 @@ describe('gbrain extract all --source db', () => {
     expect(links.length).toBe(1);
     const entries = await engine.getTimeline('companies/acme');
     expect(entries.length).toBe(1);
+  });
+});
+
+describe('--since ref-level prefilter (#4304)', () => {
+  beforeEach(truncateAll);
+
+  test('listAllPageRefs returns updated_at as a real Date', async () => {
+    await engine.putPage('people/alice', personPage('Alice'));
+    const refs = await engine.listAllPageRefs();
+    expect(refs.length).toBe(1);
+    expect(refs[0].updated_at instanceof Date).toBe(true);
+    expect(Number.isFinite(refs[0].updated_at.getTime())).toBe(true);
+  });
+
+  test('--since in the future skips every page WITHOUT a getPage round-trip', async () => {
+    await engine.putPage('people/alice', personPage('Alice'));
+    await engine.putPage('meetings/standup', meetingPage(
+      'Standup', 'Attendees: [Alice](people/alice).',
+    ));
+
+    // Spy on getPage via an own-property shadow; delete restores the
+    // prototype method. Pre-#4304 the walk called getPage once per corpus
+    // page and applied --since AFTER the fetch.
+    const proto = Object.getPrototypeOf(engine) as { getPage: typeof engine.getPage };
+    const origGetPage = proto.getPage;
+    let getPageCalls = 0;
+    (engine as unknown as Record<string, unknown>).getPage = function (this: typeof engine, ...args: Parameters<typeof origGetPage>) {
+      getPageCalls++;
+      return origGetPage.apply(this, args);
+    };
+    try {
+      await runExtract(engine, ['links', '--source', 'db', '--since', '2999-01-01']);
+    } finally {
+      delete (engine as unknown as Record<string, unknown>).getPage;
+    }
+
+    expect(getPageCalls).toBe(0);
+    expect(await engine.getLinks('meetings/standup')).toHaveLength(0);
+  });
+
+  test('--since in the past still extracts (touched-since semantics on updated_at)', async () => {
+    await engine.putPage('people/alice', personPage('Alice'));
+    await engine.putPage('meetings/standup', meetingPage(
+      'Standup', 'Attendees: [Alice](people/alice).',
+    ));
+
+    await runExtract(engine, ['links', '--source', 'db', '--since', '2000-01-01']);
+
+    expect((await engine.getLinks('meetings/standup')).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('timeline walk applies --since at the ref level too', async () => {
+    await engine.putPage('people/alice', {
+      type: 'person', title: 'Alice',
+      compiled_truth: '- **2026-01-15** | Test event',
+      timeline: '',
+    });
+
+    await runExtract(engine, ['timeline', '--source', 'db', '--since', '2999-01-01']);
+    expect(await engine.getTimeline('people/alice')).toHaveLength(0);
+
+    await runExtract(engine, ['timeline', '--source', 'db', '--since', '2000-01-01']);
+    expect((await engine.getTimeline('people/alice')).length).toBe(1);
   });
 });

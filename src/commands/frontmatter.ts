@@ -15,9 +15,9 @@
  * validate. Pass an explicit path to validate a non-source-registered tree.
  */
 
-import { readFileSync, existsSync, lstatSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, lstatSync, readdirSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
-import { join, relative, resolve } from 'path';
+import { join, relative, resolve, basename, dirname } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, toEngineConfig } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
@@ -25,15 +25,14 @@ import { parseMarkdown, type ParseValidationCode } from '../core/markdown.ts';
 import {
   autoFixFrontmatter,
   createFrontmatterBackup,
+  isFrontmatterScannablePath,
   makeFrontmatterBackupRunId,
   scanBrainSources,
   type AuditReport,
   type AuditFix,
 } from '../core/brain-writer.ts';
-import { isSyncable, pruneDir, slugifyPath } from '../core/sync.ts';
-import {
-  writeCanonicalPathMutation,
-} from '../core/canonical-page-write.ts';
+import { collectGitVisibleFiles } from '../core/git-visible-files.ts';
+import { isMarkdownFilePath, pruneDir, slugifyPath } from '../core/sync.ts';
 
 export async function runFrontmatter(args: string[]): Promise<void> {
   const sub = args[0];
@@ -44,11 +43,7 @@ export async function runFrontmatter(args: string[]): Promise<void> {
   const rest = args.slice(1);
 
   if (sub === 'validate') {
-    let engine: BrainEngine | undefined;
-    try {
-      if (rest.includes('--fix') && !rest.includes('--dry-run')) engine = await connectEngineForMutationInventory();
-      await runValidate(rest, engine);
-    } finally { await engine?.disconnect(); }
+    await runValidate(rest);
     return;
   }
   if (sub === 'audit') {
@@ -61,11 +56,7 @@ export async function runFrontmatter(args: string[]): Promise<void> {
     return;
   }
   if (sub === 'generate') {
-    let engine: BrainEngine | undefined;
-    try {
-      if (rest.includes('--fix') && !rest.includes('--dry-run')) engine = await connectEngineForMutationInventory();
-      await runGenerate(rest, engine);
-    } finally { await engine?.disconnect(); }
+    await runGenerate(rest);
     return;
   }
   if (sub === 'install-hook') {
@@ -83,15 +74,6 @@ async function connectEngineForAudit(): Promise<BrainEngine> {
   if (!config) {
     throw new Error('No brain configured. Run: gbrain init');
   }
-  const engineConfig = toEngineConfig(config);
-  const engine = await createEngine(engineConfig);
-  await engine.connect(engineConfig);
-  return engine;
-}
-
-async function connectEngineForMutationInventory(): Promise<BrainEngine | undefined> {
-  const config = loadConfig();
-  if (!config) return undefined;
   const engineConfig = toEngineConfig(config);
   const engine = await createEngine(engineConfig);
   await engine.connect(engineConfig);
@@ -174,25 +156,34 @@ interface FileValidation {
   backupPath?: string;
 }
 
-async function writeFrontmatterMutation(
-  engine: BrainEngine | undefined,
-  sourceId: string | undefined,
-  file: string,
-  content: string,
-): Promise<void> {
-  await writeCanonicalPathMutation(engine, file, content, { sourceId });
+/**
+ * Walk up from `start` (file or dir) to the brain root — the nearest ancestor
+ * containing a `.git` marker — so slug derivation is brain-root-relative,
+ * matching how sync/extract compute slugs. Falls back to the start's own
+ * directory when no marker is found. Fixes #565: for a single-file target,
+ * `relative(resolve(target), file)` was empty (target === file) and fell back
+ * to the ABSOLUTE path, yielding bogus "root/brain/..." slugs and false
+ * SLUG_MISMATCH — which the install-hook pre-commit hook hits on every commit.
+ */
+function findBrainRoot(start: string): string {
+  const startDir = lstatSync(start).isDirectory() ? start : dirname(start);
+  let candidate = startDir;
+  for (let i = 0; i < 40; i++) {
+    if (existsSync(join(candidate, '.git'))) return candidate;
+    const parent = resolve(candidate, '..');
+    if (parent === candidate) break;
+    candidate = parent;
+  }
+  return startDir;
 }
 
-async function runValidate(rest: string[], engine?: BrainEngine): Promise<void> {
+async function runValidate(rest: string[]): Promise<void> {
   const flags: ValidateFlags = { json: false, fix: false, dryRun: false };
   let target: string | null = null;
-  let sourceId: string | undefined;
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
+  for (const a of rest) {
     if (a === '--json') flags.json = true;
     else if (a === '--fix') flags.fix = true;
     else if (a === '--dry-run') flags.dryRun = true;
-    else if (a === '--source-id') sourceId = rest[++i];
     else if (!a.startsWith('--')) target = a;
   }
   if (!target) {
@@ -207,14 +198,23 @@ async function runValidate(rest: string[], engine?: BrainEngine): Promise<void> 
     setCliExitVerdict(1);
     return;
   }
+  if (lstatSync(resolved).isFile() && !isMarkdownFilePath(resolved)) {
+    console.error(`error: frontmatter validation supports only .md and .mdx files: ${target}`);
+    setCliExitVerdict(1);
+    return;
+  }
 
+  const brainRoot = findBrainRoot(resolved);
   const files = collectFiles(resolved);
   const results: FileValidation[] = [];
   const backupRunId = makeFrontmatterBackupRunId();
 
   for (const file of files) {
     const content = readFileSync(file, 'utf8');
-    const expectedSlug = slugifyPath(relative(resolve(target), file) || file);
+    const rel = relative(brainRoot, file);
+    // Files above/outside the brain root fall back to basename rather than
+    // emitting a "../"-prefixed slug for non-brain files.
+    const expectedSlug = slugifyPath(rel && !rel.startsWith('..') ? rel : basename(file));
     const parsed = parseMarkdown(content, file, { validate: true, expectedSlug });
     const errs = parsed.errors ?? [];
     const result: FileValidation = {
@@ -227,7 +227,7 @@ async function runValidate(rest: string[], engine?: BrainEngine): Promise<void> 
       result.fixesApplied = fixes;
       if (fixes.length > 0 && !flags.dryRun) {
         result.backupPath = createFrontmatterBackup(file, { sourcePath: resolved, runId: backupRunId });
-        await writeFrontmatterMutation(engine, sourceId, file, fixed);
+        writeFileSync(file, fixed, 'utf8');
       }
     }
 
@@ -302,8 +302,17 @@ export function collectFiles(
 ): string[] {
   const st = lstatSync(target);
   if (st.isFile()) {
-    return [target];
+    // An explicit Markdown target is operator intent, even for structural
+    // basenames that bulk scans intentionally skip.
+    return isMarkdownFilePath(basename(target)) ? [target] : [];
   }
+
+  const gitFiles = collectGitVisibleFiles(target, isFrontmatterScannablePath);
+  if (gitFiles) {
+    if (visitDir) visitDir(target);
+    return gitFiles;
+  }
+
   const out: string[] = [];
   const stack = [target];
   if (visitDir) visitDir(target);
@@ -332,7 +341,7 @@ export function collectFiles(
         stack.push(full);
       } else if (entryStat.isFile()) {
         const rel = relative(target, full);
-        if (isSyncable(rel, { strategy: 'markdown' })) {
+        if (isFrontmatterScannablePath(rel)) {
           out.push(full);
         }
       }
@@ -401,15 +410,12 @@ function printAuditHumanReport(report: AuditReport): void {
 // generate — synthesize frontmatter for files that have none
 // ---------------------------------------------------------------------------
 
-async function runGenerate(args: string[], engine?: BrainEngine): Promise<void> {
+async function runGenerate(args: string[]): Promise<void> {
+  const targetPath = args.find(a => !a.startsWith('-'));
   const doFix = args.includes('--fix');
   const dryRun = args.includes('--dry-run');
   const jsonOut = args.includes('--json');
   const includeCatchAll = args.includes('--include-catch-all') || args.includes('--allow-catch-all');
-  const sourceIdx = args.indexOf('--source-id');
-  const sourceId = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
-  const sourceValueIdx = sourceIdx >= 0 ? sourceIdx + 1 : -1;
-  const targetPath = args.find((a, index) => !a.startsWith('-') && index !== sourceValueIdx);
 
   if (!targetPath) {
     console.error('error: gbrain frontmatter generate requires a <path> argument');
@@ -424,6 +430,11 @@ async function runGenerate(args: string[], engine?: BrainEngine): Promise<void> 
 
   const rootPath = resolve(targetPath);
   const isDir = statSync(rootPath).isDirectory();
+  if (!isDir && !isMarkdownFilePath(rootPath)) {
+    console.error(`error: frontmatter generation supports only .md and .mdx files: ${targetPath}`);
+    setCliExitVerdict(1);
+    return;
+  }
 
   // Find the brain root — walk up from targetPath looking for .git or known brain markers.
   // Inference rules match against brain-root-relative paths (e.g., "people/alice.md").
@@ -459,15 +470,17 @@ async function runGenerate(args: string[], engine?: BrainEngine): Promise<void> 
   let written = 0;
   const backupRunId = makeFrontmatterBackupRunId();
 
-  async function processFile(absPath: string, relPath: string) {
+  function processFile(absPath: string, relPath: string) {
     scanned++;
-    if (!isSyncable(relPath, { strategy: 'markdown' })) return;
+    if (!isFrontmatterScannablePath(relPath)) return;
 
     // Skip symlinks
     try { if (lstatSync(absPath).isSymbolicLink()) return; } catch { return; }
 
     let content: string;
-    try { content = readFileSync(absPath, 'utf-8'); } catch { return; }
+    // #4798: strip a UTF-8 BOM so heading-title inference (and --fix's
+    // written body) match what `gbrain sync` / `import` produce.
+    try { content = readFileSync(absPath, 'utf-8').replace(/^\uFEFF/, ''); } catch { return; }
 
     const inferred = inferFrontmatter(relPath, content);
     if (inferred.skipped) {
@@ -493,18 +506,18 @@ async function runGenerate(args: string[], engine?: BrainEngine): Promise<void> 
       const newContent = fm + '\n' + content;
       // Safety: write a centralized backup first.
       createFrontmatterBackup(absPath, { sourcePath: brainRoot, runId: backupRunId });
-      await writeFrontmatterMutation(engine, sourceId, absPath, newContent);
+      writeFileSync(absPath, newContent, 'utf-8');
       written++;
     }
   }
 
   if (isDir) {
     for (const absPath of collectFiles(rootPath)) {
-      await processFile(absPath, relative(brainRoot, absPath));
+      processFile(absPath, relative(brainRoot, absPath));
     }
   } else {
     const relPath = relative(brainRoot, rootPath) || basename(rootPath);
-    await processFile(rootPath, relPath);
+    processFile(rootPath, relPath);
   }
 
   // Output

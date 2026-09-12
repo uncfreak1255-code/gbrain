@@ -5,12 +5,10 @@
  *   gbrain advisor --json     # structured findings; exit non-zero on critical (E2)
  *   gbrain advisor --apply ID # run ONE finding's fix, local-only, after confirm (E5)
  *
- * The advisor never runs a fix or canon write by itself. `--apply` is the only
- * path that runs a fix, and it: refuses over MCP (CLI is always local), only
- * acts on allowlisted findings (those carrying a dispatch_id), executes the fix
- * as STRUCTURED ARGV via a child process (never a shell — no injection), and
- * confirms first. Trusted local collectors may persist bounded housekeeping
- * state, such as suppression receipts, but remote advisor calls stay read-only.
+ * The advisor itself never mutates. `--apply` is the only path that runs a fix,
+ * and it: refuses over MCP (CLI is always local), only acts on allowlisted
+ * findings (those carrying a dispatch_id), executes the fix as STRUCTURED ARGV
+ * via a child process (never a shell — no injection), and confirms first.
  */
 
 import { spawnSync } from 'child_process';

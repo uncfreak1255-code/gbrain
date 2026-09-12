@@ -13,11 +13,9 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { withEnv } from './helpers/with-env.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   getStorageStatus,
-  runStorage,
   formatStorageStatusHuman,
   __resetPGLiteWarn,
 } from '../src/commands/storage.ts';
@@ -58,7 +56,6 @@ beforeEach(async () => {
   await engine.executeRaw(
     `INSERT INTO sources (id, name) VALUES ('default', 'Default') ON CONFLICT DO NOTHING`,
   );
-  await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = 'default'`, [tmp]);
 });
 
 function cleanup(): void {
@@ -106,7 +103,7 @@ describe('Storage tiering on PGLite — full lifecycle (D8 + D4)', () => {
     }
   });
 
-  test('getStorageStatus scopes page checks to the source that owns the repo path', async () => {
+  test('getStorageStatus scopes page checks to the source that owns the repo path (#4763)', async () => {
     try {
       writeGbrainYml();
       mkdirSync(join(tmp, 'media', 'x'), { recursive: true });
@@ -123,10 +120,16 @@ describe('Storage tiering on PGLite — full lifecycle (D8 + D4)', () => {
       );
 
       await engine.putPage('media/x/default-db-only', {
-        type: 'concept', title: 'Default source page', compiled_truth: '', timeline: '',
+        type: 'concept',
+        title: 'Default source page',
+        compiled_truth: '',
+        timeline: '',
       }, { sourceId: 'default' });
       await engine.putPage('media/x/foreign-db-only', {
-        type: 'concept', title: 'Foreign source page', compiled_truth: '', timeline: '',
+        type: 'concept',
+        title: 'Foreign source page',
+        compiled_truth: '',
+        timeline: '',
       }, { sourceId: 'media-corpus' });
 
       const result = await getStorageStatus(engine, tmp);
@@ -134,73 +137,6 @@ describe('Storage tiering on PGLite — full lifecycle (D8 + D4)', () => {
       expect(result.pagesByTier.db_only).toBe(1);
       expect(result.missingFiles).toEqual([]);
     } finally {
-      cleanup();
-    }
-  });
-
-  test('unmapped explicit repo refuses instead of counting all sources', async () => {
-    try {
-      await engine.executeRaw(`UPDATE sources SET local_path = NULL`);
-      await expect(getStorageStatus(engine, tmp)).rejects.toThrow('no registered source');
-    } finally {
-      cleanup();
-    }
-  });
-
-  test('explicit repo ignores an ancestor .gbrain-source pin', async () => {
-    try {
-      writeGbrainYml();
-      const parent = mkdtempSync(join(tmpdir(), 'gbrain-ancestor-pin-'));
-      const child = join(parent, 'unmapped-repo');
-      mkdirSync(child, { recursive: true });
-      writeFileSync(join(parent, '.gbrain-source'), 'default\n');
-      await engine.putPage('people/alice', { type: 'person', title: 'Alice', compiled_truth: '', timeline: '' });
-      await expect(getStorageStatus(engine, child)).rejects.toThrow('no registered source');
-      rmSync(parent, { recursive: true, force: true });
-    } finally {
-      cleanup();
-    }
-  });
-
-  test('explicit repo pin in that directory still maps the named source', async () => {
-    try {
-      writeGbrainYml();
-      const otherRepo = join(tmp, 'pinned-repo');
-      mkdirSync(otherRepo, { recursive: true });
-      await engine.executeRaw(
-        `INSERT INTO sources (id, name, local_path, config)
-           VALUES ('pinned-corpus', 'pinned-corpus', $1, '{}'::jsonb)
-           ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
-        [join(tmp, 'other-path')],
-      );
-      writeFileSync(join(otherRepo, '.gbrain-source'), 'pinned-corpus\n');
-      await engine.putPage('people/alice', { type: 'person', title: 'Default', compiled_truth: '', timeline: '' });
-      await engine.putPage('people/bob', { type: 'person', title: 'Pinned', compiled_truth: '', timeline: '' }, { sourceId: 'pinned-corpus' });
-      const result = await getStorageStatus(engine, otherRepo);
-      expect(result.totalPages).toBe(1);
-    } finally {
-      cleanup();
-    }
-  });
-
-  test('implicit legacy repo retains the selected source', async () => {
-    const oldLog = console.log;
-    const output: string[] = [];
-    try {
-      writeGbrainYml();
-      await engine.executeRaw(`UPDATE sources SET local_path = NULL`);
-      await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('foreign', 'Foreign')`);
-      await engine.setConfig('sync.repo_path', tmp);
-      await engine.putPage('media/x/owned', { type: 'note', title: 'Owned', compiled_truth: '', timeline: '' });
-      await engine.putPage('media/x/foreign', { type: 'note', title: 'Foreign', compiled_truth: '', timeline: '' }, { sourceId: 'foreign' });
-      console.log = (...args: unknown[]) => output.push(args.map(String).join(' '));
-      await withEnv({ GBRAIN_SOURCE: 'default' }, () => runStorage(engine, ['status', '--json']));
-      const result = JSON.parse(output.at(-1)!);
-      expect(result.totalPages).toBe(1);
-      expect(result.missingFiles.map((p: { slug: string }) => p.slug)).toEqual(['media/x/owned']);
-    } finally {
-      console.log = oldLog;
-      await engine.executeRaw(`DELETE FROM config WHERE key = 'sync.repo_path'`);
       cleanup();
     }
   });

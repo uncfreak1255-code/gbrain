@@ -123,6 +123,8 @@ describe('classifyModalityWithLLM — fail-open', () => {
   });
 
   test('Gateway not configured → returns fallback', async () => {
+    // Hard-unconfigure: resetGateway() would restore the preload's test
+    // baseline (#3554), whose {...process.env} could make chat available.
     __unconfigureGatewayForTests();
     // No configureGateway called → isAvailable('chat') returns false.
     expect(await classifyModalityWithLLM('q', 'text')).toBe('text');

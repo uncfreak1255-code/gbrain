@@ -13,8 +13,6 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { importFromContent } from '../src/core/import-file.ts';
-import { resolveSyncJobSourceId } from '../src/commands/jobs.ts';
-import { beginSourceArchiveDrain } from '../src/core/source-embedding-lease.ts';
 
 let engine: PGLiteEngine;
 
@@ -40,37 +38,6 @@ beforeEach(async () => {
 });
 
 describe('source-id routing (v0.36.x #891 + #978 regression)', () => {
-  test('sync job prefers a non-empty snake source id over conflicting path fallback', async () => {
-    await engine.executeRaw(
-      `UPDATE sources
-          SET local_path = CASE id
-            WHEN 'work' THEN '/fixture/work'
-            WHEN 'personal' THEN '/fixture/personal'
-          END
-        WHERE id IN ('work', 'personal')`,
-    );
-
-    expect(await resolveSyncJobSourceId(engine, {
-      sourceId: '',
-      source_id: 'work',
-      repoPath: '/fixture/personal',
-    })).toBe('work');
-  });
-
-  test('path-only sync keeps exact-source routing if that source starts draining', async () => {
-    await engine.executeRaw(
-      `UPDATE sources SET local_path = '/fixture/work' WHERE id = 'work'`,
-    );
-    expect((await beginSourceArchiveDrain(engine, 'work'))?.purpose).toBe('manual');
-
-    // A worker can claim the path-only job just before archive begins. The
-    // resolver must still return the owning source so performSync fails closed
-    // on that source instead of silently writing through the default route.
-    expect(await resolveSyncJobSourceId(engine, {
-      repoPath: '/fixture/work',
-    })).toBe('work');
-  });
-
   test('importFromContent({sourceId: "work"}) lands the page at source_id=work', async () => {
     await importFromContent(engine, 'people/alice', '---\ntype: person\ntitle: Alice\n---\n# Alice\n\nWorks at Acme.', {
       noEmbed: true,
@@ -153,5 +120,120 @@ describe('source-id routing — FK integrity (v0.36.x #1078)', () => {
         sourceId: 'work',
       }),
     ).resolves.toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unscoped-check/scoped-write pairs (five-issue fix wave, commit 4)
+// ---------------------------------------------------------------------------
+
+describe('unscoped-check/scoped-write regressions (writer + slug-registry + import-file)', () => {
+  test('REGRESSION-CRITICAL: importFromContent without sourceId reads the DEFAULT row, not any-source', async () => {
+    // Pre-fix: the existence check matched people/carol in 'work' while the
+    // write targeted 'default' — read-A/write-B divergence. Post-fix the read
+    // mirrors the write's schema default.
+    await importFromContent(engine, 'people/carol', '---\ntype: person\ntitle: Work Carol\n---\nWork row.', {
+      noEmbed: true,
+      sourceId: 'work',
+    });
+    const workBefore = await engine.executeRaw<{ content_hash: string }>(
+      `SELECT content_hash FROM pages WHERE slug = 'people/carol' AND source_id = 'work'`,
+    );
+
+    await importFromContent(engine, 'people/carol', '---\ntype: person\ntitle: Default Carol\n---\nDefault row.', {
+      noEmbed: true,
+    });
+
+    const rows = await engine.executeRaw<{ source_id: string; title: string; content_hash: string }>(
+      `SELECT source_id, title, content_hash FROM pages WHERE slug = 'people/carol' ORDER BY source_id`,
+    );
+    // Two independent rows: the no-sourceId import created/updated 'default'
+    // and left 'work' byte-identical.
+    expect(rows.length).toBe(2);
+    const work = rows.find(r => r.source_id === 'work')!;
+    const def = rows.find(r => r.source_id === 'default')!;
+    expect(work.title).toBe('Work Carol');
+    expect(work.content_hash).toBe(workBefore[0].content_hash);
+    expect(def.title).toBe('Default Carol');
+  });
+
+  test('scoped BrainWriter creates the exact slug in its source even when the slug is taken elsewhere', async () => {
+    const { BrainWriter } = await import('../src/core/output/writer.ts');
+    // Slug exists ONLY in 'personal'.
+    await importFromContent(engine, 'people/dave', '---\ntype: person\ntitle: Personal Dave\n---\nx', {
+      noEmbed: true,
+      sourceId: 'personal',
+    });
+
+    const writer = new BrainWriter(engine, { strictMode: 'off', sourceId: 'work' });
+    const ctx = {
+      engine, config: {}, requestId: 't', remote: false as const,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    };
+    const { result: slug } = await writer.transaction(async (tx) => {
+      return tx.createEntity({
+        desiredSlug: 'people/dave',
+        displayName: 'Work Dave',
+        type: 'person',
+        compiledTruth: 'Work dave body.',
+      });
+    }, ctx as never);
+
+    // Pre-fix: the unscoped probe saw personal's row and disambiguated to
+    // people/dave-2. Post-fix: exact slug, in the writer's source.
+    expect(slug).toBe('people/dave');
+    const rows = await engine.executeRaw<{ source_id: string; title: string }>(
+      `SELECT source_id, title FROM pages WHERE slug = 'people/dave' ORDER BY source_id`,
+    );
+    expect(rows.length).toBe(2);
+    expect(rows.find(r => r.source_id === 'work')?.title).toBe('Work Dave');
+    expect(rows.find(r => r.source_id === 'personal')?.title).toBe('Personal Dave');
+  });
+
+  test('scoped writer setFrontmatterField edits ITS row and never the other source', async () => {
+    const { BrainWriter } = await import('../src/core/output/writer.ts');
+    await importFromContent(engine, 'people/erin', '---\ntype: person\ntitle: Work Erin\n---\nx', {
+      noEmbed: true, sourceId: 'work',
+    });
+    await importFromContent(engine, 'people/erin', '---\ntype: person\ntitle: Personal Erin\n---\ny', {
+      noEmbed: true, sourceId: 'personal',
+    });
+
+    const writer = new BrainWriter(engine, { strictMode: 'off', sourceId: 'work' });
+    const ctx = {
+      engine, config: {}, requestId: 't', remote: false as const,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    };
+    await writer.transaction(async (tx) => {
+      await tx.setFrontmatterField('people/erin', 'reviewed', true);
+    }, ctx as never);
+
+    const work = await engine.getPage('people/erin', { sourceId: 'work' });
+    const personal = await engine.getPage('people/erin', { sourceId: 'personal' });
+    expect(work?.frontmatter?.reviewed).toBe(true);
+    expect(personal?.frontmatter?.reviewed).toBeUndefined();
+  });
+
+  test('unscoped getPage on a duplicated slug is deterministic: default-source-first', async () => {
+    // 'archive' sorts before 'default' — pre-fix (no ORDER BY) the winner was
+    // arbitrary; plain alpha would wrongly prefer 'archive'.
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('archive', 'archive') ON CONFLICT DO NOTHING`);
+    await importFromContent(engine, 'people/frank', '---\ntype: person\ntitle: Archive Frank\n---\nx', {
+      noEmbed: true, sourceId: 'archive',
+    });
+    await importFromContent(engine, 'people/frank', '---\ntype: person\ntitle: Default Frank\n---\ny', {
+      noEmbed: true,
+    });
+
+    const page = await engine.getPage('people/frank'); // gbrain-allow-unscoped-getpage: pinning the deterministic default-first tiebreak itself
+    expect(page?.title).toBe('Default Frank');
+
+    // And when only non-default sources hold the slug, the tiebreak is stable alpha.
+    await engine.deletePage('people/frank', { sourceId: 'default' });
+    await importFromContent(engine, 'people/frank', '---\ntype: person\ntitle: Work Frank\n---\nz', {
+      noEmbed: true, sourceId: 'work',
+    });
+    const page2 = await engine.getPage('people/frank'); // gbrain-allow-unscoped-getpage: pinning the deterministic alpha tiebreak itself
+    expect(page2?.title).toBe('Archive Frank');
   });
 });

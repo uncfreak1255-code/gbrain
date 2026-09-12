@@ -31,7 +31,6 @@
  */
 
 import { readFileSync } from 'node:fs';
-import matter from 'gray-matter';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult, RemoteMcpError } from '../core/mcp-client.ts';
@@ -39,6 +38,26 @@ import { computeContentHash } from '../core/ingestion/types.ts';
 import { operations } from '../core/operations.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { resolveSourceWithTier } from '../core/source-resolver.ts';
+// Pure content helpers moved to core (shared with the capture MCP op — the
+// core module also breaks the capture.ts→operations.ts static import cycle).
+// Re-exported below so existing importers/tests keep their entry point.
+import {
+  defaultSlug,
+  detectBinaryNullByte,
+  detectBinarySignature,
+  normalizeForHash,
+  deriveTitle,
+  explicitCaptureType,
+  mergeCaptureFrontmatter,
+} from '../core/capture-content.ts';
+import {
+  loadActivePackForWriteVocabulary,
+  packDeclaresPageType,
+  undeclaredPageTypeMessage,
+  undeclaredPageTypeSuggestion,
+} from '../core/schema-pack/write-vocabulary.ts';
+
+export { detectBinaryNullByte, normalizeForHash, mergeCaptureFrontmatter } from '../core/capture-content.ts';
 
 interface RunOpts {
   content?: string;
@@ -49,6 +68,12 @@ interface RunOpts {
   source?: string;
   quiet?: boolean;
   json?: boolean;
+  // v0.42.x — Life Chronicle (#2390): manual `--type event` frontmatter sugar.
+  who?: string;    // comma-separated entity slugs
+  what?: string;
+  where?: string;
+  kind?: string;
+  depth?: string;  // the depth page this event backlinks
 }
 
 function parseArgs(args: string[]): RunOpts | { help: true; positional: string | undefined } {
@@ -80,6 +105,12 @@ function parseArgs(args: string[]): RunOpts | { help: true; positional: string |
       if (v) opts.source = v;
       continue;
     }
+    // v0.42.x — Life Chronicle event sugar.
+    if (a === '--who') { const v = args[++i]; if (v) opts.who = v; continue; }
+    if (a === '--what') { const v = args[++i]; if (v) opts.what = v; continue; }
+    if (a === '--where') { const v = args[++i]; if (v) opts.where = v; continue; }
+    if (a === '--kind') { const v = args[++i]; if (v) opts.kind = v; continue; }
+    if (a === '--depth') { const v = args[++i]; if (v) opts.depth = v; continue; }
     if (a.startsWith('--')) continue; // unknown flag, ignore
     positional.push(a);
   }
@@ -132,36 +163,6 @@ Examples:
   JOB=$(gbrain capture "..." --quiet)
 `;
 
-function defaultSlug(content: string, now: Date = new Date()): string {
-  const y = now.getUTCFullYear();
-  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(now.getUTCDate()).padStart(2, '0');
-  const hashPrefix = computeContentHash(content).slice(0, 8);
-  return `inbox/${y}-${m}-${d}-${hashPrefix}`;
-}
-
-/**
- * v0.39.3.0 CV10 — binary file guard. Scans the first 8KB of `buf` for a
- * NUL byte (0x00). Real text files (including UTF-8 with multi-byte CJK,
- * emoji, BOM) never contain a NUL byte at any position — text encoding
- * uses non-zero continuation bytes. NUL appears in binary formats:
- * executables, archives, compressed images, PDFs (after the magic-byte
- * header), most office documents. Single-pass scan; constant memory.
- *
- * Returns the 0-indexed byte offset of the first NUL, or -1 if clean.
- * Caller decides the error shape (message vs JSON envelope).
- *
- * Known limit: a PNG-without-NUL-in-first-8KB slips through. v0.39
- * magic-byte allowlist (per CV10-B + TODOS.md) closes this hole. The
- * 8KB ceiling bounds the scan cost to ~microseconds even on huge files.
- */
-export function detectBinaryNullByte(buf: Buffer): number {
-  const limit = Math.min(buf.length, 8 * 1024);
-  for (let i = 0; i < limit; i++) {
-    if (buf[i] === 0) return i;
-  }
-  return -1;
-}
 
 async function readStdinBuffer(): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -171,20 +172,6 @@ async function readStdinBuffer(): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/**
- * v0.39.3.0 CV9 — normalize content for content_hash so identical text
- * produces identical hashes regardless of leading/trailing whitespace,
- * line-ending style (CRLF vs LF), or Unicode normalization form. The
- * STORED body is preserved as-is (CRLF stays CRLF, BOM stays BOM).
- *
- * Two concerns, two transforms — the hash gets aggressive normalization
- * for dedup correctness; the stored body keeps user bytes for round-trip
- * fidelity. CQ2's CRLF/BOM preservation tests rely on this split.
- */
-export function normalizeForHash(s: string): string {
-  // Strip BOM, normalize line endings to LF, trim, NFKC for Unicode-stable hash.
-  return s.replace(/^﻿/, '').replace(/\r\n/g, '\n').trim().normalize('NFKC');
-}
 
 /**
  * v0.39.3.0 A2 + CV6 — detect Postgres FK violation on the sources table
@@ -210,88 +197,6 @@ export function maybeRewriteSourceFkError(err: unknown, sourceId: string | undef
   return `source '${sourceId}' is not registered. Register it first:\n  gbrain sources add ${sourceId} --path <path>\n\nList registered sources:\n  gbrain sources list`;
 }
 
-/**
- * Derive a title from the first non-empty, non-`---` line of the body,
- * stripping leading markdown heading marks, capped at 80 chars.
- * Falls back to 'Capture' when no usable line exists.
- */
-function deriveTitle(rawBody: string): string {
-  const firstLine = rawBody
-    .split('\n')
-    .find((l) => l.trim().length > 0 && l.trim() !== '---') ?? '';
-  return firstLine.replace(/^#+\s*/, '').slice(0, 80) || 'Capture';
-}
-
-/**
- * v0.39.3.0 (BUG-1): merge capture's auto-stamped fields with any existing
- * frontmatter in `rawBody`, rather than always prepending a second
- * frontmatter block. The pre-fix code stamped its own `---` block on top
- * of files that already had frontmatter, producing `title: '---'` (the
- * file's opening delimiter became the outer title) and two consecutive
- * frontmatter blocks the parser interpreted as the outer block + a body
- * starting with a horizontal rule.
- *
- * Precedence rules (user-wins by default):
- *   - `type`:         opts.type (CLI flag) > userFm.type > 'note'
- *   - `title`:        userFm.title > derived-from-body
- *   - `captured_via`: userFm.captured_via > opts.source > 'capture-cli'
- *                     (CV3/Phase 3c will narrow this to always 'capture-cli';
- *                     for Phase 2a we preserve current semantics)
- *   - `captured_at`:  userFm.captured_at > now (user can pre-stamp for retroactive
- *                     captures; see CQ2 test case 4)
- *   - Any other user-declared keys (description, tags, slug, etc.) pass through verbatim.
- *
- * For files WITHOUT existing frontmatter, preserves the original behavior:
- * stamps a fresh frontmatter block, and if the body doesn't already look
- * like markdown (no `#` heading), wraps it under a `# {title}` heading.
- */
-export function mergeCaptureFrontmatter(rawBody: string, opts: RunOpts): string {
-  const nowIso = new Date().toISOString();
-  // Detect frontmatter: leading `---\n` or `---\r\n`, tolerating leading BOM/whitespace.
-  // We do NOT use the more permissive `startsWith('---')` because a body that opens
-  // with a horizontal-rule like `--- separator ---` would false-positive.
-  const trimmedStart = rawBody.replace(/^﻿/, '');
-  const hasFrontmatter = /^---\r?\n/.test(trimmedStart);
-
-  if (!hasFrontmatter) {
-    // No existing frontmatter: stamp a fresh block and (if body lacks markdown
-    // structure) wrap under a derived heading.
-    const title = deriveTitle(rawBody);
-    const fm: Record<string, unknown> = {
-      type: opts.type ?? 'note',
-      title,
-      captured_via: opts.source ?? 'capture-cli',
-      captured_at: nowIso,
-    };
-    const looksMarkdown = /^#{1,6}\s/.test(rawBody.trimStart());
-    const body = looksMarkdown ? rawBody : `# ${title}\n\n${rawBody}`;
-    return matter.stringify(body, fm);
-  }
-
-  // Existing frontmatter: parse, merge user-wins, re-emit as a SINGLE block.
-  let parsed: matter.GrayMatterFile<string>;
-  try {
-    parsed = matter(rawBody);
-  } catch (e) {
-    throw new Error(
-      `malformed frontmatter in capture input: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-  const userFm = (parsed.data ?? {}) as Record<string, unknown>;
-  const merged: Record<string, unknown> = {
-    // Spread user's declared keys first so 'description', 'tags', etc. pass through.
-    ...userFm,
-    // Then apply auto-fields with the precedence rules above. The explicit
-    // assignment AFTER the spread is intentional: it lets us implement the
-    // mixed precedence (CLI flag wins for `type`; user wins for `title`/
-    // `captured_via`/`captured_at`) in one expression per key.
-    type: opts.type ?? userFm.type ?? 'note',
-    title: userFm.title ?? deriveTitle(parsed.content),
-    captured_via: userFm.captured_via ?? opts.source ?? 'capture-cli',
-    captured_at: userFm.captured_at ?? nowIso,
-  };
-  return matter.stringify(parsed.content, merged);
-}
 
 /**
  * Build the put_page content (frontmatter + body). The user's --type and
@@ -388,6 +293,23 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
     process.exit(1);
   }
 
+  // #4022 magic-byte guard runs FIRST: it names the actual format, and it
+  // catches the containers the NUL scan structurally cannot (an ASCII-armored
+  // PDF has no NUL in its head, so pre-fix it was decoded to mojibake and
+  // stored as a page body with its real text silently dropped).
+  const binaryFormat = detectBinarySignature(rawBuffer!);
+  if (binaryFormat !== null) {
+    console.error(
+      `gbrain capture: refusing to capture ${binaryFormat} content from ${inputLabel}\n` +
+      `  Detected by magic bytes. Storing it would write UTF-8 replacement characters as the\n` +
+      `  page body — for container formats the real text is compressed, so it would be lost\n` +
+      `  entirely while the command reported success.\n` +
+      `  Extract the text first, then capture that. For a PDF:\n` +
+      `    pdftotext ${inputLabel === 'stdin' ? 'input.pdf' : inputLabel} - | gbrain capture --stdin --slug <slug>`,
+    );
+    process.exit(1);
+  }
+
   // CV10 binary guard. Scans the first 8KB for NUL bytes; rejects with a
   // friendly message before UTF-8 decode mangles arbitrary bytes.
   const nullByteOffset = detectBinaryNullByte(rawBuffer!);
@@ -434,12 +356,33 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
     }
   }
 
+  // #4655: fail-loud vocabulary check for an EXPLICIT page type (--type flag
+  // or a frontmatter `type:` in the input) against the active schema pack.
+  // Best-effort pack load — no resolvable pack means no check. The
+  // default-'note' path is never checked, so bare `gbrain capture` keeps
+  // working even under packs that don't declare 'note'.
+  if (!isThinClient(cfg) && engine) {
+    const explicitType = explicitCaptureType(rawBody, parsed.type);
+    if (explicitType) {
+      const activePack = await loadActivePackForWriteVocabulary({
+        engine,
+        remote: false,
+        sourceId: resolvedSourceId,
+      });
+      if (activePack && !packDeclaresPageType(activePack, explicitType)) {
+        console.error(`gbrain capture: ${undeclaredPageTypeMessage(explicitType, activePack, 'capture')}`);
+        console.error(`  ${undeclaredPageTypeSuggestion(activePack)}`);
+        process.exit(1);
+      }
+    }
+  }
+
   // CV8 (CLI side): content_hash for the RECEIPT comes from the normalized
   // rawBody, NOT the assembled fullContent which contains a timestamp.
   // The daemon's 24h LRU dedup keys on this hash; identical captures must
   // produce identical hashes. The DB content_hash (importFromContent at
   // src/core/import-file.ts) gets the same treatment in Phase 3d.
-  const slug = parsed.slug ?? defaultSlug(normalizedBody);
+  const slug = parsed.slug ?? defaultSlug(normalizedBody, new Date(), parsed.type);
   const fullContent = buildContent(rawBody, parsed);
   const capturedAt = new Date().toISOString();
   const contentHash = computeContentHash(normalizedBody);
@@ -587,8 +530,10 @@ export const __testing = {
   buildContent,
   mergeCaptureFrontmatter,
   deriveTitle,
+  explicitCaptureType,
   parseArgs,
   detectBinaryNullByte,
+  detectBinarySignature,
   normalizeForHash,
   maybeRewriteSourceFkError,
 };

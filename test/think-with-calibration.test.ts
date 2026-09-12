@@ -32,13 +32,6 @@ describe('buildThinkSystemPrompt — anti-bias rewrite rules (E1)', () => {
     expect(out).not.toContain('Calibration-aware mode');
   });
 
-  test('always scopes missing-evidence claims to the supplied evidence', () => {
-    const out = buildThinkSystemPrompt({});
-    expect(out).toContain('not shown in the supplied evidence');
-    expect(out).toContain('Retrieved excerpts do not establish absence across the whole brain');
-    expect(out).toContain('booking status is not shown');
-  });
-
   test('withCalibration:true adds anti-bias rules including PRIOR + COUNTER-PRIOR + bias-tag reference', () => {
     const out = buildThinkSystemPrompt({ withCalibration: true });
     expect(out).toContain('Calibration-aware mode');

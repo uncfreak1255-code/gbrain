@@ -60,7 +60,6 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
         ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
         DROP INDEX IF EXISTS idx_pages_source_id;
         ALTER TABLE pages DROP COLUMN IF EXISTS source_id;
-        DROP TABLE IF EXISTS source_embedding_leases;
         DROP TABLE IF EXISTS sources CASCADE;
       `);
 
@@ -107,11 +106,6 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
       await engine.initSchema();
       const db = (engine as any).db;
 
-      // Mark the historical version while the current schema is still intact.
-      // The down-mutation below removes `sources`; latest-only lifecycle
-      // triggers must not run in that intentionally incomplete fixture state.
-      await engine.setConfig('version', '20');
-
       // Mutate to pre-v0.18 shape: strip the forward-referenced state.
       // Match the shape from #399's regression fixture; constraints first
       // (so dropping columns succeeds).
@@ -120,11 +114,11 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
         ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
         DROP INDEX IF EXISTS idx_pages_source_id;
         ALTER TABLE pages DROP COLUMN IF EXISTS source_id;
-        DROP TABLE IF EXISTS source_embedding_leases;
         DROP TABLE IF EXISTS sources CASCADE;
         ALTER TABLE links DROP CONSTRAINT IF EXISTS links_resolution_type_check;
         ALTER TABLE links DROP COLUMN IF EXISTS resolution_type;
       `);
+      await engine.setConfig('version', '20');
 
       // Path under test: bootstrap → SCHEMA_SQL → runMigrations
       await engine.initSchema();
@@ -139,17 +133,6 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
 
       const { rows: defaultSrc } = await db.query(`SELECT id FROM sources WHERE id = 'default'`);
       expect(defaultSrc).toHaveLength(1);
-
-      const { rows: leaseFk } = await db.query(`
-        SELECT 1
-          FROM pg_constraint constraint_
-          JOIN pg_class child ON child.oid = constraint_.conrelid
-          JOIN pg_class parent ON parent.oid = constraint_.confrelid
-         WHERE constraint_.contype = 'f'
-           AND child.relname = 'source_embedding_leases'
-           AND parent.relname = 'sources'
-      `);
-      expect(leaseFk).toHaveLength(1);
     } finally {
       await engine.disconnect();
     }
@@ -178,93 +161,6 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
     }
   }, 30000);
 
-  test('pre-v133 sources shape reaches LATEST through schema replay', async () => {
-    const engine = new PGLiteEngine();
-    await engine.connect({});
-    try {
-      await engine.initSchema();
-      const db = (engine as any).db;
-
-      // Recreate the v132 boundary without retaining v133-only triggers that
-      // would not exist on a real old brain. Schema replay installs current
-      // guards, then migration v133 adds the drain columns before user writes.
-      await engine.setConfig('version', '132');
-      await db.exec(`
-        DROP TRIGGER IF EXISTS source_active_config_guard ON config;
-        DROP TRIGGER IF EXISTS source_archive_transition_guard ON sources;
-        DROP TABLE IF EXISTS source_embedding_leases;
-        ALTER TABLE sources DROP COLUMN IF EXISTS embedding_drain_token;
-        ALTER TABLE sources DROP COLUMN IF EXISTS embedding_drain_epoch;
-      `);
-
-      await engine.initSchema();
-
-      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
-      const { rows } = await db.query(`
-        SELECT column_name
-          FROM information_schema.columns
-         WHERE table_name = 'sources'
-           AND column_name IN ('embedding_drain_token', 'embedding_drain_epoch')
-         ORDER BY column_name
-      `);
-      expect(rows.map((row: { column_name: string }) => row.column_name)).toEqual([
-        'embedding_drain_epoch',
-        'embedding_drain_token',
-      ]);
-    } finally {
-      await engine.disconnect();
-    }
-  }, 30000);
-
-  test('v33 archived config backfill survives current lifecycle schema replay', async () => {
-    const engine = new PGLiteEngine();
-    await engine.connect({});
-    try {
-      await engine.initSchema();
-      const db = (engine as any).db;
-
-      await db.exec(`
-        INSERT INTO sources (id, name, config)
-        VALUES (
-          'legacy-archived',
-          'legacy-archived',
-          '{"archived":true,"archived_at":"2026-01-01T00:00:00Z","archive_expires_at":"2026-01-04T00:00:00Z"}'::jsonb
-        );
-      `);
-      await engine.setConfig('version', '33');
-      await db.exec(`
-        DROP TRIGGER IF EXISTS source_active_config_guard ON config;
-        DROP TRIGGER IF EXISTS source_archive_transition_guard ON sources;
-        DROP TABLE IF EXISTS source_embedding_leases;
-        ALTER TABLE sources DROP COLUMN IF EXISTS embedding_drain_token;
-        ALTER TABLE sources DROP COLUMN IF EXISTS embedding_drain_epoch;
-        ALTER TABLE sources DROP COLUMN IF EXISTS archived;
-        ALTER TABLE sources DROP COLUMN IF EXISTS archived_at;
-        ALTER TABLE sources DROP COLUMN IF EXISTS archive_expires_at;
-      `);
-
-      await engine.initSchema();
-
-      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
-      const { rows } = await db.query(`
-        SELECT archived,
-               archived_at IS NOT NULL AS has_archived_at,
-               archive_expires_at IS NOT NULL AS has_archive_expires_at,
-               config ?| ARRAY['archived', 'archived_at', 'archive_expires_at'] AS has_legacy_config
-          FROM sources
-         WHERE id = 'legacy-archived'
-      `);
-      expect(rows).toEqual([{
-        archived: true,
-        has_archived_at: true,
-        has_archive_expires_at: true,
-        has_legacy_config: false,
-      }]);
-    } finally {
-      await engine.disconnect();
-    }
-  }, 30000);
-
   test('pre-v0.13 links shape: bootstrap adds link_source + origin_page_id', async () => {
     // Issues #266 / #357 — pre-v0.13 brains had `links` without
     // `link_source` / `origin_page_id`. Schema blob's
@@ -279,7 +175,6 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
         DROP INDEX IF EXISTS idx_links_source;
         DROP INDEX IF EXISTS idx_links_origin;
         ALTER TABLE links DROP CONSTRAINT IF EXISTS links_from_to_type_source_origin_unique;
-        DROP TRIGGER IF EXISTS source_active_page_rehome_f22216da1e39c629 ON links;
         ALTER TABLE links DROP COLUMN IF EXISTS link_source;
         ALTER TABLE links DROP COLUMN IF EXISTS origin_page_id;
       `);
@@ -301,4 +196,124 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
       await engine.disconnect();
     }
   }, 30000);
+
+  test('pre-v121 timeline shape reaches LATEST through full initSchema', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.initSchema();
+      const db = (engine as any).db;
+      await db.exec(`
+        DROP INDEX IF EXISTS idx_timeline_event_dedup;
+        DROP INDEX IF EXISTS idx_timeline_event_page;
+        ALTER TABLE timeline_entries DROP CONSTRAINT IF EXISTS timeline_entries_event_page_id_fkey;
+        ALTER TABLE timeline_entries DROP COLUMN IF EXISTS event_page_id;
+      `);
+      await engine.setConfig('version', '119');
+
+      await engine.initSchema();
+      await engine.initSchema();
+
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+      const { rows } = await db.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'timeline_entries' AND column_name = 'event_page_id'
+      `);
+      expect(rows).toHaveLength(1);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+
+  test('pre-v121 partial bootstrap resumes without skipping migration work', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.initSchema();
+      const db = (engine as any).db;
+      await db.exec(`
+        DROP INDEX IF EXISTS idx_timeline_event_dedup;
+        DROP INDEX IF EXISTS idx_timeline_event_page;
+        ALTER TABLE timeline_entries DROP CONSTRAINT IF EXISTS timeline_entries_event_page_id_fkey;
+      `);
+      await engine.setConfig('version', '119');
+
+      // Simulates interruption after bootstrap added the column but before
+      // schema-blob replay and migration v121 completed the FK/index work.
+      await engine.initSchema();
+
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+      const { rows } = await db.query(`
+        SELECT to_regclass('idx_timeline_event_page') AS lookup_idx,
+               to_regclass('idx_timeline_event_dedup') AS dedup_idx
+      `);
+      expect(rows[0]?.lookup_idx).not.toBeNull();
+      expect(rows[0]?.dedup_idx).not.toBeNull();
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+
+  test('wedged-brain recovery: a brain that already FAILED the v0.42.56 upgrade converges on retry', async () => {
+    // The loudest #2626-class cohort: operators who upgraded, wedged, and are
+    // retrying with a fixed binary. Simulates the failed attempt (the blob's
+    // CREATE INDEX crashing on the missing column) and asserts the retry
+    // converges to the FULL final shape (column + FK + both partial indexes)
+    // with no residue — the failed attempt must not advance the version ledger.
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.initSchema();
+      const db = (engine as any).db;
+
+      // Rewind to the pre-v121 shape: schema AND the version counter.
+      await db.exec(`
+        DROP INDEX IF EXISTS idx_timeline_event_page;
+        DROP INDEX IF EXISTS idx_timeline_event_dedup;
+        ALTER TABLE timeline_entries DROP CONSTRAINT IF EXISTS timeline_entries_event_page_id_fkey;
+        ALTER TABLE timeline_entries DROP COLUMN IF EXISTS event_page_id;
+      `);
+      await engine.setConfig('version', '120');
+
+      // The failed old-binary attempt: without the bootstrap probe, the blob's
+      // CREATE INDEX was the first statement to touch the missing column.
+      let wedgeError: Error | null = null;
+      try {
+        await db.exec(
+          `CREATE INDEX IF NOT EXISTS idx_timeline_event_page
+             ON timeline_entries(event_page_id) WHERE event_page_id IS NOT NULL`,
+        );
+      } catch (e) {
+        wedgeError = e as Error;
+      }
+      expect(wedgeError?.message ?? '').toContain('event_page_id');
+
+      // The failed attempt must not have advanced the ledger.
+      expect(parseInt((await engine.getConfig('version')) || '1', 10)).toBe(120);
+
+      // Retry with the fixed binary: full initSchema converges to LATEST with
+      // the complete final shape.
+      await engine.initSchema();
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+      const { rows: col } = await db.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'timeline_entries' AND column_name = 'event_page_id'
+      `);
+      expect(col).toHaveLength(1);
+      const { rows: fk } = await db.query(`
+        SELECT conname FROM pg_constraint
+        WHERE conname = 'timeline_entries_event_page_id_fkey'
+      `);
+      expect(fk).toHaveLength(1);
+      const { rows: idx } = await db.query(`
+        SELECT indexname FROM pg_indexes
+        WHERE tablename = 'timeline_entries'
+          AND indexname IN ('idx_timeline_event_page', 'idx_timeline_event_dedup')
+      `);
+      expect(idx).toHaveLength(2);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+
 });

@@ -16,30 +16,52 @@
  *  - BOUNDED by a wallclock window; reports `remaining` so a cron/agent loop
  *    knows whether to run again.
  *
- * Pure over injected deps: no DB, no LLM, or lock primitive is imported here,
- * so the loop logic is unit-testable. The wiring helper
- * `runExtractAtomsDrainForSource` uses DYNAMIC imports for runtime deps.
+ * Pure over injected deps: no DB, no LLM, no lock primitive imported here, so
+ * the loop logic is unit-testable. Its only static imports are pure text
+ * sanitizers (#4730). The wiring helper `runExtractAtomsDrainForSource`
+ * (below) builds the real deps; it uses DYNAMIC imports so the pure-loop unit
+ * tests don't drag in db-lock / cycle.
  */
 
 import type { BrainEngine } from '../engine.ts';
 import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
+import { redactFindings } from '../secret-scan.ts';
+import { ensureWellFormed, truncateUtf8 } from '../text-safe.ts';
 
-/** Bounded operator-facing detail; failure_count remains exact above the cap. */
+/** #4730: bounded operator-facing failure detail; totals stay exact above the cap. */
 export const MAX_DRAIN_FAILURE_RECORDS = 25;
+/** Matches the repo's audit/error-summary privacy cap. */
 export const MAX_DRAIN_FAILURE_SOURCE_CHARS = 256;
 export const MAX_DRAIN_FAILURE_REASON_CHARS = 200;
 
+/**
+ * #4730: one preserved per-item failure. `failure_count` remains the exact
+ * total; `failures` holds up to MAX_DRAIN_FAILURE_RECORDS of these in batch
+ * order, and `omitted_failure_count` reconciles the difference — the cap is
+ * reported, never silently applied.
+ */
 export interface ExtractAtomsDrainFailure {
   /** One-based batch number within this bounded drain window. */
   batch: number;
-  /** Stable page slug / transcript locator. */
+  /** Stable page slug / transcript locator emitted by runPhaseExtractAtoms (sanitized). */
   source: string;
-  /** Bounded, redacted failure reason. */
+  /** Bounded, sanitized failure reason (secrets/connection info redacted). */
   reason: string;
 }
 
+/**
+ * Sanitize operator-facing failure text: secret + connection-string redaction,
+ * well-formed UTF-8, collapsed whitespace, bounded length. Locators and
+ * reasons both route through here so neither can carry an unbounded provider
+ * payload or credentials into `--json` output / job results.
+ */
 function sanitizeFailureText(raw: string, maxChars: number): string {
-  return redactConnectionInfo(raw).replace(/\s+/g, ' ').trim().slice(0, maxChars);
+  const secretRedacted = redactFindings(raw, { highEntropy: true }).text;
+  const connectionRedacted = redactConnectionInfo(secretRedacted);
+  return truncateUtf8(
+    ensureWellFormed(connectionRedacted).replace(/\s+/g, ' ').trim(),
+    maxChars,
+  );
 }
 
 export interface ExtractAtomsDrainDeps {
@@ -52,13 +74,23 @@ export interface ExtractAtomsDrainDeps {
    */
   withLock: <T>(work: () => Promise<T>) => Promise<T>;
   /**
-   * Process one bounded batch (rediscovers eligibility). The optional
-   * failure fields match upstream's current drain observability contract.
+   * Process one bounded batch (rediscovers eligibility). Returns counts, plus
+   * `providerFailure` (issue #3218) when EVERY item the batch attempted threw
+   * (zero items succeeded, at least one failure) — i.e. the batch's warning
+   * result was actually a total provider outage, not a partial/no-op batch.
+   * Omit/false for the ordinary partial-success or nothing-to-do cases.
+   *
+   * #4539: `failureCount` (per-item failures in this batch) and `firstError`
+   * (a representative failure message) let the drain surface WHY a run
+   * stopped/underperformed. #4730: `failures` preserves the phase's per-item
+   * `{source, reason}` records so a mixed-failure batch is fully
+   * reconcilable from `--json` — pre-#4730 everything but ONE representative
+   * error was dropped and the operator had to re-run the work to see the
+   * other reasons.
    */
-  runBatch: (info: { deadlineMs: number }) => Promise<{
+  runBatch: () => Promise<{
     extracted: number;
     skipped: number;
-    /** True when every attempted item failed in this batch. */
     providerFailure?: boolean;
     failureCount?: number;
     firstError?: string;
@@ -81,7 +113,13 @@ export interface ExtractAtomsDrainOpts {
 
 export interface ExtractAtomsDrainResult {
   phase: 'extract_atoms';
-  /** Provider outage is distinct so protected jobs can retry. */
+  /**
+   * issue #3218: 'provider_failure' when any batch reported `providerFailure`
+   * (every item it attempted errored). The Minion handler throws on this
+   * status so the durable job retries instead of completing over a backlog
+   * that made zero forward progress. Partial-success batches (>=1 item
+   * succeeded) always report 'ok', unchanged from before.
+   */
   status: 'ok' | 'provider_failure';
   extracted: number;
   skipped: number;
@@ -89,16 +127,47 @@ export interface ExtractAtomsDrainResult {
   remaining: number | null;
   /** Batches actually processed. */
   batches: number;
-  /** Why the loop stopped, including a retryable provider outage. */
+  /** Why the loop stopped: drained | window | no_progress | max_batches | provider_failure. */
   stopped: 'drained' | 'window' | 'no_progress' | 'max_batches' | 'provider_failure';
-  /** Exact per-item failure total across all processed batches. */
+  /**
+   * #4539: total per-item failures across every batch in this run. 0 for a
+   * clean run. Included in `--json` verbatim; dream.ts prints a stderr line
+   * when non-zero so the operator sees WHY the drain underperformed.
+   */
   failure_count: number;
-  /** Bounded, redacted failure records in batch order. */
+  /**
+   * #4730: bounded per-item failure details, in batch order, capped at
+   * MAX_DRAIN_FAILURE_RECORDS. Locators and reasons are sanitized (secret +
+   * connection-info redaction, bounded length). Rides `--json` verbatim.
+   */
   failures: ExtractAtomsDrainFailure[];
-  /** Count-only or capped failures not present in failures[]. */
+  /**
+   * #4730: failures beyond the record cap (or reported by count only, with
+   * no per-item detail). `failure_count === failures.length +
+   * omitted_failure_count` always holds, so the cap is visible, never silent.
+   */
   omitted_failure_count: number;
-  /** Most recent representative failure, or null for a clean run. */
+  /**
+   * #4539: representative failure message from the most recent batch that
+   * reported one (`source: reason`), or null for a clean run.
+   */
   last_error: string | null;
+}
+
+/**
+ * #3813: the Minion handler's provider_failure throw IS the job's error_text
+ * once it dead-letters, so it carries the representative `last_error` (already
+ * secret-redacted + bounded above) — a missing provider key is a one-line
+ * diagnosis instead of an opaque batches/remaining.
+ */
+export function formatDrainProviderFailure(
+  result: Pick<ExtractAtomsDrainResult, 'batches' | 'remaining' | 'last_error'>,
+): string {
+  return (
+    `extract-atoms-drain: all provider calls failed this batch ` +
+    `(batches=${result.batches}, remaining=${result.remaining ?? '?'})` +
+    `${result.last_error ? `; last error: ${result.last_error}` : ''} — retrying`
+  );
 }
 
 export async function runExtractAtomsDrain(
@@ -112,8 +181,13 @@ export async function runExtractAtomsDrain(
     let skipped = 0;
     let batches = 0;
     let stopped: ExtractAtomsDrainResult['stopped'] = 'window';
+    // issue #3218: latched once any batch reports providerFailure — drives
+    // the returned `status`, independent of how `stopped` reads after the
+    // final (possibly overriding) remaining-count check below.
     let providerFailure = false;
+    // #4539: accumulate per-item failure visibility across batches.
     let failureCount = 0;
+    // #4730: bounded typed per-item records (batch order, sanitized).
     const failures: ExtractAtomsDrainFailure[] = [];
     let lastError: string | null = null;
 
@@ -123,17 +197,20 @@ export async function runExtractAtomsDrain(
       const before = await deps.countRemaining();
       if (before === 0) { stopped = 'drained'; break; }
 
-      const r = await deps.runBatch({ deadlineMs: deadline });
+      const r = await deps.runBatch();
       extracted += r.extracted;
       skipped += r.skipped;
       batches++;
+      // #4730: preserve typed per-item records (bounded, sanitized) while
+      // keeping failure_count exact and reconcilable — count-only adapters
+      // (the #4539 shape) still contribute to the total via failureCount.
       const batchFailures = Array.isArray(r.failures)
         ? r.failures.filter(
-            (failure): failure is { source: string; reason: string } =>
-              failure != null &&
-              typeof failure === 'object' &&
-              typeof failure.source === 'string' &&
-              typeof failure.reason === 'string',
+            (f): f is { source: string; reason: string } =>
+              f != null &&
+              typeof f === 'object' &&
+              typeof f.source === 'string' &&
+              typeof f.reason === 'string',
           )
         : [];
       const reportedFailureCount =
@@ -141,18 +218,24 @@ export async function runExtractAtomsDrain(
           ? Math.floor(r.failureCount)
           : 0;
       failureCount += Math.max(reportedFailureCount, batchFailures.length);
-      for (const failure of batchFailures) {
+      for (const f of batchFailures) {
         if (failures.length >= MAX_DRAIN_FAILURE_RECORDS) break;
         failures.push({
           batch: batches,
-          source: sanitizeFailureText(failure.source, MAX_DRAIN_FAILURE_SOURCE_CHARS),
-          reason: sanitizeFailureText(failure.reason, MAX_DRAIN_FAILURE_REASON_CHARS),
+          source: sanitizeFailureText(f.source, MAX_DRAIN_FAILURE_SOURCE_CHARS),
+          reason: sanitizeFailureText(f.reason, MAX_DRAIN_FAILURE_REASON_CHARS),
         });
       }
       const representative = batchFailures[0];
       if (representative) {
-        lastError = `${sanitizeFailureText(representative.source, MAX_DRAIN_FAILURE_SOURCE_CHARS)}: ${sanitizeFailureText(representative.reason, MAX_DRAIN_FAILURE_REASON_CHARS)}`;
+        lastError =
+          `${sanitizeFailureText(representative.source, MAX_DRAIN_FAILURE_SOURCE_CHARS)}: ` +
+          `${sanitizeFailureText(representative.reason, MAX_DRAIN_FAILURE_REASON_CHARS)}`;
       } else if (typeof r.firstError === 'string' && r.firstError.trim()) {
+        // #4539 compatibility: count-only adapters still surface their
+        // representative error — through the SAME sanitizer as the typed
+        // records (secret/DSN redaction, whitespace collapse, bounded), so a
+        // provider payload cannot ride the fallback path into --json output.
         lastError = sanitizeFailureText(
           r.firstError,
           MAX_DRAIN_FAILURE_SOURCE_CHARS + 2 + MAX_DRAIN_FAILURE_REASON_CHARS,
@@ -160,24 +243,37 @@ export async function runExtractAtomsDrain(
       }
       deps.onBatch?.({ batch: batches, extracted: r.extracted, remaining: before });
 
-      // A total provider outage must not complete a protected drain job as a
-      // clean no-progress result. Latch the state before the final recount so
-      // a concurrent cleanup cannot rewrite the stop reason to "drained".
+      // issue #3218: every item this batch attempted failed (0 succeeded, >=1
+      // error) — a total provider outage, not ordinary no-op/partial progress.
+      // Stop immediately (same hot-loop guard as no_progress below) and flag
+      // it so the caller can retry via its own policy instead of treating the
+      // drain as a clean completion.
       if (r.providerFailure) {
         providerFailure = true;
         stopped = 'provider_failure';
         break;
       }
 
-      if (deps.now() >= deadline) { stopped = 'window'; break; }
-
       // Stop if a batch made zero forward progress — extraction is failing or
       // everything left is ineligible (e.g. all skipped). Prevents a hot loop
       // that spends budget without draining.
-      if (r.extracted === 0 && r.skipped === 0) { stopped = 'no_progress'; break; }
+      //
+      // #2144: a zero-ATOM batch can still be progress — tombstoned
+      // zero-yield pages shrink the backlog without producing atoms. Only
+      // stop when the backlog count genuinely didn't move.
+      if (r.extracted === 0 && r.skipped === 0) {
+        const after = await deps.countRemaining();
+        if (after === null || before === null || after >= before) { stopped = 'no_progress'; break; }
+      }
     }
 
     const remaining = await deps.countRemaining();
+    // issue #3218 (codex P2): don't let a final remaining===0 recount
+    // overwrite 'provider_failure' back to 'drained' — that would report the
+    // contradictory {status: 'provider_failure', stopped: 'drained'} and
+    // mislead the CLI/JSON consumer (dream.ts prints both fields verbatim).
+    // status already takes precedence for the Minion handler's retry
+    // decision; keep `stopped` consistent with it once a failure latched.
     if (!providerFailure && remaining === 0) stopped = 'drained';
     return {
       phase: 'extract_atoms',
@@ -215,19 +311,13 @@ export async function runExtractAtomsDrain(
 
 export interface DrainForSourceOpts {
   /**
-   * The source id used for cycle-lock identity, or `undefined` for the legacy
-   * unscoped cycle lock.
+   * The RESOLVED source id, or `undefined` for the legacy unscoped cycle.
    * `undefined` → `cycleLockIdFor(undefined)` = the bare `gbrain-cycle` lock the
    * unscoped routine cycle holds; a real id → `gbrain-cycle:<id>`. Either way the
-   * drain and the matching routine cycle genuinely contend (Codex #9).
+   * drain and the routine cycle for THIS source genuinely contend (Codex #9).
+   * The extraction/backlog source is `sourceId ?? 'default'`.
    */
   sourceId: string | undefined;
-  /**
-   * Source to count/extract. Defaults to `sourceId ?? 'default'` for legacy
-   * callers. Bare CLI drains can resolve cwd to a concrete extraction source
-   * while still holding the legacy unscoped cycle lock.
-   */
-  extractionSourceId?: string;
   /** Wallclock budget in seconds. */
   windowSeconds: number;
   /** Brain checkout dir, threaded to `runPhaseExtractAtoms` (optional — DB-only ok). */
@@ -246,44 +336,49 @@ export async function runExtractAtomsDrainForSource(
   const { runPhaseExtractAtoms, countExtractAtomsBacklog } = await import('./extract-atoms.ts');
   const { cycleLockIdFor } = await import('../cycle.ts');
 
-  const extractionSourceId = opts.extractionSourceId ?? opts.sourceId ?? 'default';
+  const extractionSourceId = opts.sourceId ?? 'default';
   const lockId = cycleLockIdFor(opts.sourceId);
 
   return runExtractAtomsDrain(
     {
       withLock: (work) => withRefreshingLock(engine, lockId, work, { ttlMinutes: 5 }),
-      runBatch: async ({ deadlineMs }) => {
+      runBatch: async () => {
         const r = await runPhaseExtractAtoms(engine, {
           sourceId: extractionSourceId,
           dryRun: false,
           brainDir: opts.brainDir,
-          // Drain mode is advertised by doctor as a DB-page backlog fix.
-          // Suppress transcript discovery so the window cannot be spent on
-          // filesystem transcripts while page backlog stays unchanged.
-          _transcripts: [],
-          deadlineMs,
         });
         const d = (r.details ?? {}) as Record<string, unknown>;
+        // issue #3218: `r.status` collapses to 'warn' whether ONE item failed
+        // (partial success — leave the drain's existing ok/no_progress path
+        // alone) or EVERY item failed (a total provider outage the drain
+        // adapter was silently swallowing). Re-derive the total-failure case
+        // from the per-item counts `runPhaseExtractAtoms` already returns:
+        // >=1 failure AND zero items successfully processed (transcripts_processed
+        // + pages_processed both 0 means every attempted `chat()` call threw —
+        // items that succeed with 0 atoms still count as processed, so this
+        // does not fire on "provider fine, nothing extractable").
         const failures = Array.isArray(d.failures) ? d.failures : [];
+        const itemsSucceeded =
+          Number(d.transcripts_processed ?? 0) + Number(d.pages_processed ?? 0);
+        // #4730: carry EVERY per-item failure up as a typed {source, reason}
+        // record (the pure loop bounds + sanitizes them) instead of the
+        // #4539 collapse to count + one representative error — a mixed
+        // three-failure batch used to be unrecoverable from `--json`.
         const typedFailures = failures
           .filter(
-            (failure): failure is { source: string; error: string } =>
-              failure != null &&
-              typeof failure === 'object' &&
-              typeof (failure as { source?: unknown }).source === 'string' &&
-              typeof (failure as { error?: unknown }).error === 'string',
+            (f): f is { source: string; error: string } =>
+              f != null &&
+              typeof f === 'object' &&
+              typeof (f as { source?: unknown }).source === 'string' &&
+              typeof (f as { error?: unknown }).error === 'string',
           )
           .map(({ source, error }) => ({ source, reason: error }));
-        const first = typedFailures[0];
         return {
           extracted: Number(d.atoms_extracted ?? 0),
           skipped: Number(d.duplicates_skipped ?? 0),
-          providerFailure: typedFailures.length > 0
-            && Number(d.transcripts_processed ?? 0) + Number(d.pages_processed ?? 0) === 0,
-          failureCount: typeof d.failure_count === 'number'
-            ? d.failure_count
-            : failures.length,
-          ...(first ? { firstError: `${first.source}: ${first.reason}` } : {}),
+          providerFailure: failures.length > 0 && itemsSucceeded === 0,
+          failureCount: failures.length,
           failures: typedFailures,
         };
       },

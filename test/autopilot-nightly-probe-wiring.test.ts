@@ -31,11 +31,15 @@ describe('autopilot wiring: nightly quality probe', () => {
     expect(SOURCE).toContain(`runCrossModalBatchForProbe`);
   });
 
-  test('feature flag gate present: DB-backed autopilot.nightly_quality_probe.enabled', () => {
+  test('feature flag gate present: dual-plane read (DB row wins, file plane fallback)', () => {
     // Per D10: the scheduler ONLY checks the feature flag. The 24h rate-limit
     // lives inside runNightlyQualityProbe itself (no scheduler-side precheck).
-    expect(SOURCE).toContain(`engine.getConfig('autopilot.nightly_quality_probe.enabled')`);
-    expect(SOURCE).toContain(`parseConfigBool`);
+    // The flag resolves through resolveProbeEnabled so `gbrain config set
+    // autopilot.nightly_quality_probe.enabled true` (the doctor hint, DB
+    // plane) and ~/.gbrain/config.json (file plane) BOTH work — a file-only
+    // read made the printed hint a silent no-op.
+    expect(SOURCE).toContain(`getConfig('autopilot.nightly_quality_probe.enabled')`);
+    expect(SOURCE).toMatch(/resolveProbeEnabled\(dbEnabled,\s*cfg\?\.autopilot\?\.nightly_quality_probe\?\.enabled\)/);
   });
 
   test('NO scheduler-side rate-limit check (D10 simplification)', () => {
@@ -65,51 +69,23 @@ describe('autopilot wiring: nightly quality probe', () => {
     expect(SOURCE).toContain(`now:`);
   });
 
+  test('resolveRepoRoot prefers the gbrain package root (committed fixture home), not the brain repoPath', () => {
+    // The DI harness in nightly-quality-probe.test.ts passes process.cwd()
+    // (= the gbrain repo in CI), which papered over the wiring passing
+    // repoPath (= sync.repo_path, the user's BRAIN repo, where the fixture
+    // never exists). Pin the package-root resolution + existence check.
+    expect(SOURCE).toMatch(/fileURLToPath\(new URL\('\.\.\/\.\.', import\.meta\.url\)\)/);
+    expect(SOURCE).toContain(`'longmemeval-nightly.jsonl'`);
+    expect(SOURCE).toMatch(/fixtureAtPkgRoot \? pkgRoot : repoPath/);
+  });
+
   test('hasEmbeddingProvider reads from gateway.isAvailable("embedding") (codex round-2 #12 — in-process, not subprocess)', () => {
     expect(SOURCE).toContain(`isAvailable('embedding')`);
     expect(SOURCE).toContain(`gateway`);
   });
 
-  test('max_usd default = 5 when config unset (matches plan default per D10)', () => {
-    expect(SOURCE).toContain(`engine.getConfig('autopilot.nightly_quality_probe.max_usd')`);
-    expect(SOURCE).toContain(`parseNonNegativeNumber(maxUsdRaw`);
-    expect(SOURCE).toMatch(/max_usd\s*\?\?\s*5/);
-  });
-
-  test('min_pass_rate default = 0.7 when config unset', () => {
-    expect(SOURCE).toContain(`engine.getConfig('autopilot.nightly_quality_probe.min_pass_rate')`);
-    expect(SOURCE).toContain(`resolveMinPassRate:`);
-    expect(SOURCE).toMatch(/min_pass_rate[\s\S]*\?\?\s*0\.7/);
-  });
-
-  test('threads configurable cross-modal slot models into nightly probe', () => {
-    expect(SOURCE).toContain(`models.eval.cross_modal.slot_a`);
-    expect(SOURCE).toContain(`models.eval.cross_modal.slot_b`);
-    expect(SOURCE).toContain(`models.eval.cross_modal.slot_c`);
-    expect(SOURCE).toContain(`resolveOptionalModelConfig`);
-    expect(SOURCE).toContain(`slotAModel: slotAModel ?? undefined`);
-    expect(SOURCE).toContain(`slotBModel: slotBModel ?? undefined`);
-    expect(SOURCE).toContain(`slotCModel: slotCModel ?? undefined`);
-    expect(SOURCE).toContain(`longMemEvalModel`);
-    expect(SOURCE).toContain(`longMemEvalExtractorModel`);
-  });
-
-  test('threads live reranker config into the hermetic LongMemEval brain', () => {
-    expect(SOURCE).toContain(`engine.getConfig('search.reranker.enabled')`);
-    expect(SOURCE).toContain(`engine.getConfig('search.reranker.model')`);
-    expect(SOURCE).toContain(`engine.getConfig('search.reranker.timeout_ms')`);
-    expect(SOURCE).toContain(`engine.getConfig('search.reranker.top_n_in')`);
-    expect(SOURCE).toContain(`engine.getConfig('search.reranker.top_n_out')`);
-    expect(SOURCE).toContain(`longMemEvalRerankerModel`);
-    expect(SOURCE).toContain(`longMemEvalRerankerEnabled`);
-    expect(SOURCE).toContain(`longMemEvalRerankerTimeoutMs`);
-    expect(SOURCE).toContain(`longMemEvalRerankerTopNIn`);
-    expect(SOURCE).toContain(`longMemEvalRerankerTopNOut`);
-    expect(SOURCE).toContain(`parsePositiveIntegerOrNullSentinel`);
-  });
-
-  test('doctor reads DB-backed nightly enable config', () => {
-    const doctorSrc = readFileSync(resolve('src/commands/doctor.ts'), 'utf-8');
-    expect(doctorSrc).toContain(`engine.getConfig('autopilot.nightly_quality_probe.enabled')`);
+  test('max_usd resolves dual-plane (default = 5 pinned by resolveProbeMaxUsd unit tests)', () => {
+    expect(SOURCE).toContain(`getConfig('autopilot.nightly_quality_probe.max_usd')`);
+    expect(SOURCE).toMatch(/resolveProbeMaxUsd\(dbMaxUsd,\s*cfg\?\.autopilot\?\.nightly_quality_probe\?\.max_usd\)/);
   });
 });

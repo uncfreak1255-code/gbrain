@@ -1,23 +1,35 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+/**
+ * Bootstrap progression regression test.
+ *
+ * extractTakesFromPages selected pages by updated_at DESC + LIMIT with no
+ * exclusion of pages that already hold takes — so on a corpus larger than
+ * one run's cap (the CLI clamps --max-pages to 1000), every re-run rescanned
+ * the same most-recent slice: the older tail could never be bootstrapped,
+ * and each rescan re-spent LLM budget producing upsert-identical rows.
+ * Seen live on a 2,311-eligible-page brain where the second run would have
+ * covered 0 new pages.
+ *
+ * Pins: covered pages are skipped by default (runs progress), and
+ * includeCovered restores the full rescan (refresh semantics).
+ */
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
-  __setChatTransportForTests,
   configureGateway,
   resetGateway,
+  __setChatTransportForTests,
 } from '../src/core/ai/gateway.ts';
 import { extractTakesFromPages } from '../src/core/extract-takes-from-pages.ts';
 
 let engine: PGLiteEngine;
+let repo: string;
 
-function setClassifierResponse(text: string): void {
-  __setChatTransportForTests(async () => ({
-    text,
-    blocks: [{ type: 'text' as const, text }],
-    stopReason: 'end' as const,
-    usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
-    model: 'anthropic:claude-haiku-4-5-20251001',
-    providerId: 'anthropic',
-  }));
+/** #4473: takes are md-first — each probe page needs a real .md home. */
+function seedMd(slug: string, body: string): void {
+  writeFileSync(join(repo, `${slug}.md`), `# ${slug}\n\n${body}\n`, 'utf-8');
 }
 
 beforeAll(async () => {
@@ -25,11 +37,22 @@ beforeAll(async () => {
   await engine.connect({});
   await engine.initSchema();
 
+  repo = mkdtempSync(join(tmpdir(), 'gb-takes-progression-'));
+  mkdirSync(join(repo, 'concepts'), { recursive: true });
+  await engine.setConfig('sync.repo_path', repo);
+
   configureGateway({
     chat_model: 'anthropic:claude-haiku-4-5-20251001',
-    env: { ANTHROPIC_API_KEY: 'test-key' },
+    env: { ANTHROPIC_API_KEY: 'sk-ant-test-takes-progression' },
   });
-  setClassifierResponse('[{"claim":"a stubbed claim","kind":"take","weight":0.7}]');
+  __setChatTransportForTests(async () => ({
+    text: '[{"claim":"a stubbed claim","kind":"take","weight":0.7}]',
+    blocks: [{ type: 'text' as const, text: '[{"claim":"a stubbed claim","kind":"take","weight":0.7}]' }],
+    stopReason: 'end' as const,
+    usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    model: 'anthropic:claude-haiku-4-5-20251001',
+    providerId: 'anthropic',
+  }));
 
   const body = 'An opinion-bearing body long enough to clear the 200-char eligibility floor. '.repeat(5);
   await engine.putPage('concepts/progression-a', {
@@ -38,89 +61,44 @@ beforeAll(async () => {
   await engine.putPage('concepts/progression-b', {
     type: 'concept', title: 'B', compiled_truth: body, frontmatter: {},
   });
+  seedMd('concepts/progression-a', body);
+  seedMd('concepts/progression-b', body);
 });
 
 afterAll(async () => {
   __setChatTransportForTests(null);
   resetGateway();
   await engine.disconnect();
+  rmSync(repo, { recursive: true, force: true });
 });
 
 describe('extractTakesFromPages — bootstrap progression', () => {
   test('first run covers the eligible pages', async () => {
-    const result = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(result.pages_scanned).toBe(2);
-    expect(result.claims_extracted).toBe(2);
+    const r1 = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
+    expect(r1.pages_scanned).toBe(2);
+    expect(r1.claims_extracted).toBe(2);
   });
 
-  test('second run skips covered pages', async () => {
-    const result = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(result.pages_scanned).toBe(0);
-    expect(result.claims_extracted).toBe(0);
+  test('second run skips covered pages — repeat runs progress instead of rescanning', async () => {
+    const r2 = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
+    expect(r2.pages_scanned).toBe(0);
+    expect(r2.claims_extracted).toBe(0);
   });
 
-  test('a page added after the first run is picked up', async () => {
+  test('a page added after the first run is picked up (progression, not a frozen set)', async () => {
     const body = 'Another opinion-bearing body long enough to clear the eligibility floor. '.repeat(5);
     await engine.putPage('concepts/progression-c', {
       type: 'concept', title: 'C', compiled_truth: body, frontmatter: {},
     });
-    const result = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(result.pages_scanned).toBe(1);
+    seedMd('concepts/progression-c', body);
+    const r3 = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
+    expect(r3.pages_scanned).toBe(1);
   });
 
-  test('a valid no-claim page is marked complete and content changes retry it', async () => {
-    const body = 'Narrative-only material with no gradeable claims, long enough for classification. '.repeat(5);
-    await engine.putPage('concepts/progression-no-claims', {
-      type: 'concept', title: 'No claims', compiled_truth: body, frontmatter: {},
+  test('includeCovered rescans everything (refresh semantics)', async () => {
+    const r4 = await extractTakesFromPages(engine, {
+      bootstrapEnabled: true, maxPages: 50, includeCovered: true,
     });
-    setClassifierResponse('[]');
-
-    const first = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(first.pages_scanned).toBe(1);
-    expect(first.claims_extracted).toBe(0);
-
-    const second = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(second.pages_scanned).toBe(0);
-
-    await engine.putPage('concepts/progression-no-claims', {
-      type: 'concept', title: 'No claims', compiled_truth: `${body} Changed.`, frontmatter: {},
-    });
-    const afterChange = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(afterChange.pages_scanned).toBe(1);
-    const afterRemark = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(afterRemark.pages_scanned).toBe(0);
-  });
-
-  test('a malformed non-empty claim array stays eligible for retry', async () => {
-    const body = 'Another classification candidate long enough to clear the eligibility floor. '.repeat(5);
-    await engine.putPage('concepts/progression-malformed', {
-      type: 'concept', title: 'Malformed result', compiled_truth: body, frontmatter: {},
-    });
-    setClassifierResponse('[{"claim":"real claim","kind":"opinion","weight":0.5}]');
-
-    const malformed = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(malformed.pages_scanned).toBe(1);
-    expect(malformed.claims_extracted).toBe(0);
-    const row = await engine.getPage('concepts/progression-malformed');
-    const marker = await engine.executeRaw<{ takes_extracted_content_hash: string | null }>(
-      `SELECT takes_extracted_content_hash FROM pages WHERE id = $1`,
-      [row!.id],
-    );
-    expect(marker[0].takes_extracted_content_hash).toBeNull();
-
-    setClassifierResponse('[]');
-    const retry = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(retry.pages_scanned).toBe(1);
-    const covered = await extractTakesFromPages(engine, { bootstrapEnabled: true, maxPages: 50 });
-    expect(covered.pages_scanned).toBe(0);
-  });
-
-  test('includeCovered restores refresh semantics', async () => {
-    const result = await extractTakesFromPages(engine, {
-      bootstrapEnabled: true,
-      maxPages: 50,
-      includeCovered: true,
-    });
-    expect(result.pages_scanned).toBe(5);
+    expect(r4.pages_scanned).toBe(3);
   });
 });

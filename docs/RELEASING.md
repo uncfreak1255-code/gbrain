@@ -1,25 +1,19 @@
 # Releasing & contributing (gbrain)
 
 The full release + contributor process. CLAUDE.md keeps the ship-critical IRON RULES
-inline (the Version-locations table, Privacy + Responsible-disclosure rules,
-and PR-title-version-first) and points here for everything else.
-
-Use the repository commands and native GitHub checks below. An external skill,
-wrapper, or app is optional; its absence does not block authorized work. Do not
-install an old tool or ask the user to restore it merely to satisfy a historical
-reference. Required tests, current review rules, user authorization, and separate
-runtime activation still apply.
+inline (the Version-locations table, branch=workspace, post-ship `/document-release`,
+the Privacy + Responsible-disclosure rules, PR-title-version-first, never-hand-roll-ship)
+and points here for everything else. **Before any ship, read this in full. Use `/ship` —
+never hand-roll a release.**
 
 ## Pre-ship requirements
 
-Before publishing code changes, run the full test suite. Read-only review does
-not require replaying tests merely to start inspection. For documentation-only
-changes, run the affected documentation and generated-content checks.
+Before shipping (/ship) or reviewing (/review), always run the full test suite.
 Two equivalent paths:
 
 **Path A — local CI gate (recommended, v0.23.1+):**
-- `bun run ci:local` runs the entire stack inside Docker: a host merge-range
-  secret scan, guards + typecheck, then 4-shard parallel unit + E2E against four pgvector
+- `bun run ci:local` runs the entire stack inside Docker: gitleaks (host),
+  guards + typecheck, then 4-shard parallel unit + E2E against four pgvector
   containers plus a transaction-mode PgBouncer service (unit phase keeps
   `DATABASE_URL` unset; `--no-shard` for the legacy sequential flow). Stronger
   than PR CI's 2-file Tier 1 set; closer to what nightly Tier 1 catches. Spins
@@ -32,25 +26,21 @@ Two equivalent paths:
 
 **Path B — manual lifecycle (still supported):**
 - `bun test` — unit tests (no database required)
-- Follow the "E2E test DB lifecycle" steps above to spin up the test DB,
-  run `bun run test:e2e`, then tear it down.
+- Follow the "E2E test DB lifecycle" steps in
+  [docs/TESTING.md](TESTING.md) to spin up the test DB, run
+  `bun run test:e2e`, then tear it down.
 
 Both must pass. Do not ship with failing E2E tests. Do not skip E2E tests.
 
-Secret scanning has two scopes. The merge scan blocks new committed secrets only:
-it scans the merge base through `HEAD` with `scripts/gitleaks-scan.sh --scope merge`.
-Workspace hygiene is separate: `bun run check:secrets:hygiene` reports findings
-already present in the checkout, including uncommitted files. A hygiene finding
-needs remediation, but it does not change a CI result.
-
-**Always run typecheck before pushing.** `bun test` (the bun runner)
-skips TypeScript type checking — it only enforces runtime behavior.
+**Always run typecheck before pushing.** Neither `bun test` (the bun runner)
+nor `bun run test` gates on types — `bun run test` is just
+`bash scripts/run-unit-parallel.sh` (the sharded unit runner; no typecheck,
+no shell pre-checks — see the test-tier table in [docs/TESTING.md](TESTING.md)).
 Three ways to actually gate on types:
 
-1. `bun run test` (npm script in `package.json`) — includes `bun run typecheck`
-   plus the four shell pre-checks (`check-jsonb-pattern.sh`,
-   `check-progress-to-stdout.sh`, `check-trailing-newline.sh`,
-   `check-wasm-embedded.sh`) before the runner. Use this mid-branch.
+1. `bun run verify` — runs the shell guard checks (privacy, jsonb, source-id,
+   progress-to-stdout, …) plus `bun run typecheck` in parallel
+   (`scripts/run-verify-parallel.sh`). Use this mid-branch.
 2. `bun run typecheck` — `tsc --noEmit` standalone. Fast (~5s on this repo).
 3. `bun run ci:local` — the full local CI gate from Path A.
 
@@ -61,50 +51,6 @@ shipping the v0.23.2 round-trip E2E (`type: 'reflection'` is not a
 member of `PageType`). Run `bun run typecheck` once before push, even
 when only test files changed.
 
-## Merge-conflict recovery on release metadata (memorize this)
-
-Every merge from master can conflict on the five release-metadata files, because
-master ships its own version bumps. Auto-merge sometimes resolves these silently
-in unexpected ways. When `git merge origin/master` reports conflicts on release
-metadata, resolve in this exact order:
-
-1. **VERSION** — overwrite with the wave's version (`echo -n "X.Y.Z.W"
-   > VERSION`). Highest semver wins; do NOT take master's lower version.
-2. **package.json** — strip the conflict markers, keep the wave's
-   version line. Sed pattern:
-   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/,/^>>>>>>> /d' package.json && rm package.json.bak`
-   (assumes ours is above the `=======`).
-3. **openclaw.plugin.json** — strip conflict markers and keep the wave's
-   version line so it matches `VERSION`.
-4. **skills/manifest.json** — strip conflict markers and keep the wave's
-   version line so it matches `VERSION`.
-5. **CHANGELOG.md** — strip ALL three conflict markers; both your entry
-   and master's entry stay. Sed pattern:
-   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/master$/d' CHANGELOG.md && rm CHANGELOG.md.bak`
-   Then verify your entry is the topmost `## [X.Y.Z.W]` and master's
-   newer-than-yours entries (if any) sit below.
-6. **Run the 5-line version-consistency audit** (the canonical copy is in
-   `CLAUDE.md`). If it doesn't show your version on all five lines, you
-   missed a marker.
-7. **Run `bun install`** to refresh `bun.lock` against the resolved
-   `package.json`. Stage and commit if it changed.
-8. **Run `bun run typecheck`** before committing the merge.
-9. Only THEN run `git commit` for the merge.
-
-If the audit shows drift after step 6, do NOT proceed to step 7. Re-run
-steps 1-5 against the actual file content; you missed a marker or
-resolved one in the wrong direction.
-
-**Anti-pattern to avoid:** Resolving via `git checkout --ours package.json`
-and `git checkout --theirs scripts/test-shard.sh` mixed in the same
-commit. The selective directional resolution is fine, but on release metadata
-specifically, ALWAYS use the explicit `echo > VERSION` + sed-strip-markers
-pattern above. The directional checkout flags have bitten us when the conflict
-shape was unexpected (e.g. master stripped a section we expected to keep).
-
-**Before pushing a merge commit**, run the 5-line audit one more time.
-The same check applies after version edits or merge resolution, regardless
-of the agent host or optional helper used.
 
 ## CHANGELOG + VERSION are branch-scoped
 
@@ -113,7 +59,7 @@ here.** Every feature branch that ships gets its own version bump and CHANGELOG
 entry. The entry is product release notes for users; it is not a log of internal
 decisions, review rounds, or codex findings.
 
-**Write the CHANGELOG entry when preparing the release, not during development.** Mid-branch
+**Write the CHANGELOG entry at /ship time, not during development.** Mid-branch
 iterations, review rounds (CEO/Eng/Codex/DX), and implementation detours belong
 in the plan file at `~/.claude/plans/`, not in the CHANGELOG. One unified entry
 per branch, covering what the branch added vs the base branch.
@@ -151,14 +97,6 @@ If any answer is no, fix it before continuing.
 - Numbers that mean something to the user: TTHW, commands that timed out before, detection counts.
 - Upgrade instructions: `gbrain upgrade` + any manual step if needed.
 - Credit to external contributors when a community PR was incorporated.
-
-**Privacy guard:** public release artifacts must use placeholder people,
-companies, funds, deals, and private agent names. Do not copy real brain queries,
-private fork names, or customer/contact examples into `CHANGELOG.md`,
-`README.md`, `docs/`, PR text, commit messages, or checked-in comments. If you
-need an example, use `alice-example`, `widget-co`, `fund-a`, or `your OpenClaw`.
-The literal denylist belongs in the privacy-check scripts and their explicit
-meta-rule allowlist, not in public docs.
 
 ## CHANGELOG voice + release-summary format
 
@@ -354,7 +292,8 @@ matter" with BrainBench-style before/after table, "what this means" closer, then
 
 Create a migration file at `skills/migrations/v[version].md` when a release
 includes changes that existing users need to act on. The auto-update agent
-reads these files post-upgrade (Section 17, Step 4) and executes them.
+reads these files post-upgrade (see `docs/guides/upgrades-auto-update.md`)
+and executes them.
 
 **You need a migration file when:**
 - New setup step that existing installs don't have (e.g., v0.5.0 added live sync,
@@ -403,30 +342,105 @@ the migration orchestrator emits a structured TODO to
 TODOs using `skills/migrations/v0.11.0.md` — stays host-agnostic, still
 canonical.
 
+
 ## Schema state tracking
 
-`~/.gbrain/update-state.json` tracks which recommended schema directories the user
-adopted, declined, or added custom. The auto-update agent (SKILLPACK Section 17)
-reads this during upgrades to suggest new schema additions without re-suggesting
+`~/.gbrain/upgrade-state.json` tracks which recommended schema directories the user
+adopted, declined, or added custom. The auto-update agent
+(`docs/guides/upgrades-auto-update.md`) reads this during upgrades to suggest new schema additions without re-suggesting
 things the user already declined. The setup skill writes the initial state during
 Phase C/E. Never modify a user's custom directories or re-suggest declined ones.
 
 ## GitHub Actions SHA maintenance
 
-All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Check and
-update pins when the task concerns those actions or a relevant security fix.
-An unrelated release or read-only review does not authorize workflow changes.
-For an in-scope pin update:
+All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Before shipping
+(`/ship`) or reviewing (`/review`), check for stale pins and update them:
 
 ```bash
-for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions/download-artifact softprops/action-gh-release; do
+for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions/download-artifact softprops/action-gh-release gitleaks/gitleaks-action; do
   tag=$(grep -r "$action@" .github/workflows/ | head -1 | grep -o '#.*' | tr -d '# ')
   [ -n "$tag" ] && echo "$action@$tag: $(gh api repos/$action/git/ref/tags/$tag --jq .object.sha 2>/dev/null)"
 done
 ```
 
-For each selected action, verify the intended upstream release, update its pin
-and version comment, and review the workflow diff under the current boundary policy.
+If any SHA differs from what's in the workflow files, update the pin and version comment.
+
+## GitHub releases (binary assets + self-update) — #3521
+
+`.github/workflows/release.yml` publishes a GitHub release automatically for
+**every VERSION bump that lands on master** (trigger: push to master touching
+`VERSION`, plus `workflow_dispatch` for a manual first run or repair). No
+manual tag push is part of the ship flow — the workflow reads `VERSION` (the
+single source of truth), mints tag `v<VERSION>` at the pushed commit, titles
+the release the same, uses that version's `CHANGELOG.md` entry as the notes
+(`scripts/changelog-entry.sh`; falls back to a CHANGELOG link if the entry is
+missing), and attaches the compiled binaries.
+
+### The `latest-stable` tag
+
+The **final step of the release job** force-advances the `latest-stable` tag to
+the release commit (`git push origin "+${GITHUB_SHA}:refs/tags/latest-stable"`).
+`latest-stable` is the single sanctioned distribution ref: the README paste
+block, the `BOOTSTRAP_FOR_AGENTS.md` fetch URL, and
+`bun install -g github:garrytan/gbrain#latest-stable` all reference it
+permanently, so paste blocks copied into the wild never rot and there is no 404
+window between VERSION landing and assets publishing.
+`scripts/check-bootstrap-tag.sh` keeps the entry docs pinned to this ref.
+
+Because it moves ONLY after binaries + provenance attestation have fully
+published, a half-built release never advances it. If the tag-advance step
+alone fails, re-advance by hand (a full workflow re-run would skip — the
+release already exists with all assets):
+
+```bash
+git push origin "+refs/tags/v<VERSION>^{commit}:refs/tags/latest-stable"
+```
+
+### The `publish-template` job
+
+After the release job, a `publish-template` job force-pushes the rendered
+agent-workspace template repo (the GitHub "Use this template" door,
+`vars.TEMPLATE_REPO`, default `garrytan/gbrain-agent-template`) from CI only —
+no human pushes it by hand, so what adopters clone is exactly what this repo
+reviewed. It is guarded three ways: the release above fully published; the
+vendored tree `templates/bootstrap/template-repo/` exists (skip, never fail,
+if not); and the `TEMPLATE_REPO_PAT` secret is configured (skip if not).
+Before pushing, it regenerates the template tree
+(`bun run scripts/generate-template-repo.ts`) and byte-diffs it against the
+vendored copy — a mismatch fails the job; regenerate + commit the vendored
+tree (`scripts/check-bootstrap-templates.sh` runs the same diff offline in
+`bun run verify`).
+
+**`TEMPLATE_REPO_PAT` scope:** a fine-grained PAT with `contents: write` on
+the template repository ONLY — no other repositories, no other permissions.
+Configure it as a repo secret; when absent, template publishing is disabled
+and the job skips cleanly.
+
+Why every bump, not selective: `gbrain check-update` resolves the latest
+version from `VERSION` on master, while binary self-update
+(`src/core/binary-self-update.ts`) downloads assets from `releases/latest`.
+Any release that lags `VERSION` tells binary installs an upgrade exists that
+self-update cannot apply. `releases/latest` must track `VERSION`.
+
+Invariants:
+
+- **Asset names are a contract.** The build matrix's `artifact:` names must
+  equal what `expectedAssetName()` in `src/core/binary-self-update.ts`
+  returns (`gbrain-darwin-arm64`, `gbrain-linux-x64` today). Adding a
+  platform means updating BOTH plus the version job's completeness check;
+  `test/release-workflow.test.ts` pins all of it.
+- **Idempotent + self-repairing.** The version job skips when a release for
+  `v<VERSION>` already exists with all expected assets; a partial release
+  (tag but no release, or missing assets) is completed on re-run. Racing
+  master pushes queue via the `release` concurrency group — a skipped
+  intermediate version is fine, latest is what matters.
+- **Historical tags are never rewritten.** Old 3-segment versions keep their
+  history; every new 4-segment `VERSION` mints a fresh tag.
+- **Permissions stay scoped.** `contents: write` lives on the release job
+  only; everything else runs read-only.
+- **Never advance `latest-stable` on a partial release.** The tag moves only
+  as the final release-job step, after every asset has published. Manual
+  re-advances must point at a fully published `v<VERSION>` release.
 
 ## PR descriptions cover the whole branch
 
@@ -456,10 +470,19 @@ Never merge external PRs directly into master. Instead, use the "fix wave" workf
    read the diff, understand the fix, and write it yourself if needed.
 4. **Test the wave** — verify with `bun test && bun run test:e2e` (full E2E lifecycle).
    Every fix in the wave must have test coverage.
-5. **Close with context** — every closed PR gets a comment explaining why and what (if
+5. **Security review** — run `bun run wave-security-scan <base>..<collector-head>` over the
+   collector branch (the repeatable mechanical sweep). It ALARMS on newly-introduced
+   obfuscation/eval in code, secrets found by gitleaks **with the test/skills allowlist
+   stripped**, and any committed `admin/dist` change (the bundle-backdoor artifact); new
+   outbound endpoints, spawns, env reads, and dependency changes print as context. Exit 1
+   means "eyeball before shipping," not "unsafe" — read the ALARM rows and the context lists,
+   and confirm each is benign. Link the result (or a one-line "clean") in the wave PR body.
+   This is the standard's teeth: a wave PR body that claims "security reviewed" must have run
+   this. It is a net, not a proof — a human still reads the diffs.
+6. **Close with context** — every closed PR gets a comment explaining why and what (if
    anything) supersedes it. Contributors did real work; respect that with clear communication
    and thank them.
-6. **Ship as one PR** — single PR to master with all attributions preserved via
+7. **Ship as one PR** — single PR to master with all attributions preserved via
    `Co-Authored-By:` trailers. Include a summary of what merged and what closed.
 
 **Community PR guardrails:**
@@ -497,3 +520,18 @@ Why this over alternatives: adding `garrytan-agents` as a collaborator, or
 flipping the repo-wide "send secrets to fork PRs" toggle, both broaden
 secret distribution to every fork PR from that account or any fork. Moving
 the branch keeps secret scope tight to just the one PR being shipped.
+
+## Plugin dist tree (codex/claude lanes)
+
+The committed `plugin/` and `plugin-variants/` trees embed the VERSION stamp
+(the variants' generated plugin manifests carry it too), so a release bump
+drifts them. After bumping VERSION/package.json, run `bun run
+scripts/generate-plugin-tree.ts --out plugin --variants-out plugin-variants`
+and stage `plugin/` + `plugin-variants/` + `skills/plugin-lanes.json`.
+`scripts/check-plugin-tree.sh` (in `bun run verify`) and the release
+`publish-codex-plugin` job both fail on drift.
+
+When personas change in `skills/plugin-lanes.json#personas`, also hand-edit
+`.claude-plugin/marketplace.json`: the variant entries must match the
+personas block exactly (`test/codex-plugin-manifest.test.ts` pins the
+mapping, so a persona added without a marketplace entry fails the suite).

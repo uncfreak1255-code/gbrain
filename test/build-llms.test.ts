@@ -106,11 +106,14 @@ describe("build-llms generator", () => {
 describe("CLAUDE.md restructure content contracts", () => {
   const claude = () => readFileSync(join(repoRoot, "CLAUDE.md"), "utf8");
 
-  test("CLAUDE.md retains the release format and policy reference", () => {
+  test("CLAUDE.md keeps the inline ship IRON RULES (must NOT move to a doc)", () => {
     const c = claude();
     // Version format — the table stays inline (CI version-gate depends on it).
     expect(c).toContain("MAJOR.MINOR.PATCH.MICRO");
-    expect(c).toContain("docs/RELEASING.md");
+    // Post-ship discipline — /document-release stays referenced inline.
+    expect(c.toLowerCase()).toContain("document-release");
+    // Never hand-roll ship.
+    expect(c.toLowerCase()).toMatch(/hand-roll ship/);
   });
 
   test("CLAUDE.md carries the resolver + cross-cutting invariants (orientation survived)", () => {

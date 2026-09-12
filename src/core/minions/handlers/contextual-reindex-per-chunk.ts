@@ -5,7 +5,7 @@
  * worker-driven). The primitive's audit + cost-cap value lives at the
  * SUBMITTER side (`gbrain reindex --markdown`, which IS retrofitted in
  * T11), not at the handler. The handler already routes its cost through
- * the global Haiku rate-leaser (D26 P0-3). No further retrofit needed.
+ * the global synopsis rate-leaser (D26 P0-3). No further retrofit needed.
  *
  * v0.40.3.0 — Minion handler for per-page contextual retrieval re-embed.
  *
@@ -15,17 +15,17 @@
  *   - `doctor --remediate` when contextual_retrieval_coverage flags drift.
  *   - The reindex command for backfill orchestration.
  *
- * This handler is DELIBERATELY thin (D23) — it wires the global Haiku
+ * This handler is DELIBERATELY thin (D23) — it wires the global synopsis
  * rate-leaser (D26 P0-3), validates the job payload, and delegates the
  * actual re-embed work to `src/core/contextual-retrieval-service.ts:
  * reembedPageWithContextualRetrieval`. The service owns the two-phase
  * build pattern + page-level fall-back per D14. This handler owns:
- *   - Rate-lease acquire/release per Haiku call (shared key across the
- *     whole worker pool so concurrent page jobs don't blow the 50 RPM
- *     default per D26 P0-3).
- *   - Exact source-qualified page lookup (D27 P2-1 defense-in-depth against
- *     stale/malicious payloads that try to apply source-level trust decisions
- *     from the wrong source). Unqualified duplicate slugs fail closed.
+ *   - Rate-lease acquire/release per synopsis call (shared, resolved-model
+ *     key across the whole worker pool so concurrent page jobs stay under
+ *     the configured provider-neutral cap per D26 P0-3).
+ *   - Source-id derivation from page-id (D27 P2-1 defense-in-depth
+ *     against stale/malicious payloads that try to apply source-level
+ *     trust decisions from the wrong source).
  *   - Result classification into Minion success/throw semantics so the
  *     queue retries transient failures and dead-letters permanents.
  *
@@ -40,6 +40,7 @@ import { UnrecoverableError } from '../types.ts';
 import type { BrainEngine } from '../../engine.ts';
 import {
   reembedPageWithContextualRetrieval,
+  resolveContextualChunkConcurrency,
   type ReembedPageResult,
 } from '../../contextual-retrieval-service.ts';
 import {
@@ -47,29 +48,49 @@ import {
   releaseLease,
 } from '../rate-leases.ts';
 import { resolveSearchMode, loadSearchModeConfig } from '../../search/mode.ts';
-
-const RATE_LEASE_KEY = 'anthropic:utility:contextual-synopsis';
+import { resolveModel } from '../../model-config.ts';
+import { DEFAULT_SYNOPSIS_MODEL } from '../../page-summary.ts';
 
 /**
- * Default global Haiku RPM for contextual synopsis calls. Anthropic's
- * published default is 50 RPM for Haiku 4.5; operators can raise via
- * the env override on a tier with higher quota.
+ * Default global concurrency cap for contextual synopsis calls. The public
+ * setting keeps the historical RPM name; the lease primitive enforces active
+ * calls, while provider SDKs own request-rate retries.
  */
-const DEFAULT_HAIKU_RPM = 50;
+const DEFAULT_SYNOPSIS_RPM = 50;
 
-function resolveMaxConcurrent(): number {
-  const env = process.env.GBRAIN_CONTEXTUAL_HAIKU_RPM;
-  if (env) {
-    const n = parseInt(env, 10);
-    if (Number.isFinite(n) && n > 0) return n;
+export function resolveContextualSynopsisLeaseSettings(
+  synopsisModel: string,
+  env: Record<string, string | undefined> = process.env,
+): { key: string; maxConcurrent: number } {
+  const configuredLimits = [
+    env.GBRAIN_CONTEXTUAL_SYNOPSIS_RPM,
+    env.GBRAIN_CONTEXTUAL_HAIKU_RPM,
+  ];
+  for (const configuredLimit of configuredLimits) {
+    if (!configuredLimit) continue;
+    const parsed = parseInt(configuredLimit, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return {
+        key: `contextual-synopsis:${synopsisModel}`,
+        maxConcurrent: parsed,
+      };
+    }
   }
-  return DEFAULT_HAIKU_RPM;
+  return {
+    key: `contextual-synopsis:${synopsisModel}`,
+    maxConcurrent: DEFAULT_SYNOPSIS_RPM,
+  };
 }
 
 /**
- * Job payload shape. `(expected_source_id, page_slug)` is exact authority
- * when the source is present. A bare page_slug remains compatible only when
- * it is unique across active sources.
+ * Job payload shape. Per D27 P2-1, only the `page_id` is authoritative;
+ * the handler loads the page row and DERIVES source_id from it. Any
+ * `source_id` field in the payload that mismatches the loaded value
+ * triggers UnrecoverableError (stale/malicious payload defense).
+ *
+ * `expected_source_id` is optional — when present, the handler verifies
+ * it matches the loaded page's source_id. Lets the submitter (mode-switch
+ * hook with known per-source plans) catch its own staleness.
  */
 export interface ContextualReindexJobData {
   page_slug: string;
@@ -78,6 +99,22 @@ export interface ContextualReindexJobData {
 
 export interface MakeContextualReindexHandlerOpts {
   engine: BrainEngine;
+  /** @internal Hermetic handler seam; production callers omit this. */
+  reembedPage?: typeof reembedPageWithContextualRetrieval;
+}
+
+export async function resolveContextualSynopsisModel(
+  engine: BrainEngine,
+  explicitModel?: string,
+): Promise<string> {
+  return resolveModel(engine, {
+    cliFlag: explicitModel,
+    configKey: 'models.contextual_synopsis',
+    deprecatedConfigKey: 'contextual_retrieval.haiku_model',
+    envVar: 'GBRAIN_CONTEXTUAL_SYNOPSIS_MODEL',
+    tier: 'utility',
+    fallback: DEFAULT_SYNOPSIS_MODEL,
+  });
 }
 
 /**
@@ -86,20 +123,19 @@ export interface MakeContextualReindexHandlerOpts {
  */
 export function makeContextualReindexHandler(opts: MakeContextualReindexHandlerOpts) {
   const { engine } = opts;
+  const reembedPage = opts.reembedPage ?? reembedPageWithContextualRetrieval;
 
   return async function contextualReindexHandler(
     ctx: MinionJobContext,
   ): Promise<{ ok: true; mode_applied: string; chunks_embedded: number }> {
     const data = parseJobData(ctx.data);
 
-    // Resolve exact source authority before any provider-capable work. A
-    // source-qualified job never probes another source, and an unqualified
-    // duplicate slug fails closed instead of selecting the first match.
-    const foundPage = await tryLoadPageAcrossSources(
-      engine,
-      data.page_slug,
-      data.expected_source_id,
-    );
+    // Load page row to derive the authoritative source_id (D27 P2-1).
+    // Without sourceId we can't do a lookup at all — fall back to
+    // 'default' for the initial lookup, then if the page isn't found
+    // there, surface as unrecoverable (the submitter should have
+    // included expected_source_id).
+    let foundPage = await tryLoadPageAcrossSources(engine, data.page_slug);
     if (!foundPage) {
       throw new UnrecoverableError(
         `Page not found for slug '${data.page_slug}'. ` +
@@ -125,46 +161,55 @@ export function makeContextualReindexHandler(opts: MakeContextualReindexHandlerO
     const globalMode = knobs.contextual_retrieval;
     const killSwitchDisabled = knobs.contextual_retrieval_disabled;
 
-    // Run the service with rate-leasing hooks (D26 P0-3). Each Haiku
+    // Run the service with rate-leasing hooks (D26 P0-3). Each synopsis
     // call inside the service acquires/releases a lease against the
     // shared key across all worker processes.
-    const maxConcurrent = resolveMaxConcurrent();
-    let currentLeaseId: number | null = null;
+    const chunkConcurrency = resolveContextualChunkConcurrency();
+    const synopsisModel = await resolveContextualSynopsisModel(engine);
+    const leaseSettings = resolveContextualSynopsisLeaseSettings(synopsisModel);
 
-    const result: ReembedPageResult = await reembedPageWithContextualRetrieval({
+    const result: ReembedPageResult = await reembedPage({
       engine,
       pageSlug: data.page_slug,
       sourceId: foundPage.source_id,
       globalMode,
       killSwitchDisabled,
+      synopsisModel,
       abortSignal: ctx.signal,
+      chunkConcurrency,
       acquireSynopsisLease: async () => {
         // Poll-acquire with brief backoff. The service's per-chunk loop
-        // is sequential within a page; this guards against the cross-
-        // worker pile-up.
+        // is bounded within a page; this guards against the cross-worker
+        // pile-up and remains the global rate governor.
         let attempts = 0;
         const maxAttempts = 60; // ~1 min max wait per chunk before giving up
         while (attempts < maxAttempts) {
-          const res = await acquireLease(engine, RATE_LEASE_KEY, ctx.id, maxConcurrent, {
-            ttlMs: 60_000,
-          });
+          if (ctx.signal.aborted) throw abortError();
+          const res = await acquireLease(
+            engine,
+            leaseSettings.key,
+            ctx.id,
+            leaseSettings.maxConcurrent,
+            {
+              ttlMs: 60_000,
+            },
+          );
           if (res.acquired && res.leaseId != null) {
-            currentLeaseId = res.leaseId;
-            return;
+            return res.leaseId;
           }
           attempts++;
-          await new Promise((r) => setTimeout(r, 1000));
+          await sleepWithAbort(1000, ctx.signal);
         }
         throw new Error(
-          `Failed to acquire ${RATE_LEASE_KEY} lease after ${maxAttempts} attempts; ` +
-            `Haiku rate limit pile-up too deep.`,
+          `Failed to acquire ${leaseSettings.key} lease after ${maxAttempts} attempts; ` +
+            `Synopsis rate limit pile-up too deep.`,
         );
       },
-      releaseSynopsisLease: async () => {
-        if (currentLeaseId != null) {
-          await releaseLease(engine, currentLeaseId);
-          currentLeaseId = null;
-        }
+      releaseSynopsisLease: async (lease) => {
+        // acquireLease coerces the id to a number at the seam; a strict
+        // typeof check here used to skip the release when Postgres handed
+        // the BIGSERIAL back as a native BigInt, idling every slot to TTL.
+        if (lease != null) await releaseLease(engine, lease as number);
       },
     });
 
@@ -190,36 +235,49 @@ function parseJobData(raw: Record<string, unknown> | undefined): ContextualReind
 }
 
 /**
- * Load an exact source-qualified page when source authority is available.
- * Legacy unqualified jobs remain compatible only when the slug is unique
- * across active sources.
+ * Try loading the page in every source the engine knows about. Stops at
+ * first match. Most brains are single-source; federated brains may have
+ * the same slug in multiple sources but the page_id (and indirectly
+ * source_id) is the authoritative tiebreaker per D27 P2-1.
  */
 async function tryLoadPageAcrossSources(
   engine: BrainEngine,
   pageSlug: string,
-  expectedSourceId?: string,
 ): Promise<{ source_id: string } | null> {
-  if (expectedSourceId) {
-    const page = await engine.getPage(pageSlug, { sourceId: expectedSourceId });
-    return page ? { source_id: page.source_id } : null;
-  }
+  // First try default. Most brains live here.
+  const defaultPage = await engine.getPage(pageSlug, { sourceId: 'default' });
+  if (defaultPage) return { source_id: defaultPage.source_id };
 
+  // Fall back to walking sources.
   const sources = await engine.executeRaw<{ id: string }>(
-    `SELECT id FROM public.sources WHERE archived = false ORDER BY id`,
+    `SELECT id FROM sources WHERE archived = false`,
   );
-  const matches: Array<{ source_id: string }> = [];
   for (const { id } of sources) {
-    const page = await engine.getPage(pageSlug, { sourceId: id });
-    if (page) matches.push({ source_id: page.source_id });
+    if (id === 'default') continue; // already tried
+    const p = await engine.getPage(pageSlug, { sourceId: id });
+    if (p) return { source_id: p.source_id };
   }
-  if (matches.length > 1) {
-    throw new UnrecoverableError(
-      `Ambiguous page slug '${pageSlug}' exists in sources `
-      + `${matches.map((page) => `'${page.source_id}'`).join(', ')}; `
-      + 'expected_source_id is required.',
-    );
-  }
-  return matches[0] ?? null;
+  return null;
+}
+
+function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(abortError());
+    }, { once: true });
+  });
+}
+
+function abortError(): Error {
+  const err = new Error('aborted');
+  err.name = 'AbortError';
+  return err;
 }
 
 function classifyResult(

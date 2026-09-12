@@ -18,22 +18,16 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   BudgetTracker,
   BudgetExhausted,
-  configureBudgetTrackerDefaults,
   extractUsageFromError,
+  isModelPriceable,
   _resetBudgetTrackerWarningsForTest,
 } from '../../../src/core/budget/budget-tracker.ts';
-import {
-  budgetAuditRowFingerprint,
-  isModelInMonthlyBudgetScope,
-  readMonthlyChatSpendUsd,
-  resolveMonthlyBudgetCapFromEngine,
-} from '../../../src/core/budget/monthly-cap.ts';
 
 let tmp: string;
 let auditPath: string;
@@ -44,7 +38,6 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-budget-test-'));
   auditPath = join(tmp, 'budget.jsonl');
   _resetBudgetTrackerWarningsForTest();
-  configureBudgetTrackerDefaults({});
   stderrCapture = '';
   origStderrWrite = process.stderr.write.bind(process.stderr);
   (process.stderr as { write: unknown }).write = (chunk: string | Uint8Array): boolean => {
@@ -64,10 +57,6 @@ function readAudit(): Array<Record<string, unknown>> {
     .split('\n')
     .filter((l) => l.length > 0)
     .map((l) => JSON.parse(l) as Record<string, unknown>);
-}
-
-function writeAuditRows(rows: Array<Record<string, unknown>>): void {
-  writeFileSync(auditPath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
 }
 
 describe('BudgetTracker.reserve', () => {
@@ -148,127 +137,14 @@ describe('BudgetTracker.reserve', () => {
     expect((caught as BudgetExhausted).reason).toBe('no_pricing');
     expect((caught as BudgetExhausted).modelId).toBe('mystery:some-unreleased-model');
     expect((caught as Error).message).toMatch(/model-pricing\.ts/);
-  });
-
-  test('DeepSeek chat models use canonical pricing under --max-cost', () => {
-    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
-    expect(() =>
-      t.reserve({
-        modelId: 'deepseek:deepseek-v4-pro',
-        estimatedInputTokens: 1000,
-        maxOutputTokens: 1000,
-        kind: 'chat',
-      }),
-    ).not.toThrow();
     const audit = readAudit();
-    expect(audit[0].event).toBe('reserve');
-    expect(audit[0].projected_cost_usd).toBeCloseTo(0.001305, 8);
-  });
-
-  test('native non-Anthropic chat models use canonical pricing under --max-cost', () => {
-    for (const [modelId, expectedCost] of [
-      ['openai:gpt-5.4-mini', 0.00525],
-      ['google:gemini-2.0-flash', 0.0005],
-    ] as const) {
-      const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
-      expect(() =>
-        t.reserve({
-          modelId,
-          estimatedInputTokens: 1000,
-          maxOutputTokens: 1000,
-          kind: 'chat',
-        }),
-      ).not.toThrow();
-      const audit = readAudit();
-      expect(audit.at(-1)?.event).toBe('reserve');
-      expect(audit.at(-1)?.projected_cost_usd).toBeCloseTo(expectedCost, 8);
-    }
-  });
-
-  test('OpenRouter nested chat ids fail closed under --max-cost', () => {
-    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
-    let caught: unknown = null;
-    try {
-      t.reserve({
-        modelId: 'openrouter:openai/gpt-5.4-mini',
-        estimatedInputTokens: 1000,
-        maxOutputTokens: 1000,
-        kind: 'chat',
-      });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(BudgetExhausted);
-    expect((caught as BudgetExhausted).reason).toBe('no_pricing');
-    expect((caught as BudgetExhausted).modelId).toBe('openrouter:openai/gpt-5.4-mini');
-    const audit = readAudit();
-    expect(audit.some((e) => e.event === 'reserve')).toBe(false);
-  });
-
-  test('monthly Claude+DeepSeek budget blocks projected overage before reserve', () => {
-    writeAuditRows([
-      {
-        schema_version: 1,
-        ts: '2026-06-10T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'deepseek:deepseek-v4-pro',
-        actual_cost_usd: 49.9,
-      },
-    ]);
-    const t = new BudgetTracker({
-      label: 'test',
-      auditPath,
-      monthlyNow: () => new Date('2026-06-18T00:00:00.000Z'),
-      monthlyBudget: { maxCostUsd: 50, mode: 'block' },
-    });
-    let caught: unknown = null;
-    try {
-      t.reserve({
-        modelId: 'deepseek:deepseek-v4-pro',
-        estimatedInputTokens: 1_000_000,
-        maxOutputTokens: 0,
-        kind: 'chat',
-      });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(BudgetExhausted);
-    expect((caught as BudgetExhausted).reason).toBe('cost');
-    const audit = readAudit();
-    expect(audit.some((e) => e.event === 'monthly_budget_denied')).toBe(true);
-    expect(audit.some((e) => e.event === 'reserve')).toBe(false);
-  });
-
-  test('monthly Claude+DeepSeek budget can warn and still reserve', () => {
-    writeAuditRows([
-      {
-        schema_version: 1,
-        ts: '2026-06-10T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'deepseek:deepseek-v4-flash',
-        actual_cost_usd: 49.9,
-      },
-    ]);
-    const t = new BudgetTracker({
-      label: 'test',
-      auditPath,
-      monthlyNow: () => new Date('2026-06-18T00:00:00.000Z'),
-      monthlyBudget: { maxCostUsd: 50, mode: 'warn' },
-    });
-    expect(() =>
-      t.reserve({
-        modelId: 'anthropic:claude-sonnet-4-6',
-        estimatedInputTokens: 100_000,
-        maxOutputTokens: 0,
-        kind: 'chat',
-      }),
-    ).not.toThrow();
-    expect(stderrCapture).toContain('monthly Claude+DeepSeek budget would exceed $50.00');
-    const audit = readAudit();
-    expect(audit.some((e) => e.event === 'monthly_budget_warn')).toBe(true);
-    expect(audit.some((e) => e.event === 'reserve')).toBe(true);
+    expect(audit).toContainEqual(expect.objectContaining({
+      event: 'reserve_no_pricing',
+      kind: 'chat',
+      model: 'mystery:some-unreleased-model',
+      reason: 'no_pricing',
+      schema_version: 1,
+    }));
   });
 
   test('v0.41.20.0: slash-prefix anthropic/claude-* under --max-cost does NOT no_pricing throw (THE FIX)', () => {
@@ -303,6 +179,33 @@ describe('BudgetTracker.reserve', () => {
     ).not.toThrow();
   });
 
+  test('#2504: canonical-priced non-Anthropic chat models reserve under a cap', () => {
+    // These models live only in CANONICAL_PRICING, not in the bare-keyed
+    // ANTHROPIC_PRICING view. A capped BudgetTracker must still price them
+    // instead of TX2 hard-failing no_pricing.
+    for (const modelId of [
+      'deepseek:deepseek-chat',
+      'openai:gpt-5.2',
+      'google:gemini-2.0-flash',
+    ]) {
+      const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+      expect(() =>
+        t.reserve({
+          modelId,
+          estimatedInputTokens: 1_000,
+          maxOutputTokens: 1_000,
+          kind: 'chat',
+        }),
+      ).not.toThrow();
+    }
+    const audit = readAudit();
+    expect(audit.filter((e) => e.event === 'reserve').map((e) => e.model)).toEqual([
+      'deepseek:deepseek-chat',
+      'openai:gpt-5.2',
+      'google:gemini-2.0-flash',
+    ]);
+  });
+
   test('no cap + unknown pricing: warns once per process, no throw', () => {
     const t = new BudgetTracker({ label: 'test', auditPath });
     expect(() =>
@@ -325,6 +228,56 @@ describe('BudgetTracker.reserve', () => {
     expect(stderrCapture.length).toBe(before);
     const audit = readAudit();
     expect(audit.filter((e) => e.event === 'reserve_unpriced').length).toBe(2);
+  });
+
+  test('claude-cli:<alias> chat model under a cap prices at the canonical model rate (no no_pricing throw)', () => {
+    // `gbrain enrich --thin` with chat_model = claude-cli:haiku TX2 hard-failed
+    // at reserve() with reason no_pricing at EVERY --max-usd tried: the
+    // gateway reserves with the pre-alias-resolution model string, and
+    // `haiku` is a recipe alias, not a pricing key. lookupPricing resolves
+    // recipe aliases, so the alias prices exactly like the dated id it maps
+    // to — at reserve(), record() and isModelPriceable() alike.
+    expect(isModelPriceable('claude-cli:haiku', 'chat')).toBe(true);
+    const t = new BudgetTracker({ maxCostUsd: 5.0, label: 'test', auditPath });
+    expect(() =>
+      t.reserve({
+        modelId: 'claude-cli:haiku',
+        estimatedInputTokens: 1_000_000,
+        maxOutputTokens: 0,
+        kind: 'chat',
+      }),
+    ).not.toThrow();
+    t.reserve({
+      modelId: 'claude-cli:claude-haiku-4-5-20251001',
+      estimatedInputTokens: 1_000_000,
+      maxOutputTokens: 0,
+      kind: 'chat',
+    });
+    const audit = readAudit();
+    expect(audit.map((e) => e.event)).toEqual(['reserve', 'reserve']);
+    // $1.00/1M input tokens (ANTHROPIC_PRICING['claude-haiku-4-5-20251001']);
+    // the alias and the dated id project the same cost.
+    expect(audit[0].projected_cost_usd).toBeCloseTo(1.0, 6);
+    expect(audit[1].projected_cost_usd).toBe(audit[0].projected_cost_usd);
+  });
+
+  test('claude-cli:<dated-id> resolves Anthropic pricing via the model tail (parity guard for the alias path)', () => {
+    // The DATED id tail ("claude-haiku-4-5-20251001") is itself a bare
+    // ANTHROPIC_PRICING key, so the modelTail fallback prices this call at
+    // the nominal Anthropic per-token rate. The alias path above must land
+    // on exactly this.
+    const t = new BudgetTracker({ maxCostUsd: 5.0, label: 'test', auditPath });
+    expect(() =>
+      t.reserve({
+        modelId: 'claude-cli:claude-haiku-4-5-20251001',
+        estimatedInputTokens: 1_000_000,
+        maxOutputTokens: 0,
+        kind: 'chat',
+      }),
+    ).not.toThrow();
+    const audit = readAudit();
+    expect(audit[0].event).toBe('reserve');
+    expect(audit[0].projected_cost_usd).toBeCloseTo(1.0, 6);
   });
 
   test('v0.40.6.1: rerank kind for llama-server-reranker prices at $0 (no TX2 throw under --max-cost)', () => {
@@ -381,6 +334,49 @@ describe('BudgetTracker.reserve', () => {
     expect((caught as BudgetExhausted).reason).toBe('no_pricing');
   });
 
+  test('v0.48.2: rerank kind for the voyage:rerank-2.5 default prices from the embedding table (no TX2 throw under --max-cost)', () => {
+    const t = new BudgetTracker({ maxCostUsd: 0.001, label: 'test', auditPath });
+    expect(() =>
+      t.reserve({ modelId: 'voyage:rerank-2.5', estimatedInputTokens: 3000, maxOutputTokens: 0, kind: 'rerank' }),
+    ).not.toThrow();
+    expect(() =>
+      t.record({ modelId: 'voyage:rerank-2.5', inputTokens: 3000, outputTokens: 0, kind: 'rerank' }),
+    ).not.toThrow();
+    // $0.05/1M * 3000 = $0.00015, under the cap — the default reranker is priced.
+    expect(t.totalSpent).toBeGreaterThan(0);
+  });
+
+  test('#3223: rerank kind for zeroentropyai:zerank-2 prices from the embedding table (no TX2 throw under --max-cost)', () => {
+    // Pre-fix: `search_mode: tokenmax` defaults the zerank-2 reranker ON
+    // (docs/ai-providers/zeroentropy.md), but lookupPricing's rerank branch
+    // never consulted the embedding pricing table (where ZeroEntropy's
+    // provider:model-keyed prices live) — so any --max-cost run that
+    // reranked TX2 hard-failed with "no pricing entry" even after adding
+    // the entry to EMBEDDING_PRICING alone. Fixed by wiring the rerank
+    // branch to fall back to lookupEmbeddingPrice.
+    const t = new BudgetTracker({ maxCostUsd: 0.0001, label: 'test', auditPath });
+    expect(() =>
+      t.reserve({
+        modelId: 'zeroentropyai:zerank-2',
+        estimatedInputTokens: 3000,
+        maxOutputTokens: 0,
+        kind: 'rerank',
+      }),
+    ).not.toThrow();
+    expect(t.totalSpent).toBe(0); // reserve() only projects; record() below banks it.
+    expect(() =>
+      t.record({
+        modelId: 'zeroentropyai:zerank-2',
+        inputTokens: 3000,
+        outputTokens: 0,
+        kind: 'rerank',
+      }),
+    ).not.toThrow();
+    // $0.025/1M * 3000 tokens = $0.000075, under the $0.0001 cap — proves the
+    // real ZeroEntropy price was used, not a $0 fallback.
+    expect(t.totalSpent).toBeCloseTo(0.000075, 9);
+  });
+
   test('v0.40.x: local embed providers price at $0 (no TX2 throw under --max-cost)', () => {
     // FREE_LOCAL_EMBED_PROVIDERS — ollama / llama-server run on local inference
     // (electricity, not tokens). Pre-fix a --max-cost embed/reindex job
@@ -405,6 +401,25 @@ describe('BudgetTracker.reserve', () => {
     }
     expect(caught).toBeInstanceOf(BudgetExhausted);
     expect((caught as BudgetExhausted).reason).toBe('no_pricing');
+  });
+
+  test('#3628: unknown hosted rerank provider points no-pricing guidance at embedding-pricing', () => {
+    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    let caught: unknown = null;
+    try {
+      t.reserve({
+        modelId: 'acmecorp:unpriced-reranker-v9',
+        estimatedInputTokens: 100,
+        maxOutputTokens: 0,
+        kind: 'rerank',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BudgetExhausted);
+    expect((caught as BudgetExhausted).reason).toBe('no_pricing');
+    expect((caught as Error).message).toContain('embedding-pricing.ts');
+    expect((caught as Error).message).not.toContain('anthropic-pricing.ts');
   });
 
   test('v0.40.x REGRESSION: known hosted embed (openai) still real-priced (trips a tiny cap)', () => {
@@ -470,70 +485,6 @@ describe('BudgetTracker.record', () => {
     expect(audit[0].actual_cost_usd).toBeCloseTo(0.0035, 6);
   });
 
-  test('prices Anthropic cache tokens with cache-specific multipliers', () => {
-    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
-    t.record({
-      modelId: 'claude-haiku-4-5-20251001',
-      inputTokens: 1000,
-      outputTokens: 500,
-      cacheReadTokens: 1000,
-      cacheCreationTokens: 1000,
-      kind: 'chat',
-    } as any);
-
-    // Haiku: input $0.001 + output $0.0025 + cache read $0.0001
-    // + 5-minute cache write $0.00125 = $0.00485.
-    expect(t.totalSpent).toBeCloseTo(0.00485, 6);
-    const audit = readAudit();
-    expect(audit[0].cache_read_tokens).toBe(1000);
-    expect(audit[0].cache_creation_tokens).toBe(1000);
-    expect(audit[0].cache_read_input_multiplier).toBe(0.1);
-    expect(audit[0].cache_creation_input_multiplier).toBe(1.25);
-    expect(audit[0].actual_cost_usd).toBeCloseTo(0.00485, 6);
-  });
-
-  test('prices Z.AI cached input with explicit cached-input rate', () => {
-    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
-    t.record({
-      modelId: 'zai:glm-5.2',
-      inputTokens: 1000,
-      outputTokens: 500,
-      cacheReadTokens: 1000,
-      cacheCreationTokens: 1000,
-      kind: 'chat',
-    } as any);
-
-    // GLM-5.2: input $0.0014 + output $0.0022 + cached input $0.00026
-    // + cache creation/storage currently priced at $0.00 = $0.00386.
-    expect(t.totalSpent).toBeCloseTo(0.00386, 6);
-    const audit = readAudit();
-    expect(audit[0].cache_read_tokens).toBe(1000);
-    expect(audit[0].cache_creation_tokens).toBe(1000);
-    expect(audit[0].cache_read_input_multiplier).toBeNull();
-    expect(audit[0].cache_creation_input_multiplier).toBeNull();
-    expect(audit[0].actual_cost_usd).toBeCloseTo(0.00386, 6);
-  });
-
-  test('non-Anthropic cached tokens fall back to normal input pricing when no cache rate is modeled', () => {
-    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
-    t.record({
-      modelId: 'openai:gpt-4o-mini',
-      inputTokens: 1000,
-      outputTokens: 500,
-      cacheReadTokens: 1000,
-      cacheCreationTokens: 1000,
-      kind: 'chat',
-    } as any);
-
-    // gpt-4o-mini: input $0.00015 + output $0.0003 + cached read fallback
-    // $0.00015 + cached creation fallback $0.00015 = $0.00075.
-    expect(t.totalSpent).toBeCloseTo(0.00075, 6);
-    const audit = readAudit();
-    expect(audit[0].cache_read_input_multiplier).toBeNull();
-    expect(audit[0].cache_creation_input_multiplier).toBeNull();
-    expect(audit[0].actual_cost_usd).toBeCloseTo(0.00075, 6);
-  });
-
   test('unpriced record: no throw, audited as record_unpriced', () => {
     const t = new BudgetTracker({ label: 'test', auditPath });
     expect(() =>
@@ -562,6 +513,70 @@ describe('BudgetTracker.record', () => {
     const audit = readAudit();
     expect(audit[0].embedding_dims).toBe(3072);
     expect(audit[0].kind).toBe('embed');
+  });
+});
+
+describe('BudgetTracker outstanding reservations (#4365)', () => {
+  // Haiku 4.5: $1/M input + $5/M output → 10K in + 10K out projects $0.06.
+  const estimate = {
+    modelId: 'claude-haiku-4-5-20251001',
+    estimatedInputTokens: 10_000,
+    maxOutputTokens: 10_000,
+    kind: 'chat' as const,
+  };
+
+  test('concurrent reservations count against the cap', () => {
+    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    // Bank $0.90 of real spend (900K input tokens at $1/M).
+    t.record({ modelId: 'claude-haiku-4-5-20251001', inputTokens: 900_000, outputTokens: 0, kind: 'chat' });
+    // One $0.06 projection fits ($0.96 ≤ $1.00)…
+    expect(() => t.reserve(estimate)).not.toThrow();
+    // …but a second concurrent one must NOT: $0.90 + $0.06 outstanding
+    // + $0.06 projected = $1.02 > $1.00. Pre-fix, admission ignored the
+    // in-flight reservation and every parallel call passed at $0.96.
+    let caught: unknown = null;
+    try {
+      t.reserve(estimate);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BudgetExhausted);
+    expect((caught as BudgetExhausted).reason).toBe('cost');
+    expect((caught as Error).message).toContain('outstanding');
+    const denied = readAudit().find((e) => e.event === 'reserve_denied');
+    expect(denied).toBeDefined();
+    expect(denied!.outstanding_usd as number).toBeCloseTo(0.06, 9);
+  });
+
+  test('record() settles the reservation: reserve→record→reserve at the same margin succeeds', () => {
+    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    t.record({ modelId: 'claude-haiku-4-5-20251001', inputTokens: 900_000, outputTokens: 0, kind: 'chat' });
+    t.reserve(estimate);
+    // Actual usage far under the projection: cumulative $0.901.
+    t.record({ modelId: 'claude-haiku-4-5-20251001', inputTokens: 1000, outputTokens: 0, kind: 'chat' });
+    // Outstanding released — the same $0.06 projection fits again
+    // ($0.901 + $0.06 = $0.961 ≤ $1.00).
+    expect(() => t.reserve(estimate)).not.toThrow();
+  });
+
+  test('record() under the post-resolution model id still settles (same-kind fallback)', () => {
+    // gateway.chat reserves with the pre-resolution string (alias/bare/slash
+    // form) but records `${recipe.id}:${modelId}` — a missed pop would leak
+    // phantom outstanding budget forever.
+    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    t.record({ modelId: 'claude-haiku-4-5-20251001', inputTokens: 900_000, outputTokens: 0, kind: 'chat' });
+    t.reserve({ ...estimate, modelId: 'anthropic/claude-haiku-4-5-20251001' });
+    t.record({ modelId: 'anthropic:claude-haiku-4-5-20251001', inputTokens: 1000, outputTokens: 0, kind: 'chat' });
+    expect(() => t.reserve(estimate)).not.toThrow();
+  });
+
+  test('unreserved records (expand/OCR) never drive outstanding negative', () => {
+    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    // Two records with no prior reserve — the pop must be a no-op both times.
+    t.record({ modelId: 'claude-haiku-4-5-20251001', inputTokens: 1000, outputTokens: 0, kind: 'chat' });
+    t.record({ modelId: 'claude-haiku-4-5-20251001', inputTokens: 1000, outputTokens: 0, kind: 'chat' });
+    // Admission math is unaffected: $0.002 spent + $0.06 projected fits.
+    expect(() => t.reserve(estimate)).not.toThrow();
   });
 });
 
@@ -616,23 +631,6 @@ describe('extractUsageFromError (A3 amended)', () => {
   test('camelCase usage variant', () => {
     const err = { usage: { inputTokens: 300, outputTokens: 100 } };
     expect(extractUsageFromError(err, fallback)).toEqual({ inputTokens: 300, outputTokens: 100 });
-  });
-
-  test('preserves separate cache usage fields for cache-aware pricing', () => {
-    const err = {
-      usage: {
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_read_input_tokens: 7,
-        cache_creation_input_tokens: 11,
-      },
-    };
-    expect(extractUsageFromError(err, fallback)).toEqual({
-      inputTokens: 100,
-      outputTokens: 50,
-      cacheReadTokens: 7,
-      cacheCreationTokens: 11,
-    });
   });
 
   test('returns pessimistic fallback when no usage present (A3 amended)', () => {
@@ -700,202 +698,5 @@ describe('BudgetTracker.snapshot', () => {
     expect(s.maxRuntimeMs).toBe(60_000);
     expect(s.elapsedMs).toBeGreaterThanOrEqual(0);
     expect(s.callsRecorded).toBe(0);
-  });
-});
-
-describe('monthly Claude+DeepSeek budget helpers', () => {
-  test('scope includes native Claude and DeepSeek but not OpenAI, GLM, or OpenRouter-wrapped Claude', () => {
-    expect(isModelInMonthlyBudgetScope('claude-opus-4-8')).toBe(true);
-    expect(isModelInMonthlyBudgetScope('anthropic:claude-sonnet-4-6')).toBe(true);
-    expect(isModelInMonthlyBudgetScope('deepseek:deepseek-v4-flash')).toBe(true);
-    expect(isModelInMonthlyBudgetScope('openai:gpt-5')).toBe(false);
-    expect(isModelInMonthlyBudgetScope('zai:glm-5.2')).toBe(false);
-    expect(isModelInMonthlyBudgetScope('openrouter:anthropic/claude-sonnet-4-6')).toBe(false);
-  });
-
-  test('readback sums current-month actual scoped provider rows unless quarantined', () => {
-    writeAuditRows([
-      {
-        schema_version: 1,
-        ts: '2026-06-01T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        actual_cost_usd: 10,
-      },
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'deepseek:deepseek-v4-flash',
-        actual_cost_usd: 1.25,
-      },
-      {
-        schema_version: 1,
-        ts: '2026-05-31T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        actual_cost_usd: 100,
-      },
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'openai:gpt-5',
-        actual_cost_usd: 100,
-      },
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'reserve',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        projected_cost_usd: 100,
-      },
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        label: 'outer-test',
-        actual_cost_usd: 100,
-      },
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        sub_label: 'gateway.chat.failed',
-        actual_cost_usd: 100,
-      },
-    ]);
-    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(111.25);
-  });
-
-  test('monthly cap does not infer test status from plausible propose_takes token counts', () => {
-    writeAuditRows([
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        label: 'cycle.propose_takes',
-        sub_label: 'gateway.chat',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        input_tokens: 1000,
-        output_tokens: 500,
-        actual_cost_usd: 0.0105,
-      },
-    ]);
-    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(0.0105);
-  });
-
-  test('monthly cap excludes fallback accounting rows from provider spend', () => {
-    writeAuditRows([
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        label: 'gateway.chat',
-        sub_label: 'gateway.chat.failed.fallback',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        input_tokens: 1000,
-        output_tokens: 500,
-        actual_cost_usd: 0.0105,
-      },
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        label: 'gateway.chat',
-        sub_label: 'gateway.chat.failed.provider_usage',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        input_tokens: 1000,
-        output_tokens: 500,
-        actual_cost_usd: 0.0205,
-      },
-    ]);
-    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(0.0205);
-  });
-
-  test('monthly cap skips explicitly quarantined local audit rows', () => {
-    const quarantinedRow = {
-      schema_version: 1,
-      ts: '2026-06-17T00:00:00.000Z',
-      event: 'record',
-      label: 'cycle.propose_takes',
-      sub_label: 'gateway.chat',
-      kind: 'chat',
-      model: 'anthropic:claude-sonnet-4-6',
-      input_tokens: 1000,
-      output_tokens: 500,
-      actual_cost_usd: 0.0105,
-    };
-    writeAuditRows([
-      quarantinedRow,
-      {
-        schema_version: 1,
-        ts: '2026-06-17T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        actual_cost_usd: 0.25,
-      },
-    ]);
-    writeFileSync(
-      join(tmp, 'budget-quarantine.jsonl'),
-      JSON.stringify({
-        fingerprint: budgetAuditRowFingerprint(quarantinedRow),
-        reason: 'legacy_local_test_fixture',
-      }) + '\n',
-      'utf-8',
-    );
-    expect(readMonthlyChatSpendUsd({ auditPath, now: new Date('2026-06-18T00:00:00.000Z') })).toBe(0.25);
-  });
-
-  test('DB config readback resolves the cap and defaults mode to block', async () => {
-    const config = new Map([
-      ['budget.monthly.chat_max_usd', '50'],
-      ['budget.monthly.mode', 'block'],
-    ]);
-    const got = await resolveMonthlyBudgetCapFromEngine({
-      getConfig: async (key: string) => config.get(key) ?? null,
-    });
-    expect(got).toEqual({ maxCostUsd: 50, mode: 'block' });
-  });
-
-  test('configured default applies to trackers without per-instance monthly options', () => {
-    writeAuditRows([
-      {
-        schema_version: 1,
-        ts: '2026-06-10T00:00:00.000Z',
-        event: 'record',
-        kind: 'chat',
-        model: 'anthropic:claude-sonnet-4-6',
-        actual_cost_usd: 49.99,
-      },
-    ]);
-    configureBudgetTrackerDefaults({ monthlyBudget: { maxCostUsd: 50, mode: 'block' } });
-    const t = new BudgetTracker({
-      label: 'test',
-      auditPath,
-      monthlyNow: () => new Date('2026-06-18T00:00:00.000Z'),
-    });
-    expect(() =>
-      t.reserve({
-        modelId: 'claude-opus-4-8',
-        estimatedInputTokens: 10_000,
-        maxOutputTokens: 0,
-        kind: 'chat',
-      }),
-    ).toThrow(BudgetExhausted);
-    expect(readAudit().some((e) => e.event === 'monthly_budget_denied')).toBe(true);
   });
 });

@@ -7,7 +7,7 @@ import type { BrainEngine } from '../engine.ts';
 import {
   computeRecommendations,
   classifyChecks,
-  maxReachableScoreFromRecommendations,
+  maxReachableScore,
 } from '../brain-score-recommendations.ts';
 import { loadRecommendationContext } from './context.ts';
 import type { RemediationPlan, RemediationPlanOpts } from './types.ts';
@@ -16,17 +16,15 @@ import type { RemediationPlan, RemediationPlanOpts } from './types.ts';
  * Synthetic check list for classification. computeRecommendations operates
  * on BrainHealth + context alone; we don't need full doctor output, just
  * the check names the recommendations care about. Same five names doctor
- * used since v0.36.4.0 plus extract_atoms_backlog; do not extend without also updating
+ * has used since v0.36.4.0; do not extend without also updating
  * brain-score-recommendations.ts.
  */
 export const SYNTHETIC_CHECK_NAMES = [
   'brain_score',
-  'source_path_health',
   'sync_freshness',
   'missing_embeddings',
   'dead_links',
   'orphan_pages',
-  'extract_atoms_backlog',
 ] as const;
 
 /**
@@ -47,33 +45,22 @@ export async function computeRemediationPlan(
   // Cheap path (D7) — don't run slow doctor checks for the plan surface.
   // The recommendation generator works from BrainHealth + context alone.
   const health = await engine.getHealth();
-  const ctx = await loadRecommendationContext(engine, {
-    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
-    sourceHygienePacket: opts.sourceHygienePacket,
-  });
+  const ctx = await loadRecommendationContext(engine);
   const recs = computeRecommendations(health, ctx, opts.extraRemediations ?? []);
   const syntheticChecks = SYNTHETIC_CHECK_NAMES.map((name) => ({
     name,
     status: 'ok' as const,
   }));
   const classifications = classifyChecks(syntheticChecks, ctx);
+  const ceiling = maxReachableScore(health, classifications);
+
   const filteredRecs = recs.filter((r) => r.status === 'remediable');
-  const ceiling = maxReachableScoreFromRecommendations(health, filteredRecs);
   const estTotalSeconds = filteredRecs.reduce((sum, r) => sum + r.est_seconds, 0);
   const estTotalUsd = filteredRecs.reduce((sum, r) => sum + (r.est_usd_cost ?? 0), 0);
 
   const blocked = classifications
-    .filter((c) => c.status === 'blocked' && c.check !== 'source_path_health')
+    .filter((c) => c.status === 'blocked')
     .map((c) => ({ check: c.check, reason: c.reason ?? 'prerequisite missing' }));
-  for (const source of ctx.sourceHygiene?.sources ?? []) {
-    if (source.classification !== 'recovery_required') continue;
-    blocked.push({
-      check: `source_path_health:${source.source_id}`,
-      reason: source.recovery_mode === 'managed_clone_sync'
-        ? 'managed source checkout must be recovered before paid or protected work'
-        : 'source data must be preserved and its checkout recovered before sync or paid work',
-    });
-  }
 
   return {
     schema_version: 2,

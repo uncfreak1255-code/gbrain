@@ -1,122 +1,114 @@
-import { describe, expect, test } from 'bun:test';
-import {
-  buildConversationFormatCoverageCheck,
-} from '../src/commands/doctor.ts';
-import { isConversationFactsCandidatePage } from '../src/core/conversation-parser/candidates.ts';
-import type { Page } from '../src/core/types.ts';
-import type {
-  ParseConversationOpts,
-  ParseResult,
-} from '../src/core/conversation-parser/parse.ts';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { computeConversationFormatCoverageCheck } from '../src/commands/doctor.ts';
 
-function page(slug: string, title: string, body = 'body'): Page {
-  const now = new Date('2026-07-02T00:00:00Z');
-  return {
-    id: 1,
-    slug,
-    type: 'conversation',
-    title,
+let engine: PGLiteEngine;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+});
+
+afterAll(async () => {
+  await engine.disconnect();
+});
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
+});
+
+/** A summary-only page: headings + short bullets, no transcript shape.
+ *  Mirrors the seven pages observed in #4193 (5-30 nonblank lines). */
+const SLACK_SUMMARY_BODY = [
+  '## Highlights',
+  '',
+  '- Shipped the new onboarding flow',
+  '- Reviewed the quarterly metrics doc',
+  '',
+  '## Decisions',
+  '',
+  '- Move the launch to next week',
+  '- Alice owns the follow-up doc',
+].join('\n');
+
+/** Transcript-claiming page (explicit `## Transcript` section) whose turn
+ *  shape no builtin matches — must STILL count as a parser miss. */
+const UNSUPPORTED_TRANSCRIPT_BODY = [
+  '## Transcript',
+  '',
+  '9.03.12 -- Alice -- kicking off',
+  '9.04.55 -- Bob -- sounds good',
+  '9.06.20 -- Alice -- shipping it',
+].join('\n');
+
+/** Body matching the builtin `imessage-slack` pattern (its own test_positive shape). */
+const SUPPORTED_TRANSCRIPT_BODY = [
+  '**Alice Example** (2024-03-15 9:00 AM): hello',
+  '**Bob Example** (2024-03-15 9:02 AM): hi there',
+  '**Alice Example** (2024-03-15 9:05 AM): shipping it',
+].join('\n');
+
+async function seedPage(slug: string, type: string, body: string): Promise<void> {
+  await engine.putPage(slug, {
+    type,
+    title: slug,
     compiled_truth: body,
     timeline: '',
     frontmatter: {},
-    created_at: now,
-    updated_at: now,
-    source_id: 'default',
-  };
+  });
 }
 
-function parserFor(unmatchedSlugs: Set<string>) {
-  return (
-    _body: string,
-    opts?: ParseConversationOpts,
-  ): ParseResult => {
-    const slug = opts?.page?.slug ?? '';
-    if (unmatchedSlugs.has(slug)) {
-      return { messages: [], phase: 'no_match' };
-    }
-    return {
-      messages: [{ speaker: 'A', timestamp: '2026-07-02T00:00:00Z', text: 'hi' }],
-      phase: 'regex_match',
-      matched_pattern_id: 'imessage-slack',
-    };
-  };
-}
+describe('conversation_format_coverage summary-only handling (#4193)', () => {
+  test('a slack/meeting summary page (headings + bullets) is not _no_match coverage debt', async () => {
+    await seedPage('slack-weekly-summary', 'slack', SLACK_SUMMARY_BODY);
+    await seedPage('meeting-standup-notes', 'meeting', SLACK_SUMMARY_BODY);
 
-describe('conversation_format_coverage doctor check', () => {
-  test('conversation candidate filter excludes indexed repo test fixtures', () => {
-    expect(
-      isConversationFactsCandidatePage(page('test/e2e/fixtures/meetings/weekly-sync-mar28', 'Fixture')),
-    ).toBe(false);
-    expect(
-      isConversationFactsCandidatePage(page('conversations/weekly-sync-mar28', 'Real import')),
-    ).toBe(true);
-  });
-
-  test('warns with deterministic details and concrete unmatched examples', () => {
-    const sample = [
-      page('conversations/zeta', 'Zeta call'),
-      page('conversations/alpha', 'Alpha call'),
-      page('conversations/beta', 'Beta call'),
-      page('conversations/gamma', 'Gamma call'),
-      page('conversations/delta', 'Delta call'),
-      page('conversations/epsilon', 'Epsilon call'),
-      page('conversations/matched', 'Matched call'),
-    ];
-
-    const check = buildConversationFormatCoverageCheck(
-      sample,
-      parserFor(new Set(sample.slice(0, 6).map((p) => p.slug))),
-    );
-
-    expect(check.status).toBe('warn');
-    expect(check.message).toContain('6/7 conversation pages (85.7%) match no built-in pattern');
-    expect(check.message).toContain('gbrain conversation-parser scan conversations/alpha');
-    expect(check.message).not.toContain('LLM fallback');
-    expect(check.message).not.toContain('<slug>');
-    expect(check.details).toEqual({
-      total_pages: 7,
-      matched_pages: 1,
-      unmatched_pages: 6,
-      unmatched_pct: 85.7,
-      pattern_counts: {
-        _no_match: 6,
-        'imessage-slack': 1,
-      },
-      unmatched_examples: [
-        { slug: 'conversations/alpha', title: 'Alpha call' },
-        { slug: 'conversations/beta', title: 'Beta call' },
-        { slug: 'conversations/delta', title: 'Delta call' },
-        { slug: 'conversations/epsilon', title: 'Epsilon call' },
-        { slug: 'conversations/gamma', title: 'Gamma call' },
-      ],
-    });
-  });
-
-  test('ok result still includes machine-readable pattern counts', () => {
-    const check = buildConversationFormatCoverageCheck(
-      [page('conversations/one', 'One'), page('conversations/two', 'Two')],
-      parserFor(new Set()),
-    );
-
+    const check = await computeConversationFormatCoverageCheck(engine);
+    expect(check.name).toBe('conversation_format_coverage');
     expect(check.status).toBe('ok');
-    expect(check.details).toMatchObject({
-      total_pages: 2,
-      matched_pages: 2,
-      unmatched_pages: 0,
-      unmatched_pct: 0,
-      pattern_counts: { 'imessage-slack': 2 },
-      unmatched_examples: [],
-    });
+    expect(check.message).toContain('_summary_only=2');
+    expect(check.message).not.toContain('_no_match');
   });
 
-  test('quotes unmatched slug in paste-ready scan command', () => {
-    const hostileSlug = "conversations/bad slug; echo nope";
-    const check = buildConversationFormatCoverageCheck(
-      [page(hostileSlug, 'Unsafe slug')],
-      parserFor(new Set([hostileSlug])),
-    );
+  test('a transcript-claiming page with an unsupported turn shape still counts as a miss', async () => {
+    await seedPage('meeting-odd-transcript', 'meeting', UNSUPPORTED_TRANSCRIPT_BODY);
 
+    const check = await computeConversationFormatCoverageCheck(engine);
     expect(check.status).toBe('warn');
-    expect(check.message).toContain("gbrain conversation-parser scan 'conversations/bad slug; echo nope'");
+    expect(check.message).toContain('_no_match=1');
+  });
+
+  test('supported transcript patterns keep their current results in the denominator', async () => {
+    await seedPage('slack-real-transcript', 'slack', SUPPORTED_TRANSCRIPT_BODY);
+    await seedPage('slack-weekly-summary', 'slack', SLACK_SUMMARY_BODY);
+
+    const check = await computeConversationFormatCoverageCheck(engine);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('imessage-slack=1');
+    expect(check.message).toContain('_summary_only=1');
+  });
+
+  test('mixed brain: summaries excluded from the denominator, real misses still warn', async () => {
+    // 1 supported + 1 unsupported transcript + 2 summaries.
+    // Old math: 3/4 unmatched = 75% -> warn either way, but with summaries
+    // wrongly in the numerator. New math: 1/2 transcript-claiming unmatched
+    // = 50% -> warn, with the summaries reported separately.
+    await seedPage('slack-real-transcript', 'slack', SUPPORTED_TRANSCRIPT_BODY);
+    await seedPage('meeting-odd-transcript', 'meeting', UNSUPPORTED_TRANSCRIPT_BODY);
+    await seedPage('slack-weekly-summary', 'slack', SLACK_SUMMARY_BODY);
+    await seedPage('meeting-standup-notes', 'meeting', SLACK_SUMMARY_BODY);
+
+    const check = await computeConversationFormatCoverageCheck(engine);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('1/2');
+    expect(check.message).toContain('_summary_only=2');
+  });
+
+  test('no conversation pages -> not-applicable ok', async () => {
+    const check = await computeConversationFormatCoverageCheck(engine);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('No conversation-type pages');
   });
 });

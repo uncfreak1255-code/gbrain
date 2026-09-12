@@ -19,9 +19,10 @@
  * parent's brainId instead of re-running this resolver.
  */
 
-import { join, dirname, resolve, relative, isAbsolute } from 'path';
+import { readFileSync, lstatSync, type Stats } from 'fs';
+import { join, dirname, resolve } from 'path';
 import { HOST_BRAIN_ID, loadMounts, validateMountId, type MountEntry } from './brain-registry.ts';
-import { readTrustedDotfile, realpathOrResolve } from './path-confine.ts';
+import { isTrustedDotfile, realpathOrResolve } from './path-confine.ts';
 
 const DOTFILE = '.gbrain-mount';
 /** Same regex as brain-registry. Kept in sync. */
@@ -40,11 +41,16 @@ function readDotfileWalk(startDir: string): string | null {
     // owned, or world-writable `.gbrain-mount` planted by another user in a
     // shared ancestor dir (same multi-user-host hijack as #418, applied to the
     // brain axis). Any stat error → skip and keep walking (fail-closed).
-    const raw = readTrustedDotfile(candidate);
-    if (raw !== null) {
-      const content = raw.trim().split('\n')[0].trim();
-      if (content === HOST_BRAIN_ID) return content;
-      if (BRAIN_ID_RE.test(content)) return content;
+    let st: Stats | null = null;
+    try { st = lstatSync(candidate); } catch { st = null; }
+    if (st && isTrustedDotfile(st)) {
+      try {
+        const content = readFileSync(candidate, 'utf8').trim().split('\n')[0].trim();
+        if (content === HOST_BRAIN_ID) return content;
+        if (BRAIN_ID_RE.test(content)) return content;
+      } catch {
+        // Unreadable dotfile — skip and keep walking.
+      }
     }
     const parent = dirname(dir);
     if (parent === dir) break; // filesystem root
@@ -63,8 +69,7 @@ function longestPathPrefixMount(mounts: MountEntry[], cwd: string): MountEntry |
   for (const m of mounts) {
     if (m.enabled === false) continue;
     const p = realpathOrResolve(m.path);
-    const rel = relative(p, cwdResolved);
-    if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
+    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
       if (!best || p.length > best.pathLen) {
         best = { mount: m, pathLen: p.length };
       }

@@ -1,26 +1,23 @@
 ---
 type: person
 title: Priya Patel
-ingested_at: '2026-07-03T11:53:38.022Z'
-source_kind: put_page
-ingested_via: put_page
 tags:
-  - ai-research
   - technical
+  - ai-research
 ---
 
 # Priya Patel
 
-CTO and co-founder of [[novamind|NovaMind]]. Stanford CS PhD (2022), where her dissertation focused
+CTO and co-founder of NovaMind. Stanford CS PhD (2022), where her dissertation focused
 on emergent communication in multi-agent systems. Before Stanford, she did her
 undergraduate CS degree at IIT Bombay. After her PhD she joined Google Brain as a
 research scientist (2022-2024), publishing several papers on multi-agent coordination
 and task decomposition.
 
-Priya designed [[novamind|NovaMind]]'s core multi-agent coordination layer. Her academic work at
+Priya designed NovaMind's core multi-agent coordination layer. Her academic work at
 Stanford on emergent communication protocols directly informs how NovaMind agents
 negotiate task handoffs and share intermediate state. She is the technical counterpart
-to [[sarah-chen|Sarah Chen]]'s product and business vision.
+to Sarah Chen's product and business vision.
 
 ## Research Background
 
@@ -37,13 +34,13 @@ to [[sarah-chen|Sarah Chen]]'s product and business vision.
 - Developed the evaluation framework that measures task completion reliability (94%
   completion rate on 47-step workflows)
 
-<!-- timeline -->
+---
 
 ## Timeline
 
 ### 2025-03-22 — Technical Deep Dive (via Sarah)
 
-[[sarah-chen|Sarah Chen]] described Priya's architecture during our follow-up call. The multi-agent
+Sarah Chen described Priya's architecture during our follow-up call. The multi-agent
 coordination layer uses a learned protocol rather than hardcoded message passing.
 Agents can recruit specialist sub-agents dynamically based on task requirements. Priya
 apparently benchmarked this against LangGraph and CrewAI, showing 3x better error

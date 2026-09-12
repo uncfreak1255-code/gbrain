@@ -2,7 +2,8 @@
  * Tests for probeHealth(), probeLiveness(), and HEALTH_TIMEOUT_MS in
  * src/commands/serve-http.ts.
  *
- * v0.28.10 split: /health now calls probeLiveness (sql`SELECT 1`); the heavier
+ * v0.28.10 split: /health now calls probeLiveness (engine.executeRaw('SELECT 1'));
+ * the heavier
  * probeHealth (engine.getStats()) moved behind requireAdmin at
  * /admin/api/full-stats. Both share ProbeHealthResult so the route handlers
  * stay 2-line dispatches.
@@ -18,7 +19,6 @@
 import { describe, test, expect } from 'bun:test';
 import { HEALTH_TIMEOUT_MS, probeHealth, probeLiveness } from '../src/commands/serve-http.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
-import type { SqlQuery } from '../src/core/oauth-provider.ts';
 
 /**
  * Minimal mock engine: only `getStats()` is exercised by probeHealth.
@@ -29,14 +29,16 @@ function makeMockEngine(getStats: () => Promise<unknown>): BrainEngine {
 }
 
 /**
- * Minimal mock sql tag: probeLiveness only awaits the result of `sql\`SELECT 1\``
- * — the tag function's return value is what's raced, success/throw is what
- * matters. We ignore the template strings and simulate a connection by calling
- * the supplied factory.
+ * Minimal liveness engine: probeLiveness only exercises executeRaw.
  */
-function makeMockSql(fn: () => Promise<unknown>): SqlQuery {
-  const tag: any = (_strings: TemplateStringsArray, ..._values: unknown[]) => fn();
-  return tag as SqlQuery;
+function makeMockLivenessEngine(
+  executeRaw: (
+    sql: string,
+    params?: unknown[],
+    opts?: { signal?: AbortSignal },
+  ) => Promise<unknown>,
+): BrainEngine {
+  return { executeRaw } as unknown as BrainEngine;
 }
 
 describe('HEALTH_TIMEOUT_MS', () => {
@@ -90,35 +92,45 @@ describe('probeHealth', () => {
 
 describe('probeLiveness (v0.28.10)', () => {
   test('happy path: returns 200 + status:ok with NO engine-stats fields', async () => {
-    const sql = makeMockSql(async () => [{ '?column?': 1 }]);
-    const result = await probeLiveness(sql, 'postgres', '0.28.10', 100);
+    const engine = makeMockLivenessEngine(async () => [{ '?column?': 1 }]);
+    const result = await probeLiveness(engine, 'postgres', '0.28.10', 100);
     expect(result.ok).toBe(true);
     expect(result.status).toBe(200);
     if (result.ok) {
       expect(result.body.status).toBe('ok');
       expect(result.body.version).toBe('0.28.10');
       expect(result.body.engine).toBe('postgres');
-      // Regression: the lightweight body must NOT spread getStats() fields,
-      // and it must not carry maintenance/health detail either — /health is
-      // public and unauthenticated. The v0.28.10 invariant (pinned by the
-      // serve-http-oauth E2E) is a body of EXACTLY {status, version, engine}.
-      // The Aug 13 WIP briefly widened this; reverted.
-      expect(Object.keys(result.body).sort()).toEqual([
-        'engine', 'status', 'version',
-      ]);
+      // Regression: the lightweight body must NOT spread getStats() fields.
+      // The original PR's pre-refactor /health leaked page_count etc.;
+      // tightening this assertion is the iron-rule regression test.
+      expect(Object.keys(result.body).sort()).toEqual(['engine', 'status', 'version']);
       expect((result.body as Record<string, unknown>).page_count).toBeUndefined();
       expect((result.body as Record<string, unknown>).chunk_count).toBeUndefined();
-      expect((result.body as Record<string, unknown>).maintenance).toBeUndefined();
-      expect((result.body as Record<string, unknown>).health).toBeUndefined();
     }
   });
 
-  test('timeout path: sql hangs → 503 with health_timeout description within 1s', async () => {
-    const sql = makeMockSql(() => new Promise(() => { /* never resolves */ }));
+  test('timeout path: aborts the live query before returning 503', async () => {
+    let querySignal: AbortSignal | undefined;
+    let abortObserved = false;
+    const engine = makeMockLivenessEngine((
+      _sql: string,
+      _params?: unknown[],
+      opts?: { signal?: AbortSignal },
+    ) => {
+      querySignal = opts?.signal;
+      return new Promise((_resolve, reject) => {
+        querySignal?.addEventListener('abort', () => {
+          abortObserved = true;
+          reject(new DOMException('aborted', 'AbortError'));
+        }, { once: true });
+      });
+    });
     const start = Date.now();
-    const result = await probeLiveness(sql, 'postgres', '0.28.10', 100);
+    const result = await probeLiveness(engine, 'postgres', '0.28.10', 100);
     const elapsed = Date.now() - start;
     expect(elapsed).toBeLessThan(1000);
+    expect(querySignal?.aborted).toBe(true);
+    expect(abortObserved).toBe(true);
     expect(result.ok).toBe(false);
     expect(result.status).toBe(503);
     if (!result.ok) {
@@ -129,9 +141,9 @@ describe('probeLiveness (v0.28.10)', () => {
     }
   });
 
-  test('db-error path: sql throws → 503 with database_failed description', async () => {
-    const sql = makeMockSql(() => Promise.reject(new Error('ECONNREFUSED')));
-    const result = await probeLiveness(sql, 'postgres', '0.28.10', 100);
+  test('db-error path: query throws → 503 with database_failed description', async () => {
+    const engine = makeMockLivenessEngine(() => Promise.reject(new Error('ECONNREFUSED')));
+    const result = await probeLiveness(engine, 'postgres', '0.28.10', 100);
     expect(result.ok).toBe(false);
     expect(result.status).toBe(503);
     if (!result.ok) {
@@ -140,28 +152,13 @@ describe('probeLiveness (v0.28.10)', () => {
     }
   });
 
-  test('liveness makes exactly one query — no secondary config/maintenance reads', async () => {
-    // The Aug 13 WIP added a maintenance read after SELECT 1; reverted with
-    // the body-shape change. Pin the call count so a secondary read (which
-    // could hang or leak state onto the public route) can't quietly return.
-    let calls = 0;
-    const sql = makeMockSql(() => {
-      calls++;
-      return calls === 1 ? Promise.resolve([{ '?column?': 1 }]) : new Promise(() => { /* never resolves */ });
-    });
-    const result = await probeLiveness(sql, 'postgres', '0.28.10', 100);
-    expect(result.ok).toBe(true);
-    expect(result.status).toBe(200);
-    expect(calls).toBe(1);
-  });
-
   test('timer-cleanup: 100 fast successful probes do not leak pending timers', async () => {
-    const sql = makeMockSql(async () => [{ '?column?': 1 }]);
+    const engine = makeMockLivenessEngine(async () => [{ '?column?': 1 }]);
     // Snapshot active handles before; same after. If the finally-block
     // clearTimeout regressed, every probe would leak a 100ms-pending timer.
     const beforeHandles = (process as any)._getActiveHandles?.()?.length ?? 0;
     await Promise.all(
-      Array.from({ length: 100 }, () => probeLiveness(sql, 'postgres', '0.28.10', 100)),
+      Array.from({ length: 100 }, () => probeLiveness(engine, 'postgres', '0.28.10', 100)),
     );
     // Allow microtask + process tick drain to let any leaked timers settle.
     await new Promise(r => setImmediate(r));

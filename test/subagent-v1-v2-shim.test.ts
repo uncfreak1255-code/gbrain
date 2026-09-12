@@ -58,6 +58,24 @@ describe('adaptContentBlocksToChatBlocks (D5 — v1 Anthropic → v2 ChatBlock s
     ]);
   });
 
+  it('carries per-part providerMetadata through the shim (#4201 — replay must not strip it)', () => {
+    const sig = { google: { thoughtSignature: 'opaque-sig-xyz' } };
+    const blocks = [
+      { type: 'text', text: 'reasoned', providerMetadata: sig },
+      { type: 'tool-call', toolCallId: 'c9', toolName: 'search', input: { q: 'z' }, providerMetadata: sig },
+      { type: 'tool-result', toolCallId: 'c9', toolName: 'search', output: 'ok', providerMetadata: sig },
+    ];
+    const out = adaptContentBlocksToChatBlocks(blocks) as any[];
+    expect(out[0].providerMetadata).toEqual(sig);
+    expect(out[1].providerMetadata).toEqual(sig);
+    expect(out[2].providerMetadata).toEqual(sig);
+    // And absent metadata stays absent — no key invented.
+    const bare = adaptContentBlocksToChatBlocks([
+      { type: 'tool-call', toolCallId: 'c1', toolName: 'search', input: {} },
+    ]) as any[];
+    expect('providerMetadata' in bare[0]).toBe(false);
+  });
+
   it('adapts v1 Anthropic tool_use block → v2 tool-call', () => {
     // Anthropic shape: {type:'tool_use', id, name, input}
     // Gateway ChatBlock shape: {type:'tool-call', toolCallId, toolName, input}
@@ -125,64 +143,6 @@ describe('adaptContentBlocksToChatBlocks (D5 — v1 Anthropic → v2 ChatBlock s
     expect(adaptContentBlocksToChatBlocks(blocks)).toEqual(blocks);
   });
 
-  it('repairs v2 tool-result blocks missing replay ids from the previous assistant tool calls', () => {
-    const blocks = [{
-      type: 'tool-result',
-      output: { ok: true },
-    }];
-    expect(adaptContentBlocksToChatBlocks(blocks, [{
-      toolCallId: 'call_1',
-      toolName: 'put_page',
-    }])).toEqual([{
-      type: 'tool-result',
-      toolCallId: 'call_1',
-      toolName: 'put_page',
-      output: { ok: true },
-      isError: false,
-    }]);
-  });
-
-  it('consumes replay hints for legacy tool_result before repairing later v2 tool-result blocks', () => {
-    const blocks = [
-      {
-        type: 'tool_result',
-        tool_use_id: 'toolu_legacy',
-        content: 'legacy result',
-      },
-      {
-        type: 'tool-result',
-        output: { ok: true },
-      },
-    ];
-    const out = adaptContentBlocksToChatBlocks(blocks, [
-      { toolCallId: 'toolu_legacy', toolName: 'search' },
-      { toolCallId: 'gbrain-next', toolName: 'put_page' },
-    ]) as any[];
-
-    expect(out[0]).toEqual({
-      type: 'tool-result',
-      toolCallId: 'toolu_legacy',
-      toolName: 'search',
-      output: 'legacy result',
-      isError: false,
-    });
-    expect(out[1]).toEqual({
-      type: 'tool-result',
-      toolCallId: 'gbrain-next',
-      toolName: 'put_page',
-      output: { ok: true },
-      isError: false,
-    });
-  });
-
-  it('skips v2 tool-result blocks missing replay ids when no assistant hint exists', () => {
-    const blocks = [{
-      type: 'tool-result',
-      output: { ok: true },
-    }];
-    expect(adaptContentBlocksToChatBlocks(blocks)).toEqual([]);
-  });
-
   it('handles a mixed-shape array (v1 + v2 blocks in same message — mid-upgrade scenario)', () => {
     const blocks = [
       { type: 'text', text: 'thinking...' },
@@ -208,6 +168,27 @@ describe('adaptContentBlocksToChatBlocks (D5 — v1 Anthropic → v2 ChatBlock s
     const out = adaptContentBlocksToChatBlocks(blocks) as any[];
     expect(out.length).toBe(1);
     expect(out[0].toolCallId).toBe('ok');
+  });
+
+  // A crash-replayed reasoning-model tool loop must keep the OpenAI
+  // Responses API reasoning-item id (providerMetadata.openai.itemId) across
+  // resume the same way a tool-call's providerMetadata already does —
+  // otherwise the resumed job's next turn 400s the same way an un-echoed
+  // live turn does (see gateway-chat.test.ts's reasoning-item round trip
+  // suite for the live-turn half of this fix).
+  it('passes a reasoning block through with providerMetadata intact', () => {
+    const sig = { openai: { itemId: 'rs_abc123', reasoningEncryptedContent: 'opaque-blob' } };
+    const blocks = [{ type: 'reasoning', text: 'weighing the tradeoff...', providerMetadata: sig }];
+    expect(adaptContentBlocksToChatBlocks(blocks)).toEqual(blocks);
+  });
+
+  it('drops a reasoning block with a non-string text field (defensive)', () => {
+    const blocks = [
+      { type: 'reasoning', text: null },
+      { type: 'text', text: 'ok' },
+    ];
+    const out = adaptContentBlocksToChatBlocks(blocks) as any[];
+    expect(out).toEqual([{ type: 'text', text: 'ok' }]);
   });
 });
 

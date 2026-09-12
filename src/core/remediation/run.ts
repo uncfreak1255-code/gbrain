@@ -25,29 +25,6 @@ import type {
   StepResult,
 } from './types.ts';
 
-const RUN_SCOPED_IDEMPOTENCY_DELIMITER = ':run:';
-
-async function scopeTerminalRemediationIdempotencyKey(
-  engine: BrainEngine,
-  baseIdempotencyKey: string,
-  doctorRunId: string,
-  runStartedAt: Date,
-): Promise<void> {
-  await engine.executeRaw(
-    `UPDATE minion_jobs
-       SET idempotency_key = idempotency_key || $2 || $3 || ':job:' || id::text
-       WHERE idempotency_key = $1
-         AND status IN ('completed', 'failed', 'dead', 'cancelled')
-         AND created_at < $4`,
-    [
-      baseIdempotencyKey,
-      RUN_SCOPED_IDEMPOTENCY_DELIMITER,
-      doctorRunId,
-      runStartedAt.toISOString(),
-    ],
-  );
-}
-
 /**
  * Submit ordered Remediation jobs sequentially per D3, with D5 cascade
  * on failure and D7 scoped recheck between steps.
@@ -66,7 +43,6 @@ export async function runRemediation(
   hooks: RemediationHooks = {},
 ): Promise<RemediationResult> {
   const targetScore = opts.targetScore ?? 90;
-  const extraRemediations = opts.extraRemediations ?? [];
   const maxJobs = opts.maxJobs ?? Infinity;
   const maxUsd = opts.maxUsd;
   const dryRun = opts.dryRun ?? false;
@@ -89,17 +65,11 @@ export async function runRemediation(
     clearRemediationCheckpoint,
   } = await import('../remediation-checkpoint.ts');
 
-  const ctx = await loadRecommendationContext(engine, {
-    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
-  });
+  const ctx = await loadRecommendationContext(engine);
+  const extraRemediations = opts.extraRemediations ?? [];
 
   // Pre-flight ceiling check via the shared plan computation.
-  const initialPlan = await computeRemediationPlan(engine, {
-    targetScore,
-    extraRemediations,
-    inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
-    sourceHygienePacket: ctx.sourceHygiene,
-  });
+  const initialPlan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
   if (initialPlan.target_unreachable) {
     hooks.onTargetUnreachable?.(targetScore, initialPlan.max_reachable_score);
     return {
@@ -213,8 +183,8 @@ export async function runRemediation(
   // Real submission path
   const submitted: StepResult[] = [];
   const abortedIds = new Set<string>();
+  const attemptedIds = new Set<string>();
   const doctorRunId = crypto.randomUUID();
-  const runStartedAt = new Date();
 
   const { MinionQueue } = await import('../minions/queue.ts');
   const { waitForCompletion } = await import('../minions/wait-for-completion.ts');
@@ -254,9 +224,8 @@ export async function runRemediation(
   const runLoop = async (): Promise<void> => {
     let stepCount = 0;
     const totalSteps = recs.length;
-    const attemptedIds = new Set<string>(completedFromCheckpoint);
     while (recs.length > 0 && stepCount < maxJobs) {
-      let step = recs[0];
+      const step = recs[0];
       if (!step) break;
       stepCount++;
 
@@ -264,6 +233,7 @@ export async function runRemediation(
       if (completedFromCheckpoint.has(step.id)) {
         const result: StepResult = { step: stepCount, id: step.id, job_id: null, status: 'completed' };
         submitted.push(result);
+        attemptedIds.add(step.id);
         hooks.onStepEnd?.(result);
         recs.shift();
         continue;
@@ -271,72 +241,49 @@ export async function runRemediation(
 
       // D5: if depends_on intersects aborted, skip + cascade
       if (step.depends_on && step.depends_on.some((d: string) => abortedIds.has(d))) {
-        attemptedIds.add(step.id);
         const result: StepResult = { step: stepCount, id: step.id, job_id: null, status: 'skipped_dep_aborted' };
         submitted.push(result);
         abortedIds.add(step.id);
+        attemptedIds.add(step.id);
         hooks.onStepEnd?.(result);
         recs.shift();
         continue;
       }
 
       hooks.onStepStart?.(stepCount, totalSteps, step);
-      attemptedIds.add(step.id);
       try {
-        // Re-read the canonical recommendation immediately before submission,
-        // including the first step. The initial plan and the post-step D7
-        // refresh are both snapshots; a local source checkout can become
-        // recovery_required while an operator is observing onStepStart. Do not
-        // enqueue paid/protected work that the fresh planner now suppresses.
-        if (opts.inspectLocalSourcePaths === true) {
-          const submissionHealth = await engine.getHealth();
-          const submissionCtx = await loadRecommendationContext(engine, {
-            inspectLocalSourcePaths: true,
-          });
-          const refreshedStep = computeRecommendations(
-            submissionHealth,
-            submissionCtx,
-            extraRemediations,
-          ).find((candidate) => candidate.status === 'remediable' && candidate.id === step.id);
-          if (!refreshedStep) {
-            const skippedResult: StepResult = {
-              step: stepCount,
-              id: step.id,
-              job_id: null,
-              status: 'skipped_recheck',
-            };
-            submitted.push(skippedResult);
-            abortedIds.add(step.id);
-            hooks.onStepEnd?.(skippedResult);
-            recs.shift();
-            continue;
-          }
-          step = refreshedStep;
-        }
-
         const isProtected = !!step.protected;
-        await scopeTerminalRemediationIdempotencyKey(
-          engine,
-          step.idempotency_key,
-          doctorRunId,
-          runStartedAt,
-        );
-        const job = await queue.add(
-          step.job,
-          { ...step.params, doctor_run_id: doctorRunId },
-          {
-            queue: 'default',
-            idempotency_key: step.idempotency_key,
-            max_attempts: 2,
-            maxWaiting: 1,
-          },
-          isProtected ? { allowProtectedSubmit: true } : undefined,
-        );
+        const submitWith = (key: string) =>
+          queue.add(
+            step.job,
+            { ...step.params, doctor_run_id: doctorRunId },
+            {
+              queue: 'default',
+              idempotency_key: key,
+              max_attempts: 2,
+              maxWaiting: 1,
+            },
+            isProtected ? { allowProtectedSubmit: true } : undefined,
+          );
+        let job = await submitWith(step.idempotency_key);
+        let dedupedJobId: number | undefined;
+        if (job.coalesced && (job.status === 'completed' || job.status === 'failed')) {
+          // #3626: the content-hash key never rotates and the queue frees a
+          // key only for dead/cancelled rows — a completed/failed row from a
+          // PRIOR run holds it forever, so every later --remediate "ran" this
+          // step as an instant no-op against the old terminal row. Rotate
+          // ONCE onto this run's id so the work actually re-executes.
+          // Waiting/active rows still coalesce (dedupe onto in-flight work).
+          dedupedJobId = job.id;
+          job = await submitWith(`${step.idempotency_key}:r:${doctorRunId}`);
+        }
         const submittedResult: StepResult = {
           step: stepCount,
           id: step.id,
           job_id: job.id,
           status: 'submitted',
+          ...(job.coalesced === true ? { coalesced: true } : {}),
+          ...(dedupedJobId !== undefined ? { deduped_job_id: dedupedJobId } : {}),
         };
         submitted.push(submittedResult);
 
@@ -371,16 +318,21 @@ export async function runRemediation(
         hooks.onStepEnd?.(errResult);
       }
 
+      attemptedIds.add(step.id);
       recs.shift();
       // D7: scoped recheck — re-compute plan from fresh health snapshot.
-      // The next plan may drop completed steps and re-introduce failed
-      // steps with bumped retry suffix (D1).
+      // Queue-level max_attempts handles retries within a submitted attempt.
+      // A stuck health signal regenerates the same stable id, so keep ids this
+      // run already attempted out of the refreshed list to avoid re-enqueueing
+      // them forever.
       if (recs.length === 0 || stepCount >= maxJobs) break;
       const freshHealth = await engine.getHealth();
-      const freshCtx = await loadRecommendationContext(engine, {
-        inspectLocalSourcePaths: opts.inspectLocalSourcePaths === true,
-      });
-      recs = computeRecommendations(freshHealth, freshCtx, extraRemediations)
+      // Extras carry a static status:'remediable' — a fresh health snapshot
+      // never ages them out the way health-derived steps drop. Filter out
+      // ids this run already processed (any terminal status), or the recheck
+      // would resubmit completed extras every iteration, forever.
+      const pendingExtras = extraRemediations.filter((r) => !attemptedIds.has(r.id));
+      recs = computeRecommendations(freshHealth, ctx, pendingExtras)
         .filter((r) => r.status === 'remediable' && !attemptedIds.has(r.id));
     }
   };
@@ -398,8 +350,8 @@ export async function runRemediation(
   }
 
   // Clear checkpoint on a clean run (no budget abort). Failed steps in the
-  // submitted set don't disqualify the cleanup — they re-surface on the
-  // next plan with bumped suffixes.
+  // submitted set don't disqualify cleanup; an uncleared health signal can
+  // produce the same stable id again in a later run.
   if (!budgetAbort) {
     clearRemediationCheckpoint(planHash);
   }

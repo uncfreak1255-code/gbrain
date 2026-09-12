@@ -1,12 +1,10 @@
 /**
  * Connection Manager — route Postgres queries by query type (v0.30.1, Fix 1).
  *
- * Three work routes plus one dedicated session-lock pool: read() goes to the
- * pooler (port 6543, fast, many connections); ddl() and bulk() go to a direct
- * connection (port 5432, 30min statement_timeout, capped at 3 conns) so DDL
- * doesn't time out on the Supabase pooler's 2-min statement_timeout. session()
- * owns one separate direct backend so long-lived advisory locks cannot consume
- * a work-pool slot or leak through transaction pooling.
+ * Three pools, one decision: read() goes to the pooler (port 6543, fast,
+ * many connections); ddl() and bulk() go to a direct connection (port 5432,
+ * 30min statement_timeout, capped at 3 conns) so DDL doesn't time out on
+ * the Supabase pooler's 2-min statement_timeout.
  *
  * The connection-manager is the URL-routing layer. It layers on top of
  * postgres.js's existing pool primitives + PostgresEngine.withReservedConnection.
@@ -39,7 +37,7 @@
  */
 
 import postgres from 'postgres';
-import { resolvePrepare, resolveSessionTimeouts, resolvePoolSize, endPoolBounded } from './db.ts';
+import { resolvePrepare, resolveSessionTimeouts, resolvePoolSize, resolveMaxLifetimeSeconds, endPoolBounded } from './db.ts';
 import { redactPgUrl } from './url-redact.ts';
 import { logConnectionEvent } from './connection-audit.ts';
 
@@ -170,6 +168,78 @@ export function deriveDirectUrl(url: string): string | null {
 }
 
 /**
+ * Derive the SESSION-mode pooler URL from a TRANSACTION-mode pooler URL
+ * (#1915): same pooler host, port 6543 → 5432, KEEPING the postgres.<ref>
+ * user (Supavisor needs the tenant suffix — unlike deriveDirectUrl, which
+ * strips it for the db.<ref> host). The session pooler is IPv4-reachable and
+ * honors the direct pool's startup-parameter timeouts, so it is the natural
+ * second choice when the auto-derived db.<ref>.supabase.co host is
+ * IPv6-unreachable (Railway, most home ISPs). Returns null when the URL
+ * isn't a Supabase transaction-pooler shape (pooler hostname + port 6543 —
+ * a bare :6543 on an unknown host proves nothing about what :5432 serves).
+ */
+export function deriveSessionPoolerUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url.replace(/^postgres(ql)?:\/\//, 'http://'));
+    const isPoolerHost = SUPABASE_POOLER_HOSTNAME_PATTERNS.some(re => re.test(parsed.hostname));
+    if (!isPoolerHost || parsed.port !== '6543') return null;
+    const scheme = url.match(/^postgres(?:ql)?:\/\//i)?.[0] ?? 'postgres://';
+    const auth = parsed.username
+      ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ''}@`
+      : '';
+    return `${scheme}${auth}${parsed.hostname}:5432${parsed.pathname ?? ''}${parsed.search ?? ''}`;
+  } catch {
+    return null;
+  }
+}
+
+/** True when the URL targets Supavisor transaction mode (port 6543). */
+function isTransactionPoolerUrl(url: string): boolean {
+  try {
+    return new URL(url.replace(/^postgres(ql)?:\/\//, 'http://')).port === '6543';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the direct-pool URL from an explicit/env override + the primary URL.
+ *
+ * A direct override still pointing at the TRANSACTION-mode pooler (port 6543,
+ * usually a copy-paste of the primary URL) is a misconfiguration: the manager
+ * would believe DDL/bulk work runs on a long-timeout direct connection while
+ * still routing through Supavisor transaction mode (short timeouts, no
+ * prepared statements). Normalize it via deriveDirectUrl. Session-mode pooler
+ * URLs (pooler host, port 5432) pass through — they are a legitimate
+ * direct-ish target when the db.<ref> host is unreachable.
+ */
+export function normalizeDirectUrl(primaryUrl: string, override?: string | null): string | null {
+  const candidate = override ?? deriveDirectUrl(primaryUrl);
+  if (!candidate) return null;
+  if (!isTransactionPoolerUrl(candidate)) return candidate;
+  return deriveDirectUrl(candidate) ?? deriveDirectUrl(primaryUrl);
+}
+
+/**
+ * Error codes that mean "the direct host is unreachable from this network"
+ * (#1641). The auto-derived db.<ref>.supabase.co host is IPv6-only without
+ * the paid IPv4 add-on, so ENOTFOUND/ECONNREFUSED here is expected on
+ * IPv4-only networks — we fall back to the pooler instead of failing init.
+ */
+const NETWORK_UNREACHABLE_CODES = [
+  'ENOTFOUND', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH',
+  'ETIMEDOUT', 'CONNECT_TIMEOUT',
+];
+
+/** True when err looks like a network-unreachable failure (not auth/SQL). */
+export function isNetworkUnreachableError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && NETWORK_UNREACHABLE_CODES.includes(code)) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return NETWORK_UNREACHABLE_CODES.some(c => msg.includes(c));
+}
+
+/**
  * Read kill-switch state from env. Subordinate to parent manager's state
  * when present (A2 inheritance).
  */
@@ -197,16 +267,15 @@ export class ConnectionManager {
   private _readPoolOwnedExternally: boolean;
   private _directInit: Promise<Sql | null> | null = null;
   private _directPool: Sql | null = null;
-  /** Dedicated one-connection pool for session advisory locks. */
-  private _sessionInit: Promise<Sql> | null = null;
-  private _sessionPool: Sql | null = null;
-  /** Invalidates an in-flight session-pool initializer during disconnect. */
-  private _sessionGeneration = 0;
-  /** Disconnect is terminal for this manager's dedicated session pool. */
-  private _sessionClosed = false;
   private _killSwitch: boolean;
   private _directUrl: string | null;
   private _isSupabase: boolean;
+  /** #1915: true when _directUrl was auto-derived (no operator override) —
+   *  only then may the unreachable-host path retry the session pooler. */
+  private _directUrlAutoDerived = false;
+  /** #1915: single-flight guard for the session-pooler retry. */
+  private _sessionInit: Promise<Sql> | null = null;
+  private _sessionFallbackLogged = false;
 
   constructor(opts: ConnectionManagerOpts) {
     this.opts = opts;
@@ -217,14 +286,20 @@ export class ConnectionManager {
       this._killSwitch = opts.parent.isKillSwitchActive();
       this._isSupabase = opts.parent.isSupabase();
       this._directUrl = opts.parent.resolveDirectUrl();
+      this._directUrlAutoDerived = opts.parent.isDirectUrlAutoDerived();
       this._readPool = opts.parent.peekReadPool();
       this._readPoolOwnedExternally = true; // never end the parent's pool
     } else {
       this._killSwitch = readKillSwitchEnv();
       this._isSupabase = isSupabasePoolerUrl(opts.url);
-      // Direct URL: explicit override > env > derive > null
+      // Direct URL: explicit override > env > derive > null. Pooler-shaped
+      // overrides are normalized to a real direct host (or dropped).
       const envOverride = process.env.GBRAIN_DIRECT_DATABASE_URL;
-      this._directUrl = opts.directUrl ?? envOverride ?? deriveDirectUrl(opts.url);
+      const override = opts.directUrl ?? envOverride;
+      this._directUrl = normalizeDirectUrl(opts.url, override);
+      // #1915: an operator override is respected as-is — never second-guessed
+      // with the session-pooler retry. Only auto-derived URLs may fall back.
+      this._directUrlAutoDerived = override == null;
     }
   }
 
@@ -236,11 +311,7 @@ export class ConnectionManager {
   isSupabase(): boolean { return this._isSupabase; }
   isKillSwitchActive(): boolean { return this._killSwitch; }
   resolveDirectUrl(): string | null { return this._directUrl; }
-  /** Exact endpoint safe for a dedicated session-lock connection. */
-  resolveSessionUrl(): string | null {
-    if (this._isSupabase && !this.isDualPoolActive()) return null;
-    return this.isDualPoolActive() ? this._directUrl : this.opts.url;
-  }
+  isDirectUrlAutoDerived(): boolean { return this._directUrlAutoDerived; }
 
   /**
    * Internal: peek at the read pool without forcing init. Used by parent
@@ -270,6 +341,8 @@ export class ConnectionManager {
       max: resolvePoolSize(this.opts.readPoolSize),
       idle_timeout: 20,
       connect_timeout: 10,
+      // Explicit (matches the postgres.js implicit default; GBRAIN_POOL_MAX_LIFETIME_S overrides).
+      max_lifetime: resolveMaxLifetimeSeconds(),
       types: { bigint: postgres.BigInt },
     };
     const timeouts = resolveSessionTimeouts();
@@ -320,69 +393,6 @@ export class ConnectionManager {
     return this.getDirectPool();
   }
 
-  /**
-   * Return a dedicated one-connection pool for session-scoped advisory locks.
-   * Work performed while the lock is held continues through the normal pools,
-   * so even a configured pool size of one cannot self-deadlock. Supabase's
-   * transaction pooler is never accepted as the session endpoint.
-   */
-  async session(): Promise<Sql> {
-    if (this._sessionClosed) {
-      throw new Error('connection-manager: session pool is unavailable after disconnect has started');
-    }
-    const url = this.resolveSessionUrl();
-    if (!url) {
-      throw new Error(
-        'A direct Postgres connection is required for migrate-engine session locking; '
-        + 'configure GBRAIN_DIRECT_DATABASE_URL and enable the direct pool',
-      );
-    }
-    if (this._sessionPool) return this._sessionPool;
-    if (!this._sessionInit) {
-      const generation = this._sessionGeneration;
-      let sessionInit!: Promise<Sql>;
-      sessionInit = this.initSessionPool(url).then(async (pool) => {
-        if (this._sessionGeneration !== generation || this._sessionInit !== sessionInit) {
-          await endPoolBounded(pool);
-          throw new Error('connection-manager: disconnected while initializing the session pool');
-        }
-        this._sessionPool = pool;
-        return pool;
-      }).catch((error) => {
-        // An invalidated initializer must not clear a newer retry's cache.
-        if (this._sessionInit === sessionInit) this._sessionInit = null;
-        throw error;
-      });
-      this._sessionInit = sessionInit;
-    }
-    return this._sessionInit;
-  }
-
-  private async initSessionPool(url: string): Promise<Sql> {
-    const opts: Record<string, unknown> = {
-      max: 1,
-      idle_timeout: 20,
-      connect_timeout: 10,
-      types: { bigint: postgres.BigInt },
-    };
-    const prepare = resolvePrepare(url);
-    if (typeof prepare === 'boolean') opts.prepare = prepare;
-    const pool = postgres(url, opts);
-    try {
-      await pool`SELECT 1`;
-      logConnectionEvent({
-        pool: this.isDualPoolActive() ? 'ddl' : 'single',
-        op: 'init',
-        caller: 'ConnectionManager.session',
-        host: this.hostOnly(url),
-      });
-      return pool;
-    } catch (error) {
-      await endPoolBounded(pool);
-      throw error;
-    }
-  }
-
   private async getDirectPool(): Promise<Sql> {
     if (this._directPool) return this._directPool;
     // A1: cache the Promise so concurrent first callers await the same init.
@@ -396,7 +406,71 @@ export class ConnectionManager {
         throw err;
       });
     }
-    const pool = await this._directInit;
+    let pool: Sql | null;
+    try {
+      pool = await this._directInit;
+    } catch (err) {
+      // #1641: the derived direct host (db.<ref>.supabase.co) is IPv6-only
+      // without Supabase's IPv4 add-on. On IPv4-only networks the direct
+      // pool can never connect — permanently fall back to the read pool
+      // (self-activating kill-switch) instead of failing init/migrations.
+      // Non-network errors (auth, SQL) still throw: they mean misconfig,
+      // not unreachability.
+      if (isNetworkUnreachableError(err)) {
+        // #1915: before the permanent read-pool fallback, retry ONCE against
+        // the SESSION pooler (same host as the transaction pooler, port 5432).
+        // It is IPv4-reachable and honors the direct pool's startup-parameter
+        // timeouts, so DDL/bulk keep their 30min budget instead of dying on
+        // the transaction pooler's ~8s statement_timeout (cold-start init
+        // failures). Auto-derived URLs only — operator overrides are final.
+        if (this._directUrlAutoDerived) {
+          try {
+            // Single-flight FIRST, URL-equality guard second: caller 1 of a
+            // rejected _directInit mutates _directUrl to the session URL
+            // before starting the retry, so a concurrent caller 2 that
+            // checked `sessionUrl !== this._directUrl` first would see them
+            // equal, skip the in-flight retry entirely, and trip the
+            // read-pool kill-switch while caller 1's session pooler connects.
+            if (this._sessionInit) {
+              return await this._sessionInit;
+            }
+            const sessionUrl = deriveSessionPoolerUrl(this.opts.url);
+            if (sessionUrl && sessionUrl !== this._directUrl) {
+              const prevHost = this._directUrl ? this.hostOnly(this._directUrl) : 'unknown host';
+              this._directUrl = sessionUrl;
+              this._sessionInit = this.initDirectPool().then(p => {
+                this._directPool = p;
+                return p;
+              });
+              const p = await this._sessionInit;
+              if (!this._sessionFallbackLogged) {
+                this._sessionFallbackLogged = true;
+                console.error(
+                  `gbrain: direct connection to ${prevHost} unreachable; using the Supabase session pooler ` +
+                  `(${this.hostOnly(sessionUrl)}) for DDL/bulk instead — long-timeout settings still apply. ` +
+                  'Set GBRAIN_DIRECT_DATABASE_URL to override.',
+                );
+              }
+              return p;
+            }
+          } catch {
+            // Session pooler also failed → fall through to the #1641
+            // read-pool kill-switch below (the original behavior).
+          }
+        }
+        const alreadyWarned = this._killSwitch;
+        this._killSwitch = true;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!alreadyWarned) console.error(
+          `gbrain: direct connection to ${this._directUrl ? this.hostOnly(this._directUrl) : 'unknown host'} unreachable (${msg}); ` +
+          'falling back to the pooler for DDL/bulk (long migrations may hit the pooler statement timeout). ' +
+          'Set GBRAIN_DIRECT_DATABASE_URL to a reachable direct URL (e.g. the Session pooler, port 5432) or enable the Supabase IPv4 add-on; ' +
+          'GBRAIN_DISABLE_DIRECT_POOL=1 silences this.',
+        );
+        return this.getReadPool();
+      }
+      throw err;
+    }
     if (!pool) {
       // Defensive — initDirectPool should have thrown.
       throw new Error('connection-manager: direct pool init returned null');
@@ -413,6 +487,8 @@ export class ConnectionManager {
       max: size,
       idle_timeout: 20,
       connect_timeout: 10,
+      // Explicit (matches the postgres.js implicit default; GBRAIN_POOL_MAX_LIFETIME_S overrides).
+      max_lifetime: resolveMaxLifetimeSeconds(),
       types: { bigint: postgres.BigInt },
       // Always use prepared statements on the direct pool — no PgBouncer
       // here, so the prepare-cache invalidation issue doesn't apply.
@@ -427,8 +503,9 @@ export class ConnectionManager {
       },
     };
     const t0 = Date.now();
+    let pool: Sql | null = null;
     try {
-      const pool = postgres(this._directUrl, opts);
+      pool = postgres(this._directUrl, opts);
       // Probe to validate connectivity early.
       await pool`SELECT 1`;
       logConnectionEvent({
@@ -439,6 +516,9 @@ export class ConnectionManager {
       });
       return pool;
     } catch (err) {
+      // Don't leak the failed pool's sockets/timers (#1641 fallback keeps
+      // the process running afterward).
+      if (pool) await endPoolBounded(pool);
       logConnectionEvent({
         pool: 'ddl',
         op: 'error',
@@ -482,19 +562,6 @@ export class ConnectionManager {
     // instance/module pool is added downstream) and neither can hang teardown
     // past the CLI's 10s force-exit. endPoolBounded never throws.
     const ends: Promise<void>[] = [];
-    const sessionPool = this._sessionPool;
-    const pendingSessionInit = sessionPool ? null : this._sessionInit;
-    this._sessionClosed = true;
-    this._sessionGeneration += 1;
-    this._sessionPool = null;
-    this._sessionInit = null;
-    if (sessionPool) {
-      ends.push(endPoolBounded(sessionPool));
-    } else if (pendingSessionInit) {
-      // Wait for the invalidated initializer to close the pool it created, so
-      // disconnect never returns before a late backend has been reclaimed.
-      ends.push(pendingSessionInit.then(() => undefined, () => undefined));
-    }
     if (this._directPool) {
       ends.push(endPoolBounded(this._directPool));
       this._directPool = null;

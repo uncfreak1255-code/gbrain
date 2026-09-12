@@ -165,7 +165,6 @@ async function scoreLlm(
   try {
     const result = await chat({
       model: judgeModel,
-      budgetLabel: 'skillopt.score.judge',
       system: LLM_JUDGE_SYSTEM,
       messages: [{ role: 'user', content: userMsg }],
       maxTokens: 200,

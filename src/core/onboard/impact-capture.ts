@@ -17,7 +17,6 @@
 // misattribute deltas to the wrong remediation.
 
 import type { BrainEngine } from './../engine.ts';
-import { executeRawJsonb } from './../sql-query.ts';
 
 export type MetricName =
   | 'orphan_count'
@@ -116,13 +115,12 @@ export async function writeImpactLogRow(
   details?: Record<string, unknown>,
 ): Promise<void> {
   try {
-    await executeRawJsonb(
-      engine,
+    await engine.executeRaw(
       `INSERT INTO migration_impact_log (
          remediation_id, metric_name, metric_before, metric_after,
          job_id, source_id, brain_id, started_at, idempotency_key,
          applied_by, details
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb)`,
       [
         attribution.remediation_id,
         metricName,
@@ -134,8 +132,8 @@ export async function writeImpactLogRow(
         attribution.started_at ?? new Date().toISOString(),
         attribution.idempotency_key ?? null,
         attribution.applied_by ?? null,
+        JSON.stringify(details ?? {}),
       ],
-      [details ?? {}],
     );
   } catch (err) {
     process.stderr.write(

@@ -22,6 +22,9 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { normalizeAlias } from '../search/alias-normalize.ts';
+import { foldNonDecomposingLatin } from '../latin-fold.ts';
+import { isUndefinedTableError } from '../utils.ts';
 
 /**
  * Canonicalize a free-form entity reference to a page slug.
@@ -55,6 +58,13 @@ export async function resolveEntitySlug(
     if (exact) return exact;
   }
 
+  // 1.5. Alias-exact (v0.46.15 identity wave, #3730): an unambiguous
+  //      page_aliases hit resolves BEFORE prefix expansion / fuzzy — the
+  //      alias table is curated ground truth ("saoirse" → people/saoirse-x)
+  //      while fuzzy is a guess. Live-page verified (page_aliases has no FK).
+  const aliased = await tryAliasExact(engine, source_id, trimmed);
+  if (aliased) return aliased;
+
   // 2. Prefix-expansion match: when the input looks like a bare first name
   //    (no slash, no prefix, slugifies to a single short token), try
   //    `people/<token>-%` then `companies/<token>-%`. Short bare names
@@ -63,10 +73,7 @@ export async function resolveEntitySlug(
   //    `"Alice"` → `people/alice-example` before we phantom-stub a bare
   //    `people/alice.md`.
   if (isBareName(trimmed)) {
-    const token = slugify(trimmed);
-    const exactBare = await tryUnambiguousExactBareMatch(engine, source_id, trimmed, token);
-    if (exactBare) return exactBare;
-    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, token);
+    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, slugify(trimmed));
     if (expanded) return expanded;
   } else {
     // 3. Fuzzy match against existing pages within the source. Bare names
@@ -77,7 +84,54 @@ export async function resolveEntitySlug(
   }
 
   // 4. Fallback: deterministic slugify.
+  return fallbackSlugify(trimmed);
+}
+
+/**
+ * #3447 — shared fallback for both resolvers. slugify()'s `[^a-z0-9]+ → '-'`
+ * rule rewrites the path separator, so running slug-shaped input through it
+ * corrupts a well-formed slug (`people/alice-example` → `people-alice-example`)
+ * into one no page can ever have — and the flattened slug never resolves, so
+ * every re-extraction re-mints it. Path-shaped input is slugified PER SEGMENT
+ * (identity for already-well-formed slugs); display names keep plain slugify.
+ */
+function fallbackSlugify(trimmed: string): string {
+  if (trimmed.includes('/')) {
+    return trimmed.split('/').map(slugify).filter(Boolean).join('/');
+  }
   return slugify(trimmed);
+}
+
+/**
+ * Alias-exact arm (v0.46.15, #3730): unambiguous single-slug page_aliases hit,
+ * verified against LIVE pages — page_aliases has no FK to pages, so stale
+ * alias rows for deleted/renamed pages linger (outside-voice R2-8).
+ * Liveness is filtered BEFORE uniqueness (codex ship-review): a stale sibling
+ * row must not veto the sole live target — that fall-through would land on
+ * fuzzy/slugify and could recreate a phantom slug on a WRITE path.
+ * Fail-open on undefined-table (pre-v110 brains have no page_aliases table);
+ * other errors warn once per process so degradation isn't silent.
+ */
+let aliasExactWarned = false;
+async function tryAliasExact(engine: BrainEngine, source_id: string, raw: string): Promise<string | null> {
+  const norm = normalizeAlias(raw);
+  if (!norm) return null;
+  try {
+    const hits = (await engine.resolveAliases([norm], { sourceId: source_id })).get(norm) ?? [];
+    if (!hits.length) return null;
+    const rows = await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE deleted_at IS NULL AND source_id = $1 AND slug = ANY($2::text[])`,
+      [source_id, [...new Set(hits.map((h) => h.slug))]],
+    );
+    const live = [...new Set(rows.map((r) => r.slug))];
+    return live.length === 1 ? live[0] : null;
+  } catch (err) {
+    if (!isUndefinedTableError(err) && !aliasExactWarned) {
+      aliasExactWarned = true;
+      console.error(`[gbrain] alias-exact resolution degraded (falling through to fuzzy): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return null;
+  }
 }
 
 /**
@@ -99,37 +153,13 @@ function isBareName(raw: string): boolean {
   return true;
 }
 
-const PREFIX_EXPANSION_DIRS = ['people', 'companies'] as const;
-
-/**
- * Prefer one exact canonical page before treating a bare token as ambiguous.
- * `companies/stripe` and `companies/stripe-atlas` are both prefix candidates,
- * but the first is still the exact terminal slug/title for "Stripe". Shared
- * titles across multiple pages remain unresolved rather than guessed.
- */
-async function tryUnambiguousExactBareMatch(
-  engine: BrainEngine,
-  source_id: string,
-  raw: string,
-  token: string,
-): Promise<string | null> {
-  const exactSlugs = PREFIX_EXPANSION_DIRS.map(dir => `${dir}/${token}`);
-  try {
-    const rows = await engine.executeRaw<{ slug: string }>(
-      `SELECT p.slug
-         FROM pages p
-        WHERE p.source_id = $1
-          AND p.deleted_at IS NULL
-          AND (p.slug = ANY($2::text[]) OR lower(p.title) = lower($3))
-        ORDER BY p.slug ASC
-        LIMIT 2`,
-      [source_id, exactSlugs, raw],
-    );
-    return rows.length === 1 ? rows[0].slug : null;
-  } catch {
-    return null;
-  }
-}
+// hosts/projects joined people/companies after the 2026-08-06 memory eval: a
+// bare infra token ("hive") fell through to slugify and recall returned
+// nothing while the canonical hosts/<token> page + its facts sat one prefix
+// away. `infra/` is deliberately NOT here — it is a mixed namespace of
+// analysis/runbook documents (`infra/hive-dependency-audit-…`), and any such
+// doc would trip the ambiguity gate and re-break bare-token resolution.
+const PREFIX_EXPANSION_DIRS = ['people', 'companies', 'hosts', 'projects'] as const;
 
 /**
  * v0.40.2.0 — resolution-source-tagged variant for trajectory routing.
@@ -144,7 +174,7 @@ async function tryUnambiguousExactBareMatch(
  * The original `resolveEntitySlug` keeps its existing contract (returns
  * just the slug) for all pre-v0.40 call sites — no caller-side churn.
  */
-export type ResolutionSource = 'exact_page' | 'fuzzy_match' | 'fallback_slugify';
+export type ResolutionSource = 'exact_page' | 'alias_exact' | 'fuzzy_match' | 'fallback_slugify';
 
 export interface ResolveResult {
   slug: string;
@@ -166,18 +196,18 @@ export async function resolveEntitySlugWithSource(
     if (exact) return { slug: exact, source: 'exact_page' };
   }
 
+  const aliased = await tryAliasExact(engine, source_id, trimmed);
+  if (aliased) return { slug: aliased, source: 'alias_exact' };
+
   if (isBareName(trimmed)) {
-    const token = slugify(trimmed);
-    const exactBare = await tryUnambiguousExactBareMatch(engine, source_id, trimmed, token);
-    if (exactBare) return { slug: exactBare, source: 'exact_page' };
-    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, token);
+    const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, slugify(trimmed));
     if (expanded) return { slug: expanded, source: 'fuzzy_match' };
   } else {
     const fuzzy = await tryFuzzyMatch(engine, source_id, trimmed);
     if (fuzzy) return { slug: fuzzy, source: 'fuzzy_match' };
   }
 
-  return { slug: slugify(trimmed), source: 'fallback_slugify' };
+  return { slug: fallbackSlugify(trimmed), source: 'fallback_slugify' };
 }
 
 /**
@@ -419,19 +449,27 @@ async function tryFuzzyMatch(
 }
 
 /**
- * Deterministic slugify: lowercase, replace non-alphanumerics with hyphens,
- * collapse repeated hyphens, trim leading/trailing hyphens.
+ * Deterministic slugify: lowercase, fold accents and stroke letters to their
+ * base letter, replace non-alphanumerics with hyphens, collapse repeated
+ * hyphens, trim leading/trailing hyphens.
  *
  * Exported for tests + callers who want the same fallback shape independently.
  */
 export function slugify(raw: string): string {
-  return raw
-    .toLowerCase()
-    .normalize('NFKD')
-    // NFKD decomposes accents into combining marks (U+0300..U+036F);
-    // strip them before replacing the rest with hyphens so "è" → "e",
-    // not "e" + "-".
-    .replace(/[̀-ͯ]/g, '')
+  // Stroke letters carry no decomposition, so the mark strip cannot fold them
+  // and the sweep below would DELETE them: "Đăng Example" slugged to
+  // "ang-example". Fold after the strip so composed forms reduce in one pass
+  // ("ǿ" → "ø" → "o").
+  const folded = foldNonDecomposingLatin(
+    raw
+      .toLowerCase()
+      .normalize('NFKD')
+      // NFKD decomposes accents into combining marks (U+0300..U+036F);
+      // strip them before replacing the rest with hyphens so "è" → "e",
+      // not "e" + "-".
+      .replace(/[̀-ͯ]/g, ''),
+  );
+  return folded
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');

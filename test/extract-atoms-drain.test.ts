@@ -13,7 +13,6 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
   runExtractAtomsDrain,
-  MAX_DRAIN_FAILURE_RECORDS,
   type ExtractAtomsDrainDeps,
 } from '../src/core/cycle/extract-atoms-drain.ts';
 import { isProtectedJobName, PROTECTED_JOB_NAMES } from '../src/core/minions/protected-names.ts';
@@ -46,9 +45,8 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
 
   it('stops at the wallclock window with remaining > 0', async () => {
     // SYNC stepping clock: now() #1 sets deadline (0+100=100); the while-check
-    // and post-batch checks stay under deadline for two batches, then the next
-    // post-batch check sees 999999 → past deadline → stop.
-    const times = [0, 50, 50, 50, 999_999];
+    // then sees 50, 50 (two batches), then 999999 → past deadline → stop.
+    const times = [0, 50, 50, 999_999];
     let ti = 0;
     const now = () => times[Math.min(ti++, times.length - 1)];
     const result = await runExtractAtomsDrain(
@@ -79,6 +77,62 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     expect(result.stopped).toBe('no_progress');
     expect(batches).toBe(1);
     expect(result.remaining).toBe(5);
+    expect(result.status).toBe('ok');
+  });
+
+  // issue #3218 — a batch where every attempted item errored (providerFailure)
+  // must surface distinctly from an ordinary no_progress/drained/window stop,
+  // so the Minion handler can retry instead of completing the durable job.
+  it('stops with status=provider_failure when a batch reports providerFailure', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: async () => 5,
+        runBatch: async () => {
+          batches++;
+          return { extracted: 0, skipped: 0, providerFailure: true };
+        },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.status).toBe('provider_failure');
+    expect(result.stopped).toBe('provider_failure');
+    expect(batches).toBe(1);
+    expect(result.remaining).toBe(5);
+  });
+
+  // issue #3218 (codex P2) — a final recount of 0 must NOT overwrite
+  // stopped='provider_failure' back to 'drained'. Otherwise the caller sees
+  // the contradictory {status: 'provider_failure', stopped: 'drained'}.
+  it('preserves stopped=provider_failure even when the final recount is 0', async () => {
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: seq([3, 0]), // before-check: 3; final post-loop recount: 0
+        runBatch: async () => ({ extracted: 0, skipped: 0, providerFailure: true }),
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.status).toBe('provider_failure');
+    expect(result.stopped).toBe('provider_failure');
+    expect(result.remaining).toBe(0);
+  });
+
+  it('does not flag provider_failure for an ordinary partial-success batch', async () => {
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: seq([3, 0, 0]),
+        runBatch: async () => ({ extracted: 1, skipped: 0, providerFailure: false }),
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.status).toBe('ok');
+    expect(result.stopped).toBe('drained');
   });
 
   it('propagates a busy-lock error (caller reports cycle_already_running)', async () => {
@@ -110,91 +164,6 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     expect(result.stopped).toBe('max_batches');
     expect(batches).toBe(4);
   });
-
-  it('surfaces upstream-compatible failure counts and bounded records', async () => {
-    const result = await runExtractAtomsDrain(
-      {
-        withLock: passThroughLock,
-        countRemaining: async () => 5,
-        runBatch: async () => ({
-          extracted: 0,
-          skipped: 0,
-          failureCount: MAX_DRAIN_FAILURE_RECORDS + 2,
-          firstError: 'pages/a: password=hunter2 provider timeout',
-          failures: [
-            { source: 'pages/a', reason: 'password=hunter2 provider timeout' },
-            { source: 'pages/b', reason: 'second failure' },
-          ],
-        }),
-        now: () => 0,
-      },
-      { windowMs: 1_000_000 },
-    );
-
-    expect(result.status).toBe('ok');
-    expect(result.stopped).toBe('no_progress');
-    expect(result.failure_count).toBe(MAX_DRAIN_FAILURE_RECORDS + 2);
-    expect(result.failures).toEqual([
-      { batch: 1, source: 'pages/a', reason: '<REDACTED:password> provider timeout' },
-      { batch: 1, source: 'pages/b', reason: 'second failure' },
-    ]);
-    expect(result.omitted_failure_count).toBe(MAX_DRAIN_FAILURE_RECORDS);
-    expect(result.last_error).toBe('pages/a: <REDACTED:password> provider timeout');
-  });
-
-  it('stops with provider_failure when every attempted item fails', async () => {
-    let batches = 0;
-    const result = await runExtractAtomsDrain(
-      {
-        withLock: passThroughLock,
-        countRemaining: async () => 5,
-        runBatch: async () => {
-          batches++;
-          return {
-            extracted: 0,
-            skipped: 0,
-            providerFailure: true,
-            failureCount: 1,
-            failures: [{ source: 'pages/a', reason: 'provider unavailable' }],
-          };
-        },
-        now: () => 0,
-      },
-      { windowMs: 1_000_000 },
-    );
-    expect(result.status).toBe('provider_failure');
-    expect(result.stopped).toBe('provider_failure');
-    expect(result.remaining).toBe(5);
-    expect(batches).toBe(1);
-  });
-
-  it('does not rewrite provider_failure to drained after a zero final recount', async () => {
-    const result = await runExtractAtomsDrain(
-      {
-        withLock: passThroughLock,
-        countRemaining: seq([3, 0]),
-        runBatch: async () => ({ extracted: 0, skipped: 0, providerFailure: true }),
-        now: () => 0,
-      },
-      { windowMs: 1_000_000 },
-    );
-    expect(result.status).toBe('provider_failure');
-    expect(result.stopped).toBe('provider_failure');
-    expect(result.remaining).toBe(0);
-  });
-});
-
-describe('extract-atoms-drain handler retry contract', () => {
-  const jobsSrc = readFileSync(join(import.meta.dir, '../src/commands/jobs.ts'), 'utf8');
-  const handlerBlock = jobsSrc.slice(
-    jobsSrc.indexOf("registerProviderHandler('extract-atoms-drain'"),
-    jobsSrc.indexOf("registerProviderHandler('extract-atoms-drain'") + 2600,
-  );
-
-  it('throws on provider_failure so the durable job retries', () => {
-    expect(handlerBlock).toContain("result.status === 'provider_failure'");
-    expect(handlerBlock).toMatch(/if \(result\.status === 'provider_failure'\) \{\s*throw new Error/);
-  });
 });
 
 // #1685 GAP D (CODEX #1) — the auto-drain Minion job burns Haiku, so it must be
@@ -219,10 +188,82 @@ describe('shared wiring helper holds the cycle lock (5A)', () => {
     expect(src).toContain('runExtractAtomsDrainForSource');
     expect(src).toContain('cycleLockIdFor(opts.sourceId)');
     expect(src).toContain('withRefreshingLock(engine, lockId');
-    expect(src).toContain('opts.extractionSourceId ?? opts.sourceId ??');
   });
 
-  it('runExtractAtomsDrainForSource suppresses transcript discovery for page-backlog drains', () => {
-    expect(src).toContain('_transcripts: []');
+  // issue #3218 — the wiring's `runBatch` must derive `providerFailure` from
+  // the SAME per-item counts pinned by
+  // `extract-atoms-synthesize-concepts.test.ts`'s "all items fail" case
+  // (failures.length > 0 && transcripts_processed + pages_processed === 0),
+  // not from `r.status` (which collapses partial and total failure into the
+  // same 'warn' value — the exact discard the issue reports).
+  it('runBatch derives providerFailure from failures.length + zero processed items, not r.status', () => {
+    const runBatchBlock = src.slice(src.indexOf('runBatch: async () => {'));
+    expect(runBatchBlock).toContain('d.failures');
+    expect(runBatchBlock).toContain('transcripts_processed');
+    expect(runBatchBlock).toContain('pages_processed');
+    expect(runBatchBlock).toContain('providerFailure: failures.length > 0 && itemsSucceeded === 0');
+  });
+});
+
+// issue #3218 — the Minion handler must throw (not complete) when the drain
+// reports status='provider_failure', so the worker's ordinary failJob path
+// (attempt+backoff / dead-letter) retries the durable job instead of the
+// backlog silently completing untouched.
+describe('extract-atoms-drain Minion handler retries on provider_failure (issue #3218)', () => {
+  const jobsSrc = readFileSync(join(import.meta.dir, '../src/commands/jobs.ts'), 'utf8');
+  const handlerBlock = jobsSrc.slice(
+    jobsSrc.indexOf("registerBuiltinJob(worker, engine, 'extract-atoms-drain'"),
+    jobsSrc.indexOf("registerBuiltinJob(worker, engine, 'extract-atoms-drain'") + 2200,
+  );
+
+  it("throws when result.status === 'provider_failure' instead of returning it", () => {
+    expect(handlerBlock).toMatch(/result\.status === 'provider_failure'/);
+    expect(handlerBlock).toMatch(/if \(result\.status === 'provider_failure'\) \{\s*throw new Error/);
+  });
+
+  it('still returns the deferred/skipped shape on LockUnavailableError (unchanged)', () => {
+    expect(handlerBlock).toContain('e instanceof LockUnavailableError');
+    expect(handlerBlock).toContain(
+      "{ phase: 'extract_atoms', status: 'skipped', deferred: true, reason: 'cycle_already_running' }",
+    );
+  });
+});
+
+describe('#2144: zero-yield tombstone progress semantics', () => {
+  it('continues when a zero-atom batch still shrinks the backlog (tombstoned pages)', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        // consumed: before#1=4, after#1=2 (<4 → progress), before#2=2,
+        // after#2=0 (<2 → progress), before#3=0 → drained; final repeats 0.
+        countRemaining: seq([4, 2, 2, 0, 0]),
+        runBatch: async () => { batches++; return { extracted: 0, skipped: 0 }; },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.stopped).toBe('drained');
+    expect(result.batches).toBe(2);
+    expect(result.extracted).toBe(0);
+    expect(result.remaining).toBe(0);
+    expect(batches).toBe(2);
+  });
+
+  it('stops no_progress when a zero-atom batch leaves the backlog flat', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: seq([5, 5]),
+        runBatch: async () => { batches++; return { extracted: 0, skipped: 0 }; },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000 },
+    );
+    expect(result.stopped).toBe('no_progress');
+    expect(result.batches).toBe(1);
+    expect(result.remaining).toBe(5);
+    expect(batches).toBe(1);
   });
 });

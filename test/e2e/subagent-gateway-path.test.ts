@@ -23,20 +23,17 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
-import {
-  __testing as subagentTesting,
-  makeSubagentHandler,
-} from '../../src/core/minions/handlers/subagent.ts';
+import { makeSubagentHandler } from '../../src/core/minions/handlers/subagent.ts';
+import { UnrecoverableError } from '../../src/core/minions/types.ts';
 import type { MinionJobContext, ToolDef, ToolCtx } from '../../src/core/minions/types.ts';
 import {
   __setChatTransportForTests,
+  __setGenerateTextTransportForTests,
   configureGateway,
   resetGateway,
-  withBudgetTracker,
   type ChatBlock,
   type ChatResult,
 } from '../../src/core/ai/gateway.ts';
-import { BudgetExhausted, BudgetTracker } from '../../src/core/budget/budget-tracker.ts';
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -71,51 +68,20 @@ function clearGateway(): void {
   resetGateway();
 }
 
-it('post-run gateway budget overage is surfaced after the final response', () => {
-  const tracker = new BudgetTracker({
-    label: 'subagent.gateway',
-    maxCostUsd: 0.01,
-  });
-
-  expect(() => {
-    tracker.record({
-      modelId: 'anthropic:claude-sonnet-4-6',
-      inputTokens: 20_000,
-      outputTokens: 20_000,
-      kind: 'chat',
-      label: 'synthetic-final-response',
-    });
-  }).toThrow(BudgetExhausted);
-
-  expect(() => {
-    subagentTesting.assertGatewayScopedBudgetNotExceeded(tracker, 'subagent.gateway');
-  }).toThrow(/budget_exhausted_after_response/);
-});
-
 interface FakeJobOpts {
   prompt: string;
   model?: string;
   allowed_tools?: string[];
-  required_tools?: string[];
-  max_turns?: number;
-  max_cost_usd?: number;
+  mode?: string;
 }
 
 async function makeFakeJob(opts: FakeJobOpts): Promise<{ jobId: number; ctx: MinionJobContext; tokenSink: any[] }> {
   // Insert a minion_jobs row so foreign keys validate (subagent_tool_executions.job_id FK).
-  const data = {
-    prompt: opts.prompt,
-    model: opts.model,
-    allowed_tools: opts.allowed_tools,
-    required_tools: opts.required_tools,
-    max_turns: opts.max_turns,
-    max_cost_usd: opts.max_cost_usd,
-  };
   const rows = await engine.executeRaw<{ id: number }>(
     `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
      VALUES ('subagent', 'active', $1::jsonb, 'default', 0, now())
      RETURNING id`,
-    [JSON.stringify(data)],
+    [JSON.stringify({ prompt: opts.prompt, model: opts.model, allowed_tools: opts.allowed_tools, mode: opts.mode })],
   );
   const jobId = rows[0].id;
 
@@ -126,9 +92,10 @@ async function makeFakeJob(opts: FakeJobOpts): Promise<{ jobId: number; ctx: Min
   const ctx: MinionJobContext = {
     id: jobId,
     name: 'subagent',
-    data,
+    data: { prompt: opts.prompt, model: opts.model, allowed_tools: opts.allowed_tools, mode: opts.mode },
     attempts_made: 0,
     signal: abortCtrl.signal,
+    deadlineAtMs: null,
     shutdownSignal: shutdownCtrl.signal,
     updateProgress: async () => {},
     updateTokens: async (t) => { tokenSink.push(t); },
@@ -172,6 +139,28 @@ function makeStubTools(executions: Array<{ name: string; input: unknown; ts: num
       idempotent: true,
       async execute(_input: unknown, _ctx: ToolCtx) {
         throw new Error('intentional tool failure');
+      },
+    },
+  ];
+}
+
+/**
+ * `brain_put_page` stub — the oneshot dispatch path (`data.mode ===
+ * 'oneshot'`) requires this exact tool name to be present in the registry
+ * (`args.putPageTool = registry.find(t => t.name === 'brain_put_page')`) or
+ * it never calls chat() at all (falls back with `no_put_page_tool` before
+ * reaching the model). Only present for oneshot-path tests; never invoked
+ * by the error-path test below (the chat() call itself throws first).
+ */
+function makeOneshotStubTools(): ToolDef[] {
+  return [
+    {
+      name: 'brain_put_page',
+      description: 'stub brain_put_page',
+      input_schema: { type: 'object' },
+      idempotent: false,
+      async execute() {
+        throw new Error('brain_put_page stub should not execute in this test');
       },
     },
   ];
@@ -231,6 +220,82 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(messages[1].message_idx).toBe(1);
   });
 
+  it('openrouter:anthropic/… auto-routes through the gateway when the flag is off', async () => {
+    await engine.unsetConfig('agent.use_gateway_loop');
+    __setChatTransportForTests(async () => ({
+      text: 'or-anthropic done',
+      blocks: [{ type: 'text', text: 'or-anthropic done' }] as ChatBlock[],
+      stopReason: 'end',
+      usage: { input_tokens: 8, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'openrouter:anthropic/claude-haiku-4.5',
+      providerId: 'openrouter',
+    } satisfies ChatResult));
+
+    const handler = buildHandler(makeStubTools([]));
+    const { ctx } = await makeFakeJob({
+      prompt: 'hello',
+      model: 'openrouter:anthropic/claude-haiku-4.5',
+    });
+    const result = await handler(ctx);
+    expect(result.result).toBe('or-anthropic done');
+    expect(result.stop_reason).toBe('end_turn');
+  });
+
+  it('openrouter:deepseek/… auto-routes through the gateway when the flag is off (#4757)', async () => {
+    // The DeepSeek family shares the anthropic-via-OR contract: the recipe
+    // predicate admits it (classifyCapabilities passes) and the handler's
+    // isOpenRouterSubagentFamily auto-enables the gateway loop — without
+    // that, the legacy Anthropic-direct pin throws "non-Anthropic but
+    // agent.use_gateway_loop is not enabled" for a model the recipe accepts.
+    await engine.unsetConfig('agent.use_gateway_loop');
+    __setChatTransportForTests(async () => ({
+      text: 'or-deepseek done',
+      blocks: [{ type: 'text', text: 'or-deepseek done' }] as ChatBlock[],
+      stopReason: 'end',
+      usage: { input_tokens: 8, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'openrouter:deepseek/deepseek-v4-flash',
+      providerId: 'openrouter',
+    } satisfies ChatResult));
+
+    const handler = buildHandler(makeStubTools([]));
+    const { ctx } = await makeFakeJob({
+      prompt: 'hello',
+      model: 'openrouter:deepseek/deepseek-v4-flash',
+    });
+    const result = await handler(ctx);
+    expect(result.result).toBe('or-deepseek done');
+    expect(result.stop_reason).toBe('end_turn');
+  });
+
+  it('openrouter:openai/… stays REFUSED when the flag is off — the auto-route is a family allowlist, not "anything on OpenRouter"', async () => {
+    // Only families with a live abort/retry replay pin (anthropic/, deepseek/)
+    // auto-enable the gateway loop. Everything else proxied through OpenRouter
+    // is refused before the transport is reached. Two gates share the
+    // allowlist (openrouter-families.ts): the recipe capability gate
+    // (`supports_subagent_loop: false`) fires first; had a family been added
+    // to the recipe predicate but not the handler's auto-route, the legacy
+    // `use_gateway_loop is not enabled` refusal would surface instead. Either
+    // way: rejected, zero transport calls.
+    await engine.unsetConfig('agent.use_gateway_loop');
+    let transportCalls = 0;
+    __setChatTransportForTests(async () => {
+      transportCalls++;
+      return {
+        text: 'must not run',
+        blocks: [{ type: 'text', text: 'must not run' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'openrouter:openai/gpt-5.2',
+        providerId: 'openrouter',
+      } satisfies ChatResult;
+    });
+
+    const handler = buildHandler(makeStubTools([]));
+    const { ctx } = await makeFakeJob({ prompt: 'hello', model: 'openrouter:openai/gpt-5.2' });
+    await expect(handler(ctx)).rejects.toThrow(/supports_subagent_loop: false|use_gateway_loop is not enabled/);
+    expect(transportCalls).toBe(0);
+  });
+
   it('happy path 2-turn with tool: dispatches, persists v2 stable ID, returns final text', async () => {
     let turn = 0;
     __setChatTransportForTests(async () => {
@@ -288,43 +353,32 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(toolRows[0].ordinal).toBe(0);
     expect(toolRows[0].schema_version).toBe(2); // v0.38 write
     expect(String(toolRows[0].gbrain_tool_use_id)).toMatch(/^[0-9a-f-]{36}$/); // UUID v7
-    expect(toolRows[0].tool_use_id).toBe('provider-tc-1'); // provider id preserved
-
-    const messages = await engine.executeRaw<Record<string, unknown>>(
-      `SELECT message_idx, role, content_blocks
-         FROM subagent_messages
-        WHERE job_id = $1
-        ORDER BY message_idx`,
-      [jobId],
-    );
-    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
-    expect(messages[2].message_idx).toBe(2);
-    const toolResultBlocks = typeof messages[2].content_blocks === 'string'
-      ? JSON.parse(messages[2].content_blocks as string)
-      : messages[2].content_blocks;
-    expect(toolResultBlocks[0]).toMatchObject({
-      type: 'tool-result',
-      toolCallId: 'provider-tc-1',
-      toolName: 'search',
-    });
+    expect(toolRows[0].tool_use_id).toBe('provider-tc-1'); // raw provider id preserved (#4155)
 
     // Token accumulation across both turns.
     expect(result.tokens.in).toBe(45); // 20 + 25
     expect(result.tokens.out).toBe(12); // 8 + 4
   });
 
-  it('required_tools adds corrective turn on text-only gateway response before accepting success', async () => {
+  it('#4155 regression: two different tool calls sharing the SAME provider id persist as two rows with the raw id intact', async () => {
+    // Real-world shape: claude-cli replays a fresh subprocess per turn from
+    // an id-stripped transcript, so the model invents the SAME short id
+    // ("toolu_01") for the first tool call of every turn. Pre-fix, the second
+    // turn's INSERT collided on the former job-wide `uniq_subagent_tools_use_id
+    // UNIQUE (job_id, tool_use_id)` constraint (a DIFFERENT constraint than
+    // this INSERT's own conflict target `(job_id, message_idx, ordinal)`) and
+    // threw, dead-lettering the job after 3 attempts. Migration v131 dropped
+    // that constraint; the raw provider id is stored as-is and row identity
+    // is (job_id, message_idx, ordinal).
     let turn = 0;
-    const seenMessages: unknown[] = [];
-    __setChatTransportForTests(async (opts) => {
+    __setChatTransportForTests(async () => {
       turn++;
-      seenMessages.push(opts.messages);
       if (turn === 1) {
         return {
-          text: 'done without using the required tool',
-          blocks: [{ type: 'text', text: 'done without using the required tool' }] as ChatBlock[],
-          stopReason: 'end',
-          usage: { input_tokens: 11, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          text: '',
+          blocks: [{ type: 'tool-call', toolCallId: 'toolu_01', toolName: 'search', input: { q: 'first' } }] as ChatBlock[],
+          stopReason: 'tool_calls',
+          usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
           model: 'anthropic:claude-sonnet-4-6',
           providerId: 'anthropic',
         } satisfies ChatResult;
@@ -332,20 +386,18 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
       if (turn === 2) {
         return {
           text: '',
-          blocks: [
-            { type: 'tool-call', toolCallId: 'tc-required', toolName: 'search', input: { q: 'required' } },
-          ] as ChatBlock[],
+          blocks: [{ type: 'tool-call', toolCallId: 'toolu_01', toolName: 'put_page', input: { slug: 'x' } }] as ChatBlock[],
           stopReason: 'tool_calls',
-          usage: { input_tokens: 20, output_tokens: 8, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
           model: 'anthropic:claude-sonnet-4-6',
           providerId: 'anthropic',
         } satisfies ChatResult;
       }
       return {
-        text: 'done after required tool',
-        blocks: [{ type: 'text', text: 'done after required tool' }] as ChatBlock[],
+        text: 'both done',
+        blocks: [{ type: 'text', text: 'both done' }] as ChatBlock[],
         stopReason: 'end',
-        usage: { input_tokens: 25, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        usage: { input_tokens: 5, output_tokens: 3, cache_read_tokens: 0, cache_creation_tokens: 0 },
         model: 'anthropic:claude-sonnet-4-6',
         providerId: 'anthropic',
       } satisfies ChatResult;
@@ -355,224 +407,35 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     const tools = makeStubTools(executions);
     const handler = buildHandler(tools);
     const { jobId, ctx } = await makeFakeJob({
-      prompt: 'find required',
+      prompt: 'do two things',
       model: 'anthropic:claude-sonnet-4-6',
-      allowed_tools: ['search'],
-      required_tools: ['search'],
-      max_turns: 4,
+      allowed_tools: ['search', 'put_page'],
     });
 
     const result = await handler(ctx);
 
-    expect(result.result).toBe('done after required tool');
+    expect(result.result).toBe('both done');
     expect(result.stop_reason).toBe('end_turn');
-    expect(turn).toBe(3);
-    expect(JSON.stringify(seenMessages[1])).toContain('Required tool call missing: search');
-    expect(JSON.stringify(seenMessages[1])).not.toContain('Your previous response was empty.');
-    expect(executions).toHaveLength(1);
-    expect(executions[0].name).toBe('search');
-
-    const messages = await engine.executeRaw<Record<string, unknown>>(
-      `SELECT message_idx, role, content_blocks
-         FROM subagent_messages
-        WHERE job_id = $1
-        ORDER BY message_idx`,
-      [jobId],
-    );
-    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant']);
-    expect(JSON.stringify(messages[2].content_blocks)).toContain('Required tool call missing: search');
-    expect(JSON.stringify(messages[2].content_blocks)).not.toContain('Your previous response was empty.');
+    expect(executions.map(e => e.name)).toEqual(['search', 'put_page']);
 
     const toolRows = await engine.executeRaw<Record<string, unknown>>(
-      `SELECT tool_name, status
+      `SELECT message_idx, tool_use_id, tool_name, status
          FROM subagent_tool_executions
-        WHERE job_id = $1`,
-      [jobId],
-    );
-    expect(toolRows).toEqual([{ tool_name: 'search', status: 'complete' }]);
-  });
-
-  it('adds corrective turn on empty gateway response before accepting success', async () => {
-    let turn = 0;
-    const seenMessages: unknown[] = [];
-    __setChatTransportForTests(async (opts) => {
-      turn++;
-      seenMessages.push(opts.messages);
-      if (turn === 1) {
-        return {
-          text: '',
-          blocks: [] as ChatBlock[],
-          stopReason: 'end',
-          usage: { input_tokens: 11, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0 },
-          model: 'anthropic:claude-sonnet-4-6',
-          providerId: 'anthropic',
-        } satisfies ChatResult;
-      }
-      return {
-        text: 'NO_WRITE: no page met the synthesis bar.',
-        blocks: [{ type: 'text', text: 'NO_WRITE: no page met the synthesis bar.' }] as ChatBlock[],
-        stopReason: 'end',
-        usage: { input_tokens: 15, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
-        model: 'anthropic:claude-sonnet-4-6',
-        providerId: 'anthropic',
-      } satisfies ChatResult;
-    });
-
-    const executions: Array<{ name: string; input: unknown; ts: number }> = [];
-    const tools = makeStubTools(executions);
-    const handler = buildHandler(tools);
-    const { jobId, ctx } = await makeFakeJob({
-      prompt: 'find nothing',
-      model: 'anthropic:claude-sonnet-4-6',
-      max_turns: 3,
-    });
-
-    const result = await handler(ctx);
-
-    expect(result.result).toBe('NO_WRITE: no page met the synthesis bar.');
-    expect(result.stop_reason).toBe('end_turn');
-    expect(turn).toBe(2);
-    expect(executions).toHaveLength(0);
-    expect(JSON.stringify(seenMessages[1])).toContain('Your previous response was empty.');
-
-    const messages = await engine.executeRaw<Record<string, unknown>>(
-      `SELECT message_idx, role, content_blocks
-         FROM subagent_messages
         WHERE job_id = $1
         ORDER BY message_idx`,
       [jobId],
     );
-    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
-    expect(JSON.stringify(messages[2].content_blocks)).toContain('Your previous response was empty.');
-  });
-
-  it('adds corrective turn when gateway response wraps an exact no-write phrase', async () => {
-    let turn = 0;
-    const seenMessages: unknown[] = [];
-    __setChatTransportForTests(async (opts) => {
-      turn++;
-      seenMessages.push(opts.messages);
-      if (turn === 1) {
-        return {
-          text: 'I completed the synthesis analysis. Here are the slugs I wrote:\n\nNO_WRITE: no page met the synthesis bar.',
-          blocks: [{
-            type: 'text',
-            text: 'I completed the synthesis analysis. Here are the slugs I wrote:\n\nNO_WRITE: no page met the synthesis bar.',
-          }] as ChatBlock[],
-          stopReason: 'end',
-          usage: { input_tokens: 11, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0 },
-          model: 'anthropic:claude-sonnet-4-6',
-          providerId: 'anthropic',
-        } satisfies ChatResult;
-      }
-      return {
-        text: 'NO_WRITE: no page met the synthesis bar.',
-        blocks: [{ type: 'text', text: 'NO_WRITE: no page met the synthesis bar.' }] as ChatBlock[],
-        stopReason: 'end',
-        usage: { input_tokens: 15, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
-        model: 'anthropic:claude-sonnet-4-6',
-        providerId: 'anthropic',
-      } satisfies ChatResult;
-    });
-
-    const executions: Array<{ name: string; input: unknown; ts: number }> = [];
-    const tools = makeStubTools(executions);
-    const handler = buildHandler(tools);
-    const { jobId, ctx } = await makeFakeJob({
-      prompt: [
-        'Dream synth task.',
-        'If you wrote nothing, your final message must be exactly: `NO_WRITE: no page met the synthesis bar.`',
-      ].join('\n'),
-      model: 'anthropic:claude-sonnet-4-6',
-      max_turns: 3,
-    });
-
-    const result = await handler(ctx);
-
-    expect(result.result).toBe('NO_WRITE: no page met the synthesis bar.');
-    expect(result.stop_reason).toBe('end_turn');
-    expect(turn).toBe(2);
-    expect(executions).toHaveLength(0);
-    expect(JSON.stringify(seenMessages[1])).toContain('reply with exactly `NO_WRITE: no page met the synthesis bar.`');
-
-    const messages = await engine.executeRaw<Record<string, unknown>>(
-      `SELECT message_idx, role, content_blocks
-         FROM subagent_messages
-        WHERE job_id = $1
-        ORDER BY message_idx`,
-      [jobId],
-    );
-    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
-    expect(JSON.stringify(messages[2].content_blocks)).toContain('required exact no-op phrase');
-  });
-
-  it('required_tools adds corrective turn before gateway resume from text-only assistant tail', async () => {
-    let turn = 0;
-    const seenMessages: unknown[] = [];
-    __setChatTransportForTests(async (opts) => {
-      turn++;
-      seenMessages.push(opts.messages);
-      if (turn === 1) {
-        return {
-          text: '',
-          blocks: [
-            { type: 'tool-call', toolCallId: 'tc-resume-required', toolName: 'search', input: { q: 'resume' } },
-          ] as ChatBlock[],
-          stopReason: 'tool_calls',
-          usage: { input_tokens: 20, output_tokens: 8, cache_read_tokens: 0, cache_creation_tokens: 0 },
-          model: 'anthropic:claude-sonnet-4-6',
-          providerId: 'anthropic',
-        } satisfies ChatResult;
-      }
-      return {
-        text: 'done after resume required tool',
-        blocks: [{ type: 'text', text: 'done after resume required tool' }] as ChatBlock[],
-        stopReason: 'end',
-        usage: { input_tokens: 25, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
-        model: 'anthropic:claude-sonnet-4-6',
-        providerId: 'anthropic',
-      } satisfies ChatResult;
-    });
-
-    const executions: Array<{ name: string; input: unknown; ts: number }> = [];
-    const tools = makeStubTools(executions);
-    const handler = buildHandler(tools);
-    const { jobId, ctx } = await makeFakeJob({
-      prompt: 'resume required',
-      model: 'anthropic:claude-sonnet-4-6',
-      allowed_tools: ['search'],
-      required_tools: ['search'],
-      max_turns: 4,
-    });
-    await engine.executeRaw(
-      `INSERT INTO subagent_messages (job_id, message_idx, role, content_blocks)
-       VALUES ($1, 0, 'user', $2::jsonb)`,
-      [jobId, JSON.stringify([{ type: 'text', text: 'resume required' }])],
-    );
-    await engine.executeRaw(
-      `INSERT INTO subagent_messages (job_id, message_idx, role, content_blocks, model)
-       VALUES ($1, 1, 'assistant', $2::jsonb, 'anthropic:claude-sonnet-4-6')`,
-      [jobId, JSON.stringify([{ type: 'text', text: 'done without required tool' }])],
-    );
-
-    const result = await handler(ctx);
-
-    expect(result.result).toBe('done after resume required tool');
-    expect(result.stop_reason).toBe('end_turn');
-    expect(turn).toBe(2);
-    expect(JSON.stringify(seenMessages[0])).toContain('Required tool call missing: search');
-    expect(executions).toHaveLength(1);
-    expect(executions[0].input).toEqual({ q: 'resume' });
-
-    const messages = await engine.executeRaw<Record<string, unknown>>(
-      `SELECT message_idx, role, content_blocks
-         FROM subagent_messages
-        WHERE job_id = $1
-        ORDER BY message_idx`,
-      [jobId],
-    );
-    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant']);
-    expect(JSON.stringify(messages[2].content_blocks)).toContain('Required tool call missing: search');
+    // Both rows persisted — the collision never threw.
+    expect(toolRows.length).toBe(2);
+    expect(toolRows[0].tool_name).toBe('search');
+    expect(toolRows[1].tool_name).toBe('put_page');
+    expect(toolRows[0].status).toBe('complete');
+    expect(toolRows[1].status).toBe('complete');
+    // The RAW provider id is stored on both rows — readers disambiguate by
+    // message_idx, which must differ across the two turns.
+    expect(toolRows[0].tool_use_id).toBe('toolu_01');
+    expect(toolRows[1].tool_use_id).toBe('toolu_01');
+    expect(toolRows[0].message_idx).not.toBe(toolRows[1].message_idx);
   });
 
   it('tool error path: handler persists status=failed, loop continues with error feedback', async () => {
@@ -617,6 +480,104 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(String(toolRows[0].error)).toContain('intentional tool failure');
   });
 
+  it('terminal classification: a "prompt is too long" error is converted to UnrecoverableError (gap parity with the legacy path)', async () => {
+    // The legacy raw-Anthropic-SDK path (subagent.ts's non-gateway branch)
+    // converts this exact condition to UnrecoverableError so the worker
+    // routes straight to `dead`, bypassing max_stalled retries. Pins that
+    // the gateway-native path does the same.
+    //
+    // Deliberately exercises the REAL production error boundary rather than
+    // __setChatTransportForTests (which bypasses gateway.chat()'s own
+    // try/catch): __setGenerateTextTransportForTests stubs the transport ONE
+    // layer deeper, so the thrown error passes through chat()'s real catch
+    // and gets normalizeAIError()-wrapped exactly like a live provider call.
+    // The thrown shape puts the phrase ONLY on the SDK's actual inner
+    // `.error.message` field (not the outer `.message`, which normalizeAIError
+    // copies onto the wrapped error) — the shape isPromptTooLongError's
+    // cause-chain walk exists to still catch post-wrap.
+    __setChatTransportForTests(null);
+    __setGenerateTextTransportForTests(async () => {
+      throw {
+        status: 400,
+        message: 'BadRequestError',
+        error: {
+          type: 'invalid_request_error',
+          message: 'prompt is too long: 1707509 tokens > 1000000 maximum',
+        },
+      };
+    });
+
+    try {
+      const tools = makeStubTools([]);
+      const handler = buildHandler(tools);
+      const { ctx } = await makeFakeJob({ prompt: 'huge input', model: 'anthropic:claude-sonnet-4-6' });
+
+      let caught: unknown;
+      try {
+        await handler(ctx);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(UnrecoverableError);
+      const message = String((caught as Error).message);
+      expect(message).toContain('prompt_too_long');
+      // The actually-useful detail (the inner .error.message, not the outer
+      // normalizeAIError()-wrapped "BadRequestError" text) must survive into
+      // the dead-lettered job's error — this is what an operator reads to
+      // diagnose a `dead` job, not just a generic label.
+      expect(message).toContain('1707509 tokens > 1000000 maximum');
+      expect(message).not.toContain('BadRequestError');
+    } finally {
+      __setGenerateTextTransportForTests(null);
+    }
+  });
+
+  it('terminal classification: the oneshot dispatch path (data.mode=oneshot) also converts "prompt is too long" to UnrecoverableError (sibling gap to the gateway-loop fix above, #4674)', async () => {
+    // Same production error boundary as the gateway-loop test above: the
+    // oneshot dispatch runner (subagent-oneshot.ts) calls the SAME
+    // gateway.chat() entrypoint, so a prompt-too-long error arrives
+    // normalizeAIError()-wrapped here too. Before this fix, the oneshot
+    // catch rethrew every non-abort error verbatim — no isPromptTooLongError
+    // check — so this exact condition retried up to max_stalled on the
+    // oneshot path even though the gateway-loop and legacy paths already
+    // fast-failed on it.
+    __setChatTransportForTests(null);
+    __setGenerateTextTransportForTests(async () => {
+      throw {
+        status: 400,
+        message: 'BadRequestError',
+        error: {
+          type: 'invalid_request_error',
+          message: 'prompt is too long: 1707509 tokens > 1000000 maximum',
+        },
+      };
+    });
+
+    try {
+      const tools = makeOneshotStubTools();
+      const handler = buildHandler(tools);
+      const { ctx } = await makeFakeJob({
+        prompt: 'huge input',
+        model: 'anthropic:claude-sonnet-4-6',
+        mode: 'oneshot',
+      });
+
+      let caught: unknown;
+      try {
+        await handler(ctx);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(UnrecoverableError);
+      const message = String((caught as Error).message);
+      expect(message).toContain('prompt_too_long');
+      expect(message).toContain('1707509 tokens > 1000000 maximum');
+      expect(message).not.toContain('BadRequestError');
+    } finally {
+      __setGenerateTextTransportForTests(null);
+    }
+  });
+
   it('max_turns: loop terminates when budget exhausted', async () => {
     // Always return tool_calls — never end. Should hit max_turns cap (default 20 in subagent.ts).
     __setChatTransportForTests(async () => ({
@@ -647,76 +608,6 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(executions.length).toBe(3);
   });
 
-  it('repeated identical tool failures surface as unrecoverable', async () => {
-    __setChatTransportForTests(async () => ({
-      text: '',
-      blocks: [
-        { type: 'tool-call', toolCallId: `tc-${Math.random()}`, toolName: 'always_fail', input: {} },
-      ] as ChatBlock[],
-      stopReason: 'tool_calls',
-      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      model: 'anthropic:claude-sonnet-4-6',
-      providerId: 'anthropic',
-    } satisfies ChatResult));
-
-    const tools = makeStubTools([]);
-    const handler = buildHandler(tools);
-    const { ctx } = await makeFakeJob({
-      prompt: 'keep trying',
-      model: 'anthropic:claude-sonnet-4-6',
-      max_turns: 10,
-    });
-
-    await expect(handler(ctx)).rejects.toThrow(/repeated_tool_failure/);
-  });
-
-  it('per-job max_cost_usd is enforced on the gateway path', async () => {
-    __setChatTransportForTests(async () => ({
-      text: 'too expensive',
-      blocks: [{ type: 'text', text: 'too expensive' }] as ChatBlock[],
-      stopReason: 'end',
-      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      model: 'anthropic:claude-sonnet-4-6',
-      providerId: 'anthropic',
-    } satisfies ChatResult));
-
-    const tools = makeStubTools([]);
-    const handler = buildHandler(tools);
-    const { ctx } = await makeFakeJob({
-      prompt: 'hi',
-      model: 'anthropic:claude-sonnet-4-6',
-      max_cost_usd: 0.000001,
-    });
-
-    await expect(handler(ctx)).rejects.toThrow(/budget_exhausted/);
-  });
-
-  it('per-job max_cost_usd still applies inside an outer budget scope', async () => {
-    __setChatTransportForTests(async () => ({
-      text: 'still too expensive',
-      blocks: [{ type: 'text', text: 'still too expensive' }] as ChatBlock[],
-      stopReason: 'end',
-      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
-      model: 'anthropic:claude-sonnet-4-6',
-      providerId: 'anthropic',
-    } satisfies ChatResult));
-
-    const tools = makeStubTools([]);
-    const handler = buildHandler(tools);
-    const { ctx } = await makeFakeJob({
-      prompt: 'hi again',
-      model: 'anthropic:claude-sonnet-4-6',
-      max_cost_usd: 0.000001,
-    });
-    const outerTracker = new BudgetTracker({ label: 'outer.scope' });
-
-    await expect(withBudgetTracker(outerTracker, () => handler(ctx))).rejects.toThrow(/budget_exhausted/);
-    // The per-job reservation rejects before provider transport, so the
-    // enclosing budget scope must show no spend and no recorded call.
-    expect(outerTracker.totalSpent).toBe(0);
-    expect(outerTracker.snapshot().callsRecorded).toBe(0);
-  });
-
   it('refusal stop reason: handler maps refusal → SubagentStopReason refusal', async () => {
     __setChatTransportForTests(async () => ({
       text: 'I cannot help with that',
@@ -734,6 +625,28 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     const result = await handler(ctx);
     expect(result.stop_reason).toBe('refusal');
     expect(result.result).toBe('I cannot help with that');
+  });
+
+  it("length stop reason: output-cap truncation maps to max_tokens, not end_turn (#4088)", async () => {
+    // Pre-fix, the gateway loop folded 'length' into 'end' and the handler's
+    // else-arm reported 'end_turn' — a capped, truncated run looked like a
+    // clean-but-empty completion (undoing #2778's honesty fix on this path).
+    __setChatTransportForTests(async () => ({
+      text: 'partial truncated outp',
+      blocks: [{ type: 'text', text: 'partial truncated outp' }] as ChatBlock[],
+      stopReason: 'length',
+      usage: { input_tokens: 22000, output_tokens: 8192, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    } satisfies ChatResult));
+
+    const tools = makeStubTools([]);
+    const handler = buildHandler(tools);
+    const { ctx } = await makeFakeJob({ prompt: 'huge prompt', model: 'anthropic:claude-sonnet-4-6' });
+
+    const result = await handler(ctx);
+    expect(result.stop_reason).toBe('max_tokens');
+    expect(result.result).toBe('partial truncated outp');
   });
 
   it('non-Anthropic model routes through gateway path (the load-bearing v0.38 unlock)', async () => {

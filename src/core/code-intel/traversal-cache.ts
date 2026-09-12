@@ -24,7 +24,6 @@
  * justify it; see `OPTS.useSnapshotIsolation`.
  */
 import type { BrainEngine } from '../engine.ts';
-import { executeRawJsonb } from '../sql-query.ts';
 
 export interface CacheKey {
   symbol_qualified: string;
@@ -120,12 +119,11 @@ export async function putCachedTraversal<T>(
   xminMax: number,
 ): Promise<void> {
   try {
-    await executeRawJsonb(
-      engine,
+    await engine.executeRaw(
       `INSERT INTO code_traversal_cache
          (symbol_qualified, depth, source_id, response_json,
           max_chunk_updated_at, xmin_max, cluster_generation)
-       VALUES ($1, $2, $3, ($7::jsonb)->'response', $4::timestamptz, $5, $6)
+       VALUES ($1, $2, $3, $4::text::jsonb, $5::timestamptz, $6, $7)
        ON CONFLICT (symbol_qualified, depth, source_id)
        DO UPDATE SET
          response_json = EXCLUDED.response_json,
@@ -137,11 +135,11 @@ export async function putCachedTraversal<T>(
         key.symbol_qualified,
         key.depth,
         key.source_id,
+        JSON.stringify(response),
         maxChunkUpdatedAt,
         xminMax,
         key.cluster_generation,
       ],
-      [{ response }],
     );
   } catch (err) {
     // Cache writes are best-effort. A failure here must not break the

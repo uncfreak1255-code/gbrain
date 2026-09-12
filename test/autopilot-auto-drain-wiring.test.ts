@@ -12,8 +12,6 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 const SRC = readFileSync(join(import.meta.dir, '../src/commands/autopilot.ts'), 'utf8');
-const DRAIN_SUBMIT = SRC.indexOf("'extract-atoms-drain',");
-const DRAIN_BLOCK = DRAIN_SUBMIT >= 0 ? SRC.slice(DRAIN_SUBMIT, DRAIN_SUBMIT + 1800) : '';
 
 describe('autopilot auto-drain wiring', () => {
   test('CODEX #2: idempotency key includes a UTC-day time slot (not static)', () => {
@@ -23,19 +21,12 @@ describe('autopilot auto-drain wiring', () => {
   });
 
   test('CODEX #1: submits with allowProtectedSubmit', () => {
-    expect(DRAIN_SUBMIT).toBeGreaterThanOrEqual(0);
-    expect(DRAIN_BLOCK).toContain('allowProtectedSubmit: true');
+    expect(SRC).toMatch(/extract-atoms-drain[\s\S]{0,800}allowProtectedSubmit: true/);
   });
 
   test('CODEX #3: enumerates sources and counts backlog per source', () => {
     expect(SRC).toContain('loadAllSources(engine)');
     expect(SRC).toContain('countExtractAtomsBacklog(engine, src.id)');
-  });
-
-  test('rechecks trusted-local source hygiene before protected submission', () => {
-    expect(SRC).toContain('inspectSourceHygiene(engine');
-    expect(SRC).toContain('gateProtectedSourceWork(sourceHygiene, src.id)');
-    expect(SRC).toMatch(/if \(!sourceGate\.allowed\)[\s\S]{0,1600}queue\.add/);
   });
 
   test('gates on pack NOT declaring extract_atoms (the silent-backlog condition)', () => {
@@ -52,31 +43,25 @@ describe('autopilot auto-drain wiring', () => {
     expect(SRC).toMatch(/engine\.kind === 'postgres'[\s\S]{0,400}auto_drain/);
   });
 
+  // issue #3218 (codex P1): with the handler now throwing on an
+  // all-provider-failed batch, max_attempts:1 made the queue's retry policy
+  // "dead-letter on the first failure, no backoff attempt" — regression-guard
+  // against silently reverting to 1.
+  test('issue #3218: submits with max_attempts 3 (not 1) so a retry can backoff before dead-lettering', () => {
+    // lastIndexOf: the queue.add(...) call site itself (the earlier occurrence
+    // is the unrelated created_at count query above it in the same function).
+    const callSite = SRC.lastIndexOf("'extract-atoms-drain'");
+    const drainBlock = SRC.slice(callSite, callSite + 900);
+    expect(drainBlock).toContain('max_attempts: 3');
+    expect(drainBlock).not.toContain('max_attempts: 1');
+  });
+
   test('CODEX impl #4: no maxWaiting (it coalesces by name+queue, not source)', () => {
     // maxWaiting would return source A's waiting job for source B's submit,
     // never queuing B and over-counting the cap. The per-source idempotency key
     // is the dedup; a pre-check on it avoids counting idempotency-hit re-submits.
-    expect(DRAIN_SUBMIT).toBeGreaterThanOrEqual(0);
-    expect(DRAIN_BLOCK).not.toContain('maxWaiting');
+    const drainBlock = SRC.slice(SRC.indexOf("'extract-atoms-drain'"));
+    expect(drainBlock.slice(0, 900)).not.toContain('maxWaiting');
     expect(SRC).toContain('WHERE idempotency_key = $1 LIMIT 1');
-  });
-
-  test('provider failures get one bounded retry with fixed backoff', () => {
-    expect(DRAIN_SUBMIT).toBeGreaterThanOrEqual(0);
-    expect(SRC).toContain('const AUTO_DRAIN_MAX_ATTEMPTS = 2');
-    expect(DRAIN_BLOCK).toContain('max_attempts: AUTO_DRAIN_MAX_ATTEMPTS');
-    expect(DRAIN_BLOCK).toMatch(/backoff_type:\s*'fixed'/);
-    expect(DRAIN_BLOCK).toMatch(/backoff_delay:\s*5000/);
-    expect(DRAIN_BLOCK).toMatch(/backoff_jitter:\s*0/);
-  });
-
-  test('daily cap reserves the full retry envelope per submitted job', () => {
-    expect(SRC).toContain('const PER_JOB_USD = PER_ATTEMPT_USD * AUTO_DRAIN_MAX_ATTEMPTS');
-    expect(SRC).toContain('Math.floor(maxUsdPerDay / PER_JOB_USD)');
-  });
-
-  test('daily cap reserves live jobs that cross the UTC-midnight boundary', () => {
-    expect(SRC).toContain('created_at < $1::timestamptz');
-    expect(SRC).toContain("status IN ('waiting','active','delayed','waiting-children','paused')");
   });
 });

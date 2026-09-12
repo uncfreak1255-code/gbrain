@@ -36,11 +36,6 @@ Models:
   --judge-model MODEL           Scores rollouts. Default models.tier.reasoning
 
 Modes:
-  review <skill-name>            Review an accepted --no-mutate candidate at
-                                skills/<name>/skillopt/best.md. Does not change
-                                SKILL.md unless --apply is passed.
-  --apply                       With review: promote best.md into SKILL.md
-                                via atomic write. Use after agent/human review.
   --patch                       Edit ops only (default; safer)
   --rewrite                     Allow full rewrites of sections
   --dry-run                     Plan + cost estimate, no LLM calls
@@ -53,7 +48,10 @@ Modes:
 
 Safety:
   --max-cost-usd N              Hard cap. Default 5.00. Preflight refuses
-                                if estimate exceeds.
+                                if estimate exceeds. 0 disables the cap
+                                (unpriced model ids then warn-once instead
+                                of aborting with no_pricing).
+  --no-max-cost                 Shorthand for --max-cost-usd 0.
   --max-runtime-min N           Wall-clock cap. Default 30
   --force                       Bypass dirty-working-tree refusal (rare)
   --resume <run-id>             Resume a prior interrupted run
@@ -90,10 +88,6 @@ Examples:
 
   # After review (sentinel deleted), run the optimizer:
   gbrain skillopt meeting-prep --bootstrap-reviewed
-
-  # Review the safe --no-mutate candidate, then explicitly promote it:
-  gbrain skillopt review meeting-prep
-  gbrain skillopt review meeting-prep --apply
 
   # Dry-run cost preview:
   gbrain skillopt meeting-prep --dry-run

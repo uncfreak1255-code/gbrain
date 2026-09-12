@@ -1,5 +1,35 @@
 import type { BrainEngine } from './engine.ts';
 import { slugifyPath } from './sync.ts';
+import { getFtsLanguage } from './fts-language.ts';
+import { hnswMaxDimsForType } from './vector-index.ts';
+// runMigrations executes while an initialized engine is live. Keep its helper
+// modules in the static graph rather than importing them from async handlers.
+import {
+  isStatementTimeoutError,
+  isRetryableConnError,
+} from './retry-matcher.ts';
+import { repairTimelineDedupIndex, repairLegacyTimelineSourceRows } from './timeline-dedup-repair.ts';
+import { repairPagesUpsertArbiter } from './pages-upsert-arbiter.ts';
+
+/**
+ * When true, per-migration explanatory notices (e.g. the v123/v124 "here is
+ * what this migration changed" lines that specific handlers write to stderr)
+ * are suppressed. Set by runMigrations for a FRESH-install full replay — those
+ * notices are useful diagnostics on an UPGRADE but pure noise as a new user's
+ * first-run output. Module-level (not threaded through the Migration type)
+ * because only a couple of handlers emit them. Guarded via `migrationNotice`.
+ * Known limitation: concurrent runMigrations calls in one process (two engines
+ * migrating simultaneously) share this flag — worst case is a suppressed or
+ * extra stderr NOTICE line; migration execution/stamping is unaffected.
+ */
+let quietMigrationNotices = false;
+
+/** Write a per-migration explanatory notice unless fresh-install quiet mode is
+ *  on. Handlers should route their "what changed" lines through this. */
+function migrationNotice(line: string): void {
+  if (quietMigrationNotices) return;
+  process.stderr.write(line);
+}
 
 /**
  * Schema migrations — run automatically on initSchema().
@@ -108,6 +138,43 @@ export class MigrationRetryExhausted extends Error {
   }
 }
 
+/**
+ * Postgres-only: drops `indexName` iff it currently exists AND is invalid — the
+ * leftover of a `CREATE INDEX CONCURRENTLY` that failed partway through. Callers
+ * MUST already be inside an `engine.kind === 'postgres'` branch (PGLite has no
+ * concurrent-build invalid-index concept and no `pg_index` catalog in the same
+ * shape) and MUST run this before their own `CREATE INDEX CONCURRENTLY IF NOT
+ * EXISTS`, since a stale invalid entry blocks the create from ever landing.
+ *
+ * Deliberately does NOT wrap the drop in `DO $$ ... EXECUTE '...' END $$`
+ * (#1178): Postgres rejects `CONCURRENTLY` from any function/EXECUTE context —
+ * the guard condition works, but the EXECUTE that follows always throws
+ * "DROP INDEX CONCURRENTLY cannot be executed from a function". The validity
+ * probe runs as a plain application-level SELECT instead, and the DROP (when
+ * needed) runs as its own top-level `runMigration` call.
+ */
+async function dropInvalidConcurrentIndex(
+  engine: BrainEngine,
+  version: number,
+  indexName: string,
+): Promise<boolean> {
+  // to_regclass() resolves the unqualified name through search_path — the same
+  // resolution the unqualified DROP below relies on — instead of matching
+  // pg_class.relname bare, which could hit a same-named index in a different
+  // schema on a non-default search_path (codex review, #1178).
+  const rows = await engine.executeRaw<{ invalid: boolean }>(
+    `SELECT NOT i.indisvalid AS invalid
+       FROM pg_index i
+      WHERE i.indexrelid = to_regclass($1)`,
+    [indexName],
+  );
+  const isInvalid = rows.some((r) => r.invalid);
+  if (isInvalid) {
+    await engine.runMigration(version, `DROP INDEX CONCURRENTLY IF EXISTS ${indexName};`);
+  }
+  return isInvalid;
+}
+
 // Migrations are embedded here, not loaded from files.
 // Add new migrations at the end. Never modify existing ones.
 // Exported for tests that structurally assert migration contents (e.g., "v9 must
@@ -134,7 +201,10 @@ export const MIGRATIONS: Migration[] = [
           }
         }
       }
-      if (renamed > 0) console.log(`  Renamed ${renamed} slugs`);
+      // Migration progress goes to stderr — stdout must stay clean for
+      // callers parsing JSON (e.g. `gbrain doctor --json | jq`); migrations
+      // can run lazily inside ANY command's first DB connect.
+      if (renamed > 0) process.stderr.write(`  Renamed ${renamed} slugs\n`);
     },
   },
   {
@@ -497,18 +567,7 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     handler: async (engine) => {
       if (engine.kind === 'postgres') {
-        await engine.runMigration(
-          14,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'idx_pages_updated_at_desc' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS idx_pages_updated_at_desc';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 14, 'idx_pages_updated_at_desc');
         await engine.runMigration(
           14,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pages_updated_at_desc
@@ -576,12 +635,24 @@ export const MIGRATIONS: Migration[] = [
         // 0b. Swap pages.UNIQUE(slug) → UNIQUE(source_id, slug).
         //     Deferred from v21 so PR #356 closes the integrity
         //     window. PGLite already did this swap in its v21 path.
+        //     #550: guard by index SHAPE (any non-partial unique index on
+        //     exactly {source_id, slug}), not by constraint NAME — a
+        //     name-only guard skips the ADD when the name is squatted by a
+        //     misshapen constraint, leaving every putPage ON CONFLICT broken.
         await tx.runMigration(23, `
           ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_slug_key;
           DO $$ BEGIN
             IF NOT EXISTS (
-              SELECT 1 FROM pg_constraint WHERE conname = 'pages_source_slug_key'
+              SELECT 1 FROM pg_index i
+               WHERE i.indrelid = 'pages'::regclass
+                 AND i.indisunique
+                 AND i.indpred IS NULL
+                 AND (SELECT array_agg(a.attname::text ORDER BY a.attname)
+                        FROM pg_attribute a
+                       WHERE a.attrelid = i.indrelid
+                         AND a.attnum = ANY (i.indkey::int2[])) = ARRAY['slug','source_id']
             ) THEN
+              ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
               ALTER TABLE pages ADD CONSTRAINT pages_source_slug_key
                 UNIQUE (source_id, slug);
             END IF;
@@ -733,10 +804,19 @@ export const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_pages_source_id ON pages(source_id);
 
         ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_slug_key;
+        -- #550: guard by index SHAPE, not constraint NAME (see v23 twin).
         DO $$ BEGIN
           IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint WHERE conname = 'pages_source_slug_key'
+            SELECT 1 FROM pg_index i
+             WHERE i.indrelid = 'pages'::regclass
+               AND i.indisunique
+               AND i.indpred IS NULL
+               AND (SELECT array_agg(a.attname::text ORDER BY a.attname)
+                      FROM pg_attribute a
+                     WHERE a.attrelid = i.indrelid
+                       AND a.attnum = ANY (i.indkey::int2[])) = ARRAY['slug','source_id']
           ) THEN
+            ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
             ALTER TABLE pages ADD CONSTRAINT pages_source_slug_key
               UNIQUE (source_id, slug);
           END IF;
@@ -862,7 +942,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+        SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
         IF NOT has_bypass THEN
           -- Fail the migration loudly instead of WARNING + version-bump.
           -- The runner unconditionally records schema_version on success,
@@ -870,7 +950,7 @@ export const MIGRATIONS: Migration[] = [
           -- on future runs even after switching to a bypass role. Raising
           -- aborts the transaction, leaves schema_version at the prior value,
           -- and lets the next invocation retry after the role is fixed.
-          RAISE EXCEPTION 'v24 rls_backfill_missing_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+          RAISE EXCEPTION 'v24 rls_backfill_missing_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Grant it (as postgres or a managed-Postgres master user): ALTER ROLE % BYPASSRLS; then re-run. The migration will retry automatically on the next initSchema call.', current_user, current_user;
         END IF;
 
         -- These 8 are guaranteed to exist: schema.sql creates them (idempotent
@@ -1151,9 +1231,9 @@ export const MIGRATIONS: Migration[] = [
         DECLARE
           has_bypass BOOLEAN;
         BEGIN
-          SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+          SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
           IF NOT has_bypass THEN
-            RAISE EXCEPTION 'v29 cathedral_ii_code_edges_rls: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+            RAISE EXCEPTION 'v29 cathedral_ii_code_edges_rls: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Grant it (as postgres or a managed-Postgres master user): ALTER ROLE % BYPASSRLS; then re-run. The migration will retry automatically on the next initSchema call.', current_user, current_user;
           END IF;
 
           ALTER TABLE code_edges_chunk ENABLE ROW LEVEL SECURITY;
@@ -1239,7 +1319,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+        SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
         IF has_bypass THEN
           ALTER TABLE takes              ENABLE ROW LEVEL SECURITY;
           ALTER TABLE synthesis_evidence ENABLE ROW LEVEL SECURITY;
@@ -1341,7 +1421,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+        SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
         IF has_bypass THEN
           ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;
         END IF;
@@ -1380,9 +1460,9 @@ export const MIGRATIONS: Migration[] = [
         DECLARE
           has_bypass BOOLEAN;
         BEGIN
-          SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+          SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
           IF NOT has_bypass THEN
-            RAISE EXCEPTION 'v31 eval_capture_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+            RAISE EXCEPTION 'v31 eval_capture_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Grant it (as postgres or a managed-Postgres master user): ALTER ROLE % BYPASSRLS; then re-run. The migration will retry automatically on the next initSchema call.', current_user, current_user;
           END IF;
 
           CREATE TABLE IF NOT EXISTS eval_candidates (
@@ -1499,13 +1579,13 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+        SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
         IF has_bypass THEN
           ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
           ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
           ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;
         ELSE
-          RAISE WARNING 'v32: role % lacks BYPASSRLS — skipping RLS on OAuth tables. Re-run as postgres (or a BYPASSRLS role) to harden.', current_user;
+          RAISE WARNING 'v32: role % lacks BYPASSRLS — skipping RLS on OAuth tables. Grant it (as postgres or a managed-Postgres master user): ALTER ROLE % BYPASSRLS; then re-run to harden.', current_user, current_user;
         END IF;
       END $$;
     `,
@@ -1591,14 +1671,6 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archive_expires_at TIMESTAMPTZ;
       `);
 
-      // Current schema replay happens before historical migrations and may
-      // install v133's committed-drain archive guard on a v33 brain. That
-      // future-only guard must not reject v34's canonical JSONB backfill.
-      // Migration v133 recreates the guard after the drain protocol exists.
-      await engine.runMigration(34, `
-        DROP TRIGGER IF EXISTS source_archive_transition_guard ON sources;
-      `);
-
       // 2. Backfill from JSONB shape used by pre-v0.26.5 cherry-picks of PR #595.
       //    Idempotent: subsequent re-runs find zero matching rows.
       await engine.runMigration(34, `
@@ -1622,18 +1694,7 @@ export const MIGRATIONS: Migration[] = [
       // 3. Partial index for the autopilot purge sweep. Postgres CONCURRENTLY
       //    avoids the SHARE lock on `pages`; PGLite has no concurrent writers.
       if (engine.kind === 'postgres') {
-        // Pre-drop any invalid index from a prior CONCURRENTLY failure (matches v14 pattern).
-        await engine.runMigration(34, `
-          DO $$ BEGIN
-            IF EXISTS (
-              SELECT 1 FROM pg_index i
-              JOIN pg_class c ON c.oid = i.indexrelid
-              WHERE c.relname = 'pages_deleted_at_purge_idx' AND NOT i.indisvalid
-            ) THEN
-              EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_deleted_at_purge_idx';
-            END IF;
-          END $$;
-        `);
+        await dropInvalidConcurrentIndex(engine, 34, 'pages_deleted_at_purge_idx');
         await engine.runMigration(34, `
           CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_deleted_at_purge_idx
             ON pages (deleted_at) WHERE deleted_at IS NOT NULL;
@@ -1681,9 +1742,17 @@ export const MIGRATIONS: Migration[] = [
     //     the DDL transaction, so a failed ALTER aborts the offending CREATE
     //     TABLE. That's a loud signal, not a silent gap. Wrapping would CREATE
     //     the silent path this migration exists to close.
-    //   - No privilege pre-check — runMigrations rethrows on SQL failure and
-    //     gates config.version, so a non-superuser run already fails loud with
-    //     an actionable Postgres error.
+    //   - Create-if-absent, NOT DROP+CREATE (#3603). CREATE EVENT TRIGGER is
+    //     superuser-reserved and on managed Postgres (RDS/Aurora) no reachable
+    //     app role has rolsuper — rds_superuser is NOT enough — so the original
+    //     ungated DROP+CREATE could never apply: config.version stalled at 34
+    //     forever while the server kept serving, and every later migration
+    //     silently never ran. Both the function and the trigger are gated on
+    //     existence so an operator can pre-create them once as the master user
+    //     and have this migration converge (CREATE OR REPLACE / DROP would fail
+    //     on master-owned objects). When absent AND uncreatable, the
+    //     insufficient_privilege handler raises ONE actionable message instead
+    //     of the raw permission error; anything else still fails loud.
     //
     // BREAKING CHANGE: the backfill is a one-time override of intentionally
     // RLS-off public tables that don't carry the GBRAIN:RLS_EXEMPT comment.
@@ -1696,28 +1765,50 @@ export const MIGRATIONS: Migration[] = [
         -- A failure here aborts the CREATE TABLE so no public.* table is ever
         -- created without RLS. object_identity is pre-quoted by Postgres
         -- (e.g. "public"."My Table"), so %s is correct — %I would double-quote.
-        CREATE OR REPLACE FUNCTION auto_enable_rls()
-        RETURNS event_trigger AS $$
-        DECLARE
-          obj record;
+        -- #3603: create-if-absent for BOTH objects (see the posture comment
+        -- above) so a master-user pre-create converges on managed Postgres.
+        DO $v35$
         BEGIN
-          FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
-            WHERE object_type = 'table'
-            AND schema_name = 'public'
-          LOOP
-            EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', obj.object_identity);
-          END LOOP;
-        END;
-        $$ LANGUAGE plpgsql;
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'auto_enable_rls' AND n.nspname = 'public'
+          ) THEN
+            EXECUTE $fn$
+              CREATE FUNCTION auto_enable_rls()
+              RETURNS event_trigger AS $body$
+              DECLARE
+                obj record;
+              BEGIN
+                FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
+                  WHERE object_type = 'table'
+                  AND schema_name = 'public'
+                LOOP
+                  EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', obj.object_identity);
+                END LOOP;
+              END;
+              $body$ LANGUAGE plpgsql
+            $fn$;
+          END IF;
 
-        -- WHEN TAG covers all three table-creation syntaxes Postgres reports.
-        -- CREATE TABLE / CREATE TABLE AS / SELECT INTO produce distinct command
-        -- tags; covering only 'CREATE TABLE' would leave a syntax-shaped hole.
-        DROP EVENT TRIGGER IF EXISTS auto_rls_on_create_table;
-        CREATE EVENT TRIGGER auto_rls_on_create_table
-          ON ddl_command_end
-          WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
-          EXECUTE FUNCTION auto_enable_rls();
+          -- WHEN TAG covers all three table-creation syntaxes Postgres reports.
+          -- CREATE TABLE / CREATE TABLE AS / SELECT INTO produce distinct command
+          -- tags; covering only 'CREATE TABLE' would leave a syntax-shaped hole.
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_event_trigger WHERE evtname = 'auto_rls_on_create_table'
+          ) THEN
+            BEGIN
+              EXECUTE $trg$
+                CREATE EVENT TRIGGER auto_rls_on_create_table
+                  ON ddl_command_end
+                  WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+                  EXECUTE FUNCTION auto_enable_rls()
+              $trg$;
+            EXCEPTION WHEN insufficient_privilege THEN
+              RAISE EXCEPTION 'v35 auto_rls_event_trigger: role % may not CREATE EVENT TRIGGER (superuser-only; on managed Postgres only the master user can — rds_superuser is not enough). Pre-create the auto_enable_rls() function and the auto_rls_on_create_table event trigger as that user (SQL in src/core/migrate.ts v35), then re-run: this migration passes create-if-absent and retries automatically on the next initSchema call.', current_user;
+            END;
+          END IF;
+        END $v35$;
 
         -- One-time backfill of every existing public.* base table without RLS.
         -- Honors the same GBRAIN:RLS_EXEMPT regex doctor.ts uses
@@ -1728,11 +1819,11 @@ export const MIGRATIONS: Migration[] = [
           has_bypass BOOLEAN;
           r record;
         BEGIN
-          SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+          SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
           IF NOT has_bypass THEN
             -- Same posture as v24: raise to abort the migration so the runner
             -- leaves config.version unbumped and retries on the next call.
-            RAISE EXCEPTION 'v35 auto_rls_event_trigger backfill: role % does not have BYPASSRLS — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role).', current_user;
+            RAISE EXCEPTION 'v35 auto_rls_event_trigger backfill: role % does not have BYPASSRLS — cannot enable RLS safely. Grant it (as postgres or a managed-Postgres master user): ALTER ROLE % BYPASSRLS; then re-run. The migration will retry automatically on the next initSchema call.', current_user, current_user;
           END IF;
 
           FOR r IN
@@ -1970,18 +2061,7 @@ export const MIGRATIONS: Migration[] = [
 
       // 2. Expression index for since/until date-range filters.
       if (engine.kind === 'postgres') {
-        // Pre-drop any invalid index from a prior CONCURRENTLY failure.
-        await engine.runMigration(38, `
-          DO $$ BEGIN
-            IF EXISTS (
-              SELECT 1 FROM pg_index i
-              JOIN pg_class c ON c.oid = i.indexrelid
-              WHERE c.relname = 'pages_coalesce_date_idx' AND NOT i.indisvalid
-            ) THEN
-              EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_coalesce_date_idx';
-            END IF;
-          END $$;
-        `);
+        await dropInvalidConcurrentIndex(engine, 38, 'pages_coalesce_date_idx');
         await engine.runMigration(38, `
           CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_coalesce_date_idx
             ON pages ((COALESCE(effective_date, updated_at)));
@@ -2120,7 +2200,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+        SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
         IF has_bypass THEN
           ALTER TABLE drift_decisions ENABLE ROW LEVEL SECURITY;
         END IF;
@@ -2280,11 +2360,19 @@ export const MIGRATIONS: Migration[] = [
         useHalfvec = true;
       }
 
-      const vecType = useHalfvec ? 'HALFVEC' : 'VECTOR';
+      const columnType = useHalfvec ? 'halfvec' : 'vector';
+      const vecType = columnType.toUpperCase();
       // HNSW operator class must match the column type:
       //   VECTOR(n)  → vector_cosine_ops
       //   HALFVEC(n) → halfvec_cosine_ops
       const opclass = useHalfvec ? 'halfvec_cosine_ops' : 'vector_cosine_ops';
+      const hnswMaxDims = hnswMaxDimsForType(columnType);
+      const factsEmbeddingIndexSql = embeddingDim <= hnswMaxDims
+        ? `CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw
+          ON facts USING hnsw (embedding ${opclass})
+          WHERE embedding IS NOT NULL AND expired_at IS NULL;`
+        : `-- idx_facts_embedding_hnsw skipped: pgvector HNSW ${columnType} indexes support
+        -- at most ${hnswMaxDims} dimensions; exact vector scans remain available.`;
       // FK to sources is added in a separate ALTER TABLE rather than inline
       // on the column. Inline `REFERENCES` worked on PGLite but silently
       // got dropped by postgres.js's `unsafe()` multi-statement path on
@@ -2299,7 +2387,7 @@ export const MIGRATIONS: Migration[] = [
           entity_slug       TEXT,
           fact              TEXT        NOT NULL,
           kind              TEXT        NOT NULL DEFAULT 'fact'
-                            CHECK (kind IN ('event','preference','commitment','belief','fact')),
+                            CHECK (kind IN ('event','preference','commitment','belief','fact','idea')),
           visibility        TEXT        NOT NULL DEFAULT 'private'
                             CHECK (visibility IN ('private','world')),
           notability        TEXT        NOT NULL DEFAULT 'medium'
@@ -2358,9 +2446,7 @@ export const MIGRATIONS: Migration[] = [
           ON facts(source_id, entity_slug)
           WHERE consolidated_at IS NULL AND expired_at IS NULL;
 
-        CREATE INDEX IF NOT EXISTS idx_facts_embedding_hnsw
-          ON facts USING hnsw (embedding ${opclass})
-          WHERE embedding IS NOT NULL AND expired_at IS NULL;
+        ${factsEmbeddingIndexSql}
       `;
 
       await engine.runMigration(40, factsDDL);
@@ -2373,7 +2459,7 @@ export const MIGRATIONS: Migration[] = [
           DECLARE
             has_bypass BOOLEAN;
           BEGIN
-            SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+            SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
             IF has_bypass THEN
               ALTER TABLE facts ENABLE ROW LEVEL SECURITY;
             END IF;
@@ -2874,8 +2960,16 @@ export const MIGRATIONS: Migration[] = [
         useHalfvec = true;
       }
 
-      const vecType = useHalfvec ? 'HALFVEC' : 'VECTOR';
+      const columnType = useHalfvec ? 'halfvec' : 'vector';
+      const vecType = columnType.toUpperCase();
       const opclass = useHalfvec ? 'halfvec_cosine_ops' : 'vector_cosine_ops';
+      const hnswMaxDims = hnswMaxDimsForType(columnType);
+      const queryCacheEmbeddingIndexSql = embeddingDim <= hnswMaxDims
+        ? `CREATE INDEX IF NOT EXISTS idx_query_cache_embedding_hnsw
+          ON query_cache USING hnsw (embedding ${opclass})
+          WHERE embedding IS NOT NULL;`
+        : `-- idx_query_cache_embedding_hnsw skipped: pgvector HNSW ${columnType} indexes support
+        -- at most ${hnswMaxDims} dimensions; exact vector scans remain available.`;
 
       const ddl = `
         CREATE TABLE IF NOT EXISTS query_cache (
@@ -2894,9 +2988,7 @@ export const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_query_cache_source_created
           ON query_cache(source_id, created_at DESC);
 
-        CREATE INDEX IF NOT EXISTS idx_query_cache_embedding_hnsw
-          ON query_cache USING hnsw (embedding ${opclass})
-          WHERE embedding IS NOT NULL;
+        ${queryCacheEmbeddingIndexSql}
       `;
 
       await engine.runMigration(55, ddl);
@@ -3271,18 +3363,7 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     handler: async (engine) => {
       if (engine.kind === 'postgres') {
-        await engine.runMigration(
-          66,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'idx_chunks_embedding_null' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS idx_chunks_embedding_null';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 66, 'idx_chunks_embedding_null');
         await engine.runMigration(
           66,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunks_embedding_null
@@ -3542,19 +3623,7 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     handler: async (engine) => {
       if (engine.kind === 'postgres') {
-        // Pre-drop invalid remnant from a failed CONCURRENTLY attempt.
-        await engine.runMigration(
-          71,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'takes_resolved_at_idx' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS takes_resolved_at_idx';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 71, 'takes_resolved_at_idx');
         await engine.runMigration(
           71,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS takes_resolved_at_idx
@@ -4214,20 +4283,7 @@ export const MIGRATIONS: Migration[] = [
       await engine.runMigration(91, columnsAndTrigger);
 
       if (engine.kind === 'postgres') {
-        // Pre-drop any invalid index from a prior CONCURRENTLY failure
-        // (matches v14 pattern).
-        await engine.runMigration(
-          91,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'pages_generation_idx' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_generation_idx';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 91, 'pages_generation_idx');
         await engine.runMigration(
           91,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_generation_idx ON pages (generation);`
@@ -4397,7 +4453,7 @@ export const MIGRATIONS: Migration[] = [
       DECLARE
         has_bypass BOOLEAN;
       BEGIN
-        SELECT (pr.rolbypassrls OR pr.rolsuper) INTO has_bypass FROM pg_roles pr WHERE pr.rolname = current_user; -- active role only; attributes are not inherited
+        SELECT EXISTS (SELECT 1 FROM pg_roles pr WHERE pg_has_role(current_user, pr.oid, 'USAGE') AND (pr.rolbypassrls OR pr.rolsuper)) INTO has_bypass; -- #1385: superuser + inherited-role BYPASSRLS, not just the role's own rolbypassrls
         IF has_bypass THEN
           ALTER TABLE take_domain_assignments ENABLE ROW LEVEL SECURITY;
         END IF;
@@ -4481,18 +4537,7 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     handler: async (engine) => {
       if (engine.kind === 'postgres') {
-        await engine.runMigration(
-          96,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'idx_facts_extract_conversation_session' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS idx_facts_extract_conversation_session';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 96, 'idx_facts_extract_conversation_session');
         await engine.runMigration(
           96,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_facts_extract_conversation_session
@@ -4534,18 +4579,7 @@ export const MIGRATIONS: Migration[] = [
     transaction: false,
     handler: async (engine) => {
       if (engine.kind === 'postgres') {
-        await engine.runMigration(
-          97,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'pages_dedup_idx' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_dedup_idx';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 97, 'pages_dedup_idx');
         await engine.runMigration(
           97,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_dedup_idx
@@ -4713,18 +4747,7 @@ export const MIGRATIONS: Migration[] = [
       );
 
       if (engine.kind === 'postgres') {
-        await engine.runMigration(
-          103,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'content_chunks_stale_idx' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS content_chunks_stale_idx';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 103, 'content_chunks_stale_idx');
         await engine.runMigration(
           103,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS content_chunks_stale_idx
@@ -4758,18 +4781,7 @@ export const MIGRATIONS: Migration[] = [
     sql: '',
     handler: async (engine) => {
       if (engine.kind === 'postgres') {
-        await engine.runMigration(
-          104,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'pages_atom_source_hash_idx' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_atom_source_hash_idx';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 104, 'pages_atom_source_hash_idx');
         await engine.runMigration(
           104,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_atom_source_hash_idx
@@ -5070,18 +5082,7 @@ export const MIGRATIONS: Migration[] = [
         `ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;`
       );
       if (engine.kind === 'postgres') {
-        await engine.runMigration(
-          112,
-          `DO $$ BEGIN
-             IF EXISTS (
-               SELECT 1 FROM pg_index i
-               JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE c.relname = 'pages_links_extracted_at_idx' AND NOT i.indisvalid
-             ) THEN
-               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_links_extracted_at_idx';
-             END IF;
-           END $$;`
-        );
+        await dropInvalidConcurrentIndex(engine, 112, 'pages_links_extracted_at_idx');
         await engine.runMigration(
           112,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_links_extracted_at_idx
@@ -5257,7 +5258,7 @@ export const MIGRATIONS: Migration[] = [
     // v110/v115 tables); pinned by the volunteer-context Postgres e2e.
     // Created empty; plain CREATE INDEX is instant — no CONCURRENTLY needed.
     // Keep in sync with src/schema.sql, src/core/pglite-schema.ts,
-    // src/core/schema-embedded.ts.
+    // src/core/schema-embedded.generated.ts.
     idempotent: true,
     sql: `
       CREATE TABLE IF NOT EXISTS context_volunteer_events (
@@ -5377,22 +5378,8 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 120,
-    name: 'eval_candidates_replay_surface',
-    // v0.43.x — captured query/search rows need a versioned retrieval-surface
-    // snapshot so replay can compare against the same production surface that
-    // produced the row. Legacy rows keep NULL and eval replay labels them as
-    // deterministic-bare legacy comparisons.
-    idempotent: true,
-    sql: `
-      ALTER TABLE eval_candidates
-        ADD COLUMN IF NOT EXISTS replay_surface JSONB NULL;
-    `,
-  },
-  {
-    version: 121,
     name: 'schema_lint_hardening_search_path_security_invoker',
-    // Downstream backport of the upstream schema-lint hardening wave
-    // (#1647 / #171). The fork already owns migration v120, so this is v121.
+    // v0.42 schema-lint hardening wave (#1647 / #171).
     //
     //   (b) security_invoker on the page_links view: pre-fix the view ran with
     //       the definer/owner's privileges, so the anon / PostgREST role could
@@ -5422,18 +5409,6 @@ export const MIGRATIONS: Migration[] = [
     sql: '', // engine-specific via sqlFor
     sqlFor: {
       postgres: `
-        -- GBrain's schema already requires PostgreSQL 15+ (migration v11
-        -- uses UNIQUE NULLS NOT DISTINCT). Keep the release boundary
-        -- explicit here so older self-hosted servers fail before attempting
-        -- the PG15-only security_invoker option, with an actionable error.
-        DO $$ BEGIN
-          IF current_setting('server_version_num')::int < 150000 THEN
-            RAISE EXCEPTION
-              'v0.46 migration requires PostgreSQL 15+. Current: %. Upgrade PostgreSQL before running gbrain upgrade.',
-              current_setting('server_version');
-          END IF;
-        END $$;
-
         ALTER VIEW IF EXISTS page_links SET (security_invoker = on);
 
         DO $$
@@ -5474,2281 +5449,1056 @@ export const MIGRATIONS: Migration[] = [
     },
   },
   {
-    version: 122,
-    name: 'files_source_storage_path_unique',
-    // File readers and import transactions already identify metadata by
-    // (source_id, storage_path). The legacy UNIQUE(storage_path) constraint
-    // made the writer disagree with that contract: importing the same relative
-    // path in a second source updated the first source's row instead of
-    // creating an isolated row. Existing data is safe to widen because the old
-    // global uniqueness is stricter than this composite key.
+    version: 121,
+    name: 'timeline_entries_event_page_id',
+    // v0.42.x — Life Chronicle (#2390): the event→timeline projection pointer.
+    // A `type:event` page projects ONE date-index row into timeline_entries
+    // keyed to the depth/meeting page (page_id), with event_page_id pointing at
+    // the event page itself. Additive + idempotent: nullable FK + partial
+    // indexes; legacy rows keep event_page_id NULL so existing behavior is
+    // unchanged. The partial UNIQUE(event_page_id, date) makes re-extraction
+    // with a changed summary an UPDATE (not a duplicate). FK added via a guarded
+    // DO block (mirrors the facts_source_id_fkey pattern) so the ALTER is a
+    // no-op on re-runs. Mirrored in src/schema.sql, src/core/pglite-schema.ts,
+    // and the generated src/core/schema-embedded.ts for fresh installs.
     idempotent: true,
     sql: `
-      ALTER TABLE files DROP CONSTRAINT IF EXISTS files_storage_path_key;
+      ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS event_page_id INTEGER;
+
       DO $$
       BEGIN
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
-           WHERE conname = 'files_source_storage_path_key'
-             AND conrelid = 'files'::regclass
+           WHERE conname = 'timeline_entries_event_page_id_fkey'
+             AND conrelid = 'timeline_entries'::regclass
         ) THEN
-          ALTER TABLE files
-            ADD CONSTRAINT files_source_storage_path_key
-            UNIQUE (source_id, storage_path);
+          ALTER TABLE timeline_entries
+            ADD CONSTRAINT timeline_entries_event_page_id_fkey
+            FOREIGN KEY (event_page_id) REFERENCES pages(id) ON DELETE CASCADE;
         END IF;
       END $$;
+
+      CREATE INDEX IF NOT EXISTS idx_timeline_event_page
+        ON timeline_entries(event_page_id) WHERE event_page_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_event_dedup
+        ON timeline_entries(event_page_id, date) WHERE event_page_id IS NOT NULL;
     `,
   },
   {
-    version: 124,
-    name: 'active_source_reference_write_guard',
-    // Source archive safety is a database invariant, not a CLI convention.
-    // Every producer takes a shared lock on each referenced active source;
-    // `sources archive --if-hygiene-candidate` takes FOR UPDATE on that source.
-    // Therefore an already-running writer finishes before archive evidence is
-    // reread, while a writer that arrives during archive waits and then fails
-    // if the source committed as archived. The dynamic registry covers every
-    // exact source_id column plus the non-canonical array/JSON/config and
-    // per-source sync-lock shapes audited by src/core/source-hygiene.ts.
-    // Scalar UPDATEs may clear an archived reference for FK ON DELETE SET
-    // NULL cleanup; retaining or replacing it still checks both owners.
+    version: 122,
+    name: 'facts_ontology_dimension',
+    // v0.42.x — Life Chronicle (#2390): the per-entity ontology rides the
+    // existing `facts` table. facts already gives bi-temporal validity
+    // (valid_from/valid_until/expired_at), supersession (superseded_by),
+    // remote redaction (visibility), confidence, provenance (source_markdown_slug),
+    // embedding, and corroboration (consolidated_into). The ONLY genuinely-new
+    // concept is a typed `dimension` (e.g. role, risk_tolerance) carrying a
+    // resolved `value` + a deterministic `value_hash` dedup key, plus a
+    // `dim_status` for quarantining novel/LLM-proposed dimensions. Plain facts
+    // keep dimension NULL → unchanged behavior. The partial UNIQUE is
+    // deterministic (no timestamp) so a crash-retry is idempotent. Additive;
+    // facts is migration-created (absent from static schema), so this migration
+    // is the single source for fresh + migrated brains.
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        raw_ref JSONB;
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_ARGV[0] = 'scalar' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref IS NOT NULL THEN
-            source_refs := array_append(source_refs, source_ref);
-            IF TG_OP = 'UPDATE' THEN
-              source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-              IF source_ref IS NOT NULL THEN
-                source_refs := array_append(source_refs, source_ref);
-              END IF;
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'array' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'array' THEN
-            source_refs := source_refs || ARRAY(
-              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-            );
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'array' THEN
-              source_refs := source_refs || ARRAY(
-                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-              );
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'object' THEN
-            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'object' THEN
-              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref LIKE 'gbrain-sync:%' THEN
-            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-            IF source_ref <> '' THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref LIKE 'gbrain-sync:%' THEN
-              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-              IF source_ref <> '' THEN
-                source_refs := array_append(source_refs, source_ref);
-              END IF;
-            END IF;
-          END IF;
-        ELSE
-          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
-        END IF;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS dimension  TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS value      TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS value_hash TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS dim_status TEXT;
 
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write %.%: source % is archived',
-              TG_TABLE_NAME, TG_ARGV[1], source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        matched_active BOOLEAN := false;
-        source_archived BOOLEAN;
-      BEGIN
-        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = NEW.value
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot set sources.default: source % is archived', NEW.value
-              USING ERRCODE = '23503';
-          END IF;
-        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          PERFORM id
-            FROM sources
-           WHERE local_path = NEW.value AND archived = false
-           ORDER BY id
-           FOR SHARE;
-          matched_active := FOUND;
-          IF NOT matched_active AND EXISTS (
-            SELECT 1 FROM sources WHERE local_path = NEW.value
-          ) THEN
-            RAISE EXCEPTION
-              'Cannot set sync.repo_path: matching source is archived'
-              USING ERRCODE = '23503';
-          END IF;
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      DO $install$
-      DECLARE
-        ref RECORD;
-      BEGIN
-        FOR ref IN
-          SELECT c.table_name, c.column_name
-            FROM information_schema.columns c
-            JOIN information_schema.tables t
-              ON t.table_schema = c.table_schema
-             AND t.table_name = c.table_name
-           WHERE c.table_schema = 'public'
-             AND t.table_type = 'BASE TABLE'
-             AND c.column_name = 'source_id'
-           ORDER BY c.table_name
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_active_ref_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I '
-            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
-            ref.table_name, 'scalar', ref.column_name
-          );
-        END LOOP;
-
-        FOR ref IN
-          SELECT *
-            FROM (VALUES
-              ('oauth_clients', 'bound_source_id', 'scalar', 'source_active_bound_source_guard'),
-              ('oauth_clients', 'federated_read', 'array', 'source_active_federated_read_guard'),
-              ('eval_candidates', 'source_ids', 'array', 'source_active_source_ids_guard'),
-              ('minion_jobs', 'data', 'json_source_keys', 'source_active_job_data_guard'),
-              ('gbrain_cycle_locks', 'id', 'sync_lock_id', 'source_active_sync_lock_guard')
-            ) AS refs(table_name, column_name, kind, trigger_name)
-           WHERE EXISTS (
-             SELECT 1
-               FROM information_schema.columns c
-              WHERE c.table_schema = 'public'
-                AND c.table_name = refs.table_name
-                AND c.column_name = refs.column_name
-           )
-           ORDER BY table_name, column_name
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS %I ON %I',
-            ref.trigger_name, ref.table_name
-          );
-          IF ref.kind = 'sync_lock_id' THEN
-            EXECUTE format(
-              'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
-              || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
-              ref.trigger_name, ref.table_name, ref.kind, ref.column_name
-            );
-          ELSE
-            EXECUTE format(
-              'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
-              || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
-              ref.trigger_name, ref.table_name, ref.kind, ref.column_name
-            );
-          END IF;
-        END LOOP;
-
-        IF to_regclass('public.config') IS NOT NULL THEN
-          DROP TRIGGER IF EXISTS source_active_config_guard ON config;
-          CREATE TRIGGER source_active_config_guard
-            BEFORE INSERT OR UPDATE OF key, value ON config
-            FOR EACH ROW EXECUTE FUNCTION enforce_active_source_config_fn();
-        END IF;
-      END;
-      $install$;
-    `,
-  },
-  {
-    version: 125,
-    name: 'active_source_job_status_guard',
-    idempotent: true,
-    sql: `
-      DO $install$
-      BEGIN
-        IF to_regclass('public.minion_jobs') IS NOT NULL
-           AND to_regprocedure('enforce_active_source_reference_fn()') IS NOT NULL THEN
-          DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
-          CREATE TRIGGER source_active_job_data_guard
-            BEFORE INSERT OR UPDATE OF data, status ON minion_jobs
-            FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(
-              'json_source_keys', 'data'
-            );
-        END IF;
-      END;
-      $install$;
+      CREATE INDEX IF NOT EXISTS idx_facts_dimension
+        ON facts(source_id, entity_slug, dimension, valid_from DESC)
+        WHERE expired_at IS NULL AND dimension IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_ontology_dedup
+        ON facts(source_id, entity_slug, dimension, value_hash, source_markdown_slug)
+        WHERE dimension IS NOT NULL;
     `,
   },
   {
     version: 123,
-    name: 'pages_takes_extracted_content_hash',
-    // A valid classifier result may contain zero claims. Without a page-level
-    // completion marker, those pages remain at the head of every bounded
-    // bootstrap run and prevent the sweep from reaching older pages.
+    name: 'configurable_fts_language',
+    // Recreate the two search_vector trigger functions using the language
+    // configured via GBRAIN_FTS_LANGUAGE (default 'english'). Idempotent:
+    // CREATE OR REPLACE swaps the function body atomically; no trigger
+    // recreation needed since the trigger references the function by name.
+    //
+    // Why a handler instead of a static SQL string: Postgres tsvector
+    // functions don't accept parameterized config names — the language
+    // must be a literal in the SQL. getFtsLanguage() validates the value
+    // (lowercase letters/digits/underscores only) before interpolation.
+    //
+    // Function bodies mirror schema.sql / pglite-schema.ts exactly —
+    // INCLUDING the `SET search_path = pg_catalog, public` hardening from
+    // v120/#1647 (CREATE OR REPLACE resets proconfig, so omitting it here
+    // would silently strip the hardening on every upgraded brain). Only
+    // the text-search config name is parameterized. Keep all copies in
+    // sync when the trigger logic changes.
+    //
+    // Backfill: after recreating the functions, re-tokenize existing rows
+    // under the new language. Skipped when the configured language is
+    // 'english' (trigger output identical — re-tokenizing is wasted I/O).
+    // To change language after this migration has run, use
+    // `gbrain reindex-search-vector`.
+    sql: '',
+    handler: async (engine) => {
+      const lang = getFtsLanguage();
+
+      const recreatePagesFn = `
+        CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $fn$
+        DECLARE
+          timeline_text TEXT;
+        BEGIN
+          SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
+          INTO timeline_text
+          FROM timeline_entries
+          WHERE page_id = NEW.id;
+
+          NEW.search_vector :=
+            setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A') ||
+            setweight(to_tsvector('${lang}', coalesce(NEW.compiled_truth, '')), 'B') ||
+            setweight(to_tsvector('${lang}', coalesce(NEW.timeline, '')), 'C') ||
+            setweight(to_tsvector('${lang}', coalesce(timeline_text, '')), 'C');
+
+          RETURN NEW;
+        END;
+        $fn$ LANGUAGE plpgsql;
+      `;
+
+      const recreateChunksFn = `
+        CREATE OR REPLACE FUNCTION update_chunk_search_vector() RETURNS TRIGGER SET search_path = pg_catalog, public AS $fn$
+        BEGIN
+          NEW.search_vector :=
+            setweight(to_tsvector('${lang}', COALESCE(NEW.doc_comment, '')), 'A') ||
+            setweight(to_tsvector('${lang}', COALESCE(NEW.symbol_name_qualified, '')), 'A') ||
+            setweight(to_tsvector('${lang}', COALESCE(NEW.chunk_text, '')), 'B');
+          RETURN NEW;
+        END;
+        $fn$ LANGUAGE plpgsql;
+      `;
+
+      await engine.executeRaw(recreatePagesFn);
+      await engine.executeRaw(recreateChunksFn);
+
+      if (lang === 'english') {
+        // stderr, NOT stdout: migrations run lazily inside any command's
+        // first DB connect — a console.log here polluted `doctor --json`
+        // stdout and broke jq consumers (heavy-tests fm_wallclock).
+        migrationNotice(`  v123: trigger functions recreated with language='english' (default — no backfill needed)\n`);
+        return;
+      }
+
+      // Backfill existing rows under the new tokenizer. UPDATE-to-same-value
+      // re-fires the pages trigger; chunks are rewritten directly with the
+      // same expression as the trigger.
+      await engine.executeRaw(`
+        UPDATE pages SET id = id
+        WHERE search_vector IS NOT NULL;
+      `);
+
+      await engine.executeRaw(`
+        UPDATE content_chunks
+        SET search_vector =
+          setweight(to_tsvector('${lang}', COALESCE(doc_comment, '')), 'A') ||
+          setweight(to_tsvector('${lang}', COALESCE(symbol_name_qualified, '')), 'A') ||
+          setweight(to_tsvector('${lang}', COALESCE(chunk_text, '')), 'B')
+        WHERE search_vector IS NOT NULL;
+      `);
+
+      migrationNotice(`  v123: trigger functions recreated with language='${lang}' + backfilled existing rows\n`);
+    },
+  },
+  {
+    version: 124,
+    name: 'page_search_vector_drop_compiled_truth',
+    // #2704: a single markdown page whose compiled_truth exceeds Postgres's
+    // hard 1,048,575-byte tsvector cap made update_page_search_vector()
+    // throw "string is too long for tsvector" INSIDE the pages UPSERT
+    // transaction — not a per-file ledger entry, a transaction abort. The
+    // whole source's sync checkpoint stayed pinned (Sync BLOCKED) until the
+    // oversized file was fixed or manually skipped, even though every
+    // OTHER file in the run imported fine.
+    //
+    // Fix: drop compiled_truth (the unbounded whole-page body) from this
+    // trigger. It was already redundant — content_chunks.search_vector
+    // (Cathedral II Layer 3, v0.20.0) is the ACTUAL keyword-search source:
+    // searchKeyword() in postgres-engine.ts/pglite-engine.ts ranks and
+    // queries `cc.search_vector` exclusively; `pages.search_vector` is
+    // written by this trigger but never read by any query in this
+    // codebase (verified: no `pages.search_vector`/bare `search_vector`
+    // appears on either side of a WHERE/ts_rank anywhere outside this
+    // trigger's own definition and the reindex/backfill machinery that
+    // maintains it). And chunking already bounds each chunk_text well
+    // under the tsvector limit (chunkText() targets embedding-sized
+    // pieces, several orders of magnitude smaller than 1MB) — the overflow
+    // was specific to the whole-page grain this trigger no longer builds.
+    //
+    // title + timeline (both naturally small — a compiled_truth-sized
+    // title or timeline field would be its own bug) stay, so
+    // pages.search_vector keeps carrying SOME signal rather than going
+    // fully inert; a future PR can drop the column outright once its
+    // last non-search consumer (if any turns up) is confirmed gone.
+    //
+    // No backfill: existing rows keep whatever search_vector they already
+    // computed until their next UPDATE (harmless — nothing reads this
+    // column, so staleness has zero behavioral effect). The brains that
+    // actually hit this bug never successfully wrote a value for the
+    // oversized page in the first place, so there's nothing stale to fix
+    // for them specifically — the NEXT sync of that exact file is what
+    // proves the fix, not a backfill of already-working rows.
+    //
+    // Function body mirrors reindex-search-vector.ts's recreatePagesFn
+    // (documented contract there: keep both in lockstep) and the fresh-
+    // install baselines in pglite-schema.ts / schema-embedded.ts — all
+    // four updated in the same commit as this migration.
+    sql: '',
+    handler: async (engine) => {
+      const lang = getFtsLanguage();
+      await engine.executeRaw(`
+        CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $fn$
+        DECLARE
+          timeline_text TEXT;
+        BEGIN
+          SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
+          INTO timeline_text
+          FROM timeline_entries
+          WHERE page_id = NEW.id;
+
+          NEW.search_vector :=
+            setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A') ||
+            setweight(to_tsvector('${lang}', coalesce(NEW.timeline, '')), 'C') ||
+            setweight(to_tsvector('${lang}', coalesce(timeline_text, '')), 'C');
+
+          RETURN NEW;
+        END;
+        $fn$ LANGUAGE plpgsql;
+      `);
+      migrationNotice(`  v124: update_page_search_vector() no longer indexes compiled_truth (was overflowing tsvector on large pages, #2704)
+`);
+    },
+  },
+  {
+    version: 125,
+    name: 'take_proposals_per_claim_idempotency',
+    // #2138: the original idempotency key was per page, so each INSERT after
+    // the first claim silently conflicted. md5(claim_text) makes it per claim
+    // without adding/backfilling a column. The new key is strictly finer than
+    // the old key and therefore preserves all existing rows.
     idempotent: true,
     sql: `
-      ALTER TABLE pages
-        ADD COLUMN IF NOT EXISTS takes_extracted_content_hash TEXT;
+      DROP INDEX IF EXISTS take_proposals_idempotency_idx;
+      CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
+        ON take_proposals (source_id, page_slug, content_hash, prompt_version, md5(claim_text));
     `,
   },
   {
     version: 126,
-    name: 'archived_source_job_terminalization_guard',
+    name: 'session_context_state',
+    // v0.45.7 (issue #1) ambient recall — per-session cursor + boundary-tie
+    // dedup for the `delta` verb and the heartbeat runtime. Key is
+    // (source_id, client_id, session_id): client_id defaults to the 'local'
+    // sentinel for the CLI/hook path; REMOTE callers pass their auth client id
+    // so two harnesses in one source can't stomp/read each other's cursor
+    // (eng 1B). ONE key shape — no split key, no NULL branch. surfaced_slugs
+    // holds the boundary set: page slugs delivered AT the cursor timestamp,
+    // REPLACED on every advance (bounded by the delta fetch limit). jsonb
+    // columns default to '[]'::jsonb (a DDL LITERAL default — the ::jsonb
+    // param double-encode trap only bites INSERT/UPDATE binds, not DDL
+    // defaults; writes bind via executeRaw + $N::text::jsonb, guarded by
+    // scripts/check-jsonb-params.mjs). Created empty; plain CREATE INDEX
+    // is instant — no CONCURRENTLY. RLS: covered by the v35
+    // auto_rls_on_create_table event trigger on Postgres. Keep in sync with
+    // src/schema.sql, src/core/pglite-schema.ts, src/core/schema-embedded.ts.
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_OP = 'UPDATE'
-           AND NEW.data IS NOT DISTINCT FROM OLD.data
-           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-          RETURN NEW;
-        END IF;
-
-        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-        IF TG_OP = 'UPDATE' THEN
-          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-        END IF;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is archived', source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
-      CREATE TRIGGER source_active_job_data_guard
-        BEFORE INSERT OR UPDATE OF data, status ON minion_jobs
-        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+      CREATE TABLE IF NOT EXISTS session_context_state (
+        source_id         TEXT NOT NULL,
+        client_id         TEXT NOT NULL DEFAULT 'local',
+        session_id        TEXT NOT NULL,
+        standing_entities JSONB NOT NULL DEFAULT '[]'::jsonb,
+        surfaced_slugs    JSONB NOT NULL DEFAULT '[]'::jsonb,
+        last_wake_at      TIMESTAMPTZ,
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (source_id, client_id, session_id)
+      );
+      CREATE INDEX IF NOT EXISTS session_context_state_updated_idx
+        ON session_context_state (updated_at);
     `,
   },
   {
     version: 127,
-    name: 'archived_source_job_continuation_guard',
+    name: 'oauth_client_surface_and_minion_queue_index',
+    // WP4 (MCP consumer-feedback wave) — two additive pieces:
+    //
+    // 1. oauth_clients.surface + surface_set_by (amendments 17-19): the
+    //    per-client MCP tool surface consumed by the D2 ceiling resolution in
+    //    serve-http (`min(server --surface ceiling, row surface ?? config
+    //    default)`) and written by `gbrain auth rescope-client --surface`
+    //    (surface_set_by='operator', the lock the request_tools persist
+    //    branch cannot override) and the `request_tools` meta-op
+    //    (surface_set_by='self'). TEXT with an OPEN value space (amendment
+    //    18): unrecognized values are ignored at resolution (warn-once per
+    //    client), and future client tiers will write tier names into this
+    //    same column — never a second column. NULL = no per-client surface
+    //    (server/config resolution applies). verifyAccessToken's degrade
+    //    ladder gained a rung above v85's so pre-v127 brains keep
+    //    authenticating (ENG-9: both columns probed by missingOAuthColumn).
+    //
+    // 2. idx_minion_jobs_queue_status_updated (ENG-10, WP5 wedge index):
+    //    btree (queue, status, updated_at) covering all four count FILTERs
+    //    and both max(updated_at) FILTERs in queryWedgeSignals
+    //    (supervisor.ts) — no non-partial queue index existed before this.
+    //    Plain CREATE INDEX (small table; no CONCURRENTLY needed, which also
+    //    keeps this runnable inside the migration transaction on both
+    //    engines).
+    //
+    // Keep in sync with src/schema.sql, src/core/pglite-schema.ts,
+    // src/core/schema-embedded.ts + the bootstrap probe sets in both engines
+    // (test/schema-bootstrap-coverage.test.ts pins coverage).
     idempotent: true,
     sql: `
-      DROP TRIGGER IF EXISTS source_active_job_data_guard ON minion_jobs;
-      CREATE TRIGGER source_active_job_data_guard
-        BEFORE INSERT OR UPDATE ON minion_jobs
-        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
+      ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS surface TEXT;
+      ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS surface_set_by TEXT;
+      CREATE INDEX IF NOT EXISTS idx_minion_jobs_queue_status_updated
+        ON minion_jobs (queue, status, updated_at);
     `,
   },
   {
     version: 128,
-    name: 'archived_source_owned_row_guard',
+    name: 'minion_jobs_timeout_backfill_and_duplicate_cycle_cleanup',
+    // Jobs fix wave (upstream issues #2/#3) — two one-shot repairs for rows
+    // that predate the fixes shipping alongside this migration:
+    //
+    // 1. HANDLER_DEFAULT_TIMEOUT_MS backfill. Submit-time stamping (#1737)
+    //    never touched already-queued rows, so their timeout_ms = NULL fell
+    //    to the minutes-scale null-default wall-clock sweep and long handlers
+    //    were dead-lettered mid-progress. Values are SNAPSHOTTED at authoring
+    //    time — deliberately NOT generated from the live map, so every brain
+    //    applies identical SQL under this version number; the claim-time
+    //    COALESCE in MinionQueue.claim owns all future drift. Do NOT sync
+    //    this list when handler-timeouts.ts changes. No timeout_at stamp for
+    //    already-active rows: that would arm the tighter 1x handleTimeouts
+    //    kill mid-flight; the 2x wall-clock bound (via non-NULL timeout_ms)
+    //    is the gentler, sufficient repair, and every future claim stamps
+    //    timeout_at correctly.
+    //
+    // 2. Duplicate autopilot-cycle backlog cleanup. The slot-scoped dispatch
+    //    guards accumulated byte-identical waiting cycles when a job stalled
+    //    in 'active' (unbounded — one observed brain held ~111). Cancel all
+    //    but the newest waiting row per (name, queue, source scope),
+    //    restricted to ticker-keyed rows (idempotency-key prefix heuristic:
+    //    manually submitted cycles carry no key unless the operator passes
+    //    one; mimicking the ticker prefix opts into ticker dedup semantics)
+    //    AND to rows without a camelCase data.sourceId — the ticker only
+    //    ever writes snake_case source_id, so a sourceId row is by
+    //    definition not ticker-provenance and must never be swept
+    //    (adversarial-review tightening: prevents distinct sourceId scopes
+    //    collapsing into the empty source_id group).
+    //    Rows are preserved as 'cancelled' for audit; their idempotency keys
+    //    free naturally via the dead/cancelled key-NULLing rule in add().
+    //    Leaves <=1 waiting (+ possibly 1 active) per scope — converges to
+    //    single-flight within one wall-clock window; the maxPending guard
+    //    (shipped with this wave) prevents new accumulation.
+    //
+    // Non-terminal status set + row-lock race-safety per the v15 precedent
+    // (serializes against claim()'s FOR UPDATE SKIP LOCKED). Idempotent:
+    // statement 1 re-runs match zero rows (timeout_ms IS NULL guard);
+    // statement 2 re-runs keep only survivors.
     idempotent: true,
     sql: `
-      DO $install$
-      DECLARE
-        ref RECORD;
-      BEGIN
-        FOR ref IN
-          SELECT c.table_name, c.column_name
-            FROM information_schema.columns c
-            JOIN information_schema.tables t
-              ON t.table_schema = c.table_schema
-             AND t.table_name = c.table_name
-           WHERE c.table_schema = 'public'
-             AND t.table_type = 'BASE TABLE'
-             AND c.column_name = 'source_id'
-           ORDER BY c.table_name
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_active_ref_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_active_ref_guard BEFORE INSERT OR UPDATE ON %I '
-            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
-            ref.table_name, 'scalar', ref.column_name
-          );
-        END LOOP;
+      UPDATE minion_jobs
+         SET timeout_ms = CASE name
+               WHEN 'subagent'                     THEN 1800000
+               WHEN 'subagent_aggregator'          THEN 1800000
+               WHEN 'embed-backfill'               THEN 1800000
+               WHEN 'autopilot-cycle'              THEN 1800000
+               WHEN 'autopilot-global-maintenance' THEN 1800000
+               WHEN 'chronicle_extract'            THEN 600000
+               WHEN 'facts-absorb'                 THEN 600000
+               WHEN 'contextual_reindex_per_chunk' THEN 3600000
+             END,
+             updated_at = now()
+       WHERE timeout_ms IS NULL
+         AND status IN ('waiting','active','delayed','waiting-children','paused')
+         AND name IN ('subagent','subagent_aggregator','embed-backfill',
+                      'autopilot-cycle','autopilot-global-maintenance',
+                      'chronicle_extract','facts-absorb',
+                      'contextual_reindex_per_chunk');
 
-        FOR ref IN
-          SELECT *
-            FROM (VALUES
-              ('oauth_clients', 'bound_source_id', 'scalar', 'source_active_bound_source_guard'),
-              ('oauth_clients', 'federated_read', 'array', 'source_active_federated_read_guard'),
-              ('eval_candidates', 'source_ids', 'array', 'source_active_source_ids_guard')
-            ) AS refs(table_name, column_name, kind, trigger_name)
-           WHERE EXISTS (
-             SELECT 1
-               FROM information_schema.columns c
-              WHERE c.table_schema = 'public'
-                AND c.table_name = refs.table_name
-                AND c.column_name = refs.column_name
-           )
-           ORDER BY table_name, column_name
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS %I ON %I',
-            ref.trigger_name, ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER %I BEFORE INSERT OR UPDATE ON %I '
-            || 'FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn(%L, %L)',
-            ref.trigger_name, ref.table_name, ref.kind, ref.column_name
-          );
-        END LOOP;
-      END;
-      $install$;
+      UPDATE minion_jobs
+         SET status = 'cancelled',
+             finished_at = now(),
+             updated_at = now(),
+             error_text = 'v128: superseded duplicate autopilot cycle'
+       WHERE status = 'waiting' AND parent_job_id IS NULL
+         AND name IN ('autopilot-cycle','autopilot-global-maintenance')
+         AND (idempotency_key LIKE 'autopilot-cycle:%' OR idempotency_key LIKE 'autopilot-global:%')
+         AND data->>'sourceId' IS NULL
+         AND id NOT IN (
+           SELECT id FROM (
+             SELECT DISTINCT ON (name, queue, COALESCE(data->>'source_id','')) id
+             FROM minion_jobs
+             WHERE status = 'waiting' AND parent_job_id IS NULL
+               AND name IN ('autopilot-cycle','autopilot-global-maintenance')
+               AND (idempotency_key LIKE 'autopilot-cycle:%' OR idempotency_key LIKE 'autopilot-global:%')
+               AND data->>'sourceId' IS NULL
+             ORDER BY name, queue, COALESCE(data->>'source_id',''), created_at DESC, id DESC
+           ) keep
+         );
     `,
   },
   {
     version: 129,
-    name: 'archived_source_missing_reference_compatibility',
-    // Source identifiers can outlive their registry row in legacy brains and
-    // isolated fixtures. Preserve that compatibility while taking the shared
-    // lifecycle lock before any source lookup, then a row lock for every known
-    // source. Concurrent archive waits even when the source row does not exist,
-    // while known archived sources remain write-protected.
+    name: 'dream_verdicts_triage_v1_columns',
+    // #4152 two-stage cascade: widens the boolean-era verdict cache into a
+    // scored triage record — ordinal salience score in [0,1], content type,
+    // candidate segments (verbatim quotes), entity candidates, plus the
+    // judging model and triage prompt version that make a cached verdict
+    // auditable and version-invalidatable. Legacy rows keep score NULL and
+    // are treated as cache misses by runTriagePass (re-judged once, cheap).
+    // No backfill by design; no index (the table is PK-probed only).
+    //
+    // dream_verdicts is migration-created on PGLite (v30, absent from
+    // PGLITE_SCHEMA_SQL), so these columns take the COLUMN_EXEMPTIONS route
+    // in test/schema-bootstrap-coverage.test.ts rather than bootstrap
+    // probes — there is no schema-blob forward reference to trip on, and
+    // every reader treats NULL as legacy-miss. Keep src/schema.sql (and the
+    // regenerated schema-embedded.ts) in sync for fresh Postgres installs.
+    //
+    // Rollback note: the stored worth_processing boolean derives from the
+    // FIXED 0.5 constant while the new runtime gate uses the configurable
+    // dream.triage.threshold. A binary rollback to pre-#4152 code (which
+    // trusts the boolean as permanent) after retuning the threshold gates
+    // differently until content hashes change — sweep with
+    // `gbrain dream retriage --force` (or clear scored rows) after such a
+    // rollback.
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        raw_ref JSONB;
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_ARGV[0] = 'scalar' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref IS NOT NULL THEN
-            source_refs := array_append(source_refs, source_ref);
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref IS NOT NULL THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'array' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'array' THEN
-            source_refs := source_refs || ARRAY(
-              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-            );
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'array' THEN
-              source_refs := source_refs || ARRAY(
-                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-              );
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'object' THEN
-            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'object' THEN
-              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref LIKE 'gbrain-sync:%' THEN
-            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-            IF source_ref <> '' THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref LIKE 'gbrain-sync:%' THEN
-              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-              IF source_ref <> '' THEN
-                source_refs := array_append(source_refs, source_ref);
-              END IF;
-            END IF;
-          END IF;
-        ELSE
-          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
-        END IF;
-
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write %.%: source % is archived',
-              TG_TABLE_NAME, TG_ARGV[1], source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_OP = 'UPDATE'
-           AND NEW.data IS NOT DISTINCT FROM OLD.data
-           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-          RETURN NEW;
-        END IF;
-
-        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-        IF TG_OP = 'UPDATE' THEN
-          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-        END IF;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is archived', source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        matched_active BOOLEAN := false;
-        source_archived BOOLEAN;
-      BEGIN
-        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = NEW.value
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot set sources.default: source % is archived', NEW.value
-              USING ERRCODE = '23503';
-          END IF;
-        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          PERFORM id
-            FROM sources
-           WHERE local_path = NEW.value AND archived = false
-           ORDER BY id
-           FOR SHARE;
-          matched_active := FOUND;
-          IF NOT matched_active AND EXISTS (
-            SELECT 1 FROM sources WHERE local_path = NEW.value
-          ) THEN
-            RAISE EXCEPTION
-              'Cannot set sync.repo_path: matching source is archived'
-              USING ERRCODE = '23503';
-          END IF;
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION;
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS content_type TEXT;
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS segments JSONB;
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS entities JSONB;
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS model TEXT;
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS triage_version INT;
     `,
   },
   {
     version: 130,
-    name: 'source_lifecycle_advisory_lock',
-    // A source row cannot provide a lock before it exists. Every guarded
-    // writer therefore takes the shared form of one transaction-scoped
-    // lifecycle lock; archive takes the exclusive form before rereading its
-    // predicate. Shared locks remain concurrent, while the rare archive waits
-    // for every earlier writer and blocks every later writer until commit.
+    name: 'minion_jobs_lock_duration_ms',
+    // #4145: per-job lock lease. A single worker-global 30s lockDuration
+    // cannot serve both 2s shell jobs and 173s-average LLM subagent jobs —
+    // under host CPU saturation the renewal window was missed and healthy
+    // long-running handlers were force-evicted. The column carries an
+    // optional per-job lease; NULL means "worker default" (the pre-#4145
+    // behavior), so NO backfill is needed — the claim-time COALESCE against
+    // HANDLER_DEFAULT_LOCK_DURATION_MS (handler-timeouts.ts) owns all
+    // defaulting from here on. CHECK added via the idempotent drop-then-add
+    // pattern (v7 precedent) so migrated brains carry the same DB bound as
+    // fresh installs; the operative [5s,1h] range clamp lives app-side in
+    // clampLockDurationMs. No index: only per-row reads on already-indexed
+    // access paths (bootstrap-coverage: column-only, no probe needed).
+    // (Authored as v129; renumbered to v130 when #4152's
+    // dream_verdicts_triage_v1_columns landed the number first.)
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        raw_ref JSONB;
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_ARGV[0] = 'scalar' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref IS NOT NULL THEN
-            source_refs := array_append(source_refs, source_ref);
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref IS NOT NULL THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'array' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'array' THEN
-            source_refs := source_refs || ARRAY(
-              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-            );
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'array' THEN
-              source_refs := source_refs || ARRAY(
-                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-              );
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'object' THEN
-            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'object' THEN
-              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref LIKE 'gbrain-sync:%' THEN
-            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-            IF source_ref <> '' THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref LIKE 'gbrain-sync:%' THEN
-              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-              IF source_ref <> '' THEN
-                source_refs := array_append(source_refs, source_ref);
-              END IF;
-            END IF;
-          END IF;
-        ELSE
-          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
-        END IF;
-
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write %.%: source % is archived',
-              TG_TABLE_NAME, TG_ARGV[1], source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_OP = 'UPDATE'
-           AND NEW.data IS NOT DISTINCT FROM OLD.data
-           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-          RETURN NEW;
-        END IF;
-
-        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-        IF TG_OP = 'UPDATE' THEN
-          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-        END IF;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is archived', source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        matched_active BOOLEAN := false;
-        source_archived BOOLEAN;
-      BEGIN
-        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = NEW.value
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot set sources.default: source % is archived', NEW.value
-              USING ERRCODE = '23503';
-          END IF;
-        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          PERFORM id
-            FROM sources
-           WHERE local_path = NEW.value AND archived = false
-           ORDER BY id
-           FOR SHARE;
-          matched_active := FOUND;
-          IF NOT matched_active AND EXISTS (
-            SELECT 1 FROM sources WHERE local_path = NEW.value
-          ) THEN
-            RAISE EXCEPTION
-              'Cannot set sync.repo_path: matching source is archived'
-              USING ERRCODE = '23503';
-          END IF;
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS lock_duration_ms INTEGER;
+      ALTER TABLE minion_jobs DROP CONSTRAINT IF EXISTS chk_lock_duration_positive;
+      ALTER TABLE minion_jobs ADD CONSTRAINT chk_lock_duration_positive CHECK (lock_duration_ms IS NULL OR (lock_duration_ms >= 5000 AND lock_duration_ms <= 3600000));
     `,
   },
   {
     version: 131,
-    name: 'archived_source_update_escape_guard',
-    // v130 originally inspected only NEW references. Replacing an archived
-    // row's source with an active source could therefore re-home the row and
-    // bypass the lifecycle boundary. Reinstall both guards under a new
-    // migration number so brains already stamped at v130 are repaired by the
-    // direct apply-migrations path as well as by schema replay.
+    name: 'drop_job_wide_subagent_tool_use_id_unique',
+    // #4155 — tool_use_id stores the RAW provider id, and some providers
+    // legitimately reuse the same short id on every turn (claude-cli spawns a
+    // fresh subprocess per turn from an id-stripped transcript, so the model
+    // re-invents ids like "toolu_01"). The job-wide UNIQUE (job_id,
+    // tool_use_id) constraint encoded the false assumption that provider ids
+    // are unique within a job; a reuse collided (this was never any INSERT's
+    // conflict target) and dead-lettered the job. Row identity is already
+    // carried by subagent_tool_executions_stable_id UNIQUE (job_id,
+    // message_idx, ordinal); readers resolve executions by (message_idx,
+    // tool_use_id). A narrower unique (e.g. adding message_idx) would still
+    // dead-letter a turn that reuses one id twice, so no replacement
+    // constraint is added. Same SQL on both engines; DROP CONSTRAINT IF
+    // EXISTS makes re-runs a no-op (v82 pglite precedent).
+    // (Authored as v129; renumbered to v131 after #4152 and #4145 landed
+    // 129/130 first — same renumber pattern as v130 itself.)
+    // Mixed-version fleets: an OLD binary still naming this constraint as an
+    // ON CONFLICT target errors (SQLSTATE 42P10) on every tool persist once
+    // the drop runs — fail-loud, not corrupting. Multi-worker Postgres
+    // deployments should stop `jobs work` daemons before upgrading and
+    // restart them on the new binary (release-noted in v0.46.14.0).
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        raw_ref JSONB;
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_ARGV[0] = 'scalar' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref IS NOT NULL THEN
-            source_refs := array_append(source_refs, source_ref);
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref IS NOT NULL THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'array' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'array' THEN
-            source_refs := source_refs || ARRAY(
-              SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-            );
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'array' THEN
-              source_refs := source_refs || ARRAY(
-                SELECT value FROM jsonb_array_elements_text(raw_ref) AS values_(value)
-              );
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'object' THEN
-            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'object' THEN
-              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref LIKE 'gbrain-sync:%' THEN
-            source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-            IF source_ref <> '' THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref LIKE 'gbrain-sync:%' THEN
-              source_ref := substring(source_ref FROM length('gbrain-sync:') + 1);
-              IF source_ref <> '' THEN
-                source_refs := array_append(source_refs, source_ref);
-              END IF;
-            END IF;
-          END IF;
-        ELSE
-          RAISE EXCEPTION 'Unknown active-source guard kind: %', TG_ARGV[0];
-        END IF;
-
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write %.%: source % is archived',
-              TG_TABLE_NAME, TG_ARGV[1], source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_OP = 'UPDATE'
-           AND NEW.data IS NOT DISTINCT FROM OLD.data
-           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-          RETURN NEW;
-        END IF;
-
-        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-        IF TG_OP = 'UPDATE' THEN
-          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-        END IF;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is archived', source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
+      ALTER TABLE subagent_tool_executions
+        DROP CONSTRAINT IF EXISTS uniq_subagent_tools_use_id;
     `,
   },
   {
     version: 132,
-    name: 'archived_source_indirect_reference_guard',
-    // Tables such as content_chunks and links inherit ownership through a
-    // pages(id) foreign key instead of carrying source_id directly. Protect
-    // every current page FK. NEW references are checked statement-wide; a
-    // narrow row trigger checks only non-null re-homes from OLD pages so
-    // ON DELETE SET NULL cleanup remains legal. Path-routed sync jobs
-    // receive the same lifecycle lock even when their payload omits sourceId.
+    name: 'session_context_state_checkpoint_manifest',
+    // Cathedral 5 (checkpoint compaction): per-session brain-link manifest
+    // banked by the compaction-boundary harvest and rendered into the
+    // post-compaction SessionStart pack. A dedicated column because the
+    // table's existing jsonb columns are TYPED arrays with validators —
+    // there is no free-form bag to extend. Shape: newest-first array of
+    // {slug, title, at, n, seg} capped at 20 (dedup-by-slug on append);
+    // `seg` is the content hash of the harvested corpus segment, the
+    // completion key the OpenClaw assemble poll matches on. DDL-literal
+    // '[]'::jsonb default (safe — the double-encode trap bites binds, not
+    // DDL); writes bind via $N::text::jsonb in session-state.ts. Row-level
+    // 7-day/LRU GC (gcSessionContextState) covers the column for free.
+    // Readers are fail-open: pre-v132 brains return an empty manifest.
+    // No index (PK-probed only). Keep in sync with src/schema.sql
+    // (regenerate schema-embedded.ts via build:schema) and
+    // src/core/pglite-schema.ts.
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        repo_path TEXT;
-        repo_paths TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
-        source_archived BOOLEAN;
-      BEGIN
-        IF TG_OP = 'UPDATE'
-           AND NEW.data IS NOT DISTINCT FROM OLD.data
-           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-          RETURN NEW;
-        END IF;
-
-        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-        IF NEW.name = 'sync'
-           AND NOT (
-             (jsonb_typeof(NEW.data->'sourceId') = 'string'
-               AND COALESCE(NEW.data->>'sourceId', '') <> '')
-             OR (jsonb_typeof(NEW.data->'source_id') = 'string'
-               AND COALESCE(NEW.data->>'source_id', '') <> '')
-           ) THEN
-          repo_path := NEW.data->>'repoPath';
-          IF repo_path IS NOT NULL AND repo_path <> '' THEN
-            repo_paths := array_append(repo_paths, repo_path);
-          END IF;
-        END IF;
-        IF TG_OP = 'UPDATE' THEN
-          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-          IF OLD.name = 'sync'
-             AND NOT (
-               (jsonb_typeof(OLD.data->'sourceId') = 'string'
-                 AND COALESCE(OLD.data->>'sourceId', '') <> '')
-               OR (jsonb_typeof(OLD.data->'source_id') = 'string'
-                 AND COALESCE(OLD.data->>'source_id', '') <> '')
-             ) THEN
-            repo_path := OLD.data->>'repoPath';
-            IF repo_path IS NOT NULL AND repo_path <> '' THEN
-              repo_paths := array_append(repo_paths, repo_path);
-            END IF;
-          END IF;
-        END IF;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO repo_paths
-          FROM unnest(repo_paths) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_before
-          FROM sources
-         WHERE local_path = ANY(repo_paths);
-
-        -- Resolve path-owned and direct references in the same ordered locking scan.
-        -- If an archive is in flight, EvalPlanQual rechecks the committed row after
-        -- the wait instead of letting a pre-lock path snapshot admit stale work.
-        FOR source_ref, source_archived IN
-          SELECT id, archived
-            FROM sources
-           WHERE id = ANY(source_refs)
-              OR local_path = ANY(repo_paths)
-           ORDER BY id
-           FOR SHARE
-        LOOP
-          IF source_archived THEN
-            RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is archived', source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_after
-          FROM sources
-         WHERE local_path = ANY(repo_paths);
-        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
-          RAISE EXCEPTION 'Source path ownership changed while writing minion_jobs.data'
-            USING ERRCODE = '40001';
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_page_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        page_refs BIGINT[] := ARRAY[]::BIGINT[];
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        archived_source_refs TEXT[] := ARRAY[]::TEXT[];
-        source_archived BOOLEAN;
-        page_owners_before JSONB;
-        page_owners_after JSONB;
-        page_ref_query TEXT;
-      BEGIN
-        IF TG_NARGS < 1 THEN
-          RAISE EXCEPTION 'Active-source page guard requires at least one page column';
-        END IF;
-
-        IF TG_OP IN ('INSERT', 'UPDATE') THEN
-          SELECT string_agg(
-                   format(
-                     'SELECT changed.%1$I::BIGINT AS page_ref FROM new_rows changed WHERE changed.%1$I IS NOT NULL',
-                     page_column
-                   ),
-                   ' UNION ALL '
-                   ORDER BY page_column
-                 )
-            INTO page_ref_query
-            FROM unnest(TG_ARGV) AS page_columns(page_column);
-        ELSE
-          RAISE EXCEPTION 'Active-source page guard does not support %', TG_OP;
-        END IF;
-
-        -- Project only the page-reference columns. Converting complete
-        -- transition rows to JSONB would detoast and serialize large payloads
-        -- such as content_chunks.embedding on every bulk upsert.
-        EXECUTE
-          'SELECT COALESCE(array_agg(DISTINCT page_ref ORDER BY page_ref), ARRAY[]::BIGINT[]) '
-          || 'FROM (' || page_ref_query || ') AS referenced_pages'
-          INTO page_refs;
-
-        IF cardinality(page_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB),
-               COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
-          INTO page_owners_before, source_refs
-          FROM pages
-         WHERE id = ANY(page_refs);
-
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived INTO source_archived
-            FROM sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND source_archived THEN
-            archived_source_refs := array_append(archived_source_refs, source_ref);
-          END IF;
-        END LOOP;
-
-        PERFORM id
-          FROM pages
-         WHERE id = ANY(page_refs)
-         ORDER BY id
-         FOR SHARE;
-
-        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB)
-          INTO page_owners_after
-          FROM pages
-         WHERE id = ANY(page_refs);
-
-        IF page_owners_after IS DISTINCT FROM page_owners_before THEN
-          RAISE EXCEPTION 'Page ownership changed while writing %', TG_TABLE_NAME
-            USING ERRCODE = '40001';
-        END IF;
-        IF cardinality(archived_source_refs) > 0 THEN
-          RAISE EXCEPTION
-            'Cannot write %: page source % is archived',
-            TG_TABLE_NAME, archived_source_refs[1]
-            USING ERRCODE = '23503';
-        END IF;
-        RETURN NULL;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_page_rehome_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        old_page_ref BIGINT;
-        old_source_ref TEXT;
-        old_source_archived BOOLEAN;
-      BEGIN
-        IF TG_NARGS <> 1 THEN
-          RAISE EXCEPTION 'Active-source page rehome guard requires one page column';
-        END IF;
-        old_page_ref := NULLIF(to_jsonb(OLD)->>TG_ARGV[0], '')::BIGINT;
-        IF old_page_ref IS NULL THEN RETURN NEW; END IF;
-        PERFORM pg_advisory_xact_lock_shared(
-          hashtextextended('gbrain:source-lifecycle', 0)
-        );
-        SELECT source.id, source.archived
-          INTO old_source_ref, old_source_archived
-          FROM public.pages page
-          JOIN public.sources source ON source.id = page.source_id
-         WHERE page.id = old_page_ref
-         FOR SHARE OF page, source;
-        IF FOUND AND old_source_archived THEN
-          RAISE EXCEPTION
-            'Cannot rehome %.%: page source % is archived',
-            TG_TABLE_NAME, TG_ARGV[0], old_source_ref
-            USING ERRCODE = '23503';
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      DO $install$
-      DECLARE
-        ref RECORD;
-      BEGIN
-        FOR ref IN
-          SELECT page_refs.table_name,
-                 string_agg(quote_literal(page_refs.column_name), ', '
-                            ORDER BY page_refs.column_name) AS trigger_arguments
-            FROM (
-              SELECT DISTINCT child_table.relname AS table_name,
-                              child_column.attname AS column_name
-                FROM pg_constraint constraint_
-                JOIN pg_class child_table
-                  ON child_table.oid = constraint_.conrelid
-                JOIN pg_namespace child_namespace
-                  ON child_namespace.oid = child_table.relnamespace
-                JOIN pg_class parent_table
-                  ON parent_table.oid = constraint_.confrelid
-                JOIN pg_namespace parent_namespace
-                  ON parent_namespace.oid = parent_table.relnamespace
-                JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
-                  AS child_key(attnum, ordinal_position) ON true
-                JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
-                  AS parent_key(attnum, ordinal_position)
-                  ON parent_key.ordinal_position = child_key.ordinal_position
-                JOIN pg_attribute child_column
-                  ON child_column.attrelid = child_table.oid
-                 AND child_column.attnum = child_key.attnum
-                JOIN pg_attribute parent_column
-                  ON parent_column.attrelid = parent_table.oid
-                 AND parent_column.attnum = parent_key.attnum
-               WHERE constraint_.contype = 'f'
-                 AND child_namespace.nspname = 'public'
-                 AND parent_namespace.nspname = 'public'
-                 AND parent_table.relname = 'pages'
-                 AND parent_column.attname = 'id'
-            ) AS page_refs
-           GROUP BY page_refs.table_name
-           ORDER BY page_refs.table_name
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_active_page_ref_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_active_page_ref_insert_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_active_page_ref_update_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_active_page_ref_insert_guard AFTER INSERT ON %I '
-            || 'REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT '
-            || 'EXECUTE FUNCTION enforce_active_source_page_reference_fn(%s)',
-            ref.table_name,
-            ref.trigger_arguments
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_active_page_ref_update_guard AFTER UPDATE ON %I '
-            || 'REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT '
-            || 'EXECUTE FUNCTION enforce_active_source_page_reference_fn(%s)',
-            ref.table_name,
-            ref.trigger_arguments
-          );
-        END LOOP;
-
-        FOR ref IN
-          SELECT DISTINCT child_table.relname AS table_name,
-                          child_column.attname AS column_name
-            FROM pg_constraint constraint_
-            JOIN pg_class child_table ON child_table.oid = constraint_.conrelid
-            JOIN pg_namespace child_namespace ON child_namespace.oid = child_table.relnamespace
-            JOIN pg_class parent_table ON parent_table.oid = constraint_.confrelid
-            JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent_table.relnamespace
-            JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
-              AS child_key(attnum, ordinal_position) ON true
-            JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
-              AS parent_key(attnum, ordinal_position)
-              ON parent_key.ordinal_position = child_key.ordinal_position
-            JOIN pg_attribute child_column
-              ON child_column.attrelid = child_table.oid AND child_column.attnum = child_key.attnum
-            JOIN pg_attribute parent_column
-              ON parent_column.attrelid = parent_table.oid AND parent_column.attnum = parent_key.attnum
-           WHERE constraint_.contype = 'f'
-             AND child_namespace.nspname = 'public'
-             AND parent_namespace.nspname = 'public'
-             AND parent_table.relname = 'pages'
-             AND parent_column.attname = 'id'
-           ORDER BY child_table.relname, child_column.attname
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS %I ON %I',
-            'source_active_page_rehome_' || substr(md5(ref.table_name || ':' || ref.column_name), 1, 16),
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER %I BEFORE UPDATE OF %I ON %I '
-            || 'FOR EACH ROW WHEN (OLD.%I IS NOT NULL AND NEW.%I IS NOT NULL AND OLD.%I IS DISTINCT FROM NEW.%I) '
-            || 'EXECUTE FUNCTION enforce_active_source_page_rehome_fn(%L)',
-            'source_active_page_rehome_' || substr(md5(ref.table_name || ':' || ref.column_name), 1, 16),
-            ref.column_name, ref.table_name,
-            ref.column_name, ref.column_name, ref.column_name, ref.column_name,
-            ref.column_name
-          );
-        END LOOP;
-      END;
-      $install$;
+      ALTER TABLE session_context_state ADD COLUMN IF NOT EXISTS checkpoint_manifest JSONB NOT NULL DEFAULT '[]'::jsonb;
     `,
   },
   {
     version: 133,
-    name: 'source_embedding_provider_drain_leases',
+    name: 'content_chunks_embedded_text_hash',
+    // #4246: per-chunk embed-time content revision. upsertChunks stamps
+    // md5(chunk_text) whenever an embedding lands; a later text rewrite that
+    // keeps the vector is then detectable (embedded_text_hash <> md5(chunk_text))
+    // and invalidateContentDriftEmbeddings NULLs it into the existing
+    // embed-stale cursor. Deliberately NO backfill: hashing existing rows
+    // would assert "this vector matches this text" for rows where that is
+    // exactly what's in question, and treating NULL as stale would force a
+    // corpus-wide re-embed spike on upgrade. NULL is grandfathered (heal-
+    // forward); each row picks up its hash on its next re-embed. No index:
+    // the column is only scanned by the invalidation sweep inside embed
+    // runs (bootstrap-coverage: column-only, no probe needed). Keep in sync
+    // with src/schema.sql (regenerate schema-embedded.ts via build:schema)
+    // and src/core/pglite-schema.ts.
     idempotent: true,
     sql: `
-      ALTER TABLE public.sources
-        ADD COLUMN IF NOT EXISTS embedding_drain_token TEXT;
-      ALTER TABLE public.sources
-        ADD COLUMN IF NOT EXISTS embedding_drain_epoch BIGINT NOT NULL DEFAULT 0;
-
-      CREATE TABLE IF NOT EXISTS public.source_embedding_leases (
-        lease_token TEXT PRIMARY KEY,
-        source_id TEXT NOT NULL REFERENCES public.sources(id) ON DELETE CASCADE,
-        source_epoch BIGINT NOT NULL,
-        owner_host TEXT NOT NULL CHECK (owner_host <> ''),
-        owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
-        owner_instance TEXT NOT NULL CHECK (owner_instance <> ''),
-        acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE INDEX IF NOT EXISTS source_embedding_leases_source_idx
-        ON public.source_embedding_leases (source_id, lease_token);
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        repo_paths TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
-        raw_ref JSONB;
-        source_archived BOOLEAN;
-        source_draining BOOLEAN;
-      BEGIN
-        -- Security cleanup must remain possible after source archive. This is
-        -- deliberately narrower than a generic archived-row UPDATE escape:
-        -- only deleted_at may change, and only from NULL to non-NULL.
-        IF TG_TABLE_NAME = 'oauth_clients'
-           AND TG_OP = 'UPDATE'
-           AND (to_jsonb(OLD)->>'deleted_at') IS NULL
-           AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
-           AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
-          RETURN NEW;
-        END IF;
-
-        IF TG_ARGV[0] = 'scalar' THEN
-          source_refs := ARRAY[to_jsonb(NEW)->>TG_ARGV[1]];
-          IF TG_OP = 'UPDATE' AND to_jsonb(NEW)->>TG_ARGV[1] IS NOT NULL THEN
-            source_refs := source_refs || ARRAY[to_jsonb(OLD)->>TG_ARGV[1]];
-          END IF;
-        ELSIF TG_ARGV[0] = 'array' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'array' THEN
-            source_refs := source_refs || ARRAY(
-              SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
-            );
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'array' THEN
-              source_refs := source_refs || ARRAY(
-                SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
-              );
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'object' THEN
-            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'object' THEN
-              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref LIKE 'gbrain-sync:%' THEN
-            source_refs := ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref LIKE 'gbrain-sync:%' THEN
-              source_refs := source_refs || ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'job' THEN
-          IF TG_OP = 'UPDATE'
-             AND NEW.data IS NOT DISTINCT FROM OLD.data
-             AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-            RETURN NEW;
-          END IF;
-          source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-          IF NEW.name = 'sync'
-             AND NOT (
-               jsonb_typeof(NEW.data->'sourceId') = 'string'
-               AND COALESCE(NEW.data->>'sourceId', '') <> ''
-             ) THEN
-            repo_paths := ARRAY[NEW.data->>'repoPath'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-            IF OLD.name = 'sync'
-               AND NOT (
-                 jsonb_typeof(OLD.data->'sourceId') = 'string'
-                 AND COALESCE(OLD.data->>'sourceId', '') <> ''
-               ) THEN
-              repo_paths := repo_paths || ARRAY[OLD.data->>'repoPath'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'config' THEN
-          IF NEW.key = 'sources.default' THEN source_refs := ARRAY[NEW.value]; END IF;
-          IF NEW.key = 'sync.repo_path' THEN repo_paths := ARRAY[NEW.value]; END IF;
-        ELSE
-          RAISE EXCEPTION 'Unknown source-drain guard kind: %', TG_ARGV[0];
-        END IF;
-
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs FROM unnest(source_refs) values_(value)
-         WHERE value IS NOT NULL AND value <> '';
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO repo_paths FROM unnest(repo_paths) values_(value)
-         WHERE value IS NOT NULL AND value <> '';
-        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_before
-          FROM public.sources
-         WHERE local_path = ANY(repo_paths);
-        FOR source_ref, source_archived, source_draining IN
-          SELECT id, archived, embedding_drain_token IS NOT NULL
-            FROM public.sources
-           WHERE id = ANY(source_refs) OR local_path = ANY(repo_paths)
-           ORDER BY id
-           FOR SHARE
-        LOOP
-          IF source_archived OR source_draining THEN
-            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
-              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_after
-          FROM public.sources
-         WHERE local_path = ANY(repo_paths);
-        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
-          RAISE EXCEPTION 'Source path ownership changed while writing %', TG_TABLE_NAME
-            USING ERRCODE = '40001';
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_page_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        page_refs BIGINT[] := ARRAY[]::BIGINT[];
-        page_ref_query TEXT;
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        unavailable_source_refs TEXT[] := ARRAY[]::TEXT[];
-        source_archived BOOLEAN;
-        source_draining BOOLEAN;
-        page_owners_before JSONB;
-        page_owners_after JSONB;
-      BEGIN
-        SELECT string_agg(
-                 format(
-                   'SELECT changed.%1$I::BIGINT AS page_ref FROM new_rows changed WHERE changed.%1$I IS NOT NULL',
-                   page_column
-                 ),
-                 ' UNION ALL ' ORDER BY page_column
-               )
-          INTO page_ref_query
-          FROM unnest(TG_ARGV) page_columns(page_column);
-        EXECUTE
-          'SELECT COALESCE(array_agg(DISTINCT page_ref ORDER BY page_ref), ARRAY[]::BIGINT[]) '
-          || 'FROM (' || page_ref_query || ') referenced_pages'
-          INTO page_refs;
-        IF cardinality(page_refs) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB),
-               COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
-          INTO page_owners_before, source_refs
-          FROM public.pages
-         WHERE id = ANY(page_refs);
-        FOREACH source_ref IN ARRAY source_refs LOOP
-          source_archived := NULL;
-          SELECT archived, embedding_drain_token IS NOT NULL
-            INTO source_archived, source_draining
-            FROM public.sources
-           WHERE id = source_ref
-           FOR SHARE;
-          IF FOUND AND (source_archived OR source_draining) THEN
-            unavailable_source_refs := array_append(unavailable_source_refs, source_ref);
-          END IF;
-        END LOOP;
-        PERFORM id
-          FROM public.pages
-         WHERE id = ANY(page_refs)
-         ORDER BY id
-         FOR SHARE;
-        SELECT COALESCE(jsonb_object_agg(id::TEXT, source_id ORDER BY id), '{}'::JSONB)
-          INTO page_owners_after
-          FROM public.pages
-         WHERE id = ANY(page_refs);
-        IF page_owners_after IS DISTINCT FROM page_owners_before THEN
-          RAISE EXCEPTION 'Page ownership changed while writing %', TG_TABLE_NAME
-            USING ERRCODE = '40001';
-        END IF;
-        IF cardinality(unavailable_source_refs) > 0 THEN
-          RAISE EXCEPTION 'Cannot write %: page source % is archived or draining',
-            TG_TABLE_NAME, unavailable_source_refs[1] USING ERRCODE = '23503';
-        END IF;
-        RETURN NULL;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_page_rehome_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        old_page_ref BIGINT;
-        old_source_ref TEXT;
-        old_source_unavailable BOOLEAN;
-      BEGIN
-        old_page_ref := NULLIF(to_jsonb(OLD)->>TG_ARGV[0], '')::BIGINT;
-        IF old_page_ref IS NULL THEN RETURN NEW; END IF;
-        PERFORM pg_advisory_xact_lock_shared(
-          hashtextextended('gbrain:source-lifecycle', 0)
-        );
-        SELECT source.id,
-               source.archived OR source.embedding_drain_token IS NOT NULL
-          INTO old_source_ref, old_source_unavailable
-          FROM public.pages page
-          JOIN public.sources source ON source.id = page.source_id
-         WHERE page.id = old_page_ref
-         FOR SHARE OF page, source;
-        IF FOUND AND old_source_unavailable THEN
-          RAISE EXCEPTION 'Cannot rehome %.%: page source % is archived or draining',
-            TG_TABLE_NAME, TG_ARGV[0], old_source_ref USING ERRCODE = '23503';
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_source_archive_transition_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      BEGIN
-        IF OLD.archived IS NOT TRUE AND NEW.archived IS TRUE THEN
-          IF OLD.embedding_drain_token IS NULL THEN
-            RAISE EXCEPTION
-              'Cannot archive source % without a committed embedding drain', OLD.id
-              USING ERRCODE = '55000';
-          END IF;
-          IF EXISTS (
-            SELECT 1
-              FROM public.source_embedding_leases
-             WHERE source_id = OLD.id
-          ) THEN
-            RAISE EXCEPTION
-              'Cannot archive source % while embedding provider leases remain', OLD.id
-              USING ERRCODE = '55000';
-          END IF;
-          IF NEW.embedding_drain_token IS NOT NULL THEN
-            RAISE EXCEPTION
-              'Cannot archive source % without clearing its embedding drain', OLD.id
-              USING ERRCODE = '55000';
-          END IF;
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      DROP TRIGGER IF EXISTS source_archive_transition_guard ON public.sources;
-      CREATE TRIGGER source_archive_transition_guard
-        BEFORE UPDATE OF archived ON public.sources
-        FOR EACH ROW EXECUTE FUNCTION enforce_source_archive_transition_fn();
-
-      DO $install$
-      DECLARE
-        ref RECORD;
-      BEGIN
-        -- Lease rows are the lifecycle primitive itself. Their acquire,
-        -- heartbeat, completion, and dead-owner recovery paths perform exact
-        -- source/token checks and must remain operable while the source drains.
-        DROP TRIGGER IF EXISTS source_active_ref_guard ON public.source_embedding_leases;
-        FOR ref IN
-          SELECT c.table_name, c.column_name
-            FROM information_schema.columns c
-            JOIN information_schema.tables t
-              ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-           WHERE c.table_schema = 'public'
-             AND t.table_type = 'BASE TABLE'
-             AND c.column_name = 'source_id'
-           ORDER BY c.table_name
-        LOOP
-          EXECUTE format('DROP TRIGGER IF EXISTS source_drain_ref_guard ON %I', ref.table_name);
-        END LOOP;
-        DROP TRIGGER IF EXISTS source_drain_bound_guard ON public.oauth_clients;
-        DROP TRIGGER IF EXISTS source_drain_federated_guard ON public.oauth_clients;
-        DROP TRIGGER IF EXISTS source_drain_eval_guard ON public.eval_candidates;
-        DROP TRIGGER IF EXISTS source_drain_job_guard ON public.minion_jobs;
-        DROP TRIGGER IF EXISTS source_drain_config_guard ON public.config;
-        DROP TRIGGER IF EXISTS source_drain_sync_lock_guard ON public.gbrain_cycle_locks;
-
-        -- Keep one lifecycle trigger per write surface. Direct and page
-        -- triggers already point at the CREATE OR REPLACE functions above.
-        -- The two specialized v124 triggers are redirected to the combined
-        -- function so upgraded brains do not pay an archived pass plus a
-        -- second drain pass.
-        DROP TRIGGER IF EXISTS source_active_job_data_guard ON public.minion_jobs;
-        CREATE TRIGGER source_active_job_data_guard
-          BEFORE INSERT OR UPDATE ON public.minion_jobs
-          FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn('job', 'data');
-        DROP TRIGGER IF EXISTS source_active_config_guard ON public.config;
-        CREATE TRIGGER source_active_config_guard
-          BEFORE INSERT OR UPDATE OF key, value ON public.config
-          FOR EACH ROW EXECUTE FUNCTION enforce_active_source_reference_fn('config', 'value');
-
-        FOR ref IN
-          SELECT page_refs.table_name,
-                 string_agg(quote_literal(page_refs.column_name), ', ' ORDER BY page_refs.column_name)
-                   AS trigger_arguments
-            FROM (
-              SELECT DISTINCT child_table.relname table_name, child_column.attname column_name
-                FROM pg_constraint constraint_
-                JOIN pg_class child_table ON child_table.oid = constraint_.conrelid
-                JOIN pg_namespace child_namespace ON child_namespace.oid = child_table.relnamespace
-                JOIN pg_class parent_table ON parent_table.oid = constraint_.confrelid
-                JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent_table.relnamespace
-                JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY child_key(attnum, pos) ON true
-                JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY parent_key(attnum, pos)
-                  ON parent_key.pos = child_key.pos
-                JOIN pg_attribute child_column
-                  ON child_column.attrelid = child_table.oid AND child_column.attnum = child_key.attnum
-                JOIN pg_attribute parent_column
-                  ON parent_column.attrelid = parent_table.oid AND parent_column.attnum = parent_key.attnum
-               WHERE constraint_.contype = 'f'
-                 AND child_namespace.nspname = 'public'
-                 AND parent_namespace.nspname = 'public'
-                 AND parent_table.relname = 'pages'
-                 AND parent_column.attname = 'id'
-            ) page_refs
-           GROUP BY page_refs.table_name
-           ORDER BY page_refs.table_name
-        LOOP
-          EXECUTE format('DROP TRIGGER IF EXISTS source_drain_page_insert_guard ON %I', ref.table_name);
-          EXECUTE format('DROP TRIGGER IF EXISTS source_drain_page_update_guard ON %I', ref.table_name);
-        END LOOP;
-      END;
-      $install$;
+      ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedded_text_hash TEXT;
     `,
   },
   {
     version: 134,
-    name: 'source_cycle_lock_archive_guard',
-    idempotent: true,
-    sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_lock_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        lock_ref TEXT;
-        lock_refs TEXT[] := ARRAY[to_jsonb(NEW)->>'id'];
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        legacy_cycle_lock BOOLEAN := false;
-        draining_source_ref TEXT;
-        source_archived BOOLEAN;
-        source_draining BOOLEAN;
-      BEGIN
-        IF TG_OP = 'UPDATE' THEN
-          lock_refs := lock_refs || ARRAY[to_jsonb(OLD)->>'id'];
-        END IF;
-
-        FOREACH lock_ref IN ARRAY lock_refs LOOP
-          IF lock_ref LIKE 'gbrain-sync:%' THEN
-            source_ref := substring(lock_ref FROM length('gbrain-sync:') + 1);
-            IF source_ref <> '' THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          ELSIF lock_ref LIKE 'gbrain-cycle:%' THEN
-            source_ref := substring(lock_ref FROM length('gbrain-cycle:') + 1);
-            IF source_ref <> '' THEN
-              source_refs := array_append(source_refs, source_ref);
-            END IF;
-          ELSIF lock_ref = 'gbrain-cycle' THEN
-            legacy_cycle_lock := true;
-          END IF;
-        END LOOP;
-
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 OR legacy_cycle_lock THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
+    name: 'restore_chunks_embedding_null_partial_indexes',
+    // #4252 heal: `migrate embeddings` rebuilt content_chunks.embedding via
+    // DROP COLUMN, which cascade-dropped the `embedding IS NULL` partial
+    // indexes (v66 idx_chunks_embedding_null, v103 content_chunks_stale_idx)
+    // without recreating them. runSchemaTransition now captures + replays
+    // dependent indexes, but brains that already ran a transition lost both
+    // permanently — v66/v103 are recorded as applied, so their IF NOT EXISTS
+    // never re-runs. Re-issue both defs; a no-op everywhere else.
+    // Engine-aware split mirrors v103: Postgres uses CREATE INDEX
+    // CONCURRENTLY + invalid-remnant pre-drop; PGLite plain CREATE INDEX.
+    transaction: false,
+    sql: '',
+    handler: async (engine) => {
+      const defs: Array<[string, string]> = [
+        ['idx_chunks_embedding_null', `ON content_chunks (page_id, chunk_index) WHERE embedding IS NULL;`],
+        ['content_chunks_stale_idx', `ON content_chunks (page_id, chunk_index) WHERE embedding IS NULL;`],
+      ];
+      for (const [name, tail] of defs) {
+        if (engine.kind === 'postgres') {
+          await dropInvalidConcurrentIndex(engine, 134, name);
+          await engine.runMigration(
+            134,
+            `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${name} ${tail}`
           );
-        END IF;
-
-        IF legacy_cycle_lock THEN
-          SELECT id
-            INTO draining_source_ref
-            FROM public.sources
-           WHERE archived IS NOT TRUE
-             AND embedding_drain_token IS NOT NULL
-           ORDER BY id
-           LIMIT 1
-           FOR SHARE;
-          IF FOUND THEN
-            RAISE EXCEPTION 'Cannot acquire global cycle lock while source % is draining',
-              draining_source_ref USING ERRCODE = '23503';
-          END IF;
-        END IF;
-
-        FOR source_ref, source_archived, source_draining IN
-          SELECT id, archived, embedding_drain_token IS NOT NULL
-            FROM public.sources
-           WHERE id = ANY(source_refs)
-           ORDER BY id
-           FOR SHARE
-        LOOP
-          IF source_archived OR source_draining THEN
-            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
-              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      DROP TRIGGER IF EXISTS source_active_sync_lock_guard ON public.gbrain_cycle_locks;
-      CREATE TRIGGER source_active_sync_lock_guard
-        BEFORE INSERT OR UPDATE ON public.gbrain_cycle_locks
-        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_lock_fn();
-    `,
+        } else {
+          await engine.runMigration(
+            134,
+            `CREATE INDEX IF NOT EXISTS ${name} ${tail}`
+          );
+        }
+      }
+    },
   },
   {
     version: 135,
-    name: 'archived_source_oauth_revocation_escape',
+    name: 'facts_event_time_index',
+    // Event-time recall (FactListOpts.eventTime) filters and orders on
+    // COALESCE(valid_from, created_at), which the created_at index at v40
+    // (idx_facts_since) cannot serve. Without a matching expression index
+    // the common `recall` shape — epoch cutoff, no entity, ORDER BY … LIMIT n
+    // — degrades from an index scan that stops at n rows into a full scan of
+    // the source plus a sort. Mirrors idx_facts_since's shape (same leading
+    // column, same partial predicate) so the two paths cost the same.
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_reference_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        repo_paths TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
-        raw_ref JSONB;
-        source_archived BOOLEAN;
-        source_draining BOOLEAN;
-      BEGIN
-        IF TG_TABLE_NAME = 'oauth_clients'
-           AND TG_OP = 'UPDATE'
-           AND (to_jsonb(OLD)->>'deleted_at') IS NULL
-           AND (to_jsonb(NEW)->>'deleted_at') IS NOT NULL
-           AND (to_jsonb(NEW) - 'deleted_at') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'deleted_at') THEN
-          RETURN NEW;
-        END IF;
-
-        IF TG_ARGV[0] = 'scalar' THEN
-          source_refs := ARRAY[to_jsonb(NEW)->>TG_ARGV[1]];
-          IF TG_OP = 'UPDATE' AND to_jsonb(NEW)->>TG_ARGV[1] IS NOT NULL THEN
-            source_refs := source_refs || ARRAY[to_jsonb(OLD)->>TG_ARGV[1]];
-          END IF;
-        ELSIF TG_ARGV[0] = 'array' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'array' THEN
-            source_refs := source_refs || ARRAY(
-              SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
-            );
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'array' THEN
-              source_refs := source_refs || ARRAY(
-                SELECT value FROM jsonb_array_elements_text(raw_ref) values_(value)
-              );
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'json_source_keys' THEN
-          raw_ref := to_jsonb(NEW)->TG_ARGV[1];
-          IF jsonb_typeof(raw_ref) = 'object' THEN
-            source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            raw_ref := to_jsonb(OLD)->TG_ARGV[1];
-            IF jsonb_typeof(raw_ref) = 'object' THEN
-              source_refs := source_refs || ARRAY[raw_ref->>'sourceId', raw_ref->>'source_id'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'sync_lock_id' THEN
-          source_ref := to_jsonb(NEW)->>TG_ARGV[1];
-          IF source_ref LIKE 'gbrain-sync:%' THEN
-            source_refs := ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_ref := to_jsonb(OLD)->>TG_ARGV[1];
-            IF source_ref LIKE 'gbrain-sync:%' THEN
-              source_refs := source_refs || ARRAY[substring(source_ref FROM length('gbrain-sync:') + 1)];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'job' THEN
-          IF TG_OP = 'UPDATE'
-             AND NEW.data IS NOT DISTINCT FROM OLD.data
-             AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-            RETURN NEW;
-          END IF;
-          source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-          IF NEW.name = 'sync'
-             AND NOT (
-               jsonb_typeof(NEW.data->'sourceId') = 'string'
-               AND COALESCE(NEW.data->>'sourceId', '') <> ''
-             ) THEN
-            repo_paths := ARRAY[NEW.data->>'repoPath'];
-          END IF;
-          IF TG_OP = 'UPDATE' THEN
-            source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-            IF OLD.name = 'sync'
-               AND NOT (
-                 jsonb_typeof(OLD.data->'sourceId') = 'string'
-                 AND COALESCE(OLD.data->>'sourceId', '') <> ''
-               ) THEN
-              repo_paths := repo_paths || ARRAY[OLD.data->>'repoPath'];
-            END IF;
-          END IF;
-        ELSIF TG_ARGV[0] = 'config' THEN
-          IF NEW.key = 'sources.default' THEN source_refs := ARRAY[NEW.value]; END IF;
-          IF NEW.key = 'sync.repo_path' THEN repo_paths := ARRAY[NEW.value]; END IF;
-        ELSE
-          RAISE EXCEPTION 'Unknown source-drain guard kind: %', TG_ARGV[0];
-        END IF;
-
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs FROM unnest(source_refs) values_(value)
-         WHERE value IS NOT NULL AND value <> '';
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO repo_paths FROM unnest(repo_paths) values_(value)
-         WHERE value IS NOT NULL AND value <> '';
-        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_before
-          FROM public.sources
-         WHERE local_path = ANY(repo_paths);
-        FOR source_ref, source_archived, source_draining IN
-          SELECT id, archived, embedding_drain_token IS NOT NULL
-            FROM public.sources
-           WHERE id = ANY(source_refs) OR local_path = ANY(repo_paths)
-           ORDER BY id
-           FOR SHARE
-        LOOP
-          IF source_archived OR source_draining THEN
-            RAISE EXCEPTION 'Cannot write %: source % is archived or draining',
-              TG_TABLE_NAME, source_ref USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_after
-          FROM public.sources
-         WHERE local_path = ANY(repo_paths);
-        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
-          RAISE EXCEPTION 'Source path ownership changed while writing %', TG_TABLE_NAME
-            USING ERRCODE = '40001';
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
+      CREATE INDEX IF NOT EXISTS idx_facts_since_event_time
+        ON facts (source_id, (COALESCE(valid_from, created_at)) DESC)
+        WHERE expired_at IS NULL;
     `,
   },
   {
     version: 136,
-    name: 'active_path_source_job_resolution',
+    name: 'minion_private_queue_owner_metadata',
+    // issue #4332: durable ownership/liveness metadata for parent-owned
+    // dream-inline queues. Startup recovery uses these columns to cancel only
+    // orphaned private queues (terminal/missing owner or expired lease), never
+    // live queues and never legacy unowned rows.
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_active_source_job_status_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-        repo_path TEXT;
-        repo_paths TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_before TEXT[] := ARRAY[]::TEXT[];
-        path_source_refs_after TEXT[] := ARRAY[]::TEXT[];
-        matched_active BOOLEAN;
-        source_archived BOOLEAN;
-        source_draining BOOLEAN;
-      BEGIN
-        IF TG_OP = 'UPDATE'
-           AND NEW.data IS NOT DISTINCT FROM OLD.data
-           AND NEW.status IN ('completed', 'failed', 'dead', 'cancelled') THEN
-          RETURN NEW;
-        END IF;
-
-        source_refs := ARRAY[NEW.data->>'sourceId', NEW.data->>'source_id'];
-        IF NEW.name = 'sync'
-           AND NOT (
-             (jsonb_typeof(NEW.data->'sourceId') = 'string'
-               AND COALESCE(NEW.data->>'sourceId', '') <> '')
-             OR (jsonb_typeof(NEW.data->'source_id') = 'string'
-               AND COALESCE(NEW.data->>'source_id', '') <> '')
-           ) THEN
-          repo_path := NEW.data->>'repoPath';
-          IF repo_path IS NOT NULL AND repo_path <> '' THEN
-            repo_paths := array_append(repo_paths, repo_path);
-          END IF;
-        END IF;
-        IF TG_OP = 'UPDATE' THEN
-          source_refs := source_refs || ARRAY[OLD.data->>'sourceId', OLD.data->>'source_id'];
-          IF OLD.name = 'sync'
-             AND NOT (
-               (jsonb_typeof(OLD.data->'sourceId') = 'string'
-                 AND COALESCE(OLD.data->>'sourceId', '') <> '')
-               OR (jsonb_typeof(OLD.data->'source_id') = 'string'
-                 AND COALESCE(OLD.data->>'source_id', '') <> '')
-             ) THEN
-            repo_path := OLD.data->>'repoPath';
-            IF repo_path IS NOT NULL AND repo_path <> '' THEN
-              repo_paths := array_append(repo_paths, repo_path);
-            END IF;
-          END IF;
-        END IF;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM unnest(source_refs) AS values_(value)
-         WHERE value IS NOT NULL;
-        SELECT COALESCE(array_agg(DISTINCT value ORDER BY value), ARRAY[]::TEXT[])
-          INTO repo_paths
-          FROM unnest(repo_paths) AS values_(value)
-         WHERE value IS NOT NULL;
-
-        IF cardinality(source_refs) > 0 OR cardinality(repo_paths) > 0 THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-        END IF;
-
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_before
-          FROM public.sources
-         WHERE local_path = ANY(repo_paths);
-
-        PERFORM id
-          FROM public.sources
-         WHERE id = ANY(source_refs)
-            OR local_path = ANY(repo_paths)
-         ORDER BY id
-         FOR SHARE;
-
-        FOR source_ref, source_archived, source_draining IN
-          SELECT id, archived, embedding_drain_token IS NOT NULL
-            FROM public.sources
-           WHERE id = ANY(source_refs)
-           ORDER BY id
-        LOOP
-          IF source_archived OR source_draining THEN
-            RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is archived or draining', source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-
-        FOREACH repo_path IN ARRAY repo_paths LOOP
-          SELECT bool_or(archived IS NOT TRUE AND embedding_drain_token IS NULL), min(id)
-            INTO matched_active, source_ref
-            FROM public.sources
-           WHERE local_path = repo_path;
-          IF source_ref IS NOT NULL AND NOT COALESCE(matched_active, false) THEN
-            RAISE EXCEPTION
-              'Cannot write minion_jobs.data: source % is archived or draining', source_ref
-              USING ERRCODE = '23503';
-          END IF;
-        END LOOP;
-
-        SELECT COALESCE(array_agg(id ORDER BY id), ARRAY[]::TEXT[])
-          INTO path_source_refs_after
-          FROM public.sources
-         WHERE local_path = ANY(repo_paths);
-        IF path_source_refs_after IS DISTINCT FROM path_source_refs_before THEN
-          RAISE EXCEPTION 'Source path ownership changed while writing minion_jobs.data'
-            USING ERRCODE = '40001';
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_active_source_config_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        matched_active BOOLEAN := false;
-        source_archived BOOLEAN;
-        source_draining BOOLEAN;
-      BEGIN
-        IF NEW.key = 'sources.default' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          SELECT archived, embedding_drain_token IS NOT NULL
-            INTO source_archived, source_draining
-            FROM public.sources
-           WHERE id = NEW.value
-           FOR SHARE;
-          IF FOUND AND (source_archived OR source_draining) THEN
-            RAISE EXCEPTION
-              'Cannot set sources.default: source % is archived or draining', NEW.value
-              USING ERRCODE = '23503';
-          END IF;
-        ELSIF NEW.key = 'sync.repo_path' AND NEW.value <> '' THEN
-          PERFORM pg_advisory_xact_lock_shared(
-            hashtextextended('gbrain:source-lifecycle', 0)
-          );
-          PERFORM id
-            FROM public.sources
-           WHERE local_path = NEW.value
-             AND archived = false
-             AND embedding_drain_token IS NULL
-           ORDER BY id
-           FOR SHARE;
-          matched_active := FOUND;
-          IF NOT matched_active AND EXISTS (
-            SELECT 1 FROM public.sources WHERE local_path = NEW.value
-          ) THEN
-            RAISE EXCEPTION
-              'Cannot set sync.repo_path: matching source is archived or draining'
-              USING ERRCODE = '23503';
-          END IF;
-        END IF;
-        RETURN NEW;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      DROP TRIGGER IF EXISTS source_active_job_data_guard ON public.minion_jobs;
-      CREATE TRIGGER source_active_job_data_guard
-        BEFORE INSERT OR UPDATE ON public.minion_jobs
-        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_job_status_fn();
-
-      DROP TRIGGER IF EXISTS source_active_config_guard ON public.config;
-      CREATE TRIGGER source_active_config_guard
-        BEFORE INSERT OR UPDATE OF key, value ON public.config
-        FOR EACH ROW EXECUTE FUNCTION enforce_active_source_config_fn();
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_owner_job_id INTEGER REFERENCES minion_jobs(id) ON DELETE SET NULL;
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_owner_token TEXT;
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS private_queue_lease_until TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_minion_jobs_private_queue_recovery
+        ON minion_jobs (queue, private_queue_lease_until)
+        WHERE queue LIKE 'dream-inline-%'
+          AND status IN ('waiting','active','delayed','waiting-children','paused');
+      CREATE INDEX IF NOT EXISTS idx_minion_jobs_private_queue_owner
+        ON minion_jobs (private_queue_owner_job_id)
+        WHERE private_queue_owner_job_id IS NOT NULL;
     `,
   },
   {
     version: 137,
-    name: 'draining_source_delete_guards',
+    name: 'entity_identities',
+    // #4224 — cross-source entity identity groups (federation v1).
+    //
+    // The identity KEY for a page is (source_id, slug): the same real-world
+    // entity can exist as `people/alice` in the `wiki` source AND
+    // `people/alice-chen` in a mounted team source, and NOTHING today says
+    // they are the same entity. This table groups member pages (by page_id,
+    // resolved from (source_id, slug) at link time) under an opaque
+    // `entity_id` handle.
+    //
+    // v1 is MANUAL-ONLY: rows are created exclusively by the
+    // entity_identity_link op (localOnly write) — no auto-matching, no
+    // similarity heuristics. `established_by` records the linking actor
+    // ('manual' for v1; a future auto-matcher would stamp its own tag and
+    // a sub-1.0 confidence).
+    //
+    // Shape invariants:
+    //   - UNIQUE (source_id, page_id): a page belongs to at most ONE
+    //     identity group (re-linking moves it — explicit manual intent).
+    //   - At most one canonical member per identity (partial unique index):
+    //     the canonical member is the identity's display/primary page.
+    //   - page_id FK ON DELETE CASCADE: deleting a page dissolves its
+    //     membership, never dangles.
+    //
+    // Consumed by src/core/entity-identity.ts (helpers + the flag-gated
+    // retrieval union) and the entity_identity_* ops. Same DDL on both
+    // engines via this shared migration.
     idempotent: true,
     sql: `
-      CREATE OR REPLACE FUNCTION enforce_source_lifecycle_delete_lock_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      BEGIN
-        PERFORM pg_advisory_xact_lock_shared(
-          hashtextextended('gbrain:source-lifecycle', 0)
+      CREATE TABLE IF NOT EXISTS entity_identities (
+        id             BIGSERIAL PRIMARY KEY,
+        entity_id      TEXT NOT NULL,
+        source_id      TEXT NOT NULL,
+        page_id        INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+        confidence     DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+        established_by TEXT NOT NULL DEFAULT 'manual',
+        established_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        canonical      BOOLEAN NOT NULL DEFAULT false,
+        CONSTRAINT entity_identities_page_uniq UNIQUE (source_id, page_id)
+      );
+      CREATE INDEX IF NOT EXISTS entity_identities_entity_idx
+        ON entity_identities (entity_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS entity_identities_canonical_uniq
+        ON entity_identities (entity_id) WHERE canonical;
+    `,
+  },
+  {
+    version: 138,
+    name: 'timeline_dedup_md5_summary',
+    // #3737 — idx_timeline_dedup keyed the RAW summary, so any incompressible
+    // summary over the btree v4 row cap ("index row size N exceeds btree
+    // version 4 maximum 2704") aborted the whole timeline insert — long
+    // transcript-derived summaries broke timeline writes brain-wide. Re-key
+    // the dedup tuple on md5(summary): fixed 32-char datum, same dedup
+    // semantics (md5-equal ⟺ summary-equal modulo negligible collisions).
+    // Both insert sites infer ON CONFLICT (page_id, date, md5(summary),
+    // source) against this expression index. Existing rows were unique on
+    // the raw tuple, so the md5 tuple is unique too — no pre-dedupe needed.
+    // The #2038 shape self-heal (timeline-dedup-repair.ts) expects the SAME
+    // md5 shape, so it converges drifted brains instead of reverting this.
+    idempotent: true,
+    sql: `
+      DROP INDEX IF EXISTS idx_timeline_dedup;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup
+        ON timeline_entries(page_id, date, md5(summary), source);
+    `,
+  },
+  {
+    version: 139,
+    name: 'timeline_legacy_source_split_repair',
+    // #3957 follow-up — one-time legacy-row shape repair. The pre-#3957
+    // DB-path parser wrote timeline rows with source='' and the UNSPLIT
+    // `Source — Summary` bullet text as summary; the parser now emits the
+    // split (source, summary) shape (source='markdown' / the parsed label),
+    // so the (page_id, date, md5(summary), source) dedup index can never
+    // collapse a re-extraction onto a legacy row — every re-extract would
+    // duplicate it. Rewrite legacy rows to the shape the next re-extract
+    // will emit, content-anchored per page (see
+    // timeline-dedup-repair.ts:repairLegacyTimelineSourceRows). Rows whose
+    // bullet no longer exists in content are left as-is (they can't
+    // duplicate); rows whose new-shape duplicate already landed are deleted.
+    // Idempotent: rewritten rows no longer match source=''. Handler-only
+    // (runs outside a transaction; every statement is individually safe to
+    // re-run). Both engines share one SQL text via executeRaw.
+    idempotent: true,
+    sql: '',
+    handler: async (engine) => {
+      const r = await repairLegacyTimelineSourceRows(engine);
+      if (r.rowsRewritten > 0 || r.rowsDeleted > 0) {
+        migrationNotice(
+          `  NOTICE: v139 rewrote ${r.rowsRewritten} legacy timeline row(s) to the split ` +
+          `(source, summary) shape` +
+          (r.rowsDeleted > 0 ? ` and removed ${r.rowsDeleted} already-duplicated row(s)` : '') +
+          ` across ${r.pagesScanned} page(s), so re-extraction dedups instead of duplicating (#3957).\n`,
         );
-        RETURN NULL;
-      END;
-      $fn$ LANGUAGE plpgsql;
+      }
+    },
+  },
+  {
+    version: 140,
+    name: 'chat_usage_log',
+    // #4218 (revives the #3392 shape): durable per-call chat usage ledger.
+    // gateway.chat() inserts one row per SUCCESSFUL call (fire-and-forget via
+    // the chat-usage sink; see src/core/ai/chat-usage.ts) with the answering
+    // model, best-effort phase attribution, token counts incl. prompt-cache
+    // reads/writes, and a canonical-table cost estimate (NULL when the model
+    // has no pricing — never a fake 0). Read back by the `get_usage` op.
+    // Created empty; plain CREATE INDEX is instant — no CONCURRENTLY. RLS:
+    // covered by the v35 auto_rls_on_create_table event trigger on Postgres.
+    // Keep in sync with src/schema.sql, src/core/pglite-schema.ts,
+    // src/core/schema-embedded.generated.ts.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS chat_usage_log (
+        id                 BIGSERIAL PRIMARY KEY,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        model              TEXT NOT NULL,
+        provider           TEXT,
+        phase              TEXT,
+        input_tokens       INTEGER NOT NULL DEFAULT 0,
+        output_tokens      INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd           DOUBLE PRECISION
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_usage_log_created
+        ON chat_usage_log (created_at);
+      CREATE INDEX IF NOT EXISTS idx_chat_usage_log_model
+        ON chat_usage_log (model, created_at);
+    `,
+  },
+  {
+    version: 141,
+    name: 'extract_rollup_expected_limit',
+    // #4482: orthogonal counter for EXPECTED-limit stops (per-source budget /
+    // walltime caps working as designed). halt_count keeps its historical
+    // meaning — rows written before this migration conflate error halts and
+    // cap stops and are deliberately NOT reclassified (they read as 0 caps,
+    // i.e. "unknown"). New writers record error halts in halt_count and cap
+    // stops here, so doctor's extract_health failure rate can exclude
+    // self-imposed capacity limits while keeping them observable.
+    idempotent: true,
+    sql: `
+      ALTER TABLE extract_rollup_7d
+        ADD COLUMN IF NOT EXISTS expected_limit_count INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    version: 142,
+    name: 'takes_embedding_dimension_matches_config',
+    // #2089: takes was created with a hard-coded vector(1536), while the
+    // configured embedding model can emit another width (for example the
+    // default zembed-1 2560d). The vector writer cannot be useful until the
+    // column shares the configured dimension with content_chunks/facts.
+    // Renumbered v141 → v142: the wave-k branch shipped this AS v141 while
+    // master consumed v141 for extract_rollup_expected_limit (#4482), so a
+    // brain that ran the branch pre-merge recorded version 141 and would
+    // skip master's v141 forever. The guarded DDL below re-applies it here
+    // as a redundant first statement — idempotent, a no-op on fresh paths.
+    idempotent: true,
+    sql: '',
+    handler: async (engine) => {
+      // Skew guard (see renumber note above): branch-tester DBs at v141
+      // missed extract_rollup_expected_limit; IF NOT EXISTS makes this free
+      // everywhere else.
+      await engine.executeRaw(
+        `ALTER TABLE extract_rollup_7d
+           ADD COLUMN IF NOT EXISTS expected_limit_count INTEGER NOT NULL DEFAULT 0`,
+      );
+      const dimRows = await engine.executeRaw<{ value: string }>(
+        `SELECT value FROM config WHERE key = 'embedding_dimensions'`,
+      );
+      const configured = Number.parseInt(dimRows[0]?.value ?? '', 10);
+      const embeddingDim = Number.isInteger(configured) && configured > 0 && configured <= 16000
+        ? configured
+        : 1536;
 
-      CREATE OR REPLACE FUNCTION enforce_draining_source_delete_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        source_ref TEXT;
-        source_draining BOOLEAN;
-      BEGIN
-        source_ref := to_jsonb(OLD)->>TG_ARGV[0];
-        IF source_ref IS NULL THEN RETURN OLD; END IF;
-        PERFORM pg_advisory_xact_lock_shared(
-          hashtextextended('gbrain:source-lifecycle', 0)
+      const typeRows = await engine.executeRaw<{ formatted: string | null }>(
+        `SELECT format_type(a.atttypid, a.atttypmod) AS formatted
+          FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relname = 'takes'
+           AND a.attname = 'embedding'
+           AND NOT a.attisdropped`,
+      );
+      const current = typeRows[0]?.formatted?.match(/vector\((\d+)\)/i)?.[1];
+      if (current && Number.parseInt(current, 10) === embeddingDim) return;
+
+      await engine.executeRaw(`DROP INDEX IF EXISTS idx_takes_embedding_hnsw`);
+      // Existing vectors cannot be cast across dimensions. Null them before
+      // replacing the column; the next `gbrain takes embed` repopulates them.
+      await engine.executeRaw(`UPDATE takes SET embedding = NULL, embedded_at = NULL`);
+      await engine.executeRaw(`ALTER TABLE takes DROP COLUMN IF EXISTS embedding`);
+      await engine.executeRaw(`ALTER TABLE takes ADD COLUMN embedding VECTOR(${embeddingDim})`);
+      if (embeddingDim <= hnswMaxDimsForType('vector')) {
+        await engine.executeRaw(
+          `CREATE INDEX IF NOT EXISTS idx_takes_embedding_hnsw ON takes
+             USING hnsw (embedding vector_cosine_ops)
+             WHERE active AND embedding IS NOT NULL`,
         );
-        SELECT embedding_drain_token IS NOT NULL
-          INTO source_draining
-          FROM public.sources
-         WHERE id = source_ref
-         FOR SHARE;
-        IF FOUND AND source_draining THEN
-          RAISE EXCEPTION
-            'Cannot delete from %: source % is draining', TG_TABLE_NAME, source_ref
-            USING ERRCODE = '23503';
-        END IF;
-        RETURN OLD;
-      END;
-      $fn$ LANGUAGE plpgsql;
+      }
+      process.stderr.write(`  v142: takes.embedding resized to vector(${embeddingDim}); existing take vectors cleared\n`);
+    },
+  },
+  {
+    // Train port: renumbered 138 -> 142 -> 143 (wave-k pass 1 appended
+    // v138-v141 on the branch, then master consumed v142 for the
+    // takes-embedding resize above; LATEST_VERSION is Math.max so only the
+    // duplicate id needed fixing). Guarded DDL below is idempotent, so a
+    // brain that ran the branch's v142 spelling records v143 as a no-op.
+    version: 143,
+    name: 'dream_verdicts_ttl',
+    // #4069 (reimplemented): 30-day TTL on the significance-verdict cache.
+    // `triage_version`/`model` (v129) already invalidate rows semantically,
+    // but nothing ever DELETED rows — verdicts for deleted or re-hashed
+    // transcripts lived forever. Reads treat expired rows as misses (so
+    // long-lived transcripts re-judge at a 30-day cadence, refreshing the
+    // TTL) and runPhaseSynthesize sweeps expired rows best-effort. Backfill
+    // derives expiry from judged_at so pre-TTL rows keep their original age
+    // instead of gaining a fresh 30 days. The interval literal mirrors
+    // DREAM_VERDICT_TTL_SECONDS (engine.ts) and the schema.sql default.
+    idempotent: true,
+    // Statement order matters (#4657 adversarial review): SET DEFAULT runs
+    // BEFORE the backfill so a concurrent pre-v143 writer (e.g. an old
+    // autopilot daemon judging transcripts mid-upgrade) inserts rows that
+    // pick up the default instead of NULL — otherwise a NULL landing between
+    // the backfill UPDATE and SET NOT NULL fails the migration on every
+    // retry for as long as the legacy writer keeps writing. Safe to edit:
+    // the ledger records no SQL checksum, recorded brains never re-run v143,
+    // and the reordered form is idempotent for everyone else.
+    sql: `
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+      ALTER TABLE dream_verdicts
+        ALTER COLUMN expires_at SET DEFAULT (now() + interval '30 days');
+      UPDATE dream_verdicts
+        SET expires_at = judged_at + interval '30 days'
+        WHERE expires_at IS NULL;
+      ALTER TABLE dream_verdicts
+        ALTER COLUMN expires_at SET NOT NULL;
+      CREATE INDEX IF NOT EXISTS dream_verdicts_expires_idx
+        ON dream_verdicts (expires_at);
+    `,
+  },
+  {
+    version: 144,
+    name: 'open_loops',
+    // Gmail-first open-loop engine: the structured record behind
+    // "who is waiting on you, what you promised". One row per open loop,
+    // deduped per source on dedup_key:
+    //   'thread:<threadId>:<loop_type>'  — deterministic thread-state loops
+    //   'commit:<sha8(canonical json)>'  — LLM-extracted commitments
+    // Loops CLOSE by state transition (done/dropped/stale), never delete —
+    // reply-driven auto-close flips status and keeps the audit trail.
+    // fact_id points at the projected facts row (kind=commitment) so entity
+    // cards / recall see the same commitment through the existing read paths.
+    // Written by src/core/google/loop-detect.ts + loops-extract.ts; read by
+    // the open_loops op (src/core/ops/loops.ts). Same DDL on both engines.
+    idempotent: true,
+    sql: `
+      -- Skew-guard re-apply of master's v143 (dream_verdicts_ttl) for
+      -- branch-tester DBs that recorded 142/143 before the renumber; all
+      -- statements are idempotent no-ops where v143 already ran.
+      ALTER TABLE dream_verdicts ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+      UPDATE dream_verdicts
+        SET expires_at = judged_at + interval '30 days'
+        WHERE expires_at IS NULL;
+      ALTER TABLE dream_verdicts
+        ALTER COLUMN expires_at SET DEFAULT (now() + interval '30 days'),
+        ALTER COLUMN expires_at SET NOT NULL;
+      CREATE INDEX IF NOT EXISTS dream_verdicts_expires_idx
+        ON dream_verdicts (expires_at);
+      CREATE TABLE IF NOT EXISTS open_loops (
+        id                 BIGSERIAL PRIMARY KEY,
+        source_id          TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        dedup_key          TEXT NOT NULL,
+        loop_type          TEXT NOT NULL CHECK (loop_type IN (
+                             'commitment_owed_by_me','commitment_owed_to_me',
+                             'unanswered_inbound','unanswered_outbound','decision_pending')),
+        counterparty_slug  TEXT,
+        counterparty_email TEXT,
+        summary            TEXT NOT NULL,
+        evidence           JSONB NOT NULL DEFAULT '[]'::jsonb,
+        thread_id          TEXT,
+        page_slug          TEXT,
+        due_at             TIMESTAMPTZ,
+        status             TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','dropped','stale')),
+        detector           TEXT NOT NULL CHECK (detector IN ('deterministic_thread','llm_extract','manual')),
+        confidence         REAL NOT NULL DEFAULT 1.0,
+        fact_id            BIGINT,
+        opened_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_activity_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        closed_at          TIMESTAMPTZ,
+        closed_by          TEXT,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT open_loops_dedup UNIQUE (source_id, dedup_key)
+      );
+      CREATE INDEX IF NOT EXISTS open_loops_status_idx
+        ON open_loops (source_id, status, last_activity_at DESC);
+      CREATE INDEX IF NOT EXISTS open_loops_counterparty_idx
+        ON open_loops (source_id, counterparty_slug) WHERE status = 'open';
+      CREATE INDEX IF NOT EXISTS open_loops_thread_idx
+        ON open_loops (source_id, thread_id) WHERE status = 'open';
+      CREATE TABLE IF NOT EXISTS loop_suppressions (
+        id         BIGSERIAL PRIMARY KEY,
+        source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL CHECK (kind IN ('sender','thread')),
+        value      TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT loop_suppressions_uniq UNIQUE (source_id, kind, value)
+      );
+    `,
+    // Skew guard (mirrors master's own renumber pattern): the
+    // gmail-open-loop-engine branch shipped open_loops as v142, then v143,
+    // while master consumed v142 (takes_embedding_dimension_matches_config,
+    // #2089) and v143 (dream_verdicts_ttl, #4069) — a brain that ran the
+    // branch pre-merge recorded 142/143 and would skip those forever. The
+    // sql above re-applies dream_verdicts_ttl (idempotent DDL) and this
+    // handler re-applies the takes resize (dimension check = no-op
+    // everywhere it already ran).
+    handler: async (engine) => {
+      const dimRows = await engine.executeRaw<{ value: string }>(
+        `SELECT value FROM config WHERE key = 'embedding_dimensions'`,
+      );
+      const configured = Number.parseInt(dimRows[0]?.value ?? '', 10);
+      const embeddingDim = Number.isInteger(configured) && configured > 0 && configured <= 16000
+        ? configured
+        : 1536;
+      const typeRows = await engine.executeRaw<{ formatted: string | null }>(
+        `SELECT format_type(a.atttypid, a.atttypmod) AS formatted
+          FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relname = 'takes'
+           AND a.attname = 'embedding'
+           AND NOT a.attisdropped`,
+      );
+      const current = typeRows[0]?.formatted?.match(/vector\((\d+)\)/i)?.[1];
+      if (current && Number.parseInt(current, 10) === embeddingDim) return;
 
-      CREATE OR REPLACE FUNCTION enforce_draining_source_row_delete_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      BEGIN
-        IF OLD.embedding_drain_token IS NOT NULL THEN
-          RAISE EXCEPTION
-            'Cannot delete source % while it is draining', OLD.id
-            USING ERRCODE = '23503';
-        END IF;
-        RETURN OLD;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      CREATE OR REPLACE FUNCTION enforce_draining_source_page_delete_fn()
-      RETURNS trigger
-      SET search_path = pg_catalog, public, pg_temp
-      AS $fn$
-      DECLARE
-        page_refs BIGINT[] := ARRAY[]::BIGINT[];
-        source_ref TEXT;
-        source_refs TEXT[] := ARRAY[]::TEXT[];
-      BEGIN
-        IF TG_NARGS < 1 THEN
-          RAISE EXCEPTION 'Draining-source page delete guard requires at least one page column';
-        END IF;
-        SELECT COALESCE(
-                 array_agg(DISTINCT (to_jsonb(OLD)->>page_column)::BIGINT
-                           ORDER BY (to_jsonb(OLD)->>page_column)::BIGINT),
-                 ARRAY[]::BIGINT[]
-               )
-          INTO page_refs
-          FROM unnest(TG_ARGV) AS page_columns(page_column)
-         WHERE to_jsonb(OLD)->>page_column IS NOT NULL;
-        IF cardinality(page_refs) = 0 THEN RETURN OLD; END IF;
-
-        PERFORM pg_advisory_xact_lock_shared(
-          hashtextextended('gbrain:source-lifecycle', 0)
+      await engine.executeRaw(`DROP INDEX IF EXISTS idx_takes_embedding_hnsw`);
+      await engine.executeRaw(`UPDATE takes SET embedding = NULL, embedded_at = NULL`);
+      await engine.executeRaw(`ALTER TABLE takes DROP COLUMN IF EXISTS embedding`);
+      await engine.executeRaw(`ALTER TABLE takes ADD COLUMN embedding VECTOR(${embeddingDim})`);
+      if (embeddingDim <= hnswMaxDimsForType('vector')) {
+        await engine.executeRaw(
+          `CREATE INDEX IF NOT EXISTS idx_takes_embedding_hnsw ON takes
+             USING hnsw (embedding vector_cosine_ops)
+             WHERE active AND embedding IS NOT NULL`,
         );
-        SELECT COALESCE(array_agg(DISTINCT source_id ORDER BY source_id), ARRAY[]::TEXT[])
-          INTO source_refs
-          FROM public.pages
-         WHERE id = ANY(page_refs);
-        FOR source_ref IN
-          SELECT id
-            FROM public.sources
-           WHERE id = ANY(source_refs)
-             AND embedding_drain_token IS NOT NULL
-           ORDER BY id
-           FOR SHARE
-        LOOP
-          RAISE EXCEPTION
-            'Cannot delete from %: page source % is draining', TG_TABLE_NAME, source_ref
-            USING ERRCODE = '23503';
-        END LOOP;
-        RETURN OLD;
-      END;
-      $fn$ LANGUAGE plpgsql;
-
-      DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON public.sources;
-      CREATE TRIGGER source_lifecycle_delete_lock_guard
-        BEFORE DELETE ON public.sources
-        FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn();
-      DROP TRIGGER IF EXISTS source_draining_delete_guard ON public.sources;
-      CREATE TRIGGER source_draining_delete_guard
-        BEFORE DELETE ON public.sources
-        FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_row_delete_fn();
-
-      DO $install$
-      DECLARE
-        ref RECORD;
-      BEGIN
-        FOR ref IN
-          SELECT c.table_name, c.column_name
-            FROM information_schema.columns c
-            JOIN information_schema.tables t
-              ON t.table_schema = c.table_schema
-             AND t.table_name = c.table_name
-           WHERE c.table_schema = 'public'
-             AND t.table_type = 'BASE TABLE'
-             AND c.column_name = 'source_id'
-             AND c.table_name <> 'source_embedding_leases'
-           ORDER BY c.table_name
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_draining_delete_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
-            || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_draining_delete_guard BEFORE DELETE ON %I '
-            || 'FOR EACH ROW EXECUTE FUNCTION enforce_draining_source_delete_fn(%L)',
-            ref.table_name, ref.column_name
-          );
-        END LOOP;
-
-        FOR ref IN
-          SELECT page_refs.table_name,
-                 string_agg(quote_literal(page_refs.column_name), ', '
-                            ORDER BY page_refs.column_name) AS trigger_arguments
-            FROM (
-              SELECT DISTINCT child_table.relname AS table_name,
-                              child_column.attname AS column_name
-                FROM pg_constraint constraint_
-                JOIN pg_class child_table ON child_table.oid = constraint_.conrelid
-                JOIN pg_namespace child_namespace ON child_namespace.oid = child_table.relnamespace
-                JOIN pg_class parent_table ON parent_table.oid = constraint_.confrelid
-                JOIN pg_namespace parent_namespace ON parent_namespace.oid = parent_table.relnamespace
-                JOIN LATERAL unnest(constraint_.conkey) WITH ORDINALITY
-                  AS child_key(attnum, ordinal_position) ON true
-                JOIN LATERAL unnest(constraint_.confkey) WITH ORDINALITY
-                  AS parent_key(attnum, ordinal_position)
-                  ON parent_key.ordinal_position = child_key.ordinal_position
-                JOIN pg_attribute child_column
-                  ON child_column.attrelid = child_table.oid
-                 AND child_column.attnum = child_key.attnum
-                JOIN pg_attribute parent_column
-                  ON parent_column.attrelid = parent_table.oid
-                 AND parent_column.attnum = parent_key.attnum
-               WHERE constraint_.contype = 'f'
-                 AND child_namespace.nspname = 'public'
-                 AND parent_namespace.nspname = 'public'
-                 AND parent_table.relname = 'pages'
-                 AND parent_column.attname = 'id'
-            ) AS page_refs
-           GROUP BY page_refs.table_name
-           ORDER BY page_refs.table_name
-        LOOP
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_draining_page_ref_delete_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'DROP TRIGGER IF EXISTS source_lifecycle_delete_lock_guard ON %I',
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_lifecycle_delete_lock_guard BEFORE DELETE ON %I '
-            || 'FOR EACH STATEMENT EXECUTE FUNCTION enforce_source_lifecycle_delete_lock_fn()',
-            ref.table_name
-          );
-          EXECUTE format(
-            'CREATE TRIGGER source_draining_page_ref_delete_guard BEFORE DELETE ON %I '
-            || 'FOR EACH ROW '
-            || 'EXECUTE FUNCTION enforce_draining_source_page_delete_fn(%s)',
-            ref.table_name,
-            ref.trigger_arguments
-          );
-        END LOOP;
-      END;
-      $install$;
+      }
+      process.stderr.write(`  v144 skew guard: takes.embedding resized to vector(${embeddingDim})\n`);
+    },
+  },
+  {
+    version: 145,
+    name: 'facts_kind_idea_alter',
+    // Widen facts.kind with 'idea' (extractor/DB taxonomy only — the frozen
+    // MEMORY_VERBS remember enum in src/core/verbs.ts does NOT gain it).
+    // The kind CHECK shipped INLINE in v45's CREATE TABLE, so Postgres
+    // autogenerated its name (`facts_kind_check` — table_column_check for a
+    // single inline column CHECK) and old brains carry the 5-kind predicate:
+    // an INSERT with kind='idea' violates it. ALTER counterpart per the v47
+    // facts_notability_alter pattern. Idempotent under all states:
+    //   - Fresh install (widened inline DDL above): probe finds the autogen
+    //     constraint, drops it, re-adds the identical widened CHECK.
+    //   - Old brain (5-kind CHECK): drop + re-add with the widened list.
+    //   - Re-run / probe miss: ADD always runs, so the CHECK converges to
+    //     the widened predicate under the same deterministic name.
+    idempotent: true,
+    sql: `
+      DO $$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'facts_kind_check'
+            AND conrelid = 'facts'::regclass
+        ) THEN
+          ALTER TABLE facts DROP CONSTRAINT facts_kind_check;
+        END IF;
+        ALTER TABLE facts ADD CONSTRAINT facts_kind_check
+          CHECK (kind IN ('event','preference','commitment','belief','fact','idea'));
+      END $$;
+    `,
+  },
+  {
+    version: 146,
+    name: 'extract_atoms_transcript_state_table',
+    // #4148 follow-on: extend the failure-count / tombstone machinery to
+    // TRANSCRIPT items. Pre-fix `recordPageFailureCount` returned null for
+    // `kind !== 'page'`, so a transcript that deterministically produced
+    // malformed output — or that honestly yielded zero atoms — re-entered
+    // discovery and re-spent LLM budget on EVERY cycle, forever. Pages avoid
+    // this via frontmatter (`atoms_fail_count` / `atoms_fail_hash` /
+    // `atoms_scan_hash`); transcripts are files, not pages, so they have no
+    // frontmatter to carry it and need their own store.
+    //
+    // Precedent: dream_verdicts (v30), the other transcript-keyed cache, whose
+    // comment already establishes why this cannot live in raw_data — "Distinct
+    // from raw_data (page-scoped); transcripts aren't pages" (raw_data.page_id
+    // is NOT NULL REFERENCES pages(id)). It also must NOT be columns on
+    // dream_verdicts itself: that table is documented as rebuildable via
+    // `gbrain dream retriage --force`, which clears it wholesale, and atom
+    // extraction state would be swept away as collateral.
+    //
+    // KEYED (source_id, file_path, content_hash), which adds source_id to the
+    // dream_verdicts shape. dream_verdicts can be source-free because it caches
+    // a content-level judgment ("is this transcript worth processing"), which is
+    // genuinely source-independent. A failure streak and a tombstone GATE
+    // EXTRACTION, and extraction is source-scoped throughout this phase — the
+    // discovery SQL, the NOT EXISTS idempotency subquery, and every putPage all
+    // take sourceId. This file's own header records what happens when that is
+    // forgotten here: "Pre-fix the putPage call was missing the sourceId arg —
+    // atoms always wrote to 'default' regardless of source, which made the NOT
+    // EXISTS guard ineffective on federated brains." An unscoped tombstone would
+    // let one source permanently suppress another source's extraction of the
+    // same file.
+    //
+    // content_hash holds the 16-char prefix, matching `atoms.frontmatter
+    // ->>'source_hash'` and the page-side `atoms_fail_hash`, so every hash
+    // comparison in this phase is on the same unit. Including it in the PK is
+    // what makes "a content edit resets the streak" fall out for free: an edited
+    // transcript is simply a different row, mirroring the page-side hash-keyed
+    // reset.
+    //
+    // RLS: covered by the v35 auto_rls_on_create_table event trigger on
+    // Postgres, same as v126's session_context_state — no explicit ALTER here.
+    // Keep in sync with src/schema.sql and src/core/pglite-schema.ts
+    // (test/schema-bootstrap-coverage.test.ts enforces the PGLite parity).
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS extract_atoms_transcript_state (
+        source_id    TEXT        NOT NULL DEFAULT 'default',
+        file_path    TEXT        NOT NULL,
+        content_hash TEXT        NOT NULL,
+        fail_count   INTEGER     NOT NULL DEFAULT 0,
+        tombstoned   BOOLEAN     NOT NULL DEFAULT FALSE,
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (source_id, file_path, content_hash)
+      );
+      DROP INDEX IF EXISTS extract_atoms_transcript_state_live_idx;
+      CREATE INDEX IF NOT EXISTS extract_atoms_transcript_state_tombstoned_idx
+        ON extract_atoms_transcript_state (source_id, content_hash)
+        WHERE tombstoned;
     `,
   },
 ];
@@ -7828,7 +6578,6 @@ async function runMigrationSQLWithRetry(
   m: Migration,
   sql: string,
 ): Promise<void> {
-  const { isStatementTimeoutError, isRetryableConnError } = await import('./retry-matcher.ts');
   // GBRAIN_MIGRATE_BACKOFF_MS lets tests skip the 5s/15s/45s backoff. In
   // production the env var is unset and the default cadence applies.
   const fastBackoff = process.env.GBRAIN_MIGRATE_BACKOFF_MS;
@@ -8098,13 +6847,30 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
   // reach the loop below). Best-effort + idempotent: a no-op on a healthy
   // index; `doctor` surfaces it independently if this ever fails.
   try {
-    const { repairTimelineDedupIndex } = await import('./timeline-dedup-repair.ts');
     const r = await repairTimelineDedupIndex(engine);
     if (r.repaired) {
       console.error(
         `[migrate] healed idx_timeline_dedup drift (#2038): ${r.before.join(',') || '(absent)'} ` +
-        `→ page_id,date,summary,source` +
+        `→ page_id,date,md5(summary),source` +
         (r.collapsedDuplicates > 0 ? ` (collapsed ${r.collapsedDuplicates} duplicate row(s))` : ''),
+      );
+    }
+  } catch { /* best-effort; doctor reports the drift if this couldn't run */ }
+
+  // #550: same drift class for the pages upsert arbiter. When the
+  // UNIQUE(source_id, slug) constraint vanishes (partial restore, manual DDL,
+  // name-only migration guards), EVERY putPage fails with "no unique or
+  // exclusion constraint" and neither re-initSchema nor the version counter
+  // can see it. ADD-only self-heal; refuses (loudly) on duplicate rows.
+  try {
+    const p = await repairPagesUpsertArbiter(engine);
+    if (p.repaired) {
+      console.error(`[migrate] restored pages_source_slug_key UNIQUE(source_id, slug) (#550)`);
+    } else if (p.reason === 'duplicates') {
+      console.error(
+        `[migrate] cannot restore pages_source_slug_key: ${p.duplicateGroups} duplicate ` +
+        `(source_id, slug) group(s) exist — page upserts will keep failing until the ` +
+        `duplicates are resolved (#550). See \`gbrain doctor\`.`,
       );
     }
   } catch { /* best-effort; doctor reports the drift if this couldn't run */ }
@@ -8113,17 +6879,64 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
     return { applied: 0, current };
   }
 
+  // Fresh install vs upgrade: a never-migrated brain (schema blob seeds
+  // version='1'; every migration is >= 2) replays the FULL history — printing
+  // ~240 lines of internal migration names as the user's first-run experience.
+  // That wall makes a 2-second init read as complex and fragile ("1 → 125"
+  // implies the brand-new install was 124 versions stale). Fresh installs get
+  // one summary line; EXISTING brains keep the full per-migration detail
+  // (upgrades are where the names carry diagnostic value).
+  // GBRAIN_MIGRATE_VERBOSE=1 is the incident escape hatch (env-first, matching
+  // the GBRAIN_SYNC_*/GBRAIN_PACE_* pattern).
+  const freshInstall = current <= 1 && pending.length === sorted.length;
+  const quietReplay = freshInstall && process.env.GBRAIN_MIGRATE_VERBOSE !== '1';
+  // Suppress per-migration explanatory notices during a fresh-install replay
+  // (they are upgrade diagnostics, noise on a new user's first run). Restored
+  // in the finally so an in-process upgrade after a fresh init still narrates.
+  quietMigrationNotices = quietReplay;
+
   // Progress messages route to stderr so callers parsing stdout (e.g.
   // `gbrain jobs submit --json | jq`) aren't polluted by migration noise.
-  process.stderr.write(`  Schema version ${current} → ${LATEST_VERSION} (${pending.length} migration(s) pending)\n`);
-
-  // Pre-flight: warn about connections that might block DDL
-  await checkForBlockingConnections(engine);
+  if (quietReplay) {
+    process.stderr.write(`  Setting up brain schema (v${LATEST_VERSION})...\n`);
+  } else {
+    process.stderr.write(`  Schema version ${current} → ${LATEST_VERSION} (${pending.length} migration(s) pending)\n`);
+  }
 
   let applied = 0;
-  for (const m of pending) {
-    process.stderr.write(`  [${m.version}] ${m.name}...\n`);
+  try {
+    // Pre-flight: warn about connections that might block DDL
+    await checkForBlockingConnections(engine);
 
+    for (const m of pending) {
+      if (!quietReplay) process.stderr.write(`  [${m.version}] ${m.name}...\n`);
+      try {
+        await applyOneMigration(engine, m);
+        // Update version after both SQL and handler succeed. Inside the same
+        // catch so a stamp-write failure is also NAMED in quiet mode.
+        await engine.setConfig('version', String(m.version));
+      } catch (err) {
+        // Quiet fresh-install replay: name the failing migration — without the
+        // per-step lines, the error would otherwise be anonymous.
+        if (quietReplay) process.stderr.write(`  [${m.version}] ${m.name} failed\n`);
+        throw err;
+      }
+
+      if (!quietReplay) process.stderr.write(`  [${m.version}] ✓ ${m.name}\n`);
+      applied++;
+    }
+  } finally {
+    // Never leak the fresh-install quiet flag into a later in-process run —
+    // covers every exit path from here on (incl. the pre-flight probe).
+    quietMigrationNotices = false;
+  }
+
+  return { applied, current: LATEST_VERSION };
+}
+
+/** One migration's full body (SQL + handler + verify), extracted so the
+ *  runMigrations loop can name the failing migration in quiet-replay mode. */
+async function applyOneMigration(engine: BrainEngine, m: Migration): Promise<void> {
     // Pick SQL: engine-specific `sqlFor` wins over engine-agnostic `sql`.
     const sql = m.sqlFor?.[engine.kind] ?? m.sql;
 
@@ -8194,11 +7007,4 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
       }
     }
 
-    // Update version after both SQL and handler succeed
-    await engine.setConfig('version', String(m.version));
-    process.stderr.write(`  [${m.version}] ✓ ${m.name}\n`);
-    applied++;
-  }
-
-  return { applied, current: LATEST_VERSION };
 }

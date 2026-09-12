@@ -25,6 +25,7 @@ import { execFileSync } from 'child_process';
 import type { BrainEngine } from './engine.ts';
 import { parseSourceConfig, type SourceRow } from './sources-load.ts';
 import { isSourceUnchangedSinceSync } from './git-head.ts';
+import { resolveHoursEnv } from './env-number.ts';
 
 export interface SourceMetrics {
   source_id: string;
@@ -37,14 +38,8 @@ export interface SourceMetrics {
   embed_coverage_pct: number;
   last_sync_at: Date | null;
   lag_seconds: number | null;
-  /** Failed jobs (sync OR embed-backfill) for this source in last 24h.
-   *  Counts BOTH the 'failed' and 'dead' statuses; see the split fields below
-   *  before naming a `gbrain jobs list --status` command in an operator hint. */
+  /** Failed jobs (sync OR embed-backfill) for this source in last 24h. */
   failed_jobs_24h: number;
-  /** The 'dead' half of failed_jobs_24h (retries exhausted). */
-  dead_jobs_24h: number;
-  /** The 'failed' half of failed_jobs_24h (still retryable). */
-  failed_only_jobs_24h: number;
   /** Waiting + active + delayed jobs (sync OR embed-backfill) for this source. */
   queue_depth: number;
   /** v0.41.31: embed-backfill jobs specifically active right now. */
@@ -172,16 +167,55 @@ export function commitTimeMs(localPath: string | null, sha: string | null): numb
 }
 
 /**
+ * Resolve the staleness-ceiling in seconds.
+ *
+ * `GBRAIN_STALENESS_CEILING_HOURS` overrides; otherwise it tracks
+ * `GBRAIN_SYNC_FRESHNESS_FAIL_HOURS` (default 72) so the ceiling and the check
+ * that reads it cannot drift apart by default, while still being separable
+ * during an incident.
+ */
+export function resolveStalenessCeilingSeconds(): number {
+  const base = resolveHoursEnv('GBRAIN_SYNC_FRESHNESS_FAIL_HOURS', 72);
+  return Math.floor(resolveHoursEnv('GBRAIN_STALENESS_CEILING_HOURS', base) * 3600);
+}
+
+/**
  * Commit-relative lag in seconds from a STORED content timestamp (the
- * `newest_content_at` column), for REMOTE consumers that cannot shell out:
+ * `newest_content_at` column), for consumers that cannot shell out:
  *   - `null` when `lastSyncMs` is unknown.
  *   - Negative wall-clock (future `last_sync_at`) is surfaced as-is so upstream
  *     clock-skew detection still fires.
- *   - `0` when the stored content is at or before the last sync (caught up).
+ *   - Caught up (content at or before the last sync) → `0` UNTIL wall-clock
+ *     passes the ceiling, then a monotonic ramp (see below).
  *   - Wall-clock `now - lastSync` when content is newer, or when `contentMs` is
  *     null (no column value / pre-migration) — detection never regresses.
  *
- * Pure. The LOCAL path does NOT use this — it keys off the live commit hash via
+ * The core logic is pure; only the DEFAULT `ceilingSeconds` reads env. Callers
+ * that need determinism pass the ceiling explicitly.
+ *
+ * WHY THE RAMP (the 71-day bug):
+ *
+ *   Before, "caught up" returned a hard 0 forever, so a source whose clone had
+ *   vanished reported fresh indefinitely — the wall-clock number was computed on
+ *   the line above and thrown away. But the caught-up branch is not a mistake: it
+ *   exists (see `checkSyncFreshness`'s clone-unavailable path) because a
+ *   container restart wipes `local_path`, and every QUIET source would otherwise
+ *   read stale after a restart. That justification assumed a no-op sync does not
+ *   advance `last_sync_at`, which stopped being true in v0.42.52.0 — a 0-change
+ *   sync now heartbeats the column. So a quiet source that is genuinely being
+ *   checked has a RECENT `last_sync_at` and stays at 0; only a source nobody has
+ *   looked at in a very long time crosses the ceiling.
+ *
+ *   It ramps rather than steps because three consumers read this one value at
+ *   different thresholds: `federation_health` fails at 24h, `sync_freshness`
+ *   warns at 24h / fails at 72h, and `buildSyncStatusReport` buckets at a
+ *   hardcoded 24/72. A step to the ceiling would cross all of them in the same
+ *   instant, firing two checks at once and skipping the warn tier entirely —
+ *   which is the alert-storm shape the caught-up branch was written to prevent.
+ *   `max(0, wallClock - ceiling)` grows continuously, so warn still precedes
+ *   fail and the surfaces escalate in order.
+ *
+ * The LOCAL path does NOT use this — it keys off the live commit hash via
  * `isSourceUnchangedSinceSync` (robust against HEAD moving to an old-dated
  * commit, which a timestamp comparison would miss).
  */
@@ -189,12 +223,17 @@ export function lagFromContentMs(
   contentMs: number | null,
   lastSyncMs: number | null,
   nowMs: number,
+  ceilingSeconds: number = resolveStalenessCeilingSeconds(),
 ): number | null {
   if (lastSyncMs === null || !Number.isFinite(lastSyncMs)) return null;
   const wallClockSeconds = Math.floor((nowMs - lastSyncMs) / 1000);
   if (wallClockSeconds < 0) return wallClockSeconds; // clock skew passthrough
   if (contentMs !== null && Number.isFinite(contentMs)) {
-    return contentMs <= lastSyncMs ? 0 : wallClockSeconds;
+    // Caught up: 0 while recently checked, then ramp once nobody has looked
+    // for longer than the ceiling.
+    return contentMs <= lastSyncMs
+      ? Math.max(0, wallClockSeconds - ceilingSeconds)
+      : wallClockSeconds;
   }
   return wallClockSeconds; // no stored content signal — wall-clock fallback
 }
@@ -226,25 +265,48 @@ export async function computeAllSourceMetrics(
   // commit-hash probe; the REMOTE federation_health path leaves it off and
   // reads the stored column (no subprocess on a DB-supplied local_path).
   const probeContent = opts?.probeContent === true;
+  // One ceiling for the whole report (hoisted out of the per-source map):
+  // every source gets the same number, and the env read runs once.
+  const stalenessCeilingSeconds = resolveStalenessCeilingSeconds();
 
   return sources.map((src) => {
     const cfg = parseSourceConfig(src.config);
     const pages = pageCounts.get(src.id) ?? 0;
     const chunkStats = chunkCounts.get(src.id) ?? { total: 0, embedded: 0 };
-    const jobStats = jobCounts.get(src.id) ?? { failed_24h: 0, dead_24h: 0, failed_only_24h: 0, queue_depth: 0, backfill_active: 0, backfill_queued: 0 };
+    const jobStats = jobCounts.get(src.id) ?? { failed_24h: 0, queue_depth: 0, backfill_active: 0, backfill_queued: 0 };
 
     const embedCoverage = chunkStats.total === 0
       ? 100
       : Math.round((chunkStats.embedded / chunkStats.total) * 1000) / 10;
 
     const lastMs = src.last_sync_at ? new Date(src.last_sync_at).getTime() : null;
-    // v0.41.32.0: commit-relative lag.
-    //   LOCAL (probeContent): caught up iff HEAD == last_commit AND no tracked
-    //     working-tree changes (untracked ignored) → lag 0; else wall-clock.
-    //     Uses the live commit hash so a HEAD that moved to an old-dated commit
-    //     is correctly NOT caught up. NULL last_commit → not caught up → wall-clock.
-    //   REMOTE (default): read the stored newest_content_at column via
-    //     lagFromContentMs — no git subprocess (v0.41.27.0 trust boundary).
+    // v0.41.32.0: commit-relative lag. TWO implementations, and the split is
+    // load-bearing rather than accidental duplication — see the diagram.
+    //
+    //   computeAllSourceMetrics
+    //         │
+    //         ├─ probeContent: true  ──► isSourceUnchangedSinceSync (git subprocess)
+    //         │                          LOCAL only. Accurate: keys off the live
+    //         │                          commit hash, so a HEAD moved to an
+    //         │                          old-dated commit is correctly NOT caught
+    //         │                          up. NULL last_commit → wall-clock.
+    //         │                          Caller: `gbrain sources status`.
+    //         │
+    //         └─ probeContent: false ──► lagFromContentMs (column read)
+    //                                    REMOTE-SAFE: no subprocess, because a
+    //                                    remote-callable path must never shell
+    //                                    out against a DB-supplied local_path
+    //                                    (v0.41.27.0 trust boundary). That makes
+    //                                    it structurally less accurate than the
+    //                                    probe, which is exactly why it needs the
+    //                                    staleness ceiling to stay honest.
+    //                                    Callers: doctor `federation_health`,
+    //                                    doctor `sync_freshness` (via its own
+    //                                    clone-unavailable branch), and
+    //                                    `buildSyncStatusReport` (gbrain status).
+    //
+    // Do NOT "unify" these behind one flag: collapsing the trust boundary into a
+    // boolean is how a remote caller eventually acquires a subprocess.
     let lagSeconds: number | null;
     if (lastMs === null) {
       lagSeconds = null;
@@ -257,7 +319,7 @@ export async function computeAllSourceMetrics(
       const contentMs = src.newest_content_at
         ? new Date(src.newest_content_at).getTime()
         : null;
-      lagSeconds = lagFromContentMs(contentMs, lastMs, now);
+      lagSeconds = lagFromContentMs(contentMs, lastMs, now, stalenessCeilingSeconds);
     }
 
     return {
@@ -272,8 +334,6 @@ export async function computeAllSourceMetrics(
       last_sync_at: src.last_sync_at,
       lag_seconds: lagSeconds,
       failed_jobs_24h: jobStats.failed_24h,
-      dead_jobs_24h: jobStats.dead_24h,
-      failed_only_jobs_24h: jobStats.failed_only_24h,
       queue_depth: jobStats.queue_depth,
       backfill_active: jobStats.backfill_active,
       backfill_queued: jobStats.backfill_queued,
@@ -297,10 +357,17 @@ async function pageCountsBySource(engine: BrainEngine): Promise<Map<string, numb
 }
 
 async function chunkCountsBySource(engine: BrainEngine): Promise<Map<string, { total: number; embedded: number }>> {
+  // Coverage must count the ACTIVE embedding column: a registry-routed brain
+  // (search_embedding_column != 'embedding') writes vectors elsewhere, and
+  // keying the literal legacy column here read 0% forever — a permanently-red
+  // doctor check recommending no-op remediations. Fail open to legacy.
+  const { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } = await import('./search/embedding-column.ts');
+  const active = await resolveActiveEmbeddingColumnFromEngine(engine, { fallbackToLegacy: true });
+  const col = quoteIdentifier(active.name);
   const rows = await engine.executeRaw<{ source_id: string; total: number; embedded: number }>(
     `SELECT p.source_id,
             COUNT(*)::int AS total,
-            COUNT(*) FILTER (WHERE c.embedding IS NOT NULL)::int AS embedded
+            COUNT(*) FILTER (WHERE c.${col} IS NOT NULL)::int AS embedded
        FROM content_chunks c
        JOIN pages p ON p.id = c.page_id
       WHERE p.deleted_at IS NULL
@@ -311,48 +378,14 @@ async function chunkCountsBySource(engine: BrainEngine): Promise<Map<string, { t
   return m;
 }
 
-/**
- * Operator hint for the failed-jobs warning.
- *
- * `failed_jobs_24h` counts BOTH 'failed' and 'dead', but `gbrain jobs list
- * --status <S>` accepts a single status. Naming the wrong half prints
- * "No jobs found" and reads as a false alarm: that is exactly how a
- * five-minute sync death loop stayed invisible for three days. Name the
- * status that actually holds the counted rows, and show the split whenever
- * both halves are non-zero so the other command is still discoverable.
- */
-export function failedJobsHint(metric: {
-  failed_jobs_24h: number;
-  dead_jobs_24h: number;
-  failed_only_jobs_24h: number;
-}): string {
-  const { failed_jobs_24h: total, dead_jobs_24h: dead, failed_only_jobs_24h: failed } = metric;
-  if (dead > 0 && failed > 0) {
-    return `${total} failed/dead jobs in 24h (dead ${dead}, failed ${failed}) — check ` +
-      '`gbrain jobs list --status dead` and `gbrain jobs list --status failed`';
-  }
-  if (dead > 0) {
-    return `${total} dead jobs in 24h (retries exhausted) — check \`gbrain jobs list --status dead\``;
-  }
-  if (failed > 0) {
-    return `${total} failed jobs in 24h — check \`gbrain jobs list --status failed\``;
-  }
-  // Split unavailable (legacy metric or pre-v0.11 brain): name both rather
-  // than guess, so the hint can never point at an empty list.
-  return `${total} failed/dead jobs in 24h — check ` +
-    '`gbrain jobs list --status dead` and `gbrain jobs list --status failed`';
-}
-
-type JobStats = { failed_24h: number; dead_24h: number; failed_only_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number };
+type JobStats = { failed_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number };
 
 async function jobCountsBySource(engine: BrainEngine): Promise<Map<string, JobStats>> {
   // Pre-v0.11 brains don't have minion_jobs; return empty map.
   try {
-    const rows = await engine.executeRaw<{ source_id: string; failed_24h: number; dead_24h: number; failed_only_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number }>(
+    const rows = await engine.executeRaw<{ source_id: string; failed_24h: number; queue_depth: number; backfill_active: number; backfill_queued: number }>(
       `SELECT data->>'sourceId' AS source_id,
               COUNT(*) FILTER (WHERE status IN ('failed','dead') AND created_at > NOW() - INTERVAL '24 hours')::int AS failed_24h,
-              COUNT(*) FILTER (WHERE status = 'dead' AND created_at > NOW() - INTERVAL '24 hours')::int AS dead_24h,
-              COUNT(*) FILTER (WHERE status = 'failed' AND created_at > NOW() - INTERVAL '24 hours')::int AS failed_only_24h,
               COUNT(*) FILTER (WHERE status IN ('waiting','active','delayed'))::int AS queue_depth,
               COUNT(*) FILTER (WHERE name = 'embed-backfill' AND status = 'active')::int AS backfill_active,
               COUNT(*) FILTER (WHERE name = 'embed-backfill' AND status IN ('waiting','delayed','waiting-children'))::int AS backfill_queued
@@ -365,8 +398,6 @@ async function jobCountsBySource(engine: BrainEngine): Promise<Map<string, JobSt
     for (const r of rows) {
       m.set(r.source_id, {
         failed_24h: Number(r.failed_24h),
-        dead_24h: Number(r.dead_24h),
-        failed_only_24h: Number(r.failed_only_24h),
         queue_depth: Number(r.queue_depth),
         backfill_active: Number(r.backfill_active),
         backfill_queued: Number(r.backfill_queued),

@@ -22,7 +22,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runExtract, runExtractCore } from '../src/commands/extract.ts';
+import { runExtract } from '../src/commands/extract.ts';
 import type { PageInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
@@ -42,9 +42,6 @@ async function truncateAll() {
   for (const t of ['content_chunks', 'links', 'tags', 'raw_data', 'timeline_entries', 'page_versions', 'ingest_log', 'pages']) {
     await (engine as any).db.exec(`DELETE FROM ${t}`);
   }
-  await (engine as any).db.exec(`DELETE FROM sources WHERE id != 'default'`);
-  await (engine as any).db.exec(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
-  await (engine as any).db.exec(`DELETE FROM config WHERE key = 'sync.repo_path'`);
 }
 
 const personPage = (title: string, body = ''): PageInput => ({
@@ -160,35 +157,6 @@ title: Alice
     expect(after2.length).toBe(2);
 
     expect(elapsedMs).toBeLessThan(2000);
-  });
-
-  test('non-default fs source writes timeline rows back to that source', async () => {
-    await (engine as any).db.exec(
-      `INSERT INTO sources (id, name, local_path) VALUES ('wiki', 'Wiki', '${brainDir.replace(/'/g, "''")}')`,
-    );
-    await engine.putPage('people/alice', personPage('Alice'), { sourceId: 'wiki' });
-
-    writeFile('people/alice.md', `---
-title: Alice
----
-
-## Timeline
-
-- **2024-01-15** | source — Founded NovaMind
-`);
-
-    await runExtractCore(engine, { mode: 'timeline', dir: brainDir, sourceId: 'wiki' });
-
-    const rows = await engine.executeRaw<{ source_id: string; count: number }>(
-      `SELECT p.source_id, count(*)::int AS count
-         FROM timeline_entries te
-         JOIN pages p ON p.id = te.page_id
-        WHERE p.slug = $1
-        GROUP BY p.source_id
-        ORDER BY p.source_id`,
-      ['people/alice'],
-    );
-    expect(rows).toEqual([{ source_id: 'wiki', count: 1 }]);
   });
 });
 
@@ -418,6 +386,33 @@ describe('resolveSlugAll', () => {
     // The legacy resolveSlug must keep returning the string|null shape.
     expect(resolveSlug('notes', 'struktura.md', all)).toBe('notes/struktura');
     expect(resolveSlug('concepts', 'phantom.md', all)).toBeNull();
+  });
+});
+
+// ─── issue #1964: cross-directory wikilinks — slug/path mismatch ──────────
+
+describe('issue #1964: raw Obsidian wikilink paths resolve to sync-slugified slugs', () => {
+  test('resolveSlug slugifies the candidate (sync-consistent), no flag needed', () => {
+    const all = new Set(['llm-wiki/entities/ai-3.0']);
+    // Wikilink literal `[[llm-wiki/entities/AI 3.0]]` — spaces + uppercase.
+    expect(resolveSlug('llm-wiki/notes', 'llm-wiki/entities/AI 3.0.md', all))
+      .toBe('llm-wiki/entities/ai-3.0');
+  });
+
+  test('resolveSlug slugifies raw (unslugified) fileDir too', () => {
+    const all = new Set(['llm-wiki/entities/ai-3.0']);
+    // fileDir comes from dirname(relPath) — the raw on-disk directory.
+    expect(resolveSlug('LLM Wiki/Notes', 'entities/AI 3.0.md', all))
+      .toBe('llm-wiki/entities/ai-3.0');
+  });
+
+  test('extractLinksFromFile resolves cross-directory wikilink with flag OFF as a typed edge', async () => {
+    const allSlugs = new Set(['llm-wiki/entities/ai-3.0', 'llm-wiki/notes/roadmap']);
+    const content = '---\ntitle: Roadmap\ntype: concept\n---\n\nSee [[llm-wiki/entities/AI 3.0]].\n';
+    const links = await extractLinksFromFile(content, 'llm-wiki/notes/roadmap.md', allSlugs);
+    expect(links.map(l => l.to_slug)).toEqual(['llm-wiki/entities/ai-3.0']);
+    // Dir-qualified path resolution is exact, NOT the basename fallback.
+    expect(links[0].link_type).not.toBe('wikilink_basename');
   });
 });
 

@@ -1,7 +1,7 @@
 /**
  * Drift guard for src/core/doctor-categories.ts.
  *
- * Reads doctor check source files via a literal-string scan, enumerates every
+ * Reads doctor check emitter source via a literal-string scan, enumerates every
  * `name: '<...>'` Check name, and asserts each appears in exactly ONE category
  * set. The union of the four sets must equal the discovered names exactly —
  * no orphans, no extras.
@@ -15,6 +15,7 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { doctorSource } from './helpers/doctor-source.ts';
 import {
   BRAIN_CHECK_NAMES,
   SKILL_CHECK_NAMES,
@@ -24,15 +25,14 @@ import {
   _resetUnknownCheckWarningsForTest,
 } from '../src/core/doctor-categories.ts';
 
-const CHECK_SOURCE_PATHS = [
-  join(import.meta.dir, '..', 'src', 'commands', 'doctor.ts'),
-  join(import.meta.dir, '..', 'src', 'core', 'onboard', 'checks.ts'),
-];
+const ONBOARD_CHECKS_TS_PATH = join(import.meta.dir, '..', 'src', 'core', 'onboard', 'checks.ts');
 
 function enumerateCheckNames(): Set<string> {
   const names = new Set<string>();
-  for (const path of CHECK_SOURCE_PATHS) {
-    const source = readFileSync(path, 'utf-8');
+  // doctorSource() spans the whole doctor surface (façade + every peeled
+  // src/commands/doctor/ module) so the name scan can't go blind on a peel.
+  const checkSources = [doctorSource(), readFileSync(ONBOARD_CHECKS_TS_PATH, 'utf-8')];
+  for (const source of checkSources) {
     // 1) Inline object-literal form: `{ name: 'foo', ... }`.
     for (const m of source.matchAll(/name:\s*['"]([a-z][a-z0-9_]+)['"]/g)) {
       names.add(m[1]);
@@ -49,7 +49,7 @@ function enumerateCheckNames(): Set<string> {
 }
 
 describe('doctor-categories drift guard', () => {
-  test('every check name in doctor.ts source belongs to exactly one category set', () => {
+  test('every doctor-emitted check name belongs to exactly one category set', () => {
     const discovered = enumerateCheckNames();
     const allCategorized = new Set<string>([
       ...BRAIN_CHECK_NAMES,
@@ -64,7 +64,7 @@ describe('doctor-categories drift guard', () => {
     }
     if (missing.length > 0) {
       throw new Error(
-        `These check names appear in doctor.ts but are not categorized in ` +
+        `These check names appear in doctor check emitters but are not categorized in ` +
           `src/core/doctor-categories.ts: ${missing.sort().join(', ')}. ` +
           `Add each to BRAIN/SKILL/OPS/META_CHECK_NAMES.`,
       );
@@ -91,7 +91,7 @@ describe('doctor-categories drift guard', () => {
     expect(dupes).toEqual([]);
   });
 
-  test('every categorized name is currently used in doctor.ts source (no stale entries)', () => {
+  test('every categorized name is currently used in doctor check emitters (no stale entries)', () => {
     const discovered = enumerateCheckNames();
     const allCategorized = new Set<string>([
       ...BRAIN_CHECK_NAMES,
@@ -129,6 +129,14 @@ describe('categorizeCheck', () => {
     expect(categorizeCheck('sync_freshness')).toBe('brain');
   });
 
+  test('returns the right category for onboard data-quality check names', () => {
+    expect(categorizeCheck('embed_staleness')).toBe('brain');
+    expect(categorizeCheck('entity_link_coverage')).toBe('brain');
+    expect(categorizeCheck('timeline_coverage')).toBe('brain');
+    expect(categorizeCheck('takes_count')).toBe('brain');
+    expect(categorizeCheck('dangling_aliases')).toBe('brain');
+  });
+
   test('returns the right category for a known skill name', () => {
     expect(categorizeCheck('resolver_health')).toBe('skill');
     expect(categorizeCheck('skill_conformance')).toBe('skill');
@@ -143,6 +151,24 @@ describe('categorizeCheck', () => {
   test('returns the right category for a known meta name', () => {
     expect(categorizeCheck('schema_version')).toBe('meta');
     expect(categorizeCheck('upgrade_errors')).toBe('meta');
+  });
+
+  test('returns the right category for onboard schema-pack check names without warning', () => {
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const captured: string[] = [];
+    (process.stderr as { write: typeof process.stderr.write }).write = ((
+      chunk: string | Uint8Array,
+    ) => {
+      captured.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(categorizeCheck('pack_upgrade_available')).toBe('meta');
+      expect(categorizeCheck('type_proliferation')).toBe('meta');
+      expect(captured.filter((c) => c.includes('[doctor-categories]'))).toEqual([]);
+    } finally {
+      (process.stderr as { write: typeof process.stderr.write }).write = originalWrite;
+    }
   });
 
   test('unknown check name falls through to meta with a stderr warn (once per process)', () => {

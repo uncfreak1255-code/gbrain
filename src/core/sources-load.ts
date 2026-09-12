@@ -16,8 +16,9 @@
  * implementations even though both run identical SQL through `executeRaw`.
  * A shared helper hits the bar at lower cost.
  */
+import { existsSync } from 'fs';
+import { isAbsolute } from 'path';
 import type { BrainEngine } from './engine.ts';
-import { sourceArchiveDrainPurpose } from './source-embedding-lease.ts';
 
 export interface SourceRow {
   id: string;
@@ -29,7 +30,6 @@ export interface SourceRow {
   config: Record<string, unknown> | string;
   created_at: Date;
   archived?: boolean;
-  embedding_drain_token?: string | null;
   /**
    * v0.41.32.0: newest COMMIT timestamp observed at last sync (HEAD committer
    * time). The REMOTE staleness path reads this column so it never shells out
@@ -47,13 +47,152 @@ export interface LoadAllSourcesOpts {
   federatedOnly?: boolean;
 }
 
-/** Parse `sources.config` to a plain object regardless of driver shape. */
-export function parseSourceConfig(config: unknown): Record<string, unknown> {
-  if (typeof config === 'string') {
-    try { return JSON.parse(config) as Record<string, unknown>; } catch { return {}; }
+/**
+ * #2829: max JSON.parse passes when unwrapping a possibly multiply-stringified
+ * `sources.config`. A re-wrapping bug could store config as a JSON *string
+ * scalar* ("{}", "\"{}\"", ...) that grows one layer per read→write cycle; the
+ * bound keeps a pathological value from spinning forever.
+ */
+const MAX_CONFIG_UNWRAP_DEPTH = 10;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Unwrap a value that may be JSON-stringified 0..N times. Bounded; never throws. */
+function unwrapConfigLayers(config: unknown): { value: unknown; layers: number } {
+  let value = config;
+  let layers = 0;
+  while (typeof value === 'string' && layers < MAX_CONFIG_UNWRAP_DEPTH) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      break;
+    }
+    layers++;
   }
-  if (typeof config === 'object' && config !== null) return config as Record<string, unknown>;
+  return { value, layers };
+}
+
+/**
+ * Recover the canonical object from historical config shapes.
+ *
+ * A naive JSONB `||` merge could turn a string-shaped config plus an object
+ * patch into an array. Those arrays are an ordered sequence of config
+ * fragments, so merge recoverable object fragments left-to-right. This keeps
+ * the latest patch authoritative while preserving keys from older fragments.
+ */
+function coerceSourceConfigObject(config: unknown): {
+  value: Record<string, unknown> | null;
+  layers: number;
+  recoveredArray: boolean;
+} {
+  const root = unwrapConfigLayers(config);
+  if (isPlainObject(root.value)) {
+    return { value: root.value, layers: root.layers, recoveredArray: false };
+  }
+  if (!Array.isArray(root.value)) {
+    return { value: null, layers: root.layers, recoveredArray: false };
+  }
+
+  const merged: Record<string, unknown> = {};
+  let objectFragments = 0;
+  let layers = root.layers;
+  for (const fragment of root.value) {
+    const unwrapped = unwrapConfigLayers(fragment);
+    layers += unwrapped.layers;
+    if (!isPlainObject(unwrapped.value)) continue;
+    Object.assign(merged, unwrapped.value);
+    objectFragments++;
+  }
+  return {
+    value: objectFragments > 0 ? merged : null,
+    layers,
+    recoveredArray: objectFragments > 0,
+  };
+}
+
+/**
+ * #2829: coerce a config value to the underlying plain object before it is
+ * written back, fully unwrapping any accidental JSON-string nesting so a
+ * re-wrapping bug can't keep growing a layer on every write. Returns {} (with a
+ * warning) when the value never resolves to a plain object. Every `sources`
+ * config writer runs its config through this before `JSON.stringify` + the
+ * `$1::text::jsonb` cast, which converges the stored value back to a jsonb
+ * object.
+ */
+export function normalizeSourceConfig(config: unknown): Record<string, unknown> {
+  const { value } = coerceSourceConfigObject(config);
+  if (value) return value;
+  console.warn(
+    `[gbrain] source config was not a recoverable JSON object; ` +
+    `storing {} instead. Run 'gbrain doctor' to find affected sources.`,
+  );
   return {};
+}
+
+/**
+ * Parse `sources.config` to a plain object regardless of driver shape (Postgres
+ * returns an object; PGLite returns a JSON string). #2829: also unwraps a config
+ * that was accidentally stored as a nested JSON string scalar, and warns once
+ * when more than one unwrap layer is needed (one layer is the normal PGLite
+ * path; two or more means the value was re-wrapped and should be repaired).
+ */
+export function parseSourceConfig(config: unknown): Record<string, unknown> {
+  const { value, layers, recoveredArray } = coerceSourceConfigObject(config);
+  if (layers > 1 || recoveredArray) {
+    const shape = recoveredArray ? 'historical JSON array' : `${layers}-layer nested JSON string`;
+    console.warn(
+      `[gbrain] source config was stored as a ${shape}; ` +
+      `it will be repaired on the next config write. Run 'gbrain doctor' to find affected sources.`,
+    );
+  }
+  return value ?? {};
+}
+
+/** True iff config declares a non-empty remote URL. */
+export function sourceConfigHasRemoteUrl(config: unknown): boolean {
+  const remoteUrl = parseSourceConfig(config).remote_url;
+  return typeof remoteUrl === 'string' && remoteUrl.trim().length > 0;
+}
+
+function sourceHasRecoverableManagedClone(config: unknown): boolean {
+  const cfg = parseSourceConfig(config);
+  const remoteUrl = cfg.remote_url;
+  if (typeof remoteUrl !== 'string' || remoteUrl.trim().length === 0) return false;
+  return cfg.managed_clone === true;
+}
+
+/**
+ * Warning for a legacy source path that cannot be interpreted safely from a
+ * daemon context. Relative paths are ambiguous; absent absolute paths belong to
+ * another machine or an unmounted checkout unless the row is an owned remote
+ * clone that sync can safely recover by re-cloning.
+ */
+export function sourceLocalPathSkipWarning(
+  sourceId: string,
+  localPath: string,
+  pathExists: (path: string) => boolean = existsSync,
+  config: unknown = {},
+): string | null {
+  const relative = relativeSourceLocalPathSkipWarning(sourceId, localPath);
+  if (relative) return relative;
+  if (pathExists(localPath)) return null;
+  if (sourceHasRecoverableManagedClone(config)) return null;
+  return (
+    `[autopilot] skipping source '${sourceId}': local_path ` +
+    `'${localPath}' does not exist on this machine. Clone/register this ` +
+    `source locally, or let the machine that owns that checkout sync it.`
+  );
+}
+
+export function relativeSourceLocalPathSkipWarning(sourceId: string, localPath: string): string | null {
+  if (isAbsolute(localPath)) return null;
+  return (
+    `[autopilot] skipping source '${sourceId}': relative local_path ` +
+    `'${localPath}' cannot be resolved from a daemon. Re-register with an ` +
+    `absolute --path or run 'gbrain sync --source ${sourceId}' once to self-heal.`
+  );
 }
 
 /** True iff the source's config.federated field is the literal boolean true. */
@@ -62,80 +201,26 @@ export function isSourceFederated(config: unknown): boolean {
   return parsed.federated === true;
 }
 
-/** True only when a source may accept new single-source work. */
-export function isSourceActive(
-  source: {
-    archived?: boolean | null;
-    embedding_drain_token?: string | null;
-  } | null | undefined,
-): boolean {
-  return source != null
-    && source.archived !== true
-    && source.embedding_drain_token == null;
-}
-
-const SOURCE_BASE_PROJECTION =
-  'id, name, local_path, last_commit, last_sync_at, config, created_at';
-
 /**
- * Read source rows through a newest-to-oldest projection ladder.
+ * Three-way federation state for display (CLI `sources list`, etc.).
  *
- * Migration v133 added embedding_drain_token after archived (v17) and
- * newest_content_at (v109). A pre-v133 brain must not lose its real archived
- * value merely because the newest column is absent: that would make an
- * archived source appear active. Each compatibility rung therefore preserves
- * archived until a query containing archived itself proves the column is
- * unavailable. Missing fields are projected as typed NULLs so every caller
- * receives one stable SourceRow shape.
+ * `isSourceFederated` collapses to a boolean for the inclusion check (does
+ * this source show up in OTHER anchors' unqualified reads?), which is
+ * correctly strict — 'unset' behaves like 'isolated' there. But 'unset' and
+ * 'isolated' are NOT interchangeable for display: only an explicit
+ * `federated: false` (`sources unfederate` / `--no-federated`) opts a source
+ * out of cross-source read mixing in both directions. A source that has
+ * simply never set the flag still widens its OWN unqualified reads to
+ * include the federated set (the #1434 sole-source convenience, pinned
+ * behavior — see test/local-federated-search-scope.test.ts and
+ * test/unfederate-read-scope-2928.test.ts). Labeling it "isolated" overstates
+ * what the flag actually does.
  */
-async function querySourcesCompat(
-  engine: BrainEngine,
-  suffix: string,
-  params: unknown[] = [],
-): Promise<SourceRow[]> {
-  const projections = [
-    `${SOURCE_BASE_PROJECTION}, archived, newest_content_at, embedding_drain_token`,
-    `${SOURCE_BASE_PROJECTION}, archived, newest_content_at, NULL::text AS embedding_drain_token`,
-    `${SOURCE_BASE_PROJECTION}, archived, NULL::timestamptz AS newest_content_at, NULL::text AS embedding_drain_token`,
-  ];
-
-  for (const projection of projections) {
-    try {
-      return await engine.executeRaw<SourceRow>(
-        `SELECT ${projection} FROM public.sources ${suffix}`,
-        params,
-      );
-    } catch (error) {
-      if (!isUndefinedColumnError(error)) throw error;
-    }
-  }
-
-  // Historical pre-v0.26.5 schema: archived itself does not exist. Only this
-  // final rung may synthesize archived=false.
-  const rows = await engine.executeRaw<SourceRow>(
-    `SELECT ${SOURCE_BASE_PROJECTION} FROM public.sources ${suffix}`,
-    params,
-  );
-  return rows.map((row) => ({
-    ...row,
-    archived: false,
-    newest_content_at: null,
-    embedding_drain_token: null,
-  }));
-}
-
-/** Recovery guidance shared by single-source active-work entry points. */
-export function sourceDrainResumeMessage(sourceId: string, drainToken?: string | null): string {
-  const purpose = sourceArchiveDrainPurpose(drainToken ?? null);
-  if (purpose === 'migration') {
-    return `Source "${sourceId}" has an interrupted engine-migration drain; `
-      + 'rerun the engine migration before continuing.';
-  }
-  const candidateFlag = purpose === 'hygiene_candidate'
-    ? ' --if-hygiene-candidate'
-    : '';
-  return `Source "${sourceId}" has an interrupted archive drain; resume with `
-    + `\`gbrain sources archive ${sourceId}${candidateFlag}\` before continuing.`;
+export function sourceFederationState(config: unknown): 'federated' | 'isolated' | 'unset' {
+  const raw = parseSourceConfig(config).federated;
+  if (raw === true) return 'federated';
+  if (raw === false) return 'isolated';
+  return 'unset';
 }
 
 /**
@@ -149,16 +234,32 @@ export async function loadAllSources(
   engine: BrainEngine,
   opts: LoadAllSourcesOpts = {},
 ): Promise<SourceRow[]> {
-  const rows = await querySourcesCompat(
-    engine,
-    `ORDER BY (id = 'default') DESC, id`,
-  );
+  // Defensive on legacy brains pre-v0.26.5 that lack the archived column.
+  let rows: SourceRow[];
+  try {
+    rows = await engine.executeRaw<SourceRow>(
+      `SELECT id, name, local_path, last_commit, last_sync_at, config, created_at, archived, newest_content_at
+         FROM sources
+       ORDER BY (id = 'default') DESC, id`,
+    );
+  } catch (err) {
+    // Forward-reference safety: pre-v0.26.5 brains lack `archived`; pre-v109
+    // brains lack `newest_content_at`. Re-issue with the historical minimal
+    // set; archived defaults false, newest_content_at undefined → wall-clock.
+    if (isUndefinedColumnError(err)) {
+      rows = await engine.executeRaw<SourceRow>(
+        `SELECT id, name, local_path, last_commit, last_sync_at, config, created_at
+           FROM sources
+         ORDER BY (id = 'default') DESC, id`,
+      );
+    } else {
+      throw err;
+    }
+  }
 
   let filtered = rows;
   if (!opts.includeArchived) {
-    filtered = filtered.filter(
-      (r) => r.archived !== true && r.embedding_drain_token == null,
-    );
+    filtered = filtered.filter((r) => r.archived !== true);
   }
   if (opts.federatedOnly) {
     filtered = filtered.filter((r) => isSourceFederated(r.config));
@@ -171,8 +272,24 @@ export async function fetchSource(
   engine: BrainEngine,
   id: string,
 ): Promise<SourceRow | null> {
-  const rows = await querySourcesCompat(engine, 'WHERE id = $1', [id]);
-  return rows[0] ?? null;
+  try {
+    const rows = await engine.executeRaw<SourceRow>(
+      `SELECT id, name, local_path, last_commit, last_sync_at, config, created_at, archived, newest_content_at
+         FROM sources WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ?? null;
+  } catch (err) {
+    if (isUndefinedColumnError(err)) {
+      const rows = await engine.executeRaw<SourceRow>(
+        `SELECT id, name, local_path, last_commit, last_sync_at, config, created_at
+           FROM sources WHERE id = $1`,
+        [id],
+      );
+      return rows[0] ?? null;
+    }
+    throw err;
+  }
 }
 
 /** Driver-tolerant 42703 detector. Mirrors src/core/utils.ts pattern. */

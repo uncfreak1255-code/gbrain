@@ -28,7 +28,6 @@ import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../operations.ts';
 import { loadActivePackBestEffort } from './best-effort.ts';
 import { ALLOWED_SUBTYPE_FIELDS, type AllowedSubtypeField } from './manifest-v1.ts';
-import { assertManagedPageMutationAllowed } from '../canonical-page-write.ts';
 
 /** Sentinel: `from_type: '*unknown*'` matches every page whose type isn't
  *  declared in the pack's page_types AND isn't the target of any prior
@@ -51,6 +50,12 @@ export interface RetypeRule {
   subtype_field?: AllowedSubtypeField;
   /** Optional source_path LIKE filter for disambiguation. */
   path_filter?: string;
+  /** Optional slug LIKE filter for disambiguation. Independent of
+   *  path_filter (both may be given; combined with AND). Useful when
+   *  pages were ingested without a populated source_path (e.g. written
+   *  via the put_page MCP tool rather than synced from a git repo), where
+   *  path_filter can never match. */
+  slug_filter?: string;
 }
 
 export interface RetypeOpts {
@@ -115,6 +120,7 @@ async function probeRule(
   engine: BrainEngine,
   fromType: string,
   pathFilter: string | undefined,
+  slugFilter: string | undefined,
   sourceId: string | undefined,
 ): Promise<{ count: number; sample: string[] }> {
   // The catch-all sentinel uses a special "not in pack types" probe; for now
@@ -129,6 +135,10 @@ async function probeRule(
   if (pathFilter) {
     where += ` AND source_path LIKE $${params.length + 1}`;
     params.push(pathFilter);
+  }
+  if (slugFilter) {
+    where += ` AND slug LIKE $${params.length + 1}`;
+    params.push(slugFilter);
   }
   if (sourceId) {
     where += ` AND source_id = $${params.length + 1}`;
@@ -179,6 +189,10 @@ async function applyRetypeRule(
       winWhereParts.push(`source_path LIKE $${winParams.length + 1}`);
       winParams.push(rule.path_filter);
     }
+    if (rule.slug_filter) {
+      winWhereParts.push(`slug LIKE $${winParams.length + 1}`);
+      winParams.push(rule.slug_filter);
+    }
     if (sourceId) {
       winWhereParts.push(`source_id = $${winParams.length + 1}`);
       winParams.push(sourceId);
@@ -216,14 +230,6 @@ async function applyRetypeRule(
       legacyTypePlaceholder,
       subtypeFieldLiteral: subtypeField,
     });
-
-    const candidates = await engine.executeRaw<{ slug: string; source_id: string }>(
-      `SELECT slug, source_id FROM pages WHERE ${winWhereParts.join(' AND ')} LIMIT ${limitPlaceholder}`,
-      winParams,
-    );
-    for (const candidate of candidates) {
-      await assertManagedPageMutationAllowed(engine, candidate.slug, candidate.source_id, 'destructive_admin');
-    }
 
     const sqlText = `
       WITH win AS (
@@ -322,6 +328,7 @@ export async function runRetypeCore(
       ctx.engine,
       rule.from_type,
       rule.path_filter,
+      rule.slug_filter,
       sourceId,
     );
     let applied = 0;

@@ -24,10 +24,11 @@
 
 import type { BrainEngine } from '../../engine.ts';
 import type { GBrainConfig } from '../../config.ts';
-import { operations, OperationError } from '../../operations.ts';
+import { operations } from '../../operations.ts';
 import type { Operation, OperationContext } from '../../operations.ts';
-import { validateParams } from '../../operation-params.ts';
 import { paramDefToSchema } from '../../../mcp/tool-defs.ts';
+import { normalizeOptionalParams, validateParams } from '../../../mcp/validate-params.ts';
+import { validateSourceId } from '../../utils.ts';
 import type { ToolCtx, ToolDef } from '../types.ts';
 
 /**
@@ -36,7 +37,7 @@ import type { ToolCtx, ToolDef } from '../types.ts';
  * Knowledge Runtime).
  *
  * Read-only (all safe):
- *   query, search, get_page, list_pages,
+ *   query, search, get_page, list_pages, file_list, file_url,
  *   get_backlinks, traverse_graph, resolve_slugs, get_ingest_log
  *
  * Conditional write:
@@ -51,6 +52,8 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'search',
   'get_page',
   'list_pages',
+  'file_list',
+  'file_url',
   'get_backlinks',
   'traverse_graph',
   // v114 (#1941): read-only provenance discovery. Edge-WRITE ops (add_link /
@@ -60,6 +63,12 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'resolve_slugs',
   'get_ingest_log',
   'put_page',
+  // #2778: the canonical timeline-write op. Fenced exactly like put_page —
+  // operations.ts:enforceSubagentSlugFence confines the target slug to the
+  // trusted-workspace allow-list (or the wiki/agents/<id>/ namespace) when
+  // ctx.viaSubagent=true, so a subagent can only append timeline entries to
+  // pages it could have written anyway.
+  'add_timeline_entry',
   // v0.29 — Salience + Anomaly Detection. Both read-only. `get_recent_transcripts`
   // is intentionally NOT included: subagent calls always have ctx.remote=true,
   // and the v0.29 trust gate rejects remote callers — adding it here would be
@@ -96,6 +105,7 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   resolve_slugs: 'Resolve free-form entity names to canonical slugs (e.g. "Alice" → `people/alice-example`). Use before any tool that takes a slug if the user gave a name not a slug.',
   get_ingest_log: 'Read the brain ingestion log for diagnostic / verification queries.',
   put_page: 'Write a markdown page to the gbrain DATABASE (NOT the local filesystem). Page becomes searchable + linkable. Slug must match the agent\'s allowed namespace.',
+  add_timeline_entry: 'Append a dated timeline entry to an existing page (the canonical timeline write). Use over rewriting the page body when recording a dated event. Slug must match the agent\'s allowed namespace.',
   get_recent_salience: 'Read pages ranked by emotional + activity salience over a recency window. Use for "what\'s been on my mind lately".',
   find_anomalies: 'Read cohort-level activity outliers (e.g. tag-cohort or type-cohort with unusual recent volume). Use for "what\'s unusual lately".',
 };
@@ -109,25 +119,6 @@ function sanitizeToolName(opName: string): string {
   // is defense-in-depth.
   const prefixed = `brain_${opName}`.replace(/[^a-zA-Z0-9_-]/g, '_');
   return prefixed.slice(0, 64);
-}
-
-function normalizeToolInputParams(input: unknown): Record<string, unknown> {
-  let candidate = input;
-  for (let depth = 0; depth < 2; depth++) {
-    if (typeof candidate !== 'string') break;
-    const trimmed = candidate.trim();
-    if (trimmed.length === 0) break;
-    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) break;
-    try {
-      candidate = JSON.parse(trimmed);
-    } catch {
-      break;
-    }
-  }
-  if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
-    return candidate as Record<string, unknown>;
-  }
-  return {};
 }
 
 /**
@@ -187,6 +178,11 @@ export interface BuildBrainToolsOpts {
   subagentId: number;
   engine: BrainEngine;
   config: GBrainConfig;
+  /**
+   * #4216 — defer chunk embeddings on put_page writes (oneshot programmatic
+   * writes only; the standing embed machinery backfills). Server-side flag.
+   */
+  deferEmbeds?: boolean;
   /** Optional filter: only include names in this set. */
   allowedNames?: ReadonlySet<string>;
   /**
@@ -204,8 +200,6 @@ export interface BuildBrainToolsOpts {
    * brainId as metadata only.
    */
   brainId?: string;
-  /** Source id used by brain tools inside the parent engine. Defaults to default. */
-  sourceId?: string;
   /**
    * Trusted-workspace allow-list (v0.23). When set, put_page is bounded
    * to slugs matching these prefix globs instead of the legacy
@@ -214,6 +208,13 @@ export interface BuildBrainToolsOpts {
    * SubagentHandlerData.allowed_slug_prefixes via the handler.
    */
   allowedSlugPrefixes?: readonly string[];
+  /**
+   * Brain source every tool-call OperationContext is scoped to (#1586).
+   * Trusted (flows from SubagentHandlerData.source_id, which only
+   * PROTECTED_JOB_NAMES-gated submitters can set); validated at build time.
+   * Unset → legacy 'default'.
+   */
+  sourceId?: string;
 }
 
 interface OpContextDeps {
@@ -223,8 +224,9 @@ interface OpContextDeps {
   jobId: number;
   signal?: AbortSignal;
   brainId?: string;
-  sourceId?: string;
   allowedSlugPrefixes?: readonly string[];
+  sourceId?: string;
+  deferEmbeds?: boolean;
 }
 
 function buildOpContext(deps: OpContextDeps): OperationContext {
@@ -238,7 +240,8 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     },
     dryRun: false,
     remote: true,                // match MCP trust boundary for auto-link skip
-    sourceId: deps.sourceId ?? 'default', // v0.34 D4: required; subagent tools default to host source
+    // #1586: cycle-resolved source when provided; legacy host default else.
+    sourceId: deps.sourceId ?? 'default',
     jobId: deps.jobId,
     subagentId: deps.subagentId,
     viaSubagent: true,           // FAIL-CLOSED: put_page etc. enforce namespace
@@ -246,6 +249,9 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     allowedSlugPrefixes: deps.allowedSlugPrefixes
       ? [...deps.allowedSlugPrefixes]
       : undefined,
+    // #4216: server-side-only — the oneshot runner defers chunk embeddings on
+    // its programmatic writes; never hydrated from any wire payload.
+    ...(deps.deferEmbeds ? { deferEmbeds: true } : {}),
   };
 }
 
@@ -261,6 +267,11 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   const picked: Operation[] = operations.filter(
     op => BRAIN_TOOL_ALLOWLIST.has(op.name) && filter.has(op.name),
   );
+
+  // #1586: fail fast on a malformed source id before any tool executes
+  // (defense-in-depth — the seam is trusted, but the value round-trips
+  // through the job payload).
+  if (opts.sourceId !== undefined) validateSourceId(opts.sourceId);
 
   return picked.map<ToolDef>(op => {
     const schema = op.name === 'put_page'
@@ -290,14 +301,20 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           jobId: ctx.jobId,
           signal: ctx.signal,
           brainId: opts.brainId,
-          sourceId: opts.sourceId,
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
+          sourceId: opts.sourceId,
+          deferEmbeds: opts.deferEmbeds,
         });
-        const params = normalizeToolInputParams(input);
+        const raw = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
+        // Same order the MCP dispatchers keep: normalize the optional-param
+        // absent idioms (`null`, `''` on a string) FIRST — the validator's
+        // header calls this load-bearing — then validate, so a missing
+        // required param (or wrong type / unknown enum) is named back to the
+        // model instead of crashing inside the handler, and `since: ""` never
+        // reaches a handler raw.
+        const params = normalizeOptionalParams(op, raw);
         const validationError = validateParams(op, params);
-        if (validationError) {
-          throw new OperationError('invalid_params', validationError);
-        }
+        if (validationError) throw new Error(`${toolName}: ${validationError}`);
         return op.handler(opCtx, params);
       },
     };
@@ -336,7 +353,6 @@ export function filterAllowedTools(registry: ToolDef[], allowedToolNames: string
 /** Exported for unit tests (stable surface). */
 export const __testing = {
   sanitizeToolName,
-  normalizeToolInputParams,
   paramsToInputSchema,
   namespacedPutPageSchema,
   ANTHROPIC_NAME_RE,

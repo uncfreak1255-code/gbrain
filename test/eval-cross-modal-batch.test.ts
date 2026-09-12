@@ -13,7 +13,7 @@ import { describe, test, expect } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { crossModalPaidBudgetError, runEvalCrossModal, runWithLimit, type BatchSummary } from '../src/commands/eval-cross-modal.ts';
+import { runEvalCrossModal, runWithLimit, type BatchSummary } from '../src/commands/eval-cross-modal.ts';
 import type { RunEvalResult } from '../src/core/cross-modal-eval/runner.ts';
 import type { AggregateResult } from '../src/core/cross-modal-eval/aggregate.ts';
 
@@ -51,15 +51,6 @@ function makeStubRunEval(verdicts: Array<'pass' | 'fail' | 'inconclusive' | 'thr
     };
   };
 }
-
-describe('cross-modal paid-budget guard', () => {
-  test('refuses the no-database gateway path when durable reservations are required', () => {
-    expect(crossModalPaidBudgetError(null)).toBeUndefined();
-    expect(crossModalPaidBudgetError({
-      paid_budget: { max_usd_per_run: 0.25, max_usd_per_day: 2 },
-    })).toContain('cannot record durable spend reservations');
-  });
-});
 
 // ---------------------------------------------------------------------------
 // 1. runWithLimit semaphore primitive (T4)
@@ -223,38 +214,6 @@ describe('runEvalCrossModal --batch end-to-end (v0.40.1.0 Track D / T3, per D5+D
       expect(summary.verdict).toBe('fail');
       expect(summary.fail_count).toBe(1);
       expect(summary.pass_count).toBe(2);
-    } finally {
-      rmSync(fixturePath, { recursive: true, force: true });
-      rmSync(summaryPath, { force: true });
-    }
-  });
-
-  test('LongMemEval answer field is included in per-question eval task', async () => {
-    const fixturePath = writeBatchFixture([
-      {
-        question_id: 'q1',
-        question: 'What language is elliot-example most fluent in?',
-        answer: 'TypeScript',
-        hypothesis: 'TypeScript',
-      },
-    ]);
-    const summaryPath = join(mkdtempSync(join(tmpdir(), 'cm-summary-')), 'summary.json');
-    const seenTasks: string[] = [];
-    try {
-      const exit = await runEvalCrossModal(
-        ['--batch', fixturePath, '--output', summaryPath, '--limit', '1',
-         '--cycles', '1', '--concurrent', '1', '--max-usd', '1000'],
-        {
-          runEval: async (opts: any) => {
-            seenTasks.push(opts.task);
-            return makeStubRunEval(['pass'])(opts);
-          },
-        },
-      );
-      expect(exit).toBe(0);
-      expect(seenTasks[0]).toContain('What language is elliot-example most fluent in?');
-      expect(seenTasks[0]).toContain('Expected answer:');
-      expect(seenTasks[0]).toContain('TypeScript');
     } finally {
       rmSync(fixturePath, { recursive: true, force: true });
       rmSync(summaryPath, { force: true });

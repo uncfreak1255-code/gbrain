@@ -14,14 +14,13 @@
  */
 
 import type { BrainEngine } from './engine.ts';
-import {
-  beginSourceArchiveDrain,
-  cancelSourceArchiveDrain,
-  lockSourceDrainForFinalize,
-  waitForSourceEmbeddingLeases,
-  type SourceArchiveDrainPurpose,
-} from './source-embedding-lease.ts';
-import { MinionQueue } from './minions/queue.ts';
+import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
+import { rmSync, lstatSync, realpathSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+import { isPathContained } from './path-confine.ts';
+import { defaultCloneDir } from './sources-ops.ts';
+import { gbrainPath } from './config.ts';
+import { isUndefinedColumnError, isUndefinedTableError } from './utils.ts';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -32,8 +31,34 @@ export interface DestructiveImpact {
   chunkCount: number;
   embeddingCount: number;
   fileCount: number;
+  /**
+   * PR6 D5b: count of ALL OAuth clients (live AND soft-deleted — the FK is
+   * physical, ON DELETE RESTRICT ignores deleted_at) whose source_id
+   * references this source. A hard delete with referents raises a raw FK
+   * violation — the preview surfaces the block before the trigger is pulled.
+   * Optional so hand-built impact literals (tests, older callers) stay valid.
+   */
+  oauthClientCount?: number;
+  /**
+   * cathedral-6: count of hot-memory facts in the source. Facts are the
+   * primary agent write lane — a revoked agent's workspace can hold facts
+   * with ZERO pages, so a pages-only preview would say "safe to remove"
+   * while the delete cascades the agent's memory away. Optional so
+   * hand-built impact literals (tests, older callers) stay valid; consumers
+   * read it as `?? 0`.
+   */
+  factCount?: number;
   /** Human-readable summary line */
   summary: string;
+}
+
+/** An OAuth client row that references a source via oauth_clients.source_id.
+ * `deleted` marks soft-deleted (revoked-but-retained) rows — the FK is
+ * PHYSICAL (ON DELETE RESTRICT ignores deleted_at), so they block too. */
+export interface SourceClientReferent {
+  clientId: string;
+  clientName: string;
+  deleted: boolean;
 }
 
 export interface SoftDeletedSource {
@@ -51,6 +76,95 @@ export const SOFT_DELETE_TTL_HOURS = 72;
 
 /** Threshold: operations affecting this many pages or more require confirmation. */
 export const CONFIRM_THRESHOLD_PAGES = 1;
+
+// ── FK-RESTRICT lifecycle (PR6 D5b) ─────────────────────────
+
+/**
+ * ALL OAuth clients referencing a source via oauth_clients.source_id
+ * (ON DELETE RESTRICT — these rows BLOCK a hard delete of the source).
+ * PHYSICAL semantics: soft-deleted rows (admin revoke does UPDATE SET
+ * deleted_at) still hold the FK, so they are returned too, tagged
+ * `deleted: true`, and the guidance splits per row. Pre-migration brains
+ * without the deleted_at column fall back to all referents (same
+ * 42703-retry idiom as oauth-provider.ts) tagged live; brains without
+ * the oauth_clients table — or without the source_id column (no column
+ * ⇒ no FK ⇒ no referents) — have no referents by construction.
+ */
+export async function clientsReferencingSource(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<SourceClientReferent[]> {
+  try {
+    const rows = await engine.executeRaw<{ client_id: string; client_name: string; deleted: boolean }>(
+      `SELECT client_id, client_name, (deleted_at IS NOT NULL) AS deleted
+       FROM oauth_clients
+       WHERE source_id = $1
+       ORDER BY client_id`,
+      [sourceId],
+    );
+    return rows.map((r) => ({ clientId: r.client_id, clientName: r.client_name, deleted: r.deleted === true }));
+  } catch (e) {
+    if (isUndefinedTableError(e)) return [];
+    // isUndefinedColumnError is code-first (any 42703 matches), and the
+    // primary query references BOTH optional columns — disambiguate on the
+    // message, which names the missing column.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (isUndefinedColumnError(e, 'source_id') && msg.includes('source_id')) return [];
+    if (!(isUndefinedColumnError(e, 'deleted_at') && msg.includes('deleted_at'))) throw e;
+    try {
+      const rows = await engine.executeRaw<{ client_id: string; client_name: string }>(
+        `SELECT client_id, client_name FROM oauth_clients
+         WHERE source_id = $1
+         ORDER BY client_id`,
+        [sourceId],
+      );
+      return rows.map((r) => ({ clientId: r.client_id, clientName: r.client_name, deleted: false }));
+    } catch (e2) {
+      // The fallback's only optional column is source_id — no column ⇒ no FK.
+      if (isUndefinedColumnError(e2, 'source_id')) return [];
+      throw e2;
+    }
+  }
+}
+
+/**
+ * Refusal message for `sources remove` / `sources purge <id>` when live OAuth
+ * clients still reference the source. Built here (not in sources.ts — that
+ * file is module-size-ratcheted) so both arms print identical guidance
+ * instead of letting the raw FK violation surface.
+ */
+export function formatClientReferentsBlock(
+  sourceId: string,
+  referents: SourceClientReferent[],
+): string {
+  const live = referents.filter((r) => !r.deleted);
+  const dead = referents.filter((r) => r.deleted);
+  const lines: string[] = [
+    ``,
+    `Cannot delete source "${sourceId}": ${referents.length} OAuth client(s) reference this source`,
+    `(oauth_clients.source_id is ON DELETE RESTRICT — the delete would fail at the database).`,
+    ``,
+  ];
+  for (const r of referents) {
+    lines.push(`  - ${r.clientName} (${r.clientId})${r.deleted ? '  [revoked, retained]' : ''}`);
+  }
+  if (live.length > 0) {
+    lines.push(``);
+    lines.push(`Revoke each live client first (hard delete), then retry:`);
+    for (const r of live) {
+      lines.push(`  gbrain auth revoke-client "${r.clientId}"`);
+    }
+  }
+  if (dead.length > 0) {
+    lines.push(``);
+    lines.push(`Revoked-but-retained rows still block the FK — \`gbrain auth revoke-client "<id>"\` hard-deletes them:`);
+    for (const r of dead) {
+      lines.push(`  gbrain auth revoke-client "${r.clientId}"`);
+    }
+  }
+  lines.push(``);
+  return lines.join('\n');
+}
 
 // ── Impact Assessment ───────────────────────────────────────
 
@@ -113,11 +227,31 @@ export async function assessDestructiveImpact(
     fileCount = fileRows[0]?.n ?? 0;
   }
 
+  // cathedral-6: count hot-memory facts. A revoked agent's workspace can
+  // hold facts with zero pages — those are data at risk, not "no data".
+  // Tolerant of a pre-v0.31 brain without the facts table (same degrade
+  // posture as clientsReferencingSource).
+  let factCount = 0;
+  try {
+    const factRows = await engine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM facts WHERE source_id = $1`,
+      [sourceId],
+    );
+    factCount = factRows[0]?.n ?? 0;
+  } catch (e) {
+    if (!isUndefinedTableError(e)) throw e;
+  }
+
+  // PR6 D5b: fold the FK-RESTRICT referent count into the preview so the
+  // operator sees the block BEFORE pulling the trigger.
+  const oauthClientCount = (await clientsReferencingSource(engine, sourceId)).length;
+
   const parts: string[] = [];
   if (pageCount > 0) parts.push(`${pageCount.toLocaleString()} pages`);
   if (chunkCount > 0) parts.push(`${chunkCount.toLocaleString()} chunks`);
   if (embeddingCount > 0) parts.push(`${embeddingCount.toLocaleString()} embeddings`);
   if (fileCount > 0) parts.push(`${fileCount.toLocaleString()} files`);
+  if (factCount > 0) parts.push(`${factCount.toLocaleString()} facts`);
 
   const summary = parts.length > 0
     ? `⚠️  This will permanently delete: ${parts.join(', ')}`
@@ -130,6 +264,8 @@ export async function assessDestructiveImpact(
     chunkCount,
     embeddingCount,
     fileCount,
+    factCount,
+    oauthClientCount,
     summary,
   };
 }
@@ -151,8 +287,10 @@ export function checkDestructiveConfirmation(
   // Dry run always passes (no side effects)
   if (opts.dryRun) return null;
 
-  // No data = no risk
-  if (impact.pageCount === 0 && impact.chunkCount === 0 && impact.fileCount === 0) {
+  // No data = no risk. Facts gate exactly like pages (cathedral-6): a
+  // fact-only source (revoked agent workspace) is data at stake, not empty.
+  if (impact.pageCount === 0 && impact.chunkCount === 0 && impact.fileCount === 0
+    && (impact.factCount ?? 0) === 0) {
     return null;
   }
 
@@ -161,8 +299,9 @@ export function checkDestructiveConfirmation(
 
   // --yes alone is NOT sufficient for destructive operations with data.
   // This is the key behavior change: --yes used to be enough, now you
-  // need --confirm-destructive when there's actual data at stake.
-  if (opts.yes && impact.pageCount === 0) return null;
+  // need --confirm-destructive when there's actual data at stake. Facts
+  // mirror pages here too — --yes never bypasses a fact-holding source.
+  if (opts.yes && impact.pageCount === 0 && (impact.factCount ?? 0) === 0) return null;
 
   return (
     `\n${impact.summary}\n\n` +
@@ -189,114 +328,35 @@ export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
-  return (await softDeleteSourceGuarded(engine, sourceId)).result;
-}
-
-export interface SoftDeleteGuardDecision {
-  allowed: boolean;
-  reason: string;
-}
-
-/**
- * Two-phase archive with provider wait and any expensive guard outside the
- * final transaction. A committed drain blocks new source work, so the final
- * exclusive section needs only exact source/token validation plus the UPDATE.
- */
-export async function softDeleteSourceGuarded(
-  engine: BrainEngine,
-  sourceId: string,
-  guard?: (engine: BrainEngine) => Promise<SoftDeleteGuardDecision>,
-  purpose: SourceArchiveDrainPurpose = 'manual',
-): Promise<{ result: SoftDeletedSource | null; reason: string }> {
-  if (sourceId === 'default') {
-    return { result: null, reason: 'protected_default' };
-  }
-  const drain = await beginSourceArchiveDrain(engine, sourceId, purpose);
-  if (!drain) return { result: null, reason: 'source_not_active' };
-  if (drain.purpose !== purpose) {
-    return {
-      result: null,
-      reason: drain.purpose === 'hygiene_candidate'
-        ? 'hygiene_candidate_resume_required'
-        : `${drain.purpose}_resume_required`,
-    };
-  }
-
+  // Atomic: only flip rows that are currently active. Returns the metadata
+  // we need without a follow-up SELECT. RETURNING projects the columns the
+  // caller cares about; pageCount is a separate count.
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
-  let final: {
-    row: { id: string; name: string; archived_at: string; archive_expires_at: string } | null;
-    reason: string;
-  };
-  try {
-    await waitForSourceEmbeddingLeases(engine, drain);
-    if (guard) {
-      const decision = await guard(engine);
-      if (!decision.allowed) {
-        await cancelSourceArchiveDrain(engine, drain);
-        return { result: null, reason: decision.reason };
-      }
-    }
-    final = await engine.transaction(async (tx) => {
-      await tx.executeRaw(
-        `SELECT pg_advisory_xact_lock(
-           hashtextextended('gbrain:source-lifecycle', 0)
-         )`,
-      );
-      const readiness = await lockSourceDrainForFinalize(tx, drain);
-      if (readiness.status === 'already_archived') {
-        return { row: null, reason: 'source_not_active' };
-      }
-      const rows = await tx.executeRaw<{
-        id: string;
-        name: string;
-        archived_at: string;
-        archive_expires_at: string;
-      }>(
-        `UPDATE public.sources
-            SET archived = true,
-                archived_at = now(),
-                archive_expires_at = ${expiresClause},
-                embedding_drain_token = NULL,
-                config = COALESCE(config, '{}'::jsonb) || '{"federated": false}'::jsonb
-          WHERE id = $1
-            AND archived IS NOT TRUE
-            AND embedding_drain_token = $2
-            AND embedding_drain_epoch = $3
-        RETURNING id, name, archived_at, archive_expires_at`,
-        [sourceId, drain.token, drain.epoch],
-      );
-      return {
-        row: rows[0] ?? null,
-        reason: rows.length === 1 ? 'archived' : 'archive_update_failed',
-      };
-    });
-  } catch (caught) {
-    // Fail safe: an uncertain provider token or DB failure keeps the source in
-    // drain state. A later archive invocation adopts the same token+epoch and
-    // resumes; we never reopen provider egress on uncertain state.
-    throw caught;
-  }
-  if (!final.row) {
-    await cancelSourceArchiveDrain(engine, drain);
-    return { result: null, reason: final.reason };
-  }
-  const row = final.row;
+  const rows = await engine.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
+    `UPDATE sources
+     SET archived = true,
+         archived_at = now(),
+         archive_expires_at = ${expiresClause},
+         config = ${SOURCE_CONFIG_OBJECT_SQL} || '{"federated": false}'::jsonb
+     WHERE id = $1 AND archived = false
+     RETURNING id, name, archived_at, archive_expires_at`,
+    [sourceId],
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0];
 
   const pageRows = await engine.executeRaw<{ n: number }>(
-    `SELECT COUNT(*)::int AS n FROM public.pages WHERE source_id = $1`,
+    `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1`,
     [sourceId],
   );
   const pageCount = pageRows[0]?.n ?? 0;
 
   return {
-    result: {
-      id: sourceId,
-      name: row.name,
-      deletedAt: new Date(row.archived_at),
-      expiresAt: new Date(row.archive_expires_at),
-      pageCount,
-    },
-    reason: 'archived',
+    id: sourceId,
+    name: row.name,
+    deletedAt: new Date(row.archived_at),
+    expiresAt: new Date(row.archive_expires_at),
+    pageCount,
   };
 }
 
@@ -319,7 +379,7 @@ export async function restoreSource(
      SET archived = false,
          archived_at = NULL,
          archive_expires_at = NULL,
-         config = COALESCE(config, '{}'::jsonb) || $1::jsonb
+         config = ${SOURCE_CONFIG_OBJECT_SQL} || $1::text::jsonb
      WHERE id = $2 AND archived = true
      RETURNING id`,
     [federatedPatch, sourceId],
@@ -361,102 +421,110 @@ export async function listArchivedSources(
   }));
 }
 
+/** Result of a purge sweep: what deleted, and what an FK deliberately held. */
+export interface PurgeExpiredResult {
+  /** Source ids permanently deleted this sweep. */
+  purged: string[];
+  /**
+   * Sources past TTL that could NOT be deleted because a RESTRICT FK still
+   * references them — today that is migration v64's oauth_clients.source_id
+   * ON DELETE RESTRICT, which intentionally refuses source deletion until
+   * every client is revoked-and-purged or re-scoped. Blocked is a policy
+   * outcome, not an error: the sweep reports it and moves on.
+   */
+  blocked: Array<{ id: string; reason: string }>;
+}
+
 /**
  * Permanently purge sources whose 72h TTL has expired. Cascades to pages
- * (and content_chunks via existing FKs). Returns the ids of purged sources.
+ * (and content_chunks via existing FKs).
  *
- * v0.26.5: moved from JSONB-driven iteration to a single set-based DELETE
- * with `archived = true AND archive_expires_at <= now()`. Server-side
- * filter; one round-trip; cascade-friendly.
+ * v0.26.5 used a single set-based DELETE; gbrain#4115 showed one FK-blocked
+ * source (a revoked-but-retained oauth_client under v64's ON DELETE RESTRICT)
+ * aborted the whole statement, wedging the nightly purge forever. The sweep is
+ * now per-source: each DELETE re-checks the expiry predicate (no
+ * select-then-delete race with a concurrent restore), ONLY the FK-restriction
+ * error class (SQLSTATE 23503) is treated as blocked-and-reported, and every
+ * other error re-raises. (Supersedes #4238's set-based NOT-EXISTS variant at
+ * merge: the 23503 catch covers ANY current or future RESTRICT FK — including
+ * soft-deleted oauth_clients, since the FK is physical — not just the one
+ * table an EXISTS prefilter names, and the structured {purged, blocked}
+ * return is what every caller + test in this tree consumes.)
  */
 export async function purgeExpiredSources(
   engine: BrainEngine,
-): Promise<string[]> {
-  // Terminalize archived-source work while the registry row still exists.
-  // After deletion, the queue's legacy-identifier compatibility predicate
-  // would otherwise make an orphaned job claimable again.
-  const expired = await engine.executeRaw<{ id: string }>(
-    `SELECT id FROM sources
-      WHERE archived = true
-        AND archive_expires_at IS NOT NULL
-        AND archive_expires_at <= now()
-      ORDER BY id`,
+): Promise<PurgeExpiredResult> {
+  const candidates = await engine.executeRaw<{ id: string; config: unknown; local_path: string | null }>(
+    `SELECT id, config, local_path FROM sources
+     WHERE archived = true
+       AND archive_expires_at IS NOT NULL
+       AND archive_expires_at <= now()
+     ORDER BY id`,
   );
-  const expiredIds = expired.map((row) => row.id);
-  if (expiredIds.length === 0) return [];
-  return purgeArchivedSourceIds(engine, expiredIds, true);
-}
-
-/** Permanently remove one archived source after terminalizing queued work. */
-export async function purgeArchivedSource(
-  engine: BrainEngine,
-  sourceId: string,
-): Promise<boolean> {
-  const state = await engine.executeRaw<{ archived: boolean }>(
-    `SELECT archived FROM sources WHERE id = $1`,
-    [sourceId],
-  );
-  if (state[0]?.archived !== true) return false;
-  return (await purgeArchivedSourceIds(engine, [sourceId], false)).length === 1;
-}
-
-async function purgeArchivedSourceIds(
-  engine: BrainEngine,
-  sourceIds: readonly string[],
-  requireExpired: boolean,
-): Promise<string[]> {
-  const uniqueSourceIds = [...new Set(sourceIds)];
-  if (uniqueSourceIds.length === 0) return [];
-
-  // Purge is not ordinary best-effort queue maintenance. Wait for every
-  // matching row lock, cancel running/waiting descendants, and reclassify
-  // completed/failed/dead rows so replayJob/retryJob cannot revive them after
-  // the registry row is gone. The normal cleanup path retains SKIP LOCKED and
-  // leaves terminal receipts intact.
-  await new MinionQueue(engine).cancelArchivedSourceJobs(uniqueSourceIds, {
-    waitForLocks: true,
-    includeRetryableTerminal: true,
-  });
-
-  return engine.transaction(async (tx) => {
-    await tx.executeRaw(
-      `SELECT pg_advisory_xact_lock(
-         hashtextextended('gbrain:source-lifecycle', 0)
-       )`,
-    );
-    const locked = await tx.executeRaw<{ id: string }>(
-      `SELECT id FROM public.sources
-        WHERE id = ANY($1::text[])
-          AND archived = true
-          ${requireExpired
-            ? 'AND archive_expires_at IS NOT NULL AND archive_expires_at <= now()'
-            : ''}
-        ORDER BY id
-        FOR UPDATE`,
-      [uniqueSourceIds],
-    );
-    const lockedIds = locked.map((row) => row.id);
-    if (lockedIds.length === 0) return [];
-
-    const remaining = await new MinionQueue(tx).countRevivableArchivedSourceJobs(lockedIds);
-    if (remaining > 0) {
-      throw new Error(
-        `Refusing to purge ${lockedIds.join(', ')}: ${remaining} source job(s) remain runnable or retryable`,
+  const purged: string[] = [];
+  const blocked: PurgeExpiredResult['blocked'] = [];
+  const cloneRoot = gbrainPath('clones');
+  for (const candidate of candidates) {
+    const { id } = candidate;
+    try {
+      const rows = await engine.executeRaw<{ id: string }>(
+        `DELETE FROM sources
+         WHERE id = $1
+           AND archived = true
+           AND archive_expires_at IS NOT NULL
+           AND archive_expires_at <= now()
+         RETURNING id`,
+        [id],
       );
+      if (rows.length > 0) {
+        purged.push(id);
+        // github-kind mirrors are gbrain-owned only when created at the
+        // default clone location. Never recursively delete an altered or
+        // symlinked path outside the managed clone root.
+        try {
+          const cfg = (typeof candidate.config === 'string'
+            ? JSON.parse(candidate.config)
+            : (candidate.config ?? {})) as Record<string, unknown>;
+          if (cfg.kind === 'github' && cfg.gh_managed === true && candidate.local_path) {
+            // STRICT containment: isPathContained accepts child === parent, so
+            // a corrupt row whose local_path IS the clone root would rm -rf
+            // every mirror. Require a real subtree AND pin the gh_managed
+            // creation shape — addSource only sets the marker when the dir is
+            // exactly defaultCloneDir('<id>-github').
+            const strictSubtree =
+              isPathContained(candidate.local_path, cloneRoot) &&
+              realpathSync(candidate.local_path) !== realpathSync(cloneRoot);
+            const expectedShape =
+              resolvePath(candidate.local_path) === resolvePath(defaultCloneDir(`${id}-github`));
+            if (strictSubtree && expectedShape) {
+              const lst = lstatSync(candidate.local_path);
+              if (!lst.isSymbolicLink()) {
+                rmSync(candidate.local_path, { recursive: true, force: true });
+              }
+            }
+          }
+        } catch {
+          // Best-effort cleanup; source deletion already completed.
+        }
+      }
+      // 0 rows = restored/already gone between SELECT and DELETE; neither
+      // purged nor blocked.
+    } catch (err) {
+      // SQLSTATE 23503 foreign_key_violation — same detection idiom as
+      // oauth-provider.ts's delete path for this exact FK.
+      if ((err as { code?: string })?.code === '23503') {
+        blocked.push({
+          id,
+          reason:
+            'still referenced by a RESTRICT foreign key (revoked oauth_client not yet purged? the FK is physical, so soft-deleted clients also block) — ' +
+            'review with `gbrain auth clients`, revoke with `gbrain auth revoke-client "<client-id>"`, then retry',
+        });
+        continue;
+      }
+      throw err;
     }
-
-    const rows = await tx.executeRaw<{ id: string }>(
-      `DELETE FROM public.sources
-        WHERE id = ANY($1::text[])
-          AND archived = true
-          ${requireExpired
-            ? 'AND archive_expires_at IS NOT NULL AND archive_expires_at <= now()'
-            : ''}
-      RETURNING id`,
-      [lockedIds],
-    );
-    return rows.map((row) => row.id);
-  });
+  }
+  return { purged, blocked };
 }
 
 // ── Display Helpers ─────────────────────────────────────────
@@ -477,11 +545,19 @@ export function formatImpact(impact: DestructiveImpact): string {
     `║  Chunks:     ${String(impact.chunkCount.toLocaleString()).padEnd(42)}║`,
     `║  Embeddings: ${String(impact.embeddingCount.toLocaleString()).padEnd(42)}║`,
     `║  Files:      ${String(impact.fileCount.toLocaleString()).padEnd(42)}║`,
+    `║  Facts:      ${String((impact.factCount ?? 0).toLocaleString()).padEnd(42)}║`,
     `╠══════════════════════════════════════════════════════════╣`,
     `║  ${impact.summary.padEnd(56)}║`,
     `╚══════════════════════════════════════════════════════════╝`,
     ``,
   ];
+  // PR6 D5b: surface the FK-RESTRICT block in the preview. Rendered outside
+  // the box (variable-width padding inside would misalign the frame).
+  if ((impact.oauthClientCount ?? 0) > 0) {
+    lines.push(`⚠️  ${impact.oauthClientCount} OAuth client(s) reference this source — a hard delete is`);
+    lines.push(`   blocked (FK RESTRICT) until they are revoked: gbrain auth revoke-client "<client-id>"`);
+    lines.push(``);
+  }
   return lines.join('\n');
 }
 

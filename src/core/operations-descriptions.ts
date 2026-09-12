@@ -19,8 +19,10 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const GET_RECENT_SALIENCE_DESCRIPTION =
-  "Returns pages recently touched and ranked by emotional + activity salience " +
-  "(deterministic 0..1 emotional_weight + take density + recency decay). " +
+  "Returns readable pages recently touched and ranked by activity salience and recency. " +
+  "Unrestricted local reads include deterministic 0..1 emotional_weight, take density, and recency decay. " +
+  "Holder-restricted reads count only permitted active takes, use zero emotional_weight, " +
+  "and select recent pages by updated_at; unrestricted local reads retain take-driven touches. " +
   "Use this when the user asks what's been going on, what's notable, what's hot, " +
   "anything crazy happening, or for any open-ended 'current state' question " +
   "about themselves or their work. Do NOT run a semantic search for these — " +
@@ -58,10 +60,22 @@ export const GET_RECENT_TRANSCRIPTS_DESCRIPTION =
 export const LIST_PAGES_DESCRIPTION =
   "List pages with optional filters. " +
   "For 'what's recent / what did I touch this week' questions, use list_pages " +
-  "with sort=updated_desc instead of semantic search.";
+  "with sort=updated_desc instead of semantic search. " +
+  "Default 50 rows; remote callers are capped at 100 (local CLI callers' explicit " +
+  "limits are honored). A result with exactly `limit` rows may be truncated. " +
+  "For exhaustive listing, page with sort=updated_asc + " +
+  "updated_after=<last row's updated_at> until a page returns fewer rows than the limit.";
 
 export const QUERY_DESCRIPTION =
   "Hybrid search with vector + keyword + multi-query expansion. " +
+  "Prefer `query` for concept / synonym / landscape questions ('all the X that " +
+  "do Y', 'the landscape of Z') — expansion recovers synonym- and " +
+  "outcome-phrased matches a single embedding misses. Still top-K, and the " +
+  "default count when `limit` is omitted depends on the configured search " +
+  "mode (10 conservative / 25 balanced / 50 tokenmax — see the `limit` param " +
+  "description); pass `limit` explicitly for a stable count regardless of " +
+  "mode. For exhaustive enumeration use list_pages; for exact known tokens " +
+  "`search` is cheaper (no expansion LLM call). " +
   "For personal/emotional questions ('what's going on with me', 'anything notable', " +
   "'how am I feeling'), prefer get_recent_salience, find_anomalies, or " +
   "get_recent_transcripts. Semantic search returns polished pages and misses " +
@@ -69,25 +83,34 @@ export const QUERY_DESCRIPTION =
   "mean impressive — they often mean difficult or emotionally charged.";
 
 export const SEARCH_DESCRIPTION =
-  "Keyword search using full-text search. For personal/emotional questions, " +
+  "Cheap hybrid search (vector + keyword + RRF) with no LLM expansion. " +
+  "Best for exact known tokens, names, and structured-field lookups. A populated " +
+  "result set is NOT proof of coverage — for concept / synonym / landscape " +
+  "questions use `query` (adds multi-query expansion); for exhaustive " +
+  "enumeration use list_pages pagination. " +
+  "For personal/emotional questions, " +
   "prefer get_recent_salience or find_anomalies — they surface activity bursts " +
   "without needing a search term. " +
   "For code-symbol questions (callers, callees, definitions, blast radius), use " +
   "code_callers / code_callees / code_def / code_refs instead — those return " +
-  "structural graph data, not text chunks.";
+  "structural graph data, not text chunks. " +
+  "For agent memory reads (saved facts + budget-packed retrieval), prefer the " +
+  "`recall` verb.";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // v0.32.6 — contradiction probe MCP surface (M3)
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const FIND_CONTRADICTIONS_DESCRIPTION =
-  "v0.32.6 — return suspected-contradiction findings from the most recent " +
+  "Stored contradiction reports are temporarily available only to trusted local callers without a source filter. " +
+  "Remote or source-scoped callers receive {contradictions: [], note} with an availability note. " +
+  "For eligible local callers, return suspected-contradiction findings from the most recent " +
   "`gbrain eval suspected-contradictions` probe run, optionally filtered by slug " +
   "and/or severity. Use this when the user asks 'what's inconsistent in my " +
   "brain', 'show me contradictions about Acme', 'high-severity issues only', or " +
   "wants to act on the probe's findings without re-running it. Returns " +
   "{contradictions: [{a, b, severity, axis, confidence, resolution_command}]}. " +
-  "Reads the cached run row — does NOT trigger a new probe; users run " +
+  "An eligible read loads the stored run without triggering a new probe; users run " +
   "`gbrain eval suspected-contradictions` for that.";
 
 export const FIND_TRAJECTORY_DESCRIPTION =
@@ -222,3 +245,19 @@ export const SKILL_CLIENT_GUIDANCE = {
       "if the user hasn't clearly asked for a write.",
   ],
 } as const;
+
+/**
+ * CLI→MCP gap-closure wave — the capture op (D2A). Pinned here because it
+ * rewrites the routing guidance three docs used to carry as the
+ * "unknown tool: capture → use put_page" FAQ: agents must learn the split
+ * (capture = quick notes with auto-slug + dedupe; put_page = full control)
+ * from this description alone. Phrase-pinned by
+ * test/operations-descriptions.test.ts.
+ */
+export const CAPTURE_DESCRIPTION =
+  'Capture a quick note into the brain — the "just remember this" write. Auto-derives a ' +
+  'stable inbox/ slug from the content date + hash (recapturing identical text is ' +
+  'idempotent), merges frontmatter, refuses binary/empty payloads, then delegates to ' +
+  'put_page (inheriting its fences and provenance stamping). Prefer capture for quick ' +
+  'notes and put_page when you need to control the slug, type, or an existing page\'s ' +
+  'content. For structured facts about entities, prefer remember.';

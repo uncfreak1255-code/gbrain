@@ -104,10 +104,6 @@ describe('nightly-probe-adapters: argv shape regression (codex round-2 #1)', () 
     expect(source).toContain(`'--output'`);  // both adapters thread an output path
     expect(source).toContain(`args.summaryPath`); // cross-modal reads from caller-controlled path
     expect(source).toContain(`'--batch'`);
-    expect(source).toContain(`'--slot-a-model'`);
-    expect(source).toContain(`'--slot-b-model'`);
-    expect(source).toContain(`'--slot-c-model'`);
-    expect(source).toContain(`'--dimensions'`);
     expect(source).toContain(`'--max-usd'`);
     expect(source).toContain(`'--yes'`);
     expect(source).toContain(`'--json'`); // cross-modal needs --json for the summary envelope
@@ -117,17 +113,16 @@ describe('nightly-probe-adapters: argv shape regression (codex round-2 #1)', () 
     const path = require('node:path').resolve('src/core/cycle/nightly-probe-adapters.ts');
     const fs = require('node:fs');
     const source = fs.readFileSync(path, 'utf-8');
-    // longmemeval adapter: model is passed explicitly so nightly does not
-    // fall back to the historical Sonnet default.
-    expect(source).toContain(`'--model'`);
-    expect(source).toContain(`'--reranker-model'`);
-    expect(source).toContain(`'--reranker-enabled'`);
-    expect(source).toContain(`'--reranker-timeout-ms'`);
-    expect(source).toContain(`'--reranker-top-n-in'`);
-    expect(source).toContain(`'--reranker-top-n-out'`);
-    expect(source).toContain(`'--by-type'`);
-    expect(source).toContain(`args.outputPath`);
-    expect(source).toContain(`extractorModel: args.extractorModel`);
+    // longmemeval adapter: first positional arg is fixturePath, then --output outputPath.
+    expect(source).toContain("[args.fixturePath, '--output', args.outputPath]");
+  });
+
+  test('runLongMemEvalForProbe passes the live search config snapshot via RunOpts', () => {
+    const path = require('node:path').resolve('src/core/cycle/nightly-probe-adapters.ts');
+    const fs = require('node:fs');
+    const source = fs.readFileSync(path, 'utf-8');
+
+    expect(source).toContain('searchConfigSnapshot: args.searchConfigSnapshot');
   });
 });
 
@@ -141,11 +136,10 @@ describe('nightly-probe-adapters: contract regression', () => {
     expect(source).toMatch(/Promise<\{ exitCode: number; summary: CrossModalBatchSummary \}>/);
   });
 
-  test('CrossModalBatchSummary shape includes the expected fields', () => {
+  test('CrossModalBatchSummary shape includes the 6 expected fields', () => {
     const path = require('node:path').resolve('src/core/cycle/nightly-probe-adapters.ts');
     const fs = require('node:fs');
     const source = fs.readFileSync(path, 'utf-8');
-    expect(source).toContain('total');
     expect(source).toContain('pass_count');
     expect(source).toContain('fail_count');
     expect(source).toContain('inconclusive_count');

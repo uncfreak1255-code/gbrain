@@ -37,8 +37,6 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
-import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
-import { randomBytes } from 'crypto';
 
 /**
  * Round identifier. Matches the progressive-batch primitive's Stage
@@ -51,17 +49,6 @@ export type ExtractReceiptRound =
   | 'ramp_500'
   | 'full'
   | 'single';
-
-export interface ExtractReceiptFailure {
-  /** Page or file label that failed. Never contains source content. */
-  source: string;
-  /** Redacted, single-line error summary. */
-  error: string;
-  /** Optional provider/application error class. */
-  error_class?: string;
-  /** Optional provider/application error code. */
-  error_code?: string;
-}
 
 /**
  * Input to writeReceipt. Optional fields are recorded in frontmatter
@@ -91,88 +78,28 @@ export interface ExtractReceiptInput {
   eval_score?: number;
   /** Human-readable summary line (1-2 sentences). */
   summary?: string;
-  /** Outcome status for partial or failed runs. */
-  status?: 'ok' | 'warn' | 'fail' | 'skipped';
-  /** True when the caller stopped at its wallclock deadline. */
-  deadline_elapsed?: boolean;
-  /** Total failures in the run, including samples omitted from the receipt. */
-  failure_count?: number;
-  /** Bounded, redacted failure samples for operator diagnosis. */
-  failures?: ReadonlyArray<ExtractReceiptFailure>;
-  /** True when the caller omitted failure samples from the input. */
-  failures_truncated?: boolean;
 }
 
 const RUN_ID_SHORT_LEN = 8;
-const MAX_FAILURE_SAMPLES = 20;
-const MAX_FAILURE_SOURCE_LENGTH = 500;
-const MAX_FAILURE_ERROR_LENGTH = 200;
-
-interface ReceiptFailureState {
-  count: number;
-  samples: ExtractReceiptFailure[];
-  truncated: boolean;
-}
-
-function summarizeFailureError(error: string): string {
-  return redactConnectionInfo(error).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_ERROR_LENGTH);
-}
-
-function summarizeFailureSource(source: string): string {
-  return redactConnectionInfo(source).replace(/\s+/g, ' ').trim().slice(0, MAX_FAILURE_SOURCE_LENGTH);
-}
-
-function summarizeFailureMetadata(value: string): string {
-  return redactConnectionInfo(value).replace(/\s+/g, ' ').trim().slice(0, 80);
-}
-
-function normalizeFailure(failure: ExtractReceiptFailure): ExtractReceiptFailure {
-  return {
-    source: summarizeFailureSource(failure.source),
-    error: summarizeFailureError(failure.error),
-    ...(failure.error_class
-      ? { error_class: summarizeFailureMetadata(failure.error_class) }
-      : {}),
-    ...(failure.error_code
-      ? { error_code: summarizeFailureMetadata(failure.error_code) }
-      : {}),
-  };
-}
-
-function receiptFailureState(input: ExtractReceiptInput): ReceiptFailureState {
-  const inputSamples = input.failures ?? [];
-  const declaredCount = typeof input.failure_count === 'number'
-    && Number.isFinite(input.failure_count)
-    && input.failure_count >= 0
-    ? Math.floor(input.failure_count)
-    : 0;
-  const count = Math.max(declaredCount, inputSamples.length);
-  const samples = inputSamples.slice(0, MAX_FAILURE_SAMPLES).map(normalizeFailure);
-  return {
-    count,
-    samples,
-    truncated: input.failures_truncated === true || count > samples.length,
-  };
-}
 
 /**
  * Truncate a run id to the standard 8-char short form used in slug
  * paths. Idempotent — passing an already-short id returns it unchanged.
- * Non-hex / non-alphanumeric chars survive (op-checkpoint ids may
- * include dashes or other separators).
+ * Non-hex / non-alphanumeric chars survive INSIDE the short form
+ * (op-checkpoint ids may include dashes or other separators), but
+ * boundary hyphens are trimmed (#3443): `slugifySegment()` strips
+ * leading/trailing hyphens during repo sync, so a short form like
+ * 'propose-' (from propose-<timestamp> run ids) made the DB receipt
+ * slug and its Git-backed slug disagree — writing the receipt through
+ * to the repo created a normalized sibling instead of materializing
+ * the existing page. Invariant: slugifySegment(shortRunId(x)) ===
+ * shortRunId(x) for slug-safe run ids.
  */
 export function shortRunId(runId: string): string {
-  return runId.slice(0, RUN_ID_SHORT_LEN);
-}
-
-/** Build an atom run id with entropy in the existing eight-character slug prefix. */
-export function buildExtractRunId(
-  label: string,
-  sourceId: string,
-  entropy: string = randomBytes(4).toString('hex'),
-): string {
-  const prefix = entropy.replace(/[^a-z0-9]/gi, '').slice(0, RUN_ID_SHORT_LEN).padStart(RUN_ID_SHORT_LEN, '0');
-  return `${prefix}-${label}-${sourceId.slice(0, 4)}`;
+  // ponytail: truncation-based discrimination is only as good as the run id's
+  // first 8 chars; families that need per-run uniqueness must front-load it.
+  const short = runId.slice(0, RUN_ID_SHORT_LEN).replace(/^-+|-+$/g, '');
+  return short || (runId ? 'run' : '');
 }
 
 /**
@@ -203,7 +130,6 @@ export function receiptSlug(input: ExtractReceiptInput): string {
  */
 function buildReceiptBody(input: ExtractReceiptInput): string {
   const lines: string[] = [];
-  const failureState = receiptFailureState(input);
   lines.push(`# ${input.kind} — round ${input.round}`);
   lines.push('');
   if (input.summary) {
@@ -229,27 +155,6 @@ function buildReceiptBody(input: ExtractReceiptInput): string {
       : '';
     lines.push(`Eval gate: **${verdict}**${score}`);
   }
-  if (input.status) {
-    lines.push(`Status: **${input.status}**`);
-  }
-  if (input.deadline_elapsed === true) {
-    lines.push('Deadline: **elapsed**');
-  }
-  if (failureState.count > 0) {
-    lines.push(`Failures: **${failureState.count}**`);
-    for (const failure of failureState.samples) {
-      const metadata = [failure.error_class, failure.error_code]
-        .filter(Boolean)
-        .join('/');
-      lines.push(
-        `- \`${failure.source.replace(/`/g, "'")}\`: ${failure.error}` +
-        (metadata ? ` (${metadata})` : ''),
-      );
-    }
-    if (failureState.truncated) {
-      lines.push(`- ${failureState.count - failureState.samples.length} additional failure(s) omitted`);
-    }
-  }
   return lines.join('\n') + '\n';
 }
 
@@ -259,10 +164,14 @@ function buildReceiptBody(input: ExtractReceiptInput): string {
  * writeReceipt call regardless of caller. Per D-EXTRACT-19.
  */
 function buildReceiptFrontmatter(input: ExtractReceiptInput): Record<string, unknown> {
-  const failureState = receiptFailureState(input);
   const fm: Record<string, unknown> = {
     type: 'extract_receipt',
     dream_generated: true,
+    // #1978: receipts record an operation, not a source document — the
+    // run_id/round fields ARE the provenance. Explicit exemption keeps the
+    // doctor raw_provenance check quiet.
+    raw_trace_exempt: true,
+    raw_trace_exempt_reason: 'operation receipt; provenance is run_id + round',
     kind: input.kind,
     source_id: input.source_id,
     run_id: input.run_id,
@@ -274,13 +183,6 @@ function buildReceiptFrontmatter(input: ExtractReceiptInput): Record<string, unk
   if (input.model_id) fm.model_id = input.model_id;
   if (typeof input.eval_pass === 'boolean') fm.eval_pass = input.eval_pass;
   if (typeof input.eval_score === 'number') fm.eval_score = input.eval_score;
-  if (input.status) fm.status = input.status;
-  if (typeof input.deadline_elapsed === 'boolean') fm.deadline_elapsed = input.deadline_elapsed;
-  if (input.failure_count !== undefined || failureState.count > 0) {
-    fm.failure_count = failureState.count;
-  }
-  if (failureState.samples.length > 0) fm.failures = failureState.samples;
-  if (failureState.truncated) fm.failures_truncated = true;
   return fm;
 }
 
@@ -316,6 +218,16 @@ export async function writeReceipt(
     },
     { sourceId: input.source_id },
   );
+
+  // #4009: receipts are audit artifacts — deliberately never run through
+  // the contextual-retrieval ladder. Born with a NULL
+  // contextual_retrieval_mode they tripped doctor's
+  // contextual_retrieval_coverage warn on every extraction run right
+  // after a reindex. Stamp mode 'none' so receipts are born CR-evaluated.
+  // NOT permanent: a reindex that takes the DB fallback clears the stamp
+  // and it recurs per receipt — the doctor check also excludes
+  // type='extract_receipt' from mode_null (belt+braces).
+  await engine.updatePageContextualRetrievalState(slug, input.source_id, 'none', null);
 
   return { slug, page };
 }
