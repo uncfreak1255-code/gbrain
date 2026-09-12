@@ -3,8 +3,15 @@ name: Test
 on:
   push:
     branches: [master]
-  pull_request:
-    branches: [master]
+  # NO branches filter on purpose. A master-only base filter made this suite
+  # skip silently for any PR not targeting master, while GitHub still reported
+  # that PR MERGEABLE and CLEAN — "not checked" rendered as "healthy". PR #139
+  # landed on this branch with 7 checks, all skipping, zero passing.
+  # Written as an explicit empty mapping, not a bare key: a bare key parses as
+  # null and test/scripts/ci-gates.test.ts reads on.pull_request.paths.
+  # Do not re-add a base filter; a list of allowed bases goes stale and
+  # silently reopens this hole.
+  pull_request: {}
   # Manual dispatch lets a local dev/agent offload the suite to GitHub's
   # on-demand runners from ANY branch (see scripts/ship-remote-tests.sh).
   # Frees a load-saturated local machine (e.g. many Conductor agents running

@@ -16,7 +16,7 @@
  * `generateText` import via Bun's module-replace pattern.
  */
 
-import { describe, test, expect, beforeEach, mock } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import {
   configureGateway,
   resetGateway,
@@ -37,6 +37,14 @@ import { BudgetTracker } from '../../src/core/budget/budget-tracker.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// This file repeatedly replaces the process-global gateway configuration. Restore
+// the preload baseline after every test so the final chat-only configuration
+// cannot resize schemas created by the next test file in the same Bun process.
+afterEach(() => {
+  __setGenerateTextTransportForTests(null);
+  resetGateway();
+});
 
 describe('chat touchpoint — recipe registry', () => {
   test('all hosted tool-loop providers ship a chat touchpoint with supports_subagent_loop', () => {
