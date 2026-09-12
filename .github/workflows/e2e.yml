@@ -3,8 +3,10 @@ name: E2E Tests
 on:
   push:
     branches: [master]
+  # NO branches filter on purpose — see the note in test.yml. A master-only
+  # base filter made this skip silently on PRs with any other base while the
+  # PR still read CLEAN.
   pull_request:
-    branches: [master]
   schedule:
     - cron: '0 6 * * *'  # Nightly at 6am UTC
   workflow_dispatch:
