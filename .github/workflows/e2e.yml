@@ -5,8 +5,8 @@ on:
     branches: [master]
   # NO branches filter on purpose — see the note in test.yml. A master-only
   # base filter made this skip silently on PRs with any other base while the
-  # PR still read CLEAN.
-  pull_request:
+  # PR still read CLEAN. Explicit empty mapping, not a bare key — see test.yml.
+  pull_request: {}
   schedule:
     - cron: '0 6 * * *'  # Nightly at 6am UTC
   workflow_dispatch:
