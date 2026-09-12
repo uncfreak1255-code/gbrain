@@ -223,4 +223,9 @@ gbrain config set memory.auto_writeback off
 gbrain bootstrap harness --yes
 ```
 
+For a local recall with no explicit, environment, dotfile, repository-path, or
+configured-default source, `recall` uses the source pinned by the current
+machine-level harness receipt. This keeps the verification read on the same
+source as ambient writes. Pass `--source <id>` to override it.
+
 Deferred fact extraction admits only claims explicitly classified as `lifetime: durable`. Temporary or unknown-lifetime output is omitted before embedding and storage, including historical imports. Direct `remember` calls retain their explicit TTL path. Replayed facts with the same provenance cannot revive a corrected or expired claim.

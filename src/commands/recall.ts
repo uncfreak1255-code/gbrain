@@ -36,7 +36,9 @@ import { resolveEntitySlug } from '../core/entities/resolve.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
 import { readCursor, writeCursor } from '../core/recall-cursor-state.ts';
-import { resolveSourceId } from '../core/source-resolver.ts';
+import { readHarnessReceiptState } from '../core/bootstrap/format.ts';
+import { resolveGbrainHome } from '../core/gbrain-home.ts';
+import { resolveSourceWithTier } from '../core/source-resolver.ts';
 
 // Same kebab-case shape gate the source-resolver applies. v0.32: applied
 // locally on thin-client where the canonical resolver's assertSourceExists
@@ -66,6 +68,7 @@ interface ParsedFlags {
   asContext: boolean;
   json: boolean;
   source: string;
+  sourceExplicit: boolean;
   limit: number;
   // MEMORY_VERBS v1 [c4]: recall's verb params, routed through the recall OP
   // (this hand-rolled CLI otherwise ignores unknown flags silently).
@@ -98,6 +101,7 @@ function parseFlags(args: string[]): ParsedFlags {
     asContext: false,
     json: false,
     source: 'default',
+    sourceExplicit: false,
     limit: 50,
     query: null,
     budgetTokens: null,
@@ -117,7 +121,11 @@ function parseFlags(args: string[]): ParsedFlags {
     if (a === '--include-expired') { out.includeExpired = true; continue; }
     if (a === '--as-context') { out.asContext = true; continue; }
     if (a === '--json') { out.json = true; continue; }
-    if (a === '--source') { out.source = args[++i] ?? 'default'; continue; }
+    if (a === '--source') {
+      out.source = args[++i] ?? 'default';
+      out.sourceExplicit = true;
+      continue;
+    }
     if (a === '--limit') { out.limit = parseInt(args[++i] ?? '50', 10) || 50; continue; }
     if (a === '--query') { out.query = args[++i] ?? null; continue; }
     if (a === '--budget-tokens') { out.budgetTokens = parseInt(args[++i] ?? '', 10) || null; continue; }
@@ -191,10 +199,11 @@ function validateAndNormalizeFlags(flags: ParsedFlags): void {
 async function resolveSourceForRecall(
   engine: BrainEngine,
   flagValue: string,
+  sourceExplicit: boolean,
   thinClient: boolean,
 ): Promise<string> {
   if (thinClient) {
-    if (flagValue !== 'default') return flagValue;
+    if (sourceExplicit) return flagValue;
     const env = process.env.GBRAIN_SOURCE;
     if (env && env.length > 0 && SOURCE_ID_RE.test(env)) return env;
     return 'default';
@@ -206,14 +215,42 @@ async function resolveSourceForRecall(
   // pre-v0.32 "query whatever source the user typed and let it return
   // empty" behavior so existing tests + scripts keep working while
   // recall still benefits from the env/dotfile resolution chain.
+  let resolved: Awaited<ReturnType<typeof resolveSourceWithTier>>;
   try {
-    return await resolveSourceId(engine, flagValue !== 'default' ? flagValue : null);
+    resolved = await resolveSourceWithTier(engine, sourceExplicit ? flagValue : null);
   } catch (e) {
     process.stderr.write(
       `[recall] source not registered: ${flagValue}. Falling back to literal value.\n`,
     );
     return flagValue;
   }
+
+  // Ambient memory parity: `bootstrap harness --source X` pins agent writes
+  // to X in the machine receipt. When a manual local recall has no stronger
+  // source signal, read that same pinned source instead of the seeded
+  // `default`. Explicit/env/dotfile/path/default-config routing still wins.
+  // A missing, unpinned, pending-only, malformed, or stale receipt is ignored
+  // so ordinary standalone brains keep their historical default behavior.
+  if (!sourceExplicit && resolved.tier === 'seed_default') {
+    const state = readHarnessReceiptState(resolveGbrainHome());
+    if (
+      state.state === 'ok' &&
+      state.receipt.source_pinned !== false &&
+      SOURCE_ID_RE.test(state.receipt.source_id) &&
+      state.receipt.targets.some(
+        (target) => target.state === 'confirmed' && (target.kind === 'mcp' || target.kind === 'hooks'),
+      )
+    ) {
+      try {
+        return (await resolveSourceWithTier(engine, state.receipt.source_id)).source_id;
+      } catch {
+        // Receipt drift must not make recall unusable. The harness status and
+        // Doctor surfaces own the loud repair path; recall keeps the scalar
+        // resolver result.
+      }
+    }
+  }
+  return resolved.source_id;
 }
 
 export async function runRecall(engine: BrainEngine, args: string[]): Promise<void> {
@@ -230,7 +267,7 @@ export async function runRecall(engine: BrainEngine, args: string[]): Promise<vo
     );
   }
 
-  const sourceId = await resolveSourceForRecall(engine, flags.source, thinClient);
+  const sourceId = await resolveSourceForRecall(engine, flags.source, flags.sourceExplicit, thinClient);
 
   // MEMORY_VERBS v1 [c4]: the verb params route through the recall OP so the
   // CLI and MCP exercise the same arm (query/budget packing/superset envelope).
