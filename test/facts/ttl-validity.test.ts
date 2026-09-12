@@ -12,6 +12,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import { getEmbeddingDimensions, getEmbeddingModel } from '../../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
@@ -25,6 +26,10 @@ afterAll(async () => {
 });
 
 beforeAll(async () => {
+  // Regression: a preceding test file must not leak a chat-only gateway config.
+  // The suite preload baseline and this fixture's vectors are both 1536-wide.
+  expect(getEmbeddingModel()).toBe('openai:text-embedding-3-large');
+  expect(getEmbeddingDimensions()).toBe(1536);
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
