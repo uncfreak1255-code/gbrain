@@ -10,8 +10,9 @@ on:
     branches: [master]
     paths:
       - '.github/workflows/**'
+  # NO branches filter on purpose — see the note in test.yml. The paths filter
+  # still scopes this to workflow edits; only the base gate is removed.
   pull_request:
-    branches: [master]
     paths:
       - '.github/workflows/**'
   workflow_dispatch:
