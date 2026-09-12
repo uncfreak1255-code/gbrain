@@ -55,14 +55,22 @@ const EXTRA_FLAGS: Record<string, string[]> = {
  * scanning the router bleeds takes/quarantine flags into jobs (whose case
  * block imports it for the `jobs stats` thin-client route).
  */
-const EXCLUDED_MODULES = ['thin-client-routing.ts'];
+const EXCLUDED_MODULES = [
+  'thin-client-routing.ts',
+  // Shared bootstrap receipt I/O does not consume CLI flags. Its lifecycle
+  // error messages mention flags such as --remove and --delete-brain; scanning
+  // them would make those unrelated flags legal on any command that reads a
+  // harness receipt (for example recall).
+  'src/core/bootstrap/format.ts',
+];
 
 function isExcludedModule(p: string): boolean {
-  // Basename comparison is path-separator agnostic: on Windows p ends in
-  // '\\thin-client-routing.ts' so endsWith('/thin-client-routing.ts') is
-  // false and the skip silently no-ops, inflating every command that
-  // imports the router with its flags.
-  return EXCLUDED_MODULES.some(m => p.split(/[\\/]/).pop() === m);
+  // Normalize separators so path-specific exclusions remain exact on Windows.
+  // Basename-only entries retain their historical match behavior.
+  const normalized = p.replace(/\\/g, '/');
+  return EXCLUDED_MODULES.some(m =>
+    m.includes('/') ? normalized.endsWith(`/${m}`) : normalized.split('/').pop() === m,
+  );
 }
 
 /** Universal helper flags every command may see (parsed or short-circuited upstream). */

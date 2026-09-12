@@ -226,6 +226,14 @@ describe('#2185 red-team regressions', () => {
     // the gate must not strip real consumers.
     expect(CLI_FLAG_REGISTRY['backfill']).toContain('--dry-run');
   });
+
+  test('bootstrap receipt lifecycle flags do not bleed into memory reads', () => {
+    for (const command of ['recall', 'forget']) {
+      expect(CLI_FLAG_REGISTRY[command]).not.toContain('--delete-brain');
+      expect(CLI_FLAG_REGISTRY[command]).not.toContain('--remove');
+      expect(CLI_FLAG_REGISTRY[command]).not.toContain('--token');
+    }
+  });
 });
 
 describe('#2185 drift + freshness guards', () => {
