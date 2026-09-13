@@ -33,7 +33,7 @@ import {
   type ReflexPointer,
 } from './retrieval-reflex.ts';
 import { volunteerContext, type VolunteeredPage } from './volunteer.ts';
-import { getBrainHotMemoryMeta } from '../facts/meta-hook.ts';
+import { getBrainHotMemoryMeta, projectHotMemoryFact } from '../facts/meta-hook.ts';
 import { buildEntityCard, type EntityCard, type EntityOpenThread } from '../verbs/entity-card.ts';
 
 /**
@@ -60,6 +60,9 @@ export const TURN_CONTEXT_ENVELOPE =
 
 /** [ENG-1] Default assembled-block budget (Claude Code hook output cap headroom). */
 export const TURN_CONTEXT_DEFAULT_MAX_BYTES = 8192;
+
+/** Startup carries more standing context than a turn, with a hard text cap. */
+export const PACK_CONTEXT_DEFAULT_MAX_BYTES = 32768;
 
 /** Max volunteered pages per turn (mirrors VOLUNTEER_DEFAULT_MAX_PAGES). */
 const MAX_VOLUNTEERED_PAGES = 3;
@@ -154,8 +157,8 @@ export interface AssembleTurnContextOpts {
   since?: string;
   /**
    * Cathedral 5 (pack mode) — banked compaction-checkpoint links to render as
-   * a self-capped section (pack mode does NOT enforce maxBytes; the section
-   * caps itself at CHECKPOINT_LINKS_RENDER_CAP) and carry on the result.
+   * a section capped at CHECKPOINT_LINKS_RENDER_CAP, additionally bounded
+   * by the pack's total maxBytes, and carry on the result.
    */
   checkpointLinks?: TurnContextResult['checkpointLinks'];
   /**
@@ -290,7 +293,15 @@ export async function assembleTurnContext(
   if (byteLen(text) > maxBytes) {
     degradedReason = 'budget_trimmed';
     while (byteLen(text) > maxBytes && facts.length) {
-      dropLowestConfidence(facts);
+      // Preserve the bounded preference reserve under ordinary event noise.
+      // If preferences alone exceed the byte cap, they are trimmed as well.
+      const events = facts.filter((f) => f.kind !== 'preference');
+      const candidates = events.length ? events : facts;
+      let lowest = candidates[0];
+      for (const fact of candidates) {
+        if (fact.confidence < lowest.confidence) lowest = fact;
+      }
+      facts.splice(facts.indexOf(lowest), 1);
       text = render(pointers, volunteered, facts);
     }
     while (byteLen(text) > maxBytes && volunteered.length) {
@@ -468,7 +479,20 @@ async function assemblePack(
       }
     }
     if (deadlineAt !== null && Date.now() >= deadlineAt) return;
-    acc.facts = await fetchHotFacts(engine, opts, remote);
+    const hotFacts = await fetchHotFacts(engine, opts, remote);
+    acc.facts = hotFacts;
+    // Startup and post-compaction need standing context, not just the small
+    // per-turn digest. Read a bounded preference set before recent facts so
+    // an import burst cannot evict older preferences from a cold session.
+    // The client may still apply its own token budget; this is not an
+    // unbounded/all-preferences guarantee for sources with over 100 rows.
+    if (deadlineAt !== null && Date.now() >= deadlineAt) return;
+    const preferences = await engine.listFactsSince(opts.sourceId, new Date(0), {
+      activeOnly: true, kinds: ['preference'], limit: 100,
+      visibility: remote ? ['world'] : undefined, excludeAuditRows: true,
+    });
+    const now = new Date();
+    acc.facts = [...new Map([...preferences.map(f => projectHotMemoryFact(f, now)), ...hotFacts].map(f => [f.id, f])).values()];
   })();
 
   const degradedReason = await raceDeadline(build, opts.deadlineMs);
@@ -481,10 +505,26 @@ async function assemblePack(
   // `since` filter (adversarial review: was documented but dead) — open-thread
   // events are cut to those after the cursor, matching the verb contract.
   const since = typeof opts.since === 'string' && opts.since.trim() ? opts.since : undefined;
-  const openThreads = cards
+  let openThreads = cards
     .flatMap((c) => c.open_threads ?? [])
     .filter((t) => !since || (t.date !== null && isAfter(t.date, since)));
-  const text = renderPack(cards, openThreads, facts, opts.checkpointLinks);
+  const maxBytes = typeof opts.maxBytes === 'number' && Number.isFinite(opts.maxBytes) && opts.maxBytes > 0
+    ? Math.floor(opts.maxBytes) : PACK_CONTEXT_DEFAULT_MAX_BYTES;
+  let text = renderPack(cards, openThreads, facts, opts.checkpointLinks);
+  const budgetTrimmed = byteLen(text) > maxBytes;
+  // Preferences precede recent work in the pack. Remove the tail first;
+  // if even standing context exceeds the cap, it must also be trimmed.
+  while (byteLen(text) > maxBytes && facts.length) {
+    facts.pop();
+    text = renderPack(cards, openThreads, facts, opts.checkpointLinks);
+  }
+  while (byteLen(text) > maxBytes && cards.length) {
+    cards.pop();
+    openThreads = cards.flatMap(c => c.open_threads ?? [])
+      .filter(t => !since || (t.date !== null && isAfter(t.date, since)));
+    text = renderPack(cards, openThreads, facts, opts.checkpointLinks);
+  }
+  if (byteLen(text) > maxBytes) text = '';
   return {
     text,
     pointers: [],
@@ -493,8 +533,8 @@ async function assemblePack(
     openThreads,
     facts,
     mode: 'pack',
-    ...(opts.checkpointLinks?.length ? { checkpointLinks: opts.checkpointLinks } : {}),
-    ...(degradedReason ? { degradedReason } : {}),
+    ...(text && opts.checkpointLinks?.length ? { checkpointLinks: opts.checkpointLinks } : {}),
+    ...(degradedReason || budgetTrimmed ? { degradedReason: degradedReason ?? 'budget_trimmed' } : {}),
   };
 }
 
@@ -643,7 +683,7 @@ export function assembleDeltaContext(
  * from the FINAL (budget-packed) sets — the injectable field must honor the
  * same budget + dedup contract as the structured arrays. */
 /** Self-cap on the rendered checkpoint-links section (cathedral 5 — pack mode
- * does not enforce maxBytes, so the section bounds itself). */
+ * also has a total maxBytes cap; this keeps links a small part of it). */
 export const CHECKPOINT_LINKS_RENDER_CAP = 10;
 
 export function renderPack(

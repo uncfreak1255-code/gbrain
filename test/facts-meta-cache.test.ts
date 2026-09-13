@@ -283,23 +283,23 @@ describe('meta-hook cache hygiene (bounded, expired-entry eviction)', () => {
     // 30s past the row's own expiry.
     const soon = countingEngine(new Date(Date.now() + 50));
     await getBrainHotMemoryMeta('get_stats', ctx({ engine: soon.engine }), { ttlMs: 30_000 });
-    expect(soon.calls()).toBe(1);
+    expect(soon.calls()).toBe(2);
     await getBrainHotMemoryMeta('get_stats', ctx({ engine: soon.engine }), { ttlMs: 30_000 });
-    expect(soon.calls()).toBe(1); // inside the clamped window: cache hit
+    expect(soon.calls()).toBe(2); // inside the clamped window: cache hit
     await new Promise((r) => setTimeout(r, 80));
     await getBrainHotMemoryMeta('get_stats', ctx({ engine: soon.engine }), { ttlMs: 30_000 });
-    expect(soon.calls()).toBe(2); // clamp expired the entry at valid_until, not +30s
+    expect(soon.calls()).toBe(4); // both candidate reads rebuild after valid_until
 
     // Control: a far-future valid_until (+1h) never tightens the window —
     // the third call after the same 80ms wait is still a cache hit.
     const far = countingEngine(new Date(Date.now() + 60 * 60 * 1000));
     await getBrainHotMemoryMeta('get_stats', ctx({ engine: far.engine }), { ttlMs: 30_000 });
-    expect(far.calls()).toBe(1);
+    expect(far.calls()).toBe(2);
     await getBrainHotMemoryMeta('get_stats', ctx({ engine: far.engine }), { ttlMs: 30_000 });
-    expect(far.calls()).toBe(1);
+    expect(far.calls()).toBe(2);
     await new Promise((r) => setTimeout(r, 80));
     await getBrainHotMemoryMeta('get_stats', ctx({ engine: far.engine }), { ttlMs: 30_000 });
-    expect(far.calls()).toBe(1); // ttl still governs: 80ms << 30s
+    expect(far.calls()).toBe(2); // ttl still governs: 80ms << 30s
   });
 
   test('max-entries bound holds under many distinct (caller-controlled) session ids', async () => {

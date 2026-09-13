@@ -127,45 +127,39 @@ export async function getBrainHotMemoryMeta(
       activeOnly: true, limit: topK, visibility,
     });
   }
+  // Standing preferences do not become irrelevant after 24 hours. Reserve
+  // at most half the existing allowance (and never more than five slots),
+  // leaving room for current work. Filter in SQL before LIMIT so recent
+  // events cannot crowd preferences out of the candidate set.
+  const preferenceLimit = Math.min(5, Math.max(1, Math.floor(topK / 2)));
+  const preferences = await ctx.engine.listFactsSince(sourceId, new Date(0), {
+    activeOnly: true, kinds: ['preference'], limit: preferenceLimit, visibility,
+    excludeAuditRows: true,
+  });
+  const now = new Date();
+  const byConfidence = (a: FactRow, b: FactRow) =>
+    effectiveConfidence(b, now) - effectiveConfidence(a, now) || b.id - a.id;
+  preferences.sort(byConfidence);
+  rows.sort(byConfidence);
+  const selected = new Map<number, FactRow>();
+  for (const row of [...preferences, ...rows]) {
+    if (selected.size >= topK) break;
+    selected.set(row.id, row);
+  }
+  rows = [...selected.values()];
   if (rows.length === 0) {
     cacheSet(cacheKey, { expiresAt: Date.now() + ttl, payload: undefined });
     return undefined;
   }
 
-  // Sort by effective confidence (decayed) before truncating.
-  const now = new Date();
-  rows.sort((a, b) => effectiveConfidence(b, now) - effectiveConfidence(a, now));
-  rows = rows.slice(0, topK);
-
   const payload = {
     brain_hot_memory: {
       source_id: sourceId,
       session_id: sessionId,
-      facts: rows.map(r => ({
-        id: r.id,
-        fact: r.fact,
-        kind: r.kind,
-        // v0.31.2: surface notability so connected agents can filter or
-        // weight HIGH-tier facts in their context budget.
-        notability: r.notability,
-        entity_slug: r.entity_slug,
-        valid_from: r.valid_from.toISOString(),
-        // v0.45.7 ambient recall: recording time, so delta's "new facts since my
-        // last wake" filters on WHEN the fact was learned, not its semantic
-        // validity date (a fact recorded today about last month is NEW).
-        created_at: r.created_at.toISOString(),
-        // #4206: provenance context (e.g. the source_slug extract_facts threaded
-        // in) rides the pack/delta projections instead of being recall-only.
-        context: r.context ?? null,
-        confidence: Number(effectiveConfidence(r, now).toFixed(3)),
-      })),
+      facts: rows.map(r => projectHotMemoryFact(r, now)),
     },
   };
-  // Read-time TTL honesty (adversarial review, this wave): a row whose
-  // valid_until lands INSIDE the cache window would otherwise keep riding
-  // the ambient channel for up to `ttl` past its expiry even though the
-  // underlying reads now filter it — clamp this entry's cache deadline to
-  // the earliest retained valid_until so the next call re-reads on time.
+  // Read-time TTL honesty: don't cache a row beyond its own expiry.
   let expiresAt = Date.now() + ttl;
   for (const r of rows) {
     const vu = r.valid_until?.getTime();
@@ -173,6 +167,22 @@ export async function getBrainHotMemoryMeta(
   }
   cacheSet(cacheKey, { expiresAt, payload });
   return payload;
+}
+
+/** Shared fact projection for the small digest and startup preference pack. */
+export function projectHotMemoryFact(r: FactRow, now = new Date()) {
+  return {
+    id: r.id,
+    fact: r.fact,
+    kind: r.kind,
+    notability: r.notability,
+    entity_slug: r.entity_slug,
+    valid_from: r.valid_from.toISOString(),
+    // Delta filters on recording time, not semantic validity time.
+    created_at: r.created_at.toISOString(),
+    context: r.context ?? null,
+    confidence: Number(effectiveConfidence(r, now).toFixed(3)),
+  };
 }
 
 /** Invalidate the cache for a (source_id, session_id) pair after extraction. */
