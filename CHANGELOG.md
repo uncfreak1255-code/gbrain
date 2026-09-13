@@ -2,6 +2,18 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.49.0.1] - 2026-09-13
+
+**Standing preferences remain available when recent activity grows.** The
+per-turn memory digest reserves space for active preferences older than a day.
+Startup and post-compaction context includes a larger preference set, so recent
+imports do not immediately displace older guidance. Source, visibility, and
+expiry filters still apply.
+
+Context stays bounded: per-turn delivery keeps its existing limits, and startup
+context has a 32 KiB text cap. Sources with more than 100 preferences or oversized
+facts may receive a subset; delivered context is not a guarantee of agent behavior.
+
 ## [0.49.0.0] - 2026-09-10
 
 **Add GBrain memory to the agent you already use, or connect that agent to

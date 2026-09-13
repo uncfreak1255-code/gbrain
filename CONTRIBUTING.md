@@ -377,9 +377,9 @@ section in [`docs/eval-bench.md`](./docs/eval-bench.md).
 
 ## Shipping
 
-Releases go through the `/ship` skill, never hand-rolled. The full release +
-contributor process (CHANGELOG voice, version-locations sync, PR conventions,
-community-PR-wave workflow) lives in [`docs/RELEASING.md`](docs/RELEASING.md).
+Use the native release preparation steps in
+[`docs/RELEASING.md`](docs/RELEASING.md), including CHANGELOG voice, version
+synchronization, PR conventions, and the community-PR-wave workflow.
 Community PRs are batched into release waves rather than merged one-by-one;
 contributor attribution stays attached via `Co-Authored-By:` trailers and every
 accepted contribution is credited in `CHANGELOG.md`.

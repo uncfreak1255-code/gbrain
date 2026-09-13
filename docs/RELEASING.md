@@ -1,14 +1,41 @@
 # Releasing & contributing (gbrain)
 
 The full release + contributor process. CLAUDE.md keeps the ship-critical IRON RULES
-inline (the Version-locations table, branch=workspace, post-ship `/document-release`,
-the Privacy + Responsible-disclosure rules, PR-title-version-first, never-hand-roll-ship)
-and points here for everything else. **Before any ship, read this in full. Use `/ship` —
-never hand-roll a release.**
+inline (the Version-locations table, branch=workspace, release documentation checks,
+the Privacy + Responsible-disclosure rules, PR-title-version-first)
+and points here for everything else. **Before preparing a release, read this
+guide in full. Use the repository commands and available native Git/GitHub tools;
+no external release skill is required.**
+
+## Release preparation
+
+1. Establish the target branch, current base, complete intended diff, and sole
+   mutation owner. Fetch the target and preserve unrelated work. For a fork,
+   use its intended release branch rather than assuming upstream master.
+2. Complete the pre-ship checks below. Keep real exit statuses and inspect
+   failures. If parallel test processes are killed, rerun only the missing
+   shards sequentially using the repository wrappers; retain coverage of every
+   required unit and E2E shard.
+3. Allocate the branch release version, synchronize every location in
+   `CLAUDE.md`, write the CHANGELOG entry, and regenerate derived artifacts.
+   Inspect and update documentation affected by the complete release diff.
+   Run the affected consistency checks after these edits.
+4. Review the final material diff under the policy that preceded any policy
+   changes in this release. Satisfy repository and operator review requirements,
+   and resolve blocking findings before handoff. A release workflow edit cannot
+   authorize itself or remove an existing approval requirement.
+5. Commit and prepare the PR with the intended base, version-first title,
+   complete scope, test evidence, and any remaining activation steps. Re-read
+   native GitHub checks, reviews, and mergeability at the final head.
+6. Keep release preparation separate from publication and runtime activation.
+   Use the operator's authorized merge lane. Check workflow triggers before
+   merging: a master VERSION bump publishes release assets. Publishing,
+   installing, restarting services, and activating a runtime require the
+   applicable explicit approval and fresh readback.
 
 ## Pre-ship requirements
 
-Before shipping (/ship) or reviewing (/review), always run the full test suite.
+Before preparing a release or reviewing it, always run the full test suite.
 Two equivalent paths:
 
 **Path A — local CI gate (recommended, v0.23.1+):**
@@ -59,7 +86,7 @@ here.** Every feature branch that ships gets its own version bump and CHANGELOG
 entry. The entry is product release notes for users; it is not a log of internal
 decisions, review rounds, or codex findings.
 
-**Write the CHANGELOG entry at /ship time, not during development.** Mid-branch
+**Write the CHANGELOG entry during release preparation, not during development.** Mid-branch
 iterations, review rounds (CEO/Eng/Codex/DX), and implementation detours belong
 in the plan file at `~/.claude/plans/`, not in the CHANGELOG. One unified entry
 per branch, covering what the branch added vs the base branch.
@@ -353,8 +380,7 @@ Phase C/E. Never modify a user's custom directories or re-suggest declined ones.
 
 ## GitHub Actions SHA maintenance
 
-All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Before shipping
-(`/ship`) or reviewing (`/review`), check for stale pins and update them:
+All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Before release preparation or review, check for stale pins and update them:
 
 ```bash
 for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions/download-artifact softprops/action-gh-release gitleaks/gitleaks-action; do

@@ -110,10 +110,11 @@ describe("CLAUDE.md restructure content contracts", () => {
     const c = claude();
     // Version format — the table stays inline (CI version-gate depends on it).
     expect(c).toContain("MAJOR.MINOR.PATCH.MICRO");
-    // Post-ship discipline — /document-release stays referenced inline.
-    expect(c.toLowerCase()).toContain("document-release");
-    // Never hand-roll ship.
-    expect(c.toLowerCase()).toMatch(/hand-roll ship/);
+    // Keep documentation and approval discipline without a retired skill dependency.
+    expect(c).toContain("release documentation check");
+    expect(c).toContain("existing approval boundaries");
+    expect(c).not.toContain("/ship");
+    expect(c).not.toContain("/document-release");
   });
 
   test("CLAUDE.md carries the resolver + cross-cutting invariants (orientation survived)", () => {

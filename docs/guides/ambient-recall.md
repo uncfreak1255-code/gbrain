@@ -100,3 +100,20 @@ gbrain context-pack --entities "acme-example,alice-example" --budget-tokens 4000
 
 Returns entity cards + open threads + hot facts, budget-packed, world-only. Inject
 the `text` field into the model's context before the first user message.
+
+## Standing preferences and size limits
+
+Say to your agent: "Check that my standing preferences are present when this
+session starts and after compaction."
+
+The default per-turn hot-memory digest reserves five of its ten slots for active
+preferences regardless of age. Recent work uses
+the remaining slots. Under byte pressure, recent non-preference facts are removed
+before preferences.
+
+Startup and post-compaction assembly reads up to 100 active preferences before
+recent hot-memory facts. The assembled text has a default 32 KiB cap and honors a
+smaller positive `maxBytes` when supplied. The client may impose its own token
+budget as well. Oversized sets are trimmed and reported as `budget_trimmed`;
+this is bounded context delivery, not an all-preferences or agent-obedience
+guarantee. Source scope, remote visibility, expiry, and audit-row filtering apply.
