@@ -3,8 +3,9 @@ name: E2E Tests
 on:
   push:
     branches: [master]
-  pull_request:
-    branches: [master]
+  # NO branches filter on purpose — see the note in test.yml. Explicit empty
+  # mapping, not a bare key.
+  pull_request: {}
   schedule:
     - cron: '0 6 * * *'  # Nightly at 6am UTC
   workflow_dispatch:
