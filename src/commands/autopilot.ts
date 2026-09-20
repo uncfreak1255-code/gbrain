@@ -1986,12 +1986,12 @@ if [ ! -x '${safeGbrainPath}' ]; then
   _resolved=$(type -P gbrain 2>/dev/null)
   if [ -n "$_resolved" ]; then
     echo "$(date -u +%FT%TZ) [autopilot] baked CLI path is gone:" '${safeGbrainPath}' "- using $_resolved"
-    exec "$_resolved" autopilot --repo '${safeRepoPath}'
+    ${zeroPaidSpend ? 'GBRAIN_QUEUE_ZERO_PAID_SPEND=1 ' : ''}exec "$_resolved" autopilot --repo '${safeRepoPath}'
   fi
   echo "$(date -u +%FT%TZ) [autopilot] gbrain CLI not found at" '${safeGbrainPath}' "nor on PATH; re-run: gbrain autopilot --install"
   exit 1
 fi
-exec '${safeGbrainPath}' autopilot --repo '${safeRepoPath}'
+${zeroPaidSpend ? 'GBRAIN_QUEUE_ZERO_PAID_SPEND=1 ' : ''}exec '${safeGbrainPath}' autopilot --repo '${safeRepoPath}'
 `;
   writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
   return wrapperPath;

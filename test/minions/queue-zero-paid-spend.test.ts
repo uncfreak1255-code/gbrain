@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { invokeAI, withAIInvocationGuard } from '../../src/core/ai/invocation-guard.ts';
@@ -192,6 +193,49 @@ describe('queue zero-paid-spend enforcement', () => {
         // developer's ~/.gbrain. GBRAIN_HOME is the PARENT: configDir() appends
         // '.gbrain' itself.
         expect(existsSync(join(home, '.gbrain', 'autopilot-run.sh'))).toBe(true);
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('wrapper exec keeps the boundary when a startup file swallows export', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-zero-spend-export-function-'));
+    const binDir = join(home, 'bin');
+    const fallbackBinDir = join(home, 'fallback-bin');
+    const outputFile = join(home, 'child-env.txt');
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(fallbackBinDir);
+    writeFileSync(join(home, '.zshenv'), 'export() { :; }\n');
+    const fakeGbrain = '#!/bin/sh\nprintf "%s" "${GBRAIN_QUEUE_ZERO_PAID_SPEND-unset}" > "$GBRAIN_TEST_OUTPUT"\n';
+    writeFileSync(join(binDir, 'gbrain'), fakeGbrain, { mode: 0o755 });
+    try {
+      await withEnv({
+        HOME: home,
+        GBRAIN_HOME: home,
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        GBRAIN_TEST_OUTPUT: outputFile,
+      }, () => {
+        const repoDir = join(home, 'repo');
+        mkdirSync(repoDir);
+        const wrapper = writeWrapperScript(repoDir, 'linux-cron', { zeroPaidSpend: true });
+        const child = spawnSync('bash', [wrapper], {
+          env: { ...process.env },
+          encoding: 'utf8',
+          timeout: 15_000,
+        });
+        expect(child.status).toBe(0);
+        expect(readFileSync(outputFile, 'utf8')).toBe('1');
+
+        rmSync(join(binDir, 'gbrain'));
+        writeFileSync(join(fallbackBinDir, 'gbrain'), fakeGbrain, { mode: 0o755 });
+        const fallback = spawnSync('bash', [wrapper], {
+          env: { ...process.env, PATH: `${fallbackBinDir}:${process.env.PATH ?? ''}` },
+          encoding: 'utf8',
+          timeout: 15_000,
+        });
+        expect(fallback.status).toBe(0);
+        expect(readFileSync(outputFile, 'utf8')).toBe('1');
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
