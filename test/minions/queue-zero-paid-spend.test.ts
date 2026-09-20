@@ -178,7 +178,10 @@ describe('queue zero-paid-spend enforcement', () => {
   test('autopilot installation bakes the opt-in into the daemon environment', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-zero-spend-'));
     try {
-      await withEnv({ GBRAIN_HOME: home }, () => {
+      const binDir = join(home, 'bin');
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, 'gbrain'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      await withEnv({ GBRAIN_HOME: home, PATH: `${binDir}:${process.env.PATH ?? ''}` }, () => {
         const guarded = readFileSync(
           writeWrapperScript(ROOT, 'linux-cron', { zeroPaidSpend: true }),
           'utf8',
@@ -251,7 +254,10 @@ describe('queue zero-paid-spend enforcement', () => {
   test('a bare reinstall preserves an enforced boundary', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-zero-spend-reinstall-'));
     try {
-      await withEnv({ GBRAIN_HOME: home }, () => {
+      const binDir = join(home, 'bin');
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, 'gbrain'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      await withEnv({ GBRAIN_HOME: home, PATH: `${binDir}:${process.env.PATH ?? ''}` }, () => {
         // The operator opted in once.
         saveConfig({ ...(loadConfigFileOnly() ?? {} as any), autopilot: { zero_paid_spend: true } });
 
