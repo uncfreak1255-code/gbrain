@@ -59,7 +59,7 @@ function chatResult(text: string, stopReason: ChatResult['stopReason']): ChatRes
 }
 
 const GOOD_JSON = '{"facts":[{"fact":"user gave up alcohol","kind":"commitment",' +
-  '"entity":null,"confidence":1.0,"notability":"high",' +
+  '"entity":null,"confidence":1.0,"notability":"high","lifetime":"durable",' +
   '"metric":null,"value":null,"unit":null,"period":null}]}';
 
 describe('getFactsExtractionMaxTokens (#2113)', () => {

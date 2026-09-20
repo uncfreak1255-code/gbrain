@@ -64,10 +64,10 @@ describe('taxonomy coercion — idea is a first-class extractor kind', () => {
   test("known kinds survive verbatim, 'idea' stays 'idea', unknown kinds coerce to 'fact'", async () => {
     const raw = JSON.stringify({
       facts: [
-        { fact: 'promised to ship the wave', kind: 'commitment', notability: 'high' },
-        { fact: 'thinks agents will eat SaaS', kind: 'belief', notability: 'medium' },
-        { fact: 'memory should work like a database', kind: 'idea', notability: 'medium' },
-        { fact: 'chose the embedded engine', kind: 'decision', notability: 'medium' },
+        { lifetime: 'durable', fact: 'promised to ship the wave', kind: 'commitment', notability: 'high' },
+        { lifetime: 'durable', fact: 'thinks agents will eat SaaS', kind: 'belief', notability: 'medium' },
+        { lifetime: 'durable', fact: 'memory should work like a database', kind: 'idea', notability: 'medium' },
+        { lifetime: 'durable', fact: 'chose the embedded engine', kind: 'decision', notability: 'medium' },
       ],
     });
     __setChatTransportForTests(async () => chatResult(raw, 'end'));
@@ -118,7 +118,7 @@ describe('buildExtractorSystem — prompt shape', () => {
 
 describe('admission wiring — which prompt variant each caller gets', () => {
   const HIGH_JSON = JSON.stringify({
-    facts: [{ fact: 'user gave up alcohol', kind: 'commitment', notability: 'high' }],
+    facts: [{ lifetime: 'durable', fact: 'user gave up alcohol', kind: 'commitment', notability: 'high' }],
   });
 
   async function systemSentFor(

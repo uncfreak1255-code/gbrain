@@ -232,7 +232,7 @@ describe('extraction_prompt_appendix — composes with BOTH prompt variants (#38
     __setChatTransportForTests(async (opts) => {
       seen.push(opts);
       return chatResult(JSON.stringify({
-        facts: [{ fact: 'user gave up alcohol', kind: 'commitment', notability: 'high' }],
+        facts: [{ lifetime: 'durable', fact: 'user gave up alcohol', kind: 'commitment', notability: 'high' }],
       }), 'end');
     });
     await extractFactsFromTurn({
@@ -266,9 +266,9 @@ describe('extraction_prompt_appendix — composes with BOTH prompt variants (#38
 describe('extraction_junk_filter — end-to-end gate + kill-switch (#3852)', () => {
   const MIXED_JSON = JSON.stringify({
     facts: [
-      { fact: 'Now let me write an oracle that recomputes the totals', kind: 'fact', notability: 'low' },
-      { fact: 'User prefers detached nohup jobs over run_in_background', kind: 'preference', notability: 'medium' },
-      { fact: "You've hit your org's monthly spend limit.", kind: 'fact', notability: 'low' },
+      { lifetime: 'durable', fact: 'Now let me write an oracle that recomputes the totals', kind: 'fact', notability: 'low' },
+      { lifetime: 'durable', fact: 'User prefers detached nohup jobs over run_in_background', kind: 'preference', notability: 'medium' },
+      { lifetime: 'durable', fact: "You've hit your org's monthly spend limit.", kind: 'fact', notability: 'low' },
     ],
   });
 
@@ -289,10 +289,10 @@ describe('extraction_junk_filter — end-to-end gate + kill-switch (#3852)', () 
     // Friday" — the one kind of fact the loop engine exists to capture.
     const json = JSON.stringify({
       facts: [
-        { fact: "I'll send the deck by Friday", kind: 'commitment', notability: 'medium' },
-        { fact: "I'll write the oracle next and then rerun the totals", kind: 'fact', notability: 'low' },
-        { fact: 'Now let me write an oracle that recomputes the totals', kind: 'fact', notability: 'low' },
-        { fact: "You've hit your org's monthly spend limit.", kind: 'commitment', notability: 'low' },
+        { lifetime: 'durable', fact: "I'll send the deck by Friday", kind: 'commitment', notability: 'medium' },
+        { lifetime: 'durable', fact: "I'll write the oracle next and then rerun the totals", kind: 'fact', notability: 'low' },
+        { lifetime: 'durable', fact: 'Now let me write an oracle that recomputes the totals', kind: 'fact', notability: 'low' },
+        { lifetime: 'durable', fact: "You've hit your org's monthly spend limit.", kind: 'commitment', notability: 'low' },
       ],
     });
     __setChatTransportForTests(async () => chatResult(json, 'end'));

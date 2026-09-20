@@ -1845,12 +1845,31 @@ function readDurableZeroPaidSpend(): boolean {
     throw new Error(
       `refusing to write the autopilot wrapper: ${configFile} exists but could not be read ` +
       `(${e instanceof Error ? e.message : String(e)}), so the zero-paid-spend setting is ` +
-      'unknown. Repair or remove the file, or pass --zero-paid-spend / --no-zero-paid-spend ' +
-      'explicitly.',
+      'unknown. Repair or remove the file.',
     );
   }
   const autopilot = (parsed as { autopilot?: { zero_paid_spend?: unknown } } | null)?.autopilot;
   return autopilot?.zero_paid_spend === true;
+}
+
+/**
+ * Persist an explicit spend choice. Missing config is fine (creates a stub).
+ * An existing file that `loadConfigFileOnly()` cannot read must abort —
+ * treating that as `{}` would overwrite engine, keys, and every other key.
+ */
+export function persistDurableZeroPaidSpend(choice: boolean): void {
+  const configFile = join(gbrainHomePath(), 'config.json');
+  const cfg = loadConfigFileOnly();
+  if (cfg === null && existsSync(configFile)) {
+    throw new Error(
+      `refusing to persist zero-paid-spend: ${configFile} exists but could not be read, ` +
+      'so overwriting it would destroy the rest of the config. Repair or remove the file.',
+    );
+  }
+  saveConfig({
+    ...(cfg ?? {} as GBrainConfig),
+    autopilot: { ...cfg?.autopilot, zero_paid_spend: choice },
+  });
 }
 
 export function writeWrapperScript(repoPath: string, target: InstallTarget, opts: { zeroPaidSpend?: boolean } = {}): string {
@@ -2017,8 +2036,12 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
     process.exit(1);
   }
   if (zeroSpendChoice !== undefined) {
-    const cfg = loadConfigFileOnly() ?? ({} as GBrainConfig);
-    saveConfig({ ...cfg, autopilot: { ...cfg.autopilot, zero_paid_spend: zeroSpendChoice } });
+    try {
+      persistDurableZeroPaidSpend(zeroSpendChoice);
+    } catch (e) {
+      console.error(`[autopilot] ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
   }
   const wrapperPath = writeWrapperScript(
     repoPath,

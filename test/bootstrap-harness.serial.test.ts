@@ -254,7 +254,7 @@ describe('full apply', () => {
     // config.toml (never the ambient global), trust entry in the same toml.
     const hooksJson = readFileSync(join(dirname(f.codexConfig), 'hooks.json'), 'utf8');
     expect(hooksJson).toContain('hook session-end --harness codex');
-    expect(hooksJson).not.toContain('GBRAIN_SOURCE');
+    expect(hooksJson).toContain('GBRAIN_SOURCE=default');
     expect(toml).toContain('gbrain:codex-hooks-trust');
     expect(toml).toContain('trusted_hash');
 
