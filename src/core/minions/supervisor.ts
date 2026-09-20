@@ -86,6 +86,8 @@ export interface SupervisorOpts {
    *  child env AND passes `--allow-shell-jobs` (buildWorkerArgs) so the worker's cwd-.env quarantine
    *  cannot silently drop the opt-in. */
   allowShellJobs: boolean;
+  /** Workers may call only explicitly local providers, and may not run shell jobs. */
+  zeroPaidSpend: boolean;
   /** JSON mode: emit JSONL events on stderr, reserve stdout for data payloads. Default: false. */
   json: boolean;
   /** RSS threshold (MB) passed to the spawned worker as `--max-rss N`.
@@ -161,6 +163,7 @@ const DEFAULTS: Omit<SupervisorOpts, 'cliPath'> = {
   maxCrashes: 10,
   healthInterval: 60_000,
   allowShellJobs: false,
+  zeroPaidSpend: false,
   json: false,
   maxRssMb: 2048,
   // issue #1801 progress-watchdog defaults. Conservative: a dead-pool wedge is
@@ -183,7 +186,7 @@ const DEFAULTS: Omit<SupervisorOpts, 'cliPath'> = {
  */
 export function buildWorkerArgs(
   opts: Pick<SupervisorOpts, 'concurrency' | 'queue' | 'maxRssMb' | 'nice_requested' | 'jobIsolation'> &
-    Partial<Pick<SupervisorOpts, 'allowShellJobs'>>,
+    Partial<Pick<SupervisorOpts, 'allowShellJobs' | 'zeroPaidSpend'>>,
 ): string[] {
   const args = [
     'jobs', 'work',
@@ -208,6 +211,11 @@ export function buildWorkerArgs(
   // re-asserts the env from this flag after its preflight.
   if (opts.allowShellJobs) {
     args.push('--allow-shell-jobs');
+  }
+  // Conditional push, same handshake: the spend boundary must survive the
+  // handoff to a spawned worker rather than relying on env inheritance alone.
+  if (opts.zeroPaidSpend) {
+    args.push('--zero-paid-spend');
   }
   return args;
 }

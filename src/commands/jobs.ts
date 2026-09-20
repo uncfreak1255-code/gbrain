@@ -21,6 +21,7 @@ import {
 import { CHILD_ENV, resolveChildCliInvocation } from '../core/minions/job-isolation.ts';
 import { withFactsAbsorbHaltCooldown } from '../core/minions/llm-halt-cooldown.ts';
 import { runChildJobEntry } from '../core/minions/run-child.ts';
+import { applyQueueZeroPaidSpendFlag } from '../core/minions/zero-paid-spend.ts';
 import type { MinionHandler, MinionJob, MinionJobStatus } from '../core/minions/types.ts';
 import type { PaceKeyOverrides } from '../core/pace-mode.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
@@ -457,12 +458,17 @@ USAGE
   gbrain jobs work [--queue Q] [--concurrency N] [--max-rss MB]
                    [--health-interval MS] [--nice N]
                    [--job-isolation inline|process] [--allow-shell-jobs]
+                   [--zero-paid-spend]
 
 OPTIONS
   --queue Q            Queue to claim from (default: default)
   --allow-shell-jobs   Enable the shell handler on this worker. Equivalent to
                        exporting GBRAIN_ALLOW_SHELL_JOBS=1 from your shell; a
                        .env in the working directory cannot set it.
+  --zero-paid-spend    Refuse every provider route that is not explicitly
+                       local, and refuse shell jobs outright (a spawned
+                       command is outside the provider policy). Equivalent to
+                       exporting GBRAIN_QUEUE_ZERO_PAID_SPEND=1.
   --job-isolation M    inline (default): handlers run in the worker process.
                        process: each claimed job runs in its own child
                        process — a stuck handler is group-SIGKILLed instead
@@ -519,6 +525,8 @@ OPTIONS (start)
                        GBRAIN_SUPERVISOR_HARD_STOP_CRASHES.
   --health-interval N  Worker health probe cadence in ms
   --allow-shell-jobs   Enable the shell handler on the spawned worker
+  --zero-paid-spend    Enforce zero paid spend on every spawned worker
+                       (local-only providers, no shell jobs)
   --cli-path PATH      Explicit gbrain binary for the worker child
   --max-rss MB         RSS watchdog for the worker (same rules as jobs work)
   --nice N             OS priority for supervisor + worker children
@@ -1490,6 +1498,9 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         // --allow-shell-jobs (buildChildArgs pass-through): same re-assert as
         // `work` — this child's preflight re-ran the cwd-.env quarantine.
         if (hasFlag(args, '--allow-shell-jobs')) process.env.GBRAIN_ALLOW_SHELL_JOBS = '1';
+        // --zero-paid-spend travels the same way, for the same reason: this
+        // child runs the handler itself, so it must inherit the boundary.
+        applyQueueZeroPaidSpendFlag(args);
         const config = loadConfig();
         if (config?.engine === 'pglite') {
           console.error('[run-child] process isolation requires the Postgres engine.');
@@ -1550,6 +1561,12 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
       // in this worker's cwd assigns it, so the flag re-asserts the operator's
       // opt-in AFTER preflight. Read sites keep checking the env var.
       if (hasFlag(args, '--allow-shell-jobs')) process.env.GBRAIN_ALLOW_SHELL_JOBS = '1';
+      // --zero-paid-spend: same re-assert. Before this the flag validated and
+      // then did nothing here, so an operator who asked for the boundary on a
+      // hand-started worker got a clean start and no enforcement.
+      if (applyQueueZeroPaidSpendFlag(args)) {
+        process.stderr.write('[minion worker] zero paid spend enforced (--zero-paid-spend / GBRAIN_QUEUE_ZERO_PAID_SPEND=1): only explicitly local providers, no shell jobs\n');
+      }
 
       const queueName = parseFlag(args, '--queue') ?? 'default';
       const concurrency = resolveWorkerConcurrency(args);
@@ -2001,6 +2018,8 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
       }
       const allowShellJobs = hasFlag(args, '--allow-shell-jobs') ||
                              process.env.GBRAIN_ALLOW_SHELL_JOBS === '1'; // same literal the shell handler checks
+      // Re-assert here too, then hand it to every worker this supervisor spawns.
+      const zeroPaidSpend = applyQueueZeroPaidSpendFlag(args);
       const detach = hasFlag(args, '--detach');
       // Supervisor's --max-rss: explicit wins; absent → cgroup-aware auto-size
       // (issue #1678). The supervisor is the main production path, so the
@@ -2064,6 +2083,7 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         healthInterval,
         cliPath,
         allowShellJobs,
+        zeroPaidSpend,
         json: jsonMode,
         maxRssMb,
         jobIsolation: parseJobIsolationFlag(args),

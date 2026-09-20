@@ -33,6 +33,7 @@ import { UnrecoverableError } from '../types.ts';
 import { deriveEnvKey, resolveInheritValue } from './shell-inherit.ts';
 import { validateShellJobParams } from './shell-validate.ts';
 import { redactSecretsInText } from './shell-redact.ts';
+import { queueZeroPaidSpendEnabled } from '../zero-paid-spend.ts';
 import { loadConfig } from '../../config.ts';
 
 /** Environment variables passed through to shell children by default. Callers
@@ -213,6 +214,24 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
     throw new UnrecoverableError(
       'shell handler disabled on this worker (start it with --allow-shell-jobs or ' +
       'GBRAIN_ALLOW_SHELL_JOBS=1 to execute shell jobs)',
+    );
+  }
+
+  // A zero-paid-spend worker cannot admit a shell job. The queue boundary is
+  // an in-process policy on the AI gateway (core/minions/zero-paid-spend.ts);
+  // a spawned command runs outside that process and reaches any paid endpoint
+  // it likes — `curl https://api.anthropic.com/...` bills the account without
+  // the policy ever seeing an invocation. Nothing here can police a child's
+  // network, so the only honest answer is to refuse before spawning.
+  if (queueZeroPaidSpendEnabled()) {
+    const warning =
+      `[shell] Job #${ctx.id} rejected: this worker enforces zero paid spend.\n` +
+      '        Shell commands run outside the provider policy, so they cannot be proven free.\n' +
+      '        Run shell jobs on a worker started without --zero-paid-spend.';
+    console.warn(warning);
+    throw new UnrecoverableError(
+      'queue_zero_paid_spend: refused shell job on a zero-paid-spend worker; ' +
+      'a child process is outside the provider policy, so no command was run',
     );
   }
 

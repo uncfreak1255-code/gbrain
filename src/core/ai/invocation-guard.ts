@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { assertZeroPaidSpendAdmission } from './zero-paid-spend-policy.ts';
 
 export interface AIInvocation {
   operation: string;
@@ -47,6 +48,16 @@ export function withAIInvocationPolicy<T>(policy: AIInvocationPolicy, run: () =>
 
 /** One provider attempt. No guessed usage, no release on an ambiguous failure. */
 export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>): Promise<T> {
+  // The zero-paid-spend boundary is evaluated HERE, not in a wrapper each
+  // executor remembers to install. See ai/zero-paid-spend-policy.ts: the
+  // wrapper design missed core/cycle/inline-drain.ts, a third executor of the
+  // same queue rows, and a queued subagent job billed a paid route while the
+  // boundary read as "on". A chokepoint cannot be forgotten by a new caller.
+  try { assertZeroPaidSpendAdmission(call); }
+  catch (error) {
+    if (typeof error === 'object' && error !== null) refused.add(error);
+    throw error;
+  }
   for (const policy of policies.getStore() ?? []) {
     try { await policy(call); }
     catch (error) {

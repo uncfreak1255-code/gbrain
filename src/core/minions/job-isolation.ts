@@ -231,6 +231,9 @@ export async function decodeChildOutcomeFileAsync(
 export function buildChildArgs(jobId: number, env: Record<string, string | undefined> = process.env): string[] {
   const args = ['jobs', 'run-child', '--job-id', String(jobId)];
   if (env.GBRAIN_ALLOW_SHELL_JOBS === '1') args.push('--allow-shell-jobs');
+  // The zero-paid-spend boundary rides along for the same reason: the child
+  // runs the handler in its own process and re-reads the env after preflight.
+  if (env.GBRAIN_QUEUE_ZERO_PAID_SPEND === '1') args.push('--zero-paid-spend');
   return args;
 }
 

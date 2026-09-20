@@ -212,6 +212,18 @@ export interface GBrainConfig {
    * absence means "do not run nightly probe."
    */
   autopilot?: {
+    /**
+     * DURABLE zero-paid-spend boundary for the daemon's queue workers.
+     *
+     * It is persisted here rather than only as an `export` line in the
+     * generated wrapper because any reinstall regenerates that wrapper: the
+     * v0_11_0 migration runs `gbrain autopilot --install --yes`, and five
+     * more places tell the operator to re-run the same command as a fix-it.
+     * Each of those silently deleted the boundary. Persisting the operator's
+     * choice makes wrapper generation reproduce it, and makes "is the
+     * boundary on?" answerable without watching for charges.
+     */
+    zero_paid_spend?: boolean;
     nightly_quality_probe?: {
       /** Enable the nightly probe in the autopilot loop. Defaults to false. */
       enabled?: boolean;

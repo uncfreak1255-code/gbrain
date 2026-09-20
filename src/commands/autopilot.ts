@@ -24,7 +24,12 @@ import { join, dirname, isAbsolute, resolve as resolvePath } from 'path';
 import { execSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadPreferences } from '../core/preferences.ts';
-import { loadConfig, loadConfigFileOnly, saveConfig, gbrainPath as gbrainHomePath } from '../core/config.ts';
+import { loadConfig, loadConfigFileOnly, saveConfig, gbrainPath as gbrainHomePath, type GBrainConfig } from '../core/config.ts';
+import {
+  QUEUE_ZERO_PAID_SPEND_FLAG,
+  queueZeroPaidSpendEnabled,
+  resolveZeroPaidSpendChoice,
+} from '../core/minions/zero-paid-spend.ts';
 import {
   classifyAutopilotLockHolder,
   type AutopilotLockProbeDeps,
@@ -567,7 +572,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   if (args.includes('--help') || args.includes('-h')) {
     console.log(
       'Usage: gbrain autopilot [--repo <path>] [--interval N] [--json] [--no-worker]\n' +
-      '       gbrain autopilot --install [--repo <path>] [--zero-paid-spend]\n' +
+      '       gbrain autopilot --install [--repo <path>]\n' +
+      '                          [--zero-paid-spend | --no-zero-paid-spend]\n' +
       '       gbrain autopilot --uninstall\n' +
       '       gbrain autopilot --status [--json]\n\n' +
       'Self-maintaining brain daemon. Runs the full maintenance cycle\n' +
@@ -727,7 +733,13 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       // startup (jobs.ts 'work', gated on GBRAIN_SUPERVISED !== '1', which
       // autopilot children never set) — so every spawn AND crash-respawn
       // recovers without a parent-side beforeSpawn double-running the scan.
-      args: ['jobs', 'work', '--max-rss', String(autopilotMaxRssMb)],
+      // The spend boundary travels as a FLAG as well as env, the same
+      // handshake buildWorkerArgs uses: env-only inheritance is one
+      // env-trust/quarantine change away from silently unguarding this lane.
+      args: [
+        'jobs', 'work', '--max-rss', String(autopilotMaxRssMb),
+        ...(queueZeroPaidSpendEnabled() ? [QUEUE_ZERO_PAID_SPEND_FLAG] : []),
+      ],
       // process.env clone; autopilot doesn't gate shell jobs the way the
       // standalone supervisor does (autopilot is the operator-trust path).
       // GBRAIN_SUPERVISED is stripped explicitly: worker-startup recovery is
@@ -1813,14 +1825,48 @@ const GBRAIN_ENV_TEMPLATE = `# gbrain daemon environment — sourced by autopilo
 # daemon's home from this file's own location.
 `;
 
-export function writeWrapperScript(repoPath: string, target: InstallTarget, opts: { zeroPaidSpend?: boolean; gbrainDirForTest?: string } = {}): string {
+/**
+ * The durable spend choice, or a hard failure if it cannot be determined.
+ *
+ * `loadConfigFileOnly()` returns null for "no config file", "corrupt JSON" and
+ * "EACCES" alike, so using it here would silently regenerate an UNGUARDED
+ * wrapper for an operator whose config says the opposite — and the wrapper's
+ * export is the only carrier on the daemon lane. "I could not read your
+ * choice" must never resolve to "you chose to allow paid spend", so an
+ * unreadable config aborts the install instead of quietly downgrading it.
+ */
+function readDurableZeroPaidSpend(): boolean {
+  const configFile = join(gbrainHomePath(), 'config.json');
+  if (!existsSync(configFile)) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configFile, 'utf-8'));
+  } catch (e) {
+    throw new Error(
+      `refusing to write the autopilot wrapper: ${configFile} exists but could not be read ` +
+      `(${e instanceof Error ? e.message : String(e)}), so the zero-paid-spend setting is ` +
+      'unknown. Repair or remove the file, or pass --zero-paid-spend / --no-zero-paid-spend ' +
+      'explicitly.',
+    );
+  }
+  const autopilot = (parsed as { autopilot?: { zero_paid_spend?: unknown } } | null)?.autopilot;
+  return autopilot?.zero_paid_spend === true;
+}
+
+export function writeWrapperScript(repoPath: string, target: InstallTarget, opts: { zeroPaidSpend?: boolean } = {}): string {
+  // Undefined (not false) means "no explicit choice on this invocation" — fall
+  // back to the durable setting so a bare reinstall, including the v0_11_0
+  // migration's `autopilot --install --yes` and every "re-run
+  // `gbrain autopilot --install`" hint in this repo, REPRODUCES the operator's
+  // boundary instead of quietly dropping it.
+  const zeroPaidSpend = opts.zeroPaidSpend ?? readDurableZeroPaidSpend();
   // gbrainHomePath, not raw $HOME: the daemon writes its lock/markers through
   // it and the status command reads through it, so a GBRAIN_HOME install must
   // keep its wrapper (and the start-script detection that looks for it) in
   // the same directory. Identical to the old behavior when GBRAIN_HOME is
   // unset. The env var is also baked into the wrapper below — launchd does
   // not pass the installer's environment to the spawned job.
-  const gbrainDir = opts.gbrainDirForTest ?? gbrainHomePath();
+  const gbrainDir = gbrainHomePath();
   mkdirSync(gbrainDir, { recursive: true });
 
   // Wrapper sources the user's shell profile for API keys so nothing is
@@ -1895,7 +1941,7 @@ export function writeWrapperScript(repoPath: string, target: InstallTarget, opts
 # fallback, keeps the wrapper self-contained regardless of where bun is installed
 # or which init file the OS loaded.
 export PATH=${runtimePathPrefix}"$HOME/.bun/bin:$PATH"
-${opts.zeroPaidSpend ? '# Queue workers may call only explicitly local inference providers.\nexport GBRAIN_QUEUE_ZERO_PAID_SPEND=1\n' : ''}
+${zeroPaidSpend ? '# Queue workers may call only explicitly local inference providers.\nexport GBRAIN_QUEUE_ZERO_PAID_SPEND=1\n' : ''}
 ${process.env.GBRAIN_HOME ? `# Baked at install: the supervisor does not pass the installer's env, and\n# without this the daemon would read/write a different home than the\n# install that configured it.\nexport GBRAIN_HOME='${(process.env.GBRAIN_HOME).replace(/'/g, "'\\''")}'\n` : ''}
 ${generateSelfDisableGuard(repoPath, target)}# #3696: daemon cwd = the repo, so any legacy RELATIVE sources.local_path /
 # sync.repo_path row resolves against it instead of a phantom path under the
@@ -1958,7 +2004,27 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
 
   const injectBootstrap = args.includes('--inject-bootstrap');
   const noInject = args.includes('--no-inject');
-  const wrapperPath = writeWrapperScript(repoPath, target, { zeroPaidSpend: args.includes('--zero-paid-spend') });
+  // Persist an EXPLICIT choice before generating the wrapper; an invocation
+  // that says nothing inherits whatever was chosen last. Parsed with the
+  // value-aware reader, not includes(): `--zero-paid-spend=1` reaches dispatch
+  // and an exact-match reader would install an UNGUARDED daemon for an
+  // operator who believes they asked for the boundary.
+  let zeroSpendChoice: boolean | undefined;
+  try {
+    zeroSpendChoice = resolveZeroPaidSpendChoice(args);
+  } catch (e) {
+    console.error(`[autopilot] ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+  if (zeroSpendChoice !== undefined) {
+    const cfg = loadConfigFileOnly() ?? ({} as GBrainConfig);
+    saveConfig({ ...cfg, autopilot: { ...cfg.autopilot, zero_paid_spend: zeroSpendChoice } });
+  }
+  const wrapperPath = writeWrapperScript(
+    repoPath,
+    target,
+    zeroSpendChoice !== undefined ? { zeroPaidSpend: zeroSpendChoice } : {},
+  );
   // #2608: tell the operator about the deterministic key channel — launchd/
   // systemd don't inherit the login shell env, and rc-file interactive guards
   // routinely swallow exports, so "it works in my terminal" keys often never

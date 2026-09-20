@@ -1,62 +1,100 @@
 import { withAIInvocationPolicy, type AIInvocation } from '../ai/invocation-guard.ts';
-import { UnrecoverableError } from './types.ts';
+import {
+  assertZeroPaidSpendAdmission,
+  isExplicitlyLocalInvocation,
+  queueZeroPaidSpendEnabled,
+  queueZeroPaidSpendValueIsAmbiguous,
+  QueueZeroPaidSpendError,
+} from '../ai/zero-paid-spend-policy.ts';
 
-const LOCAL_PROVIDERS: Readonly<Record<AIInvocation['kind'], ReadonlySet<string>>> = {
-  chat: new Set(['ollama', 'llama-server']),
-  embedding: new Set(['ollama', 'llama-server', 'lmstudio']),
-  rerank: new Set(['llama-server-reranker']),
-  // No multimodal recipe is currently proven local-only. Fail closed until a
-  // concrete local transport is added and covered by this policy's tests.
-  multimodal: new Set(),
+// Re-exported so existing minions-side importers keep one import path while
+// the single definition lives at the chokepoint (ai/zero-paid-spend-policy.ts).
+export {
+  isExplicitlyLocalInvocation,
+  queueZeroPaidSpendEnabled,
+  queueZeroPaidSpendValueIsAmbiguous,
+  QueueZeroPaidSpendError,
 };
 
-export class QueueZeroPaidSpendError extends UnrecoverableError {
-  constructor(call: AIInvocation) {
-    super(
-      `queue_zero_paid_spend: refused ${call.kind} provider route ${call.model} ` +
-      `for ${call.operation}; no provider call was made`,
-    );
-    this.name = 'QueueZeroPaidSpendError';
+export const QUEUE_ZERO_PAID_SPEND_FLAG = '--zero-paid-spend';
+export const QUEUE_ZERO_PAID_SPEND_ENV = 'GBRAIN_QUEUE_ZERO_PAID_SPEND';
+
+export class ZeroPaidSpendFlagError extends Error {}
+
+const TRUTHY = new Set(['', '1', 'true', 'yes', 'on']);
+const FALSY = new Set(['0', 'false', 'no', 'off']);
+
+/**
+ * Resolve an EXPLICIT spend choice from argv, or undefined when argv is
+ * silent. Returns a tri-state on purpose: "not mentioned" must not read as
+ * "turn it off", or a durable opt-in would be erased by every bare invocation.
+ *
+ * Why this is not `args.includes('--zero-paid-spend')`: the CLI validator
+ * (src/cli.ts findUnknownFlag) legalizes an `=value` suffix and `--no-`
+ * negations for any known flag, so `--zero-paid-spend=1` reaches dispatch.
+ * An `includes()` reader silently misses it and the worker starts UNGUARDED
+ * while the operator watches a clean startup — the exact false-safety-signal
+ * this boundary exists to eliminate. `--allow-shell-jobs` shares the idiom
+ * but not the failure direction: missing it there fails closed, missing it
+ * here fails open, toward money.
+ *
+ * An unrecognized value is refused loudly rather than guessed.
+ */
+export function resolveZeroPaidSpendChoice(args: readonly string[]): boolean | undefined {
+  let choice: boolean | undefined;
+  for (const arg of args) {
+    const match = /^--(no-)?zero-paid-spend(?:=(.*))?$/i.exec(arg);
+    if (!match) continue;
+    const [, negated, rawValue] = match;
+    const value = (rawValue ?? '').trim().toLowerCase();
+    let enabled: boolean;
+    if (TRUTHY.has(value)) enabled = true;
+    else if (FALSY.has(value)) enabled = false;
+    else {
+      throw new ZeroPaidSpendFlagError(
+        `${QUEUE_ZERO_PAID_SPEND_FLAG}: unrecognized value '${rawValue}'. ` +
+        `Use ${QUEUE_ZERO_PAID_SPEND_FLAG}, ${QUEUE_ZERO_PAID_SPEND_FLAG}=true, ` +
+        `or --no-${QUEUE_ZERO_PAID_SPEND_FLAG.slice(2)} — refusing to guess whether ` +
+        'paid spend is allowed.',
+      );
+    }
+    choice = negated ? !enabled : enabled;
   }
-}
-
-function providerOf(model: string): string {
-  const colon = model.indexOf(':');
-  const slash = model.indexOf('/');
-  const cut = colon < 0 ? slash : slash < 0 ? colon : Math.min(colon, slash);
-  return (cut < 0 ? '' : model.slice(0, cut)).trim().toLowerCase();
-}
-
-function isLoopbackEndpoint(endpoint: string | undefined): boolean {
-  if (!endpoint) return false;
-  try {
-    const { hostname, protocol } = new URL(endpoint);
-    if (protocol !== 'http:' && protocol !== 'https:') return false;
-    const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-    return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
-  } catch {
-    return false;
-  }
-}
-
-export function isExplicitlyLocalInvocation(call: AIInvocation): boolean {
-  const provider = providerOf(call.model);
-  if (!LOCAL_PROVIDERS[call.kind].has(provider) || !isLoopbackEndpoint(call.endpoint)) return false;
-  // Ollama cloud models are reached through the local daemon but can still
-  // bill remotely. The documented model tag is therefore never local-only.
-  return provider !== 'ollama' || !/(?:^|[:-])cloud(?:$|:)/i.test(call.model);
+  return choice;
 }
 
 /**
- * Queue-wide hard boundary for continuous workers. Unknown and proxy routes
- * fail closed: only provider ids whose transport is explicitly local may run.
+ * Re-assert the operator's opt-in after a command's preflight and report the
+ * resulting state. Mirrors the --allow-shell-jobs handshake: the opt-in
+ * travels as a flag as well as env so a worker spawned by the supervisor, or
+ * an isolated child, keeps the boundary its parent was started with.
+ *
+ * Every command that ends up executing queued work calls this. A flag the CLI
+ * accepts and the worker ignores is a false safety signal, not a safeguard.
+ */
+export function applyQueueZeroPaidSpendFlag(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const choice = resolveZeroPaidSpendChoice(args);
+  if (choice === true) env[QUEUE_ZERO_PAID_SPEND_ENV] = '1';
+  else if (choice === false) delete env[QUEUE_ZERO_PAID_SPEND_ENV];
+  return queueZeroPaidSpendEnabled(env);
+}
+
+/**
+ * Defence in depth only — enforcement itself lives in `invokeAI` (see
+ * ai/zero-paid-spend-policy.ts), so a job is covered whether or not its
+ * executor calls this. Retained because it also refuses in-process callers
+ * that reach a policy without going through the guard, and because an
+ * explicit wrap at a known executor documents the intent at that site.
  */
 export function withQueueZeroPaidSpend<T>(
   run: () => Promise<T>,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<T> {
-  if (env.GBRAIN_QUEUE_ZERO_PAID_SPEND !== '1') return run();
-  return withAIInvocationPolicy(async (call) => {
-    if (!isExplicitlyLocalInvocation(call)) throw new QueueZeroPaidSpendError(call);
+  if (!queueZeroPaidSpendEnabled(env)) return run();
+  return withAIInvocationPolicy((call: AIInvocation) => {
+    assertZeroPaidSpendAdmission(call, env);
   }, run);
 }
