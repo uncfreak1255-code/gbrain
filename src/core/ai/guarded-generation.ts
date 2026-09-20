@@ -1,4 +1,4 @@
-import { invokeAI, sdkInvocationUsage, hasAIInvocationGuard, type AIInvocation } from './invocation-guard.ts';
+import { invokeAI, sdkInvocationUsage, hasAIInvocationGuard, hasAIInvocationPolicy, type AIInvocation } from './invocation-guard.ts';
 import { resolveChatContextTokens } from './model-resolver.ts';
 
 export function chatInvocation(operation: string, model: string, maxOutputTokens: number): AIInvocation {
@@ -9,10 +9,11 @@ export function chatInvocation(operation: string, model: string, maxOutputTokens
 
 /** Each SDK attempt has its own durable hold; local calls keep SDK retries. */
 export function createGuardedGeneration(defaultMaxOutputTokens: () => number) {
-  return async function guardedGeneration<T>(model: string, transport: (opts: any) => Promise<T>, opts: any): Promise<T> {
-    if (!hasAIInvocationGuard()) return transport(opts);
+  return async function guardedGeneration<T>(model: string, transport: (opts: any) => Promise<T>, opts: any, endpoint?: string): Promise<T> {
+    if (!hasAIInvocationGuard() && !hasAIInvocationPolicy()) return transport(opts);
     const maxOutputTokens = opts.maxOutputTokens ?? defaultMaxOutputTokens();
     return invokeAI({ ...chatInvocation('gateway.generate', model, maxOutputTokens),
+      endpoint,
       cacheWriteTtl: opts.providerOptions?.anthropic?.cacheControl?.ttl ?? '5m' },
       () => transport({ ...opts, maxOutputTokens, maxRetries: 0 }), sdkInvocationUsage);
   };

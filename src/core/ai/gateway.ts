@@ -2165,7 +2165,7 @@ async function embedSubBatch(
   opts?: EmbedOpts,
 ): Promise<Float32Array[]> {
   try {
-    const callTransport = () => invokeAI({ operation: 'gateway.embed', kind: 'embedding', model: `${recipe.id}:${modelId}`,
+    const callTransport = () => invokeAI({ operation: 'gateway.embed', kind: 'embedding', model: `${recipe.id}:${modelId}`, endpoint: requireConfig().base_urls?.[recipe.id] ?? recipe.base_url_default,
       maxInputTokens: recipe.touchpoints.embedding?.max_batch_tokens
         ?? (recipe.touchpoints.embedding?.max_input_tokens?.[modelId] !== undefined
           ? recipe.touchpoints.embedding.max_input_tokens[modelId]! * texts.length : undefined),
@@ -2905,7 +2905,7 @@ export async function expand(query: string): Promise<string[]> {
 
   try {
     const { model, recipe, modelId } = await resolveExpansionProvider(getExpansionModel());
-    const modelLabel = `${recipe.id}:${modelId}`;
+    const modelLabel = `${recipe.id}:${modelId}`, invocationEndpoint = requireConfig().base_urls?.[recipe.id] ?? recipe.base_url_default;
 
     let expansions: string[];
 
@@ -2920,7 +2920,7 @@ export async function expand(query: string): Promise<string[]> {
           model,
           abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
           prompt: expansionPrompt,
-        });
+        }, invocationEndpoint);
       } catch (err) {
         if (isAIInvocationPolicyError(err)) throw err;
         recordExpansionFailure(modelLabel, err); // failed call still billed upstream
@@ -2977,7 +2977,7 @@ export async function expand(query: string): Promise<string[]> {
           schemaDescription: 'The rewritten search queries used to retrieve relevant documents.',
           abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
           prompt: expansionPrompt,
-        });
+        }, invocationEndpoint);
       } catch (err) {
         if (isAIInvocationPolicyError(err)) throw err;
         recordExpansionFailure(modelLabel, err);
@@ -3002,7 +3002,7 @@ export async function expand(query: string): Promise<string[]> {
           schemaDescription: 'The rewritten search queries used to retrieve relevant documents.',
           abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
           prompt: expansionPrompt,
-        });
+        }, invocationEndpoint);
         recordExpansionUsage(modelLabel, result.usage);
         const parsed = ExpansionSchema.safeParse(result.object);
         expansions = parsed.success ? parsed.data.queries : [];
@@ -3109,7 +3109,7 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
           ] as any,
         },
       ],
-    });
+    }, requireConfig().base_urls?.[recipe.id] ?? recipe.base_url_default);
   } catch (err) {
     if (isAIInvocationPolicyError(err)) throw err;
     recordOcr('gateway.ocr.failed', _extractUsageFromError(err, {
@@ -4127,7 +4127,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),
     providerOptions: Object.keys(providerOptions).length > 0 ? providerOptions : undefined,
     ...(requestHeaders ? { headers: requestHeaders } : {}),
-  });
+  }, cfg.base_urls?.[recipe.id] ?? recipe.base_url_default);
 
   try {
     let result: Awaited<ReturnType<GenerateTextFn>>;
@@ -4838,7 +4838,7 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
   };
   try {
     const transport: RerankTransport = _rerankTransport ?? ((u, init) => fetch(u, init));
-    const resp = await invokeAI({ operation: 'gateway.rerank', kind: 'rerank', model: modelStr }, () => transport(url, {
+    const resp = await invokeAI({ operation: 'gateway.rerank', kind: 'rerank', model: modelStr, endpoint: url }, () => transport(url, {
       method: 'POST',
       headers,
       body,

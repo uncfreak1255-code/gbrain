@@ -567,7 +567,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   if (args.includes('--help') || args.includes('-h')) {
     console.log(
       'Usage: gbrain autopilot [--repo <path>] [--interval N] [--json] [--no-worker]\n' +
-      '       gbrain autopilot --install [--repo <path>]\n' +
+      '       gbrain autopilot --install [--repo <path>] [--zero-paid-spend]\n' +
       '       gbrain autopilot --uninstall\n' +
       '       gbrain autopilot --status [--json]\n\n' +
       'Self-maintaining brain daemon. Runs the full maintenance cycle\n' +
@@ -1813,14 +1813,14 @@ const GBRAIN_ENV_TEMPLATE = `# gbrain daemon environment — sourced by autopilo
 # daemon's home from this file's own location.
 `;
 
-export function writeWrapperScript(repoPath: string, target: InstallTarget): string {
+export function writeWrapperScript(repoPath: string, target: InstallTarget, opts: { zeroPaidSpend?: boolean; gbrainDirForTest?: string } = {}): string {
   // gbrainHomePath, not raw $HOME: the daemon writes its lock/markers through
   // it and the status command reads through it, so a GBRAIN_HOME install must
   // keep its wrapper (and the start-script detection that looks for it) in
   // the same directory. Identical to the old behavior when GBRAIN_HOME is
   // unset. The env var is also baked into the wrapper below — launchd does
   // not pass the installer's environment to the spawned job.
-  const gbrainDir = gbrainHomePath();
+  const gbrainDir = opts.gbrainDirForTest ?? gbrainHomePath();
   mkdirSync(gbrainDir, { recursive: true });
 
   // Wrapper sources the user's shell profile for API keys so nothing is
@@ -1895,6 +1895,7 @@ export function writeWrapperScript(repoPath: string, target: InstallTarget): str
 # fallback, keeps the wrapper self-contained regardless of where bun is installed
 # or which init file the OS loaded.
 export PATH=${runtimePathPrefix}"$HOME/.bun/bin:$PATH"
+${opts.zeroPaidSpend ? '# Queue workers may call only explicitly local inference providers.\nexport GBRAIN_QUEUE_ZERO_PAID_SPEND=1\n' : ''}
 ${process.env.GBRAIN_HOME ? `# Baked at install: the supervisor does not pass the installer's env, and\n# without this the daemon would read/write a different home than the\n# install that configured it.\nexport GBRAIN_HOME='${(process.env.GBRAIN_HOME).replace(/'/g, "'\\''")}'\n` : ''}
 ${generateSelfDisableGuard(repoPath, target)}# #3696: daemon cwd = the repo, so any legacy RELATIVE sources.local_path /
 # sync.repo_path row resolves against it instead of a phantom path under the
@@ -1957,8 +1958,7 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
 
   const injectBootstrap = args.includes('--inject-bootstrap');
   const noInject = args.includes('--no-inject');
-
-  const wrapperPath = writeWrapperScript(repoPath, target);
+  const wrapperPath = writeWrapperScript(repoPath, target, { zeroPaidSpend: args.includes('--zero-paid-spend') });
   // #2608: tell the operator about the deterministic key channel — launchd/
   // systemd don't inherit the login shell env, and rc-file interactive guards
   // routinely swallow exports, so "it works in my terminal" keys often never

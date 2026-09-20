@@ -4,6 +4,8 @@ export interface AIInvocation {
   operation: string;
   model: string;
   kind: 'chat' | 'embedding' | 'rerank' | 'multimodal';
+  /** Resolved transport URL when the route claims to be local. */
+  endpoint?: string;
   maxInputTokens?: number;
   maxOutputTokens?: number;
   cacheWriteTtl?: '5m' | '1h';
@@ -16,7 +18,9 @@ export interface AIInvocationUsage {
 }
 export interface AIInvocationPermit { settle(usage: AIInvocationUsage | null): Promise<void> }
 export type AIInvocationGuard = (call: AIInvocation) => Promise<AIInvocationPermit>;
+export type AIInvocationPolicy = (call: AIInvocation) => void | Promise<void>;
 const guards = new AsyncLocalStorage<AIInvocationGuard>();
+const policies = new AsyncLocalStorage<ReadonlyArray<AIInvocationPolicy>>();
 const refused = new WeakSet<object>();
 
 /** Preserve admission refusals through provider fallback/error normalization. */
@@ -29,9 +33,27 @@ export function withAIInvocationGuard<T>(guard: AIInvocationGuard, run: () => Pr
   return guards.run(guard, run);
 }
 export function hasAIInvocationGuard(): boolean { return guards.getStore() !== undefined; }
+export function hasAIInvocationPolicy(): boolean { return (policies.getStore()?.length ?? 0) > 0; }
+
+/**
+ * Add an admission-only policy without replacing an active spend guard.
+ * Policies compose outer-to-inner and run before any reserving guard or
+ * provider transport. This makes a queue safety boundary impossible for a
+ * nested handler-owned budget guard to override.
+ */
+export function withAIInvocationPolicy<T>(policy: AIInvocationPolicy, run: () => Promise<T>): Promise<T> {
+  return policies.run([...(policies.getStore() ?? []), policy], run);
+}
 
 /** One provider attempt. No guessed usage, no release on an ambiguous failure. */
 export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>): Promise<T> {
+  for (const policy of policies.getStore() ?? []) {
+    try { await policy(call); }
+    catch (error) {
+      if (typeof error === 'object' && error !== null) refused.add(error);
+      throw error;
+    }
+  }
   const guard = guards.getStore();
   if (!guard) return run();
   let permit: AIInvocationPermit;

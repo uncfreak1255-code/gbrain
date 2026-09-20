@@ -35,6 +35,7 @@ import { MinionQueue } from './queue.ts';
 import type { MinionHandler } from './types.ts';
 import { buildJobContext } from './job-context.ts';
 import { withChatPhase } from '../ai/chat-usage.ts';
+import { withQueueZeroPaidSpend } from './zero-paid-spend.ts';
 import {
   JOB_CHILD_EXIT_NOT_CLAIMED,
   JOB_CHILD_EXIT_RESULT_WRITE_FAILED,
@@ -154,7 +155,9 @@ export async function runChildJobEntry(
       // #4218: same phase attribution as the in-process worker path — the
       // isolated child runs its own gateway, so the wrap must live here too.
       const authority = await authorizeJobExecution(engine, job);
-      const result = await withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => handler(context)), abort.signal);
+      const result = await withQueueZeroPaidSpend(() =>
+        withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => handler(context)), abort.signal),
+      );
       // completeJob's {value: x} wrap decision must run BEFORE JSON
       // serialization: a JSON round-trip changes typeof for Date /
       // toJSON-bearing results (object → string), which would flip the wrap
