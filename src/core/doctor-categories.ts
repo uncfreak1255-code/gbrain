@@ -198,6 +198,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'progressive_batch_audit_health',
   'provider_sunset',
   'queue_health',
+  'queue_zero_paid_spend',
   'reranker_health',
   'rls',
   'rls_event_trigger',

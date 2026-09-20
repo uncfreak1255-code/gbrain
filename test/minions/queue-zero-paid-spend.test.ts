@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { invokeAI, withAIInvocationGuard } from '../../src/core/ai/invocation-guard.ts';
+import { inspectZeroPaidSpendStatus } from '../../src/core/ai/zero-paid-spend-status.ts';
 import { createGuardedGeneration } from '../../src/core/ai/guarded-generation.ts';
 import {
   applyQueueZeroPaidSpendFlag,
@@ -169,6 +170,7 @@ describe('queue zero-paid-spend enforcement', () => {
           'utf8',
         );
         expect(guarded).toContain('export GBRAIN_QUEUE_ZERO_PAID_SPEND=1');
+        expect(inspectZeroPaidSpendStatus().wrapper_declaration).toBe('declares_on');
 
         const ordinary = readFileSync(writeWrapperScript(ROOT, 'linux-cron'), 'utf8');
         expect(ordinary).not.toContain('export GBRAIN_QUEUE_ZERO_PAID_SPEND=1');

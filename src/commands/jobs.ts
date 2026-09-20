@@ -1850,32 +1850,31 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         // isLockHolderLive keys on lock freshness, never process.kill.
         const supQueue = parseFlag(args, '--queue') ?? 'default';
         let detectedViaDbLock = false;
-        let dbLockHolder: { holder_pid: number; holder_host: string } | null = null;
-        if (!pidfileRunning) {
-          try {
-            const { inspectLock, isLockHolderLive } = await import('../core/db-lock.ts');
-            const { supervisorLockId, SUPERVISOR_LOCK_TTL_MIN } = await import('../core/minions/supervisor.ts');
-            const snap = await inspectLock(engine, supervisorLockId(supQueue));
-            if (snap && isLockHolderLive(snap, SUPERVISOR_LOCK_TTL_MIN)) {
-              detectedViaDbLock = true;
-              dbLockHolder = { holder_pid: snap.holder_pid, holder_host: snap.holder_host };
-            }
-          } catch {
-            // Pre-migration brains / transient DB errors: fall back to pidfile-only.
+        let dbLockHolder: { holder_pid: number; holder_host: string; acquisition_token: string } | null = null;
+        try {
+          const { inspectLock, isLockHolderLive } = await import('../core/db-lock.ts');
+          const { supervisorLockId, SUPERVISOR_LOCK_TTL_MIN } = await import('../core/minions/supervisor.ts');
+          const snap = await inspectLock(engine, supervisorLockId(supQueue));
+          if (snap && isLockHolderLive(snap, SUPERVISOR_LOCK_TTL_MIN)) {
+            detectedViaDbLock = !pidfileRunning;
+            dbLockHolder = { holder_pid: snap.holder_pid, holder_host: snap.holder_host, acquisition_token: snap.acquisition_token };
           }
+        } catch {
+          // Pre-migration brains / transient DB errors: fall back to pidfile-only.
         }
         const running = pidfileRunning || detectedViaDbLock;
         // Surface the supervisor's recorded config from the latest `started`
         // event (concurrency + effective --max-rss) so split-$HOME deployments
         // see what the live-but-pidfile-invisible supervisor is running.
         const startedEvt = events.filter(e => e.event === 'started').pop() ?? null;
+        const { supervisorZeroPaidSpendStatus, formatSupervisorZeroPaidSpendStatus } = await import('../core/ai/zero-paid-spend-status.ts');
+        const zeroPaidSpendStatus = supervisorZeroPaidSpendStatus(events, dbLockHolder, supQueue);
         // Shared classifier — same code path runs in `gbrain doctor` so the
         // two surfaces cannot drift on what counts as a crash. Supersedes
         // v0.35.4.0's binary `classifyWorkerExit({code})` on this surface;
         // see doctor.ts for the layering rationale.
         const summary = summarizeCrashes(events);
         const maxCrashesEvent = events.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
-
         // Niceness (issue #1815): measure live workers + the supervisor itself.
         const workers = readWorkers().map(w => ({
           pid: w.pid,
@@ -1886,7 +1885,6 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         const supervisorNice = pidfileRunning && supervisorPid !== null
           ? getEffectiveNiceness(supervisorPid)
           : null;
-
         const status = {
           running,
           detected_via: detectedViaDbLock ? 'db_lock' : (pidfileRunning ? 'pidfile' : null),
@@ -1903,8 +1901,8 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
           max_crashes_exceeded: !!maxCrashesEvent,
           nice: supervisorNice,
           workers,
+          zero_paid_spend: zeroPaidSpendStatus,
         };
-
         if (jsonMode) {
           console.log(JSON.stringify(status, null, 2));
         } else {
@@ -1916,6 +1914,7 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
           if (lastStart) console.log(`  Last start:    ${lastStart}`);
           console.log(`  Crashes (24h):     ${summary.total} (runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy})`);
           console.log(`  Clean exits (24h): ${summary.clean_exits}`);
+          console.log(formatSupervisorZeroPaidSpendStatus(zeroPaidSpendStatus));
           if (supervisorNice !== null) console.log(`  Nice (supervisor): ${formatNice(supervisorNice)}`);
           for (const w of workers) {
             const req = w.nice_requested !== null && w.nice !== null && w.nice_requested !== w.nice
@@ -1926,7 +1925,6 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         }
         process.exit(running ? 0 : 1);
       }
-
       // ----- stop subcommand -----
       if (isStopCmd) {
         const { existsSync, readFileSync } = await import('fs');

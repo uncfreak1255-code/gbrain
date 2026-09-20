@@ -237,7 +237,10 @@ describe('MinionSupervisor', () => {
       try {
         // hard ceiling defaults to SUP_MAX_CRASHES in the harness (see
         // spawnSupervisor) so this give-up lifecycle still fires at 3 (#1994).
-        const sup = spawnSupervisor(h, { SUP_MAX_CRASHES: '3' });
+        const sup = spawnSupervisor(h, {
+          SUP_MAX_CRASHES: '3',
+          SUP_ZERO_PAID_SPEND: '1',
+        });
         const { code } = await sup.exited;
 
         expect(code).toBe(1);
@@ -255,6 +258,12 @@ describe('MinionSupervisor', () => {
         expect(eventTypes).toContain('max_crashes_exceeded');
         expect(eventTypes).toContain('shutting_down');
         expect(eventTypes).toContain('stopped');
+
+        // The status/doctor receipt records what this live supervisor really
+        // handed to workers, rather than inferring runtime state from config.
+        const startedEvt = events.filter(e => e.event === 'started').pop();
+        expect((startedEvt as Record<string, unknown>).zero_paid_spend).toBe(true);
+        expect((startedEvt as Record<string, unknown>).lock_acquisition_token).toBeString();
 
         // The stopped event should carry exit_code=1 and reason=max_crashes.
         const stoppedEvt = events.filter(e => e.event === 'stopped').pop();

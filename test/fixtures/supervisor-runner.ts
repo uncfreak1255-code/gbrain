@@ -13,6 +13,7 @@
  *   SUP_BACKOFF_FLOOR_MS   — test-only short backoff (default: 1)
  *   SUP_HEALTH_INTERVAL_MS — how often healthCheck fires (default: 999_999 off)
  *   SUP_ALLOW_SHELL_JOBS   — "1" to set allowShellJobs:true, else false
+ *   SUP_ZERO_PAID_SPEND    — "1" to enforce local-only provider calls
  *   SUP_QUEUE              — queue name (default: 'default')
  *   SUP_AUDIT_DIR          — GBRAIN_AUDIT_DIR override (default: tmpdir/supervisor-test)
  */
@@ -47,6 +48,7 @@ const maxCrashes = parseInt(process.env.SUP_MAX_CRASHES ?? '3', 10);
 const backoffFloor = parseInt(process.env.SUP_BACKOFF_FLOOR_MS ?? '1', 10);
 const healthInterval = parseInt(process.env.SUP_HEALTH_INTERVAL_MS ?? '999999', 10);
 const allowShellJobs = process.env.SUP_ALLOW_SHELL_JOBS === '1';
+const zeroPaidSpend = process.env.SUP_ZERO_PAID_SPEND === '1';
 const queueName = process.env.SUP_QUEUE ?? 'default';
 // SUP_MAX_RSS: when set, pin an explicit watchdog cap (tests the passthrough
 // path). When unset, MinionSupervisor auto-sizes cgroup-aware (issue #1678).
@@ -68,6 +70,7 @@ const supervisor = new MinionSupervisor(mockEngine as BrainEngine, {
   healthInterval,
   cliPath,
   allowShellJobs,
+  zeroPaidSpend,
   json: true,
   _backoffFloorMs: backoffFloor,
   ...(maxRssExplicit !== undefined ? { maxRssMb: maxRssExplicit } : {}),

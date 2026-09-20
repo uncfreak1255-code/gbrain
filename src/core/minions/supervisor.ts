@@ -825,6 +825,10 @@ export class MinionSupervisor {
       // #1849: record the EFFECTIVE --max-rss so `gbrain doctor` can surface
       // the cap a rogue second supervisor would have fought over.
       max_rss_mb: this.opts.maxRssMb,
+      lock_acquisition_token: this.dbLock.acquisitionToken,
+      // Runtime evidence for doctor/status. This records what the live
+      // supervisor actually passed to its workers, not merely config intent.
+      zero_paid_spend: this.opts.zeroPaidSpend,
       // Niceness (issue #1815): record requested + effective so doctor/status can
       // surface a failed renice even for a detached supervisor whose stderr is gone.
       ...(this.opts.nice_requested !== undefined ? { nice_requested: this.opts.nice_requested } : {}),

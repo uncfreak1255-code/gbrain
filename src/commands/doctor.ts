@@ -1071,6 +1071,7 @@ export async function buildChecks(
     // Audit read / import failure is best-effort; skip silently.
   }
 
+  const name = 'queue_zero_paid_spend'; checks.push((await import('../core/ai/zero-paid-spend-status.ts')).buildZeroPaidSpendDoctorCheck(name));
   // 3b-bis-2. Supervisor SINGLETON + effective max-rss (#1849). Separate check
   // from `supervisor` above (same Codex #11 precedent as the niceness split) so
   // a singleton-divergence warn can't clobber the crash/liveness precedence.
