@@ -113,6 +113,15 @@ describe('inspectZeroPaidSpendStatus', () => {
     expect(status.configuration_consistent).toBe(false);
   });
 
+  test('reports a non-boolean durable choice as invalid and inconsistent', () => {
+    const paths = fixture();
+    writeFileSync(paths.configFile, JSON.stringify({ autopilot: { zero_paid_spend: 'true' } }));
+
+    const status = inspectZeroPaidSpendStatus({}, paths);
+    expect(status.durable_autopilot).toBe('invalid');
+    expect(status.configuration_consistent).toBe(false);
+  });
+
   test('surfaces an unrecognized env value while confirming fail-closed enforcement', () => {
     const paths = fixture();
     const status = inspectZeroPaidSpendStatus(

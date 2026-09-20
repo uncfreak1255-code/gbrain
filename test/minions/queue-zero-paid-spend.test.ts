@@ -271,6 +271,38 @@ describe('queue zero-paid-spend enforcement', () => {
     }
   });
 
+  test('a bare reinstall refuses a non-boolean durable boundary', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-zero-spend-invalid-'));
+    try {
+      await withEnv({ GBRAIN_HOME: home }, () => {
+        const gbrainDir = join(home, '.gbrain');
+        mkdirSync(gbrainDir, { recursive: true });
+        writeFileSync(join(gbrainDir, 'config.json'), JSON.stringify({
+          autopilot: { zero_paid_spend: 'true' },
+        }));
+        expect(() => writeWrapperScript(ROOT, 'linux-cron')).toThrow('non-boolean');
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('an explicit choice cannot overwrite a non-boolean durable boundary', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-zero-spend-invalid-persist-'));
+    try {
+      await withEnv({ GBRAIN_HOME: home }, () => {
+        const configPath = join(home, '.gbrain', 'config.json');
+        mkdirSync(join(home, '.gbrain'), { recursive: true });
+        const invalid = JSON.stringify({ preserved: true, autopilot: { zero_paid_spend: 'true' } });
+        writeFileSync(configPath, invalid);
+        expect(() => persistDurableZeroPaidSpend(false)).toThrow('non-boolean');
+        expect(readFileSync(configPath, 'utf8')).toBe(invalid);
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('explicit persist aborts on an unreadable config instead of wiping it', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-zero-spend-corrupt-'));
     try {

@@ -6,7 +6,7 @@ import {
   queueZeroPaidSpendValueIsAmbiguous,
 } from './zero-paid-spend-policy.ts';
 
-export type ZeroPaidSpendFileState = 'on' | 'off' | 'unset' | 'missing' | 'unreadable';
+export type ZeroPaidSpendFileState = 'on' | 'off' | 'unset' | 'missing' | 'invalid' | 'unreadable';
 export type ZeroPaidSpendWrapperDeclaration = 'declares_on' | 'declares_off' | 'noncanonical' | 'missing' | 'unreadable';
 
 export interface ZeroPaidSpendStatus {
@@ -58,11 +58,22 @@ export function inspectZeroPaidSpendStatus(
   let durable: ZeroPaidSpendFileState = 'missing';
   if (existsSync(configFile)) {
     try {
-      const parsed = JSON.parse(readFileSync(configFile, 'utf8')) as {
-        autopilot?: { zero_paid_spend?: unknown };
-      };
-      const value = parsed?.autopilot?.zero_paid_spend;
-      durable = value === true ? 'on' : value === false ? 'off' : 'unset';
+      const parsed = JSON.parse(readFileSync(configFile, 'utf8')) as unknown;
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        durable = 'invalid';
+      } else {
+        const autopilot = (parsed as { autopilot?: unknown }).autopilot;
+        if (autopilot === undefined) {
+          durable = 'unset';
+        } else if (autopilot === null || typeof autopilot !== 'object' || Array.isArray(autopilot)) {
+          durable = 'invalid';
+        } else if (!Object.prototype.hasOwnProperty.call(autopilot, 'zero_paid_spend')) {
+          durable = 'unset';
+        } else {
+          const value = (autopilot as { zero_paid_spend?: unknown }).zero_paid_spend;
+          durable = value === true ? 'on' : value === false ? 'off' : 'invalid';
+        }
+      }
     } catch {
       durable = 'unreadable';
     }

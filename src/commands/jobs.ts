@@ -1831,7 +1831,7 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
 
       // ----- status subcommand -----
       if (isStatusCmd) {
-        const { readSupervisorEvents, summarizeCrashes } = await import('../core/minions/handlers/supervisor-audit.ts');
+        const { readSupervisorEvents, readSupervisorStartEventForIdentity, summarizeCrashes } = await import('../core/minions/handlers/supervisor-audit.ts');
         const { readSupervisorPid } = await import('../core/minions/supervisor-pid.ts');
         const { readWorkers } = await import('../core/minions/worker-registry.ts');
 
@@ -1840,7 +1840,6 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         const pidfileRunning = pidStatus.running;
 
         const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
-        const lastStart = events.filter(e => e.event === 'started').pop()?.ts ?? null;
 
         // issue #2227 fix #1/#3: the pidfile is HOME-derived, so a supervisor
         // started under a different $HOME (keeper=/root vs ops=/data) reads as
@@ -1866,9 +1865,11 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         // Surface the supervisor's recorded config from the latest `started`
         // event (concurrency + effective --max-rss) so split-$HOME deployments
         // see what the live-but-pidfile-invisible supervisor is running.
-        const startedEvt = events.filter(e => e.event === 'started').pop() ?? null;
+        const liveStartedEvt = dbLockHolder ? readSupervisorStartEventForIdentity(dbLockHolder, supQueue) : null;
+        const startedEvt = liveStartedEvt ?? events.filter(e => e.event === 'started').pop() ?? null;
+        const lastStart = startedEvt?.ts ?? null;
         const { supervisorZeroPaidSpendStatus, formatSupervisorZeroPaidSpendStatus } = await import('../core/ai/zero-paid-spend-status.ts');
-        const zeroPaidSpendStatus = supervisorZeroPaidSpendStatus(events, dbLockHolder, supQueue);
+        const zeroPaidSpendStatus = supervisorZeroPaidSpendStatus(liveStartedEvt ? [...events, liveStartedEvt] : events, dbLockHolder, supQueue);
         // Shared classifier — same code path runs in `gbrain doctor` so the
         // two surfaces cannot drift on what counts as a crash. Supersedes
         // v0.35.4.0's binary `classifyWorkerExit({code})` on this surface;

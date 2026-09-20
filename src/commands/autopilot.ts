@@ -24,7 +24,8 @@ import { join, dirname, isAbsolute, resolve as resolvePath } from 'path';
 import { execSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadPreferences } from '../core/preferences.ts';
-import { loadConfig, loadConfigFileOnly, saveConfig, gbrainPath as gbrainHomePath, type GBrainConfig } from '../core/config.ts';
+import { loadConfig, loadConfigFileOnly, saveConfig, gbrainPath as gbrainHomePath } from '../core/config.ts';
+import { persistDurableZeroPaidSpend, readDurableZeroPaidSpend } from '../core/ai/zero-paid-spend-config.ts';
 import {
   QUEUE_ZERO_PAID_SPEND_FLAG,
   queueZeroPaidSpendEnabled,
@@ -73,6 +74,7 @@ import {
 } from '../core/autopilot-paths.ts';
 export { autopilotLockPath, autopilotDisabledMarkerPath, autopilotPausedMarkerPath, autopilotLaunchdLabel };
 export { relativeSourceLocalPathSkipWarning as relativeLocalPathSkipWarning };
+export { persistDurableZeroPaidSpend };
 
 /**
  * v0.37.7.0 #1162 — classify autopilot reconnect-loop errors.
@@ -1824,53 +1826,6 @@ const GBRAIN_ENV_TEMPLATE = `# gbrain daemon environment — sourced by autopilo
 # this file is sourced, so a value here is clobbered or diverges the
 # daemon's home from this file's own location.
 `;
-
-/**
- * The durable spend choice, or a hard failure if it cannot be determined.
- *
- * `loadConfigFileOnly()` returns null for "no config file", "corrupt JSON" and
- * "EACCES" alike, so using it here would silently regenerate an UNGUARDED
- * wrapper for an operator whose config says the opposite — and the wrapper's
- * export is the only carrier on the daemon lane. "I could not read your
- * choice" must never resolve to "you chose to allow paid spend", so an
- * unreadable config aborts the install instead of quietly downgrading it.
- */
-function readDurableZeroPaidSpend(): boolean {
-  const configFile = join(gbrainHomePath(), 'config.json');
-  if (!existsSync(configFile)) return false;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(configFile, 'utf-8'));
-  } catch (e) {
-    throw new Error(
-      `refusing to write the autopilot wrapper: ${configFile} exists but could not be read ` +
-      `(${e instanceof Error ? e.message : String(e)}), so the zero-paid-spend setting is ` +
-      'unknown. Repair or remove the file.',
-    );
-  }
-  const autopilot = (parsed as { autopilot?: { zero_paid_spend?: unknown } } | null)?.autopilot;
-  return autopilot?.zero_paid_spend === true;
-}
-
-/**
- * Persist an explicit spend choice. Missing config is fine (creates a stub).
- * An existing file that `loadConfigFileOnly()` cannot read must abort —
- * treating that as `{}` would overwrite engine, keys, and every other key.
- */
-export function persistDurableZeroPaidSpend(choice: boolean): void {
-  const configFile = join(gbrainHomePath(), 'config.json');
-  const cfg = loadConfigFileOnly();
-  if (cfg === null && existsSync(configFile)) {
-    throw new Error(
-      `refusing to persist zero-paid-spend: ${configFile} exists but could not be read, ` +
-      'so overwriting it would destroy the rest of the config. Repair or remove the file.',
-    );
-  }
-  saveConfig({
-    ...(cfg ?? {} as GBrainConfig),
-    autopilot: { ...cfg?.autopilot, zero_paid_spend: choice },
-  });
-}
 
 export function writeWrapperScript(repoPath: string, target: InstallTarget, opts: { zeroPaidSpend?: boolean } = {}): string {
   // Undefined (not false) means "no explicit choice on this invocation" — fall
