@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { invokeAI, withAIInvocationGuard } from '../../src/core/ai/invocation-guard.ts';
@@ -13,7 +13,7 @@ import {
 import { shellHandler } from '../../src/core/minions/handlers/shell.ts';
 import { buildChildArgs } from '../../src/core/minions/job-isolation.ts';
 import { buildWorkerArgs } from '../../src/core/minions/supervisor.ts';
-import { writeWrapperScript } from '../../src/commands/autopilot.ts';
+import { persistDurableZeroPaidSpend, writeWrapperScript } from '../../src/commands/autopilot.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { loadConfigFileOnly, saveConfig } from '../../src/core/config.ts';
 
@@ -62,6 +62,19 @@ describe('queue zero-paid-spend enforcement', () => {
       ),
       { GBRAIN_QUEUE_ZERO_PAID_SPEND: '1' },
     )).rejects.toThrow('queue_zero_paid_spend');
+  });
+
+  test('production generation refuses a paid route with no wrapper and no policy ALS', async () => {
+    const generate = createGuardedGeneration(() => 100);
+    let transportCalls = 0;
+    await withEnv({ GBRAIN_QUEUE_ZERO_PAID_SPEND: '1' }, async () => {
+      await expect(generate(
+        'anthropic:claude-sonnet-4-6',
+        async () => { transportCalls += 1; return { usage: { inputTokens: 1, outputTokens: 1 } }; },
+        {},
+      )).rejects.toThrow('queue_zero_paid_spend');
+    });
+    expect(transportCalls).toBe(0);
   });
 
   test('production generation cannot bypass a policy when no budget guard exists', async () => {
@@ -206,6 +219,22 @@ describe('queue zero-paid-spend enforcement', () => {
           'utf8',
         );
         expect(off).not.toContain('export GBRAIN_QUEUE_ZERO_PAID_SPEND=1');
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('explicit persist aborts on an unreadable config instead of wiping it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-zero-spend-corrupt-'));
+    try {
+      await withEnv({ GBRAIN_HOME: home }, () => {
+        const configPath = join(home, '.gbrain', 'config.json');
+        mkdirSync(join(home, '.gbrain'), { recursive: true });
+        const corrupt = '{not-json';
+        writeFileSync(configPath, corrupt);
+        expect(() => persistDurableZeroPaidSpend(true)).toThrow('could not be read');
+        expect(readFileSync(configPath, 'utf8')).toBe(corrupt);
       });
     } finally {
       rmSync(home, { recursive: true, force: true });
