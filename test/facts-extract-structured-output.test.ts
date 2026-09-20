@@ -31,7 +31,7 @@ import { extractFactsFromTurnWithOutcome } from '../src/core/facts/extract.ts';
 
 const OLLAMA = 'ollama:gemma3:4b';
 const GOOD_JSON = '{"facts":[{"fact":"user gave up alcohol","kind":"commitment",' +
-  '"entity":null,"confidence":1.0,"notability":"high",' +
+  '"entity":null,"confidence":1.0,"notability":"high","lifetime":"durable",' +
   '"metric":null,"value":null,"unit":null,"period":null}]}';
 
 function sdkResult(text: string, finishReason: 'stop' | 'length' = 'stop'): any {
@@ -86,6 +86,7 @@ describe('facts extraction — structured output on ollama (#4863)', () => {
     expect(item.additionalProperties).toBe(false);
     expect(item.properties.kind.enum).toContain('commitment');
     expect(item.properties.notability.enum).toEqual(['high', 'medium', 'low']);
+    expect(item.properties.lifetime.enum).toEqual(['durable', 'transient', 'unknown']);
 
     expect(outcome.ok).toBe(true);
     if (outcome.ok) {
