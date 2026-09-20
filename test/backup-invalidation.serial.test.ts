@@ -21,7 +21,7 @@
  * transport (same knob as workspace-push.serial.test.ts).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -134,7 +134,7 @@ async function muted<TReturn>(fn: () => Promise<TReturn>): Promise<TReturn> {
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'gb-backup-inv-'));
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'gb-backup-inv-')));
   saved = {};
   for (const k of ENV_KEYS) saved[k] = process.env[k];
   savedExitCode = process.exitCode;

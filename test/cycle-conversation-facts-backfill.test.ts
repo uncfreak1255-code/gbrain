@@ -84,7 +84,7 @@ beforeAll(async () => {
           kind: 'event',
           entity: null,
           confidence: 1.0,
-          notability: 'high',
+          notability: 'high', lifetime: 'durable',
         }],
       }),
       blocks: [],

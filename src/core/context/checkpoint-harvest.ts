@@ -236,7 +236,7 @@ async function pump(): Promise<void> {
 
 /** `<sessionId>.seg-<hash12>.txt` → hash12 ('' when the name has no hash part). */
 function segHashFromName(file: string): string {
-  const m = /\.seg-([0-9a-f]+)\.txt$/.exec(file);
+  const m = /\.seg-([0-9a-f]+)(?:\.src-[A-Za-z0-9._-]+)?\.txt$/.exec(file);
   return m ? m[1] : '';
 }
 

@@ -60,6 +60,22 @@ function userContent(o: ChatOpts): string {
 }
 
 describe('extract_atoms configurable caps (#4540)', () => {
+  test('an explicit zero budget makes no provider calls', async () => {
+    await engine.setConfig('cycle.extract_atoms.budget_usd', '0');
+    const { calls, chat } = captureChat();
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [{ filePath: '/tmp/zero-budget.txt', content: 'content', contentHash: 'zero'.repeat(4) }],
+      _pages: [],
+      _chat: chat,
+    });
+
+    expect(calls).toHaveLength(0);
+    expect(result.details?.budget_usd).toBe(0);
+    expect(result.details?.transcripts_skipped_budget).toBe(1);
+    expect(result.status).toBe('warn');
+  });
+
   test('defaults unchanged: 50k input chars, 4096 output tokens', async () => {
     const { calls, chat } = captureChat();
     const big = 'x'.repeat(DEFAULT_EXTRACT_MAX_INPUT_CHARS + 5_000);

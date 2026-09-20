@@ -131,6 +131,6 @@ export function gateWritebackTurn(text: unknown): WritebackGateResult {
     return { ok: false, reason: 'quoted_or_tool_output' };
   }
 
-  const normalized = normalizeTurnText(trimmed);
+  const normalized = normalizeTurnText(residue);
   return { ok: true, normalized, hash24: turnHash24(normalized) };
 }

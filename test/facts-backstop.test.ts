@@ -50,6 +50,7 @@ function chatStub(facts: Array<{ fact: string; kind: string; notability?: string
     text: JSON.stringify({
       facts: facts.map(f => ({
         fact: f.fact,
+        lifetime: 'durable',
         kind: f.kind,
         entity: f.entity ?? null,
         confidence: 1.0,
