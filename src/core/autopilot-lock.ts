@@ -1,5 +1,5 @@
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from 'node:child_process';
-import { readFileSync, readlinkSync } from 'node:fs';
+import { readFileSync, readlinkSync, realpathSync } from 'node:fs';
 
 export type AutopilotLockHolder =
   | { state: 'dead' }
@@ -14,6 +14,8 @@ export interface AutopilotLockProbeDeps {
   readProcessArgv?: (pid: number) => string[] | null;
   readProcessExecutable?: (pid: number) => string | null;
   readProcessParentPid?: (pid: number) => number | null;
+  /** Injected for tests; defaults to realpathSync and fails closed on error. */
+  resolveCanonicalPath?: (path: string) => string | null;
 }
 
 function readCommandToken(command: string, start: number): { value: string; next: number } | null {
@@ -29,6 +31,100 @@ function readCommandToken(command: string, start: number): { value: string; next
   let end = index;
   while (end < command.length && !/\s/.test(command[end])) end++;
   return { value: command.slice(index, end), next: end };
+}
+
+function normalizeFsPath(path: string): string {
+  return path.replace(/\\/g, '/');
+}
+
+function isAbsoluteFsPath(path: string): boolean {
+  return path.startsWith('/') || /^[A-Za-z]:\//.test(path);
+}
+
+function isCompiledLauncherName(name: string | undefined): boolean {
+  return name === 'gbrain' || name === 'gbrain.exe';
+}
+
+function isRuntimeLauncherName(name: string | undefined): boolean {
+  return name === 'bun' || name === 'bun.exe' || name === 'node' || name === 'node.exe';
+}
+
+function defaultResolveCanonicalPath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function resolveNormalizedPath(
+  path: string,
+  resolveCanonicalPath: (path: string) => string | null,
+): string | null {
+  const resolved = resolveCanonicalPath(path);
+  return resolved === null ? null : normalizeFsPath(resolved);
+}
+
+function canonicalPathsEqual(
+  left: string,
+  right: string,
+  resolveCanonicalPath: (path: string) => string | null,
+): boolean {
+  const normalizedLeft = normalizeFsPath(left);
+  const normalizedRight = normalizeFsPath(right);
+  if (normalizedLeft === normalizedRight) return true;
+  const resolvedLeft = isAbsoluteFsPath(normalizedLeft)
+    ? resolveNormalizedPath(left, resolveCanonicalPath)
+    : null;
+  if (resolvedLeft === normalizedRight) return true;
+  const resolvedRight = isAbsoluteFsPath(normalizedRight)
+    ? resolveNormalizedPath(right, resolveCanonicalPath)
+    : null;
+  return resolvedLeft !== null && resolvedLeft === resolvedRight;
+}
+
+function launcherTokenMatches(
+  token: string,
+  expectedLauncher: string,
+  resolveCanonicalPath: (path: string) => string | null,
+): boolean {
+  if (canonicalPathsEqual(token, expectedLauncher, resolveCanonicalPath)) return true;
+  const launcherName = normalizeFsPath(expectedLauncher).split('/').at(-1)?.toLowerCase();
+  const tokenName = normalizeFsPath(token);
+  // `#!/usr/bin/env bun` leaves argv[0] as the runtime basename. Bind this
+  // only to bun/node — a compiled gbrain launcher still requires its path.
+  return isRuntimeLauncherName(launcherName)
+    && !tokenName.includes('/')
+    && tokenName.toLowerCase() === launcherName;
+}
+
+function scriptTokenMatches(
+  token: string | undefined,
+  expectedEntrypoint: string,
+  resolveCanonicalPath: (path: string) => string | null,
+): boolean {
+  if (token === undefined) return false;
+  return canonicalPathsEqual(token, expectedEntrypoint, resolveCanonicalPath);
+}
+
+function argvMatchesReleaseCommand(
+  argv: string[],
+  entrypoint: string,
+  launcher: string,
+  command: readonly string[],
+  resolveCanonicalPath: (path: string) => string | null,
+): boolean {
+  const commandAt = (index: number): boolean =>
+    command.every((part, offset) => argv[index + offset] === part);
+  const launcherName = normalizeFsPath(launcher).split('/').at(-1)?.toLowerCase();
+  const compiledLauncher = isCompiledLauncherName(launcherName);
+  return (scriptTokenMatches(argv[0], entrypoint, resolveCanonicalPath) && commandAt(1))
+    || (launcherTokenMatches(argv[0] ?? '', launcher, resolveCanonicalPath)
+      && scriptTokenMatches(argv[1], entrypoint, resolveCanonicalPath)
+      && commandAt(2))
+    || (compiledLauncher
+      && launcherTokenMatches(argv[0] ?? '', launcher, resolveCanonicalPath)
+      && commandAt(1));
 }
 
 /** Require the exact release entrypoint immediately before the autopilot
@@ -53,19 +149,22 @@ export function commandMatchesAutopilotEntrypoint(
   return subcommand?.value === 'autopilot';
 }
 
+/** Kernel argv for the documented `bun install -g` shim is
+ * `["bun", "~/.bun/bin/gbrain", "autopilot", ...]`. Accept that only when the
+ * shim's canonical target is the status-process entrypoint. */
 export function argvMatchesAutopilotEntrypoint(
   argv: string[],
   entrypoint: string,
   launcher: string,
+  resolveCanonicalPath: (path: string) => string | null = defaultResolveCanonicalPath,
 ): boolean {
-  const normalized = argv.map((arg) => arg.replace(/\\/g, '/'));
-  const expectedEntrypoint = entrypoint.replace(/\\/g, '/');
-  const expectedLauncher = launcher.replace(/\\/g, '/');
-  const launcherName = expectedLauncher.split('/').at(-1)?.toLowerCase();
-  const compiledLauncher = launcherName === 'gbrain' || launcherName === 'gbrain.exe';
-  return (normalized[0] === expectedEntrypoint && normalized[1] === 'autopilot')
-    || (normalized[0] === expectedLauncher && normalized[1] === expectedEntrypoint && normalized[2] === 'autopilot')
-    || (compiledLauncher && normalized[0] === expectedLauncher && normalized[1] === 'autopilot');
+  return argvMatchesReleaseCommand(
+    argv,
+    entrypoint,
+    launcher,
+    ['autopilot'],
+    resolveCanonicalPath,
+  );
 }
 
 export function verifyAutopilotRuntimeOwner(
@@ -78,7 +177,8 @@ export function verifyAutopilotRuntimeOwner(
   const probeAlive = deps.isPidAlive ?? isPidAlive;
   if (!probeAlive(pid)) return false;
   const argv = (deps.readProcessArgv ?? readProcessArgv)(pid);
-  if (argv === null || !argvMatchesAutopilotEntrypoint(argv, entrypoint, launcher)) return false;
+  const resolveCanonicalPath = deps.resolveCanonicalPath ?? defaultResolveCanonicalPath;
+  if (argv === null || !argvMatchesAutopilotEntrypoint(argv, entrypoint, launcher, resolveCanonicalPath)) return false;
   const executable = (deps.readProcessExecutable ?? readProcessExecutable)(pid);
   if (executable === null) return false;
   const normalizedExecutable = executable.replace(/\\/g, '/');
@@ -119,18 +219,18 @@ export function verifyAutopilotManagedWorker(
     if (argv === null) return false;
     const executable = (deps.readProcessExecutable ?? readProcessExecutable)(pid);
     if (executable === null) return false;
-    const normalized = argv.map((arg) => arg.replace(/\\/g, '/'));
-    const expectedEntrypoint = entrypoint.replace(/\\/g, '/');
-    const expectedLauncher = launcher.replace(/\\/g, '/');
-    const launcherName = expectedLauncher.split('/').at(-1)?.toLowerCase();
-    const compiledLauncher = launcherName === 'gbrain' || launcherName === 'gbrain.exe';
-    const normalizedExecutable = executable.replace(/\\/g, '/');
+    const expectedEntrypoint = normalizeFsPath(entrypoint);
+    const expectedLauncher = normalizeFsPath(launcher);
+    const normalizedExecutable = normalizeFsPath(executable);
     if (normalizedExecutable !== expectedLauncher && normalizedExecutable !== expectedEntrypoint) return false;
-    return (normalized[0] === expectedEntrypoint && normalized[1] === 'jobs' && normalized[2] === 'work')
-      || (normalized[0] === expectedLauncher && normalized[1] === expectedEntrypoint
-        && normalized[2] === 'jobs' && normalized[3] === 'work')
-      || (compiledLauncher && normalized[0] === expectedLauncher
-        && normalized[1] === 'jobs' && normalized[2] === 'work');
+    const resolveCanonicalPath = deps.resolveCanonicalPath ?? defaultResolveCanonicalPath;
+    return argvMatchesReleaseCommand(
+      argv,
+      entrypoint,
+      launcher,
+      ['jobs', 'work'],
+      resolveCanonicalPath,
+    );
   });
 }
 

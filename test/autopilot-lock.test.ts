@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -277,6 +277,42 @@ describe('verifyAutopilotRuntimeOwner', () => {
     expect(argvMatchesAutopilotEntrypoint([`${launcher} ${entrypoint} autopilot`], entrypoint, launcher)).toBe(false);
     expect(argvMatchesAutopilotEntrypoint(['/opt/gbrain', 'autopilot'], '/$bunfs/root/gbrain', '/opt/gbrain')).toBe(true);
     expect(argvMatchesAutopilotEntrypoint([launcher, 'autopilot'], '/$bunfs/root/gbrain', launcher)).toBe(false);
+    expect(argvMatchesAutopilotEntrypoint(
+      ['bun', '/home/me/.bun/bin/gbrain', 'autopilot', '--repo', '/brain'],
+      entrypoint,
+      launcher,
+      (path) => path === '/home/me/.bun/bin/gbrain' ? entrypoint : null,
+    )).toBe(true);
+    expect(argvMatchesAutopilotEntrypoint(
+      [launcher, '/home/me/.bun/bin/gbrain', 'autopilot'],
+      entrypoint,
+      launcher,
+      (path) => path === '/home/me/.bun/bin/gbrain' ? entrypoint : null,
+    )).toBe(true);
+    expect(argvMatchesAutopilotEntrypoint(
+      ['bun', '/home/me/.bun/bin/gbrain', 'autopilot'],
+      entrypoint,
+      launcher,
+      () => '/tmp/not-cli.ts',
+    )).toBe(false);
+    expect(argvMatchesAutopilotEntrypoint(
+      ['bun', '/home/me/.bun/bin/gbrain', 'autopilot'],
+      entrypoint,
+      launcher,
+      () => null,
+    )).toBe(false);
+    expect(argvMatchesAutopilotEntrypoint(
+      ['bun', 'gbrain', 'autopilot'],
+      entrypoint,
+      launcher,
+      () => entrypoint,
+    )).toBe(false);
+    expect(argvMatchesAutopilotEntrypoint(
+      ['python', '/home/me/.bun/bin/gbrain', 'autopilot'],
+      entrypoint,
+      launcher,
+      (path) => path === '/home/me/.bun/bin/gbrain' ? entrypoint : null,
+    )).toBe(false);
     expect(commandMatchesAutopilotEntrypoint(
       `${launcher} ${entrypoint} autopilot --repo /brain`,
       entrypoint,
@@ -360,6 +396,18 @@ describe('verifyAutopilotRuntimeOwner', () => {
       readProcessArgv: () => [launcher, entrypoint, 'autopilot'],
       readProcessExecutable: () => '/bin/cat',
     })).toBe(false);
+    expect(verifyAutopilotRuntimeOwner(4321, entrypoint, launcher, {
+      isPidAlive: () => true,
+      readProcessArgv: () => ['bun', '/home/me/.bun/bin/gbrain', 'autopilot'],
+      readProcessExecutable: () => launcher,
+      resolveCanonicalPath: (path) => path === '/home/me/.bun/bin/gbrain' ? entrypoint : null,
+    })).toBe(true);
+    expect(verifyAutopilotRuntimeOwner(4321, entrypoint, launcher, {
+      isPidAlive: () => true,
+      readProcessArgv: () => ['bun', '/home/me/.bun/bin/gbrain', 'autopilot'],
+      readProcessExecutable: () => '/bin/cat',
+      resolveCanonicalPath: (path) => path === '/home/me/.bun/bin/gbrain' ? entrypoint : null,
+    })).toBe(false);
   });
 
   test('service-managed parent and live child are independently verified', () => {
@@ -412,7 +460,78 @@ describe('verifyAutopilotRuntimeOwner', () => {
       readProcessArgv: () => [launcher, entrypoint, 'jobs', 'work'],
       readProcessExecutable: () => '/bin/cat',
     })).toBe(false);
+    expect(verifyAutopilotManagedWorker(8765, 4321, [8765], entrypoint, launcher, {
+      isPidAlive: () => true,
+      readProcessParentPid: () => 4321,
+      readProcessArgv: () => ['bun', '/home/me/.bun/bin/gbrain', 'jobs', 'work'],
+      readProcessExecutable: () => launcher,
+      resolveCanonicalPath: (path) => path === '/home/me/.bun/bin/gbrain' ? entrypoint : null,
+    })).toBe(true);
+    expect(verifyAutopilotManagedWorker(8765, 4321, [8765], entrypoint, launcher, {
+      isPidAlive: () => true,
+      readProcessParentPid: () => 4321,
+      readProcessArgv: () => ['bun', '/home/me/.bun/bin/gbrain', 'jobs', 'work'],
+      readProcessExecutable: () => '/bin/cat',
+      resolveCanonicalPath: (path) => path === '/home/me/.bun/bin/gbrain' ? entrypoint : null,
+    })).toBe(false);
     expect(verifyAutopilotManagedWorker(null, 4321, [], entrypoint, launcher)).toBe(false);
+  });
+});
+
+describe('Bun global-install shim argv', () => {
+  test('accepts a PATH shim whose realpath is the release entrypoint', () => {
+    const shimHome = mkdtempSync(join(tmpdir(), 'gbrain-bun-shim-'));
+    try {
+      const entry = join(shimHome, 'cli.ts');
+      const shim = join(shimHome, 'gbrain');
+      writeFileSync(entry, '#!/usr/bin/env bun\n');
+      symlinkSync(entry, shim);
+      const canonicalEntry = realpathSync(entry);
+      const bunLauncher = '/home/me/.bun/bin/bun';
+      expect(argvMatchesAutopilotEntrypoint(['bun', shim, 'autopilot'], canonicalEntry, bunLauncher)).toBe(true);
+      expect(argvMatchesAutopilotEntrypoint([bunLauncher, shim, 'autopilot'], canonicalEntry, bunLauncher)).toBe(true);
+      expect(verifyAutopilotRuntimeOwner(4321, canonicalEntry, bunLauncher, {
+        isPidAlive: () => true,
+        readProcessArgv: () => ['bun', shim, 'autopilot'],
+        readProcessExecutable: () => bunLauncher,
+      })).toBe(true);
+      expect(verifyAutopilotManagedWorker(8765, 4321, [8765], canonicalEntry, bunLauncher, {
+        isPidAlive: () => true,
+        readProcessParentPid: () => 4321,
+        readProcessArgv: () => ['bun', shim, 'jobs', 'work'],
+        readProcessExecutable: () => bunLauncher,
+      })).toBe(true);
+    } finally {
+      rmSync(shimHome, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects a PATH shim whose realpath is a different file', () => {
+    const shimHome = mkdtempSync(join(tmpdir(), 'gbrain-bun-shim-other-'));
+    try {
+      const entry = join(shimHome, 'cli.ts');
+      const other = join(shimHome, 'other.ts');
+      const shim = join(shimHome, 'gbrain');
+      writeFileSync(entry, '#!/usr/bin/env bun\n');
+      writeFileSync(other, '#!/usr/bin/env bun\n');
+      symlinkSync(other, shim);
+      const canonicalEntry = realpathSync(entry);
+      const bunLauncher = '/home/me/.bun/bin/bun';
+      expect(argvMatchesAutopilotEntrypoint(['bun', shim, 'autopilot'], canonicalEntry, bunLauncher)).toBe(false);
+      expect(verifyAutopilotRuntimeOwner(4321, canonicalEntry, bunLauncher, {
+        isPidAlive: () => true,
+        readProcessArgv: () => ['bun', shim, 'autopilot'],
+        readProcessExecutable: () => bunLauncher,
+      })).toBe(false);
+      expect(verifyAutopilotManagedWorker(8765, 4321, [8765], canonicalEntry, bunLauncher, {
+        isPidAlive: () => true,
+        readProcessParentPid: () => 4321,
+        readProcessArgv: () => ['bun', shim, 'jobs', 'work'],
+        readProcessExecutable: () => bunLauncher,
+      })).toBe(false);
+    } finally {
+      rmSync(shimHome, { recursive: true, force: true });
+    }
   });
 });
 
