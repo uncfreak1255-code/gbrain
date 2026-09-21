@@ -35,8 +35,12 @@ beforeEach(() => {
   for (const k of envKeys()) envSnapshot[k] = process.env[k];
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-install-test-'));
   process.env.HOME = tmp;
+  // Bun's os.homedir() is fixed at process start, so mutating HOME alone does
+  // not isolate gbrainPath(). Bind the explicit runtime home before any test
+  // calls writeWrapperScript() or gbrainPath(); otherwise this suite writes
+  // the generated wrapper and env fixture into the developer's real ~/.gbrain.
+  process.env.GBRAIN_HOME = tmp;
   // Start each test with a clean slate for ephemeral env vars.
-  delete process.env.GBRAIN_HOME;
   delete process.env.RENDER;
   delete process.env.RAILWAY_ENVIRONMENT;
   delete process.env.FLY_APP_NAME;
@@ -69,6 +73,10 @@ function makeFakeGbrainOnPath(): { binDir: string; restore: () => void } {
 }
 
 describe('detectInstallTarget', () => {
+  test('suite paths are isolated from the developer home', () => {
+    expect(gbrainPath()).toBe(join(tmp, '.gbrain'));
+  });
+
   test('returns "macos" on darwin regardless of env', () => {
     if (process.platform !== 'darwin') return; // Skip on non-mac CI
     // Even if RENDER is set, darwin wins (user is probably dev-testing).
