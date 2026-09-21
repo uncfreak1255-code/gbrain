@@ -293,7 +293,7 @@ describe('verifyAutopilotRuntimeOwner', () => {
       ['bun', '/home/me/.bun/bin/gbrain', 'autopilot'],
       entrypoint,
       launcher,
-      () => '/tmp/not-cli.ts',
+      (path) => path === '/home/me/.bun/bin/gbrain' ? '/tmp/not-cli.ts' : null,
     )).toBe(false);
     expect(argvMatchesAutopilotEntrypoint(
       ['bun', '/home/me/.bun/bin/gbrain', 'autopilot'],

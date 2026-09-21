@@ -116,7 +116,10 @@ function argvMatchesReleaseCommand(
 ): boolean {
   const commandAt = (index: number): boolean =>
     command.every((part, offset) => argv[index + offset] === part);
-  const launcherName = normalizeFsPath(launcher).split('/').at(-1)?.toLowerCase();
+  const expectedEntrypoint = normalizeFsPath(entrypoint);
+  const expectedLauncher = normalizeFsPath(launcher);
+  if (!isAbsoluteFsPath(expectedEntrypoint) || !isAbsoluteFsPath(expectedLauncher)) return false;
+  const launcherName = expectedLauncher.split('/').at(-1)?.toLowerCase();
   const compiledLauncher = isCompiledLauncherName(launcherName);
   return (scriptTokenMatches(argv[0], entrypoint, resolveCanonicalPath) && commandAt(1))
     || (launcherTokenMatches(argv[0] ?? '', launcher, resolveCanonicalPath)
