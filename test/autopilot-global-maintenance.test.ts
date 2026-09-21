@@ -239,10 +239,10 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
   afterAll(async () => { await engine.disconnect(); });
   beforeEach(async () => { await resetPgliteState(engine); });
 
-  async function captureHandlers() {
+  async function captureHandlers(handlerEngine: BrainEngine = engine) {
     const handlers = new Map<string, (job: any) => Promise<any>>();
     const fakeWorker = { register(name: string, fn: (job: any) => Promise<any>) { handlers.set(name, fn); } };
-    await registerBuiltinHandlers(fakeWorker as never, engine);
+    await registerBuiltinHandlers(fakeWorker as never, handlerEngine);
     return handlers;
   }
 
@@ -364,5 +364,112 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     const stamped = await engine.getConfig(LAST_GLOBAL_AT_KEY);
     expect(stamped).not.toBeNull();
     expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
+  });
+
+  test('managed brains exclude legacy mixed writers instead of dead-lettering global maintenance', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-global-maintenance-'));
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    try {
+      const handlers = await captureHandlers();
+      const handler = handlers.get('autopilot-global-maintenance');
+      expect(handler).toBeTruthy();
+
+      const result = await handler!({
+        id: 4103,
+        data: { phases: ['synthesize', 'patterns', 'orphans'], repoPath },
+        signal: undefined,
+      });
+
+      expect(result.phases_rejected_by_persistence).toEqual(['synthesize', 'patterns']);
+      expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
+      expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
+      expect(['ok', 'clean']).toContain(result.report.status);
+    } finally {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }
+  });
+
+  test('managed brains report an explicit no-op when every requested phase uses a legacy writer', async () => {
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    try {
+      const handlers = await captureHandlers();
+      const handler = handlers.get('autopilot-global-maintenance');
+      const result = await handler!({
+        id: 4104,
+        data: { phases: ['synthesize', 'patterns'] },
+        signal: undefined,
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(result.report.reason).toBe('all_phases_rejected_by_persistence');
+      expect(result.phases_rejected_by_persistence).toEqual(['synthesize', 'patterns']);
+      expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
+    } finally {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }
+  });
+
+  test('an activation race fails the legacy writer closed and still runs compatible global phases', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-race-maintenance-'));
+    let stateReads = 0;
+    const racingEngine = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop !== 'executeRaw') return Reflect.get(target, prop, receiver);
+        return async (sql: string, params?: unknown[]) => {
+          if (sql === 'SELECT enabled FROM persistence_brain WHERE singleton=1') {
+            stateReads += 1;
+            if (stateReads === 1) {
+              await target.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+              return [{ enabled: false }];
+            }
+          }
+          return target.executeRaw(sql, params);
+        };
+      },
+    }) as unknown as BrainEngine;
+    try {
+      const handlers = await captureHandlers(racingEngine);
+      const result = await handlers.get('autopilot-global-maintenance')!({
+        id: 4105,
+        data: { phases: ['synthesize', 'orphans'], repoPath },
+        signal: undefined,
+      });
+
+      expect(stateReads).toBeGreaterThanOrEqual(2);
+      expect(result.persistence_transition_recovered).toBe(true);
+      expect(result.phases_rejected_by_persistence).toEqual(['synthesize']);
+      expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
+      expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
+    } finally {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }
+  });
+
+  test('an unavailable persistence-state read fails mixed writers closed but still runs global phases', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-read-failure-'));
+    let failedRead = false;
+    const unavailableStateEngine = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop !== 'executeRaw') return Reflect.get(target, prop, receiver);
+        return async (sql: string, params?: unknown[]) => {
+          if (!failedRead && sql === 'SELECT enabled FROM persistence_brain WHERE singleton=1') {
+            failedRead = true;
+            throw new Error('fixture persistence-state read outage');
+          }
+          return target.executeRaw(sql, params);
+        };
+      },
+    }) as unknown as BrainEngine;
+    const handlers = await captureHandlers(unavailableStateEngine);
+    const result = await handlers.get('autopilot-global-maintenance')!({
+      id: 4106,
+      data: { phases: ['synthesize', 'orphans'], repoPath },
+      signal: undefined,
+    });
+
+    expect(result.persistence_state_read_failed).toBe(true);
+    expect(result.phases_rejected_by_persistence).toEqual(['synthesize']);
+    expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
+    expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
   });
 });

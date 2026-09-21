@@ -2,6 +2,34 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.51.0.2] - 2026-09-21
+
+**Autopilot maintenance now stays useful after managed writing is turned on.**
+
+Managed brains intentionally block two older maintenance writers because those writers cannot preserve the coordinated ownership guarantees added in v0.51. Autopilot previously treated that expected refusal as a failed job, so the rest of the safe brain-wide maintenance never ran and the durable queue accumulated a dead job. It now skips only the incompatible work and continues the maintenance that is safe under managed ownership.
+
+The ownership boundary remains fail-closed. If managed writing turns on during a maintenance cycle, or the ownership state cannot be read, the older writers stay blocked. Safe global work continues, and an all-blocked request remains visibly skipped instead of claiming a fresh maintenance cycle.
+
+### What changes in practice
+
+| Situation | Result |
+|---|---|
+| Managed writing is already enabled | Legacy mixed writers are skipped; compatible global phases still run. |
+| Managed writing activates during a cycle | The legacy writer refuses, then the job recovers by running only compatible phases. |
+| Ownership state cannot be read | Legacy writers fail closed while compatible global phases remain available. |
+| Every requested phase is incompatible | The job reports an explicit skip and does not stamp maintenance freshness. |
+
+### Things to watch
+
+This does not make the legacy synthesis and pattern writers compatible with managed ownership. Those phases remain intentionally unavailable until they have a coordinated writer path. The result reports which phases were rejected so operators can distinguish a safe skip from a failed job.
+
+### Itemized changes
+
+- Normalize brain-wide Autopilot maintenance against the managed-persistence boundary before invoking legacy mixed writers.
+- Recover from an ownership activation race without weakening the writer fence or dead-lettering compatible maintenance.
+- Treat an unreadable ownership state conservatively and expose both rejected phases and recovery state in job results.
+- Add fixture coverage for managed operation, all-excluded requests, activation races, ownership-state outages, freshness stamps and compatible phase execution.
+
 ## [0.51.0.1] - 2026-09-21
 
 **Reinstalling Autopilot now reliably turns it back on, and status proves when its guarded worker is actually enforcing zero paid spend.**

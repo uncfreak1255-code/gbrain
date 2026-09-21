@@ -125,6 +125,7 @@ describe('deadline plumbing wiring (structural)', () => {
   // derivation lives there now; worker.ts calls buildJobContext.
   const jobContextSrc = readFileSync(new URL('../src/core/minions/job-context.ts', import.meta.url), 'utf-8');
   const jobsSrc = readFileSync(new URL('../src/commands/jobs.ts', import.meta.url), 'utf-8');
+  const globalMaintenanceSrc = readFileSync(new URL('../src/commands/autopilot-global-maintenance.ts', import.meta.url), 'utf-8');
   const cycleSrc = readFileSync(new URL('../src/core/cycle.ts', import.meta.url), 'utf-8');
   const patternsSrc = readFileSync(new URL('../src/core/cycle/patterns.ts', import.meta.url), 'utf-8');
 
@@ -138,7 +139,7 @@ describe('deadline plumbing wiring (structural)', () => {
   });
 
   test('autopilot-cycle, global-maintenance AND phase-wrapper handlers thread deadlineAtMs into runCycle', () => {
-    const matches = jobsSrc.match(/deadlineAtMs: job\.deadlineAtMs/g) ?? [];
+    const matches = `${jobsSrc}\n${globalMaintenanceSrc}`.match(/deadlineAtMs: job\.deadlineAtMs/g) ?? [];
     expect(matches.length).toBe(3);
   });
 
