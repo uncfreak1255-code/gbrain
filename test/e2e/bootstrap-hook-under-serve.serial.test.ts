@@ -411,6 +411,7 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
       ].join('\n') + '\n',
     );
     const out = collectStdout();
+    const compactStartedAt = Date.now();
     const code = await runHook(['compact'], {
       stdin: JSON.stringify({ transcript_path: transcript, session_id: 'e2e-seg-sess' }),
       write: out.write,
@@ -419,10 +420,18 @@ describe('bootstrap hook under a live serve (serial e2e) [A7]', () => {
     });
     expect(code).toBe(0);
     expect(out.get()).toBe('');
-    const [hb] = await readHeartbeatTail(1);
-    expect(hb.event).toBe('compact');
-    expect(hb.outcome).toBe('ok'); // IPC round trip reached the serve
-    expect(hb.segment).toBe('segment_banked');
+    // Compact can schedule checkpoint harvest immediately after writing its
+    // own heartbeat. Select this invocation's compact record instead of
+    // assuming it remains the file's final line under parallel CI load.
+    const hb = (await readHeartbeatTail(10)).reverse().find((entry) => (
+      entry.event === 'compact'
+      && Date.parse(entry.ts) >= compactStartedAt
+      && entry.segment === 'segment_banked'
+    ));
+    expect(hb).toBeDefined();
+    expect(hb?.event).toBe('compact');
+    expect(hb?.outcome).toBe('ok'); // IPC round trip reached the serve
+    expect(hb?.segment).toBe('segment_banked');
     // Durability artifacts on disk, content-addressed, since-boundary only.
     const corpusDir = join(tmpParent, '.gbrain', 'transcripts', 'corpus');
     const segs = readdirSync(corpusDir).filter((f) => f.startsWith('e2e-seg-sess.seg-') && f.endsWith('.txt'));

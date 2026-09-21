@@ -35,8 +35,12 @@ beforeEach(() => {
   for (const k of envKeys()) envSnapshot[k] = process.env[k];
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-install-test-'));
   process.env.HOME = tmp;
+  // Bun's os.homedir() is fixed at process start, so mutating HOME alone does
+  // not isolate gbrainPath(). Bind the explicit runtime home before any test
+  // calls writeWrapperScript() or gbrainPath(); otherwise this suite writes
+  // the generated wrapper and env fixture into the developer's real ~/.gbrain.
+  process.env.GBRAIN_HOME = tmp;
   // Start each test with a clean slate for ephemeral env vars.
-  delete process.env.GBRAIN_HOME;
   delete process.env.RENDER;
   delete process.env.RAILWAY_ENVIRONMENT;
   delete process.env.FLY_APP_NAME;
@@ -69,6 +73,10 @@ function makeFakeGbrainOnPath(): { binDir: string; restore: () => void } {
 }
 
 describe('detectInstallTarget', () => {
+  test('suite paths are isolated from the developer home', () => {
+    expect(gbrainPath()).toBe(join(tmp, '.gbrain'));
+  });
+
   test('returns "macos" on darwin regardless of env', () => {
     if (process.platform !== 'darwin') return; // Skip on non-mac CI
     // Even if RENDER is set, darwin wins (user is probably dev-testing).
@@ -451,25 +459,24 @@ describe('autopilot wiring: chat-unavailable boot warning (#2608)', () => {
 // style (same rationale as the wiring test above): the install functions
 // shell out to launchctl/systemctl/crontab, which a unit test cannot drive.
 describe('autopilot install — reload-safety (#2608)', () => {
-  test('launchd unloads before load, systemd try-restarts, cron/container explain the residual process', async () => {
+  test('launchd clears persistent disable before bootstrap/kickstart, systemd try-restarts, cron/container explain the residual process', async () => {
     const { readFileSync } = await import('fs');
     const src = readFileSync('src/commands/autopilot.ts', 'utf8');
 
-    // installLaunchd: bare `launchctl load` on an already-loaded agent errors
-    // (aborting reinstall) and never relaunches the running daemon. The
-    // unload must precede the load INSIDE installLaunchd — anchor on the
-    // function body, not the file-wide first occurrence (uninstall also
-    // unloads, much later in the file).
+    // installLaunchd must clear launchd's persistent disabled override before
+    // registering and starting the job. Legacy unload/load preserves that
+    // override, so a reinstall can claim success while launchd refuses to run.
     const launchdFnIdx = src.indexOf('function installLaunchd(');
     expect(launchdFnIdx).toBeGreaterThan(-1);
     const launchdBody = src.slice(launchdFnIdx, src.indexOf('function generateSystemdUnit'));
-    // Anchor on the execSync calls, not bare command names — the explanatory
-    // comment above the unload also says "launchctl load".
-    const unloadIdx = launchdBody.indexOf('execSync(`launchctl unload');
-    const loadIdx = launchdBody.indexOf('execSync(`launchctl load');
-    expect(unloadIdx).toBeGreaterThan(-1);
-    expect(loadIdx).toBeGreaterThan(-1);
-    expect(unloadIdx).toBeLessThan(loadIdx);
+    const launchdEnableIdx = launchdBody.indexOf('launchctl enable');
+    const bootstrapIdx = launchdBody.indexOf('launchctl bootstrap');
+    const kickstartIdx = launchdBody.indexOf('launchctl kickstart -k');
+    expect(launchdEnableIdx).toBeGreaterThan(-1);
+    expect(bootstrapIdx).toBeGreaterThan(launchdEnableIdx);
+    expect(kickstartIdx).toBeGreaterThan(bootstrapIdx);
+    expect(launchdBody).not.toContain('launchctl load');
+    expect(launchdBody).not.toContain('launchctl unload');
 
     // installSystemd: enable --now does not restart an active unit; only
     // try-restart bounces a running daemon onto the regenerated wrapper.

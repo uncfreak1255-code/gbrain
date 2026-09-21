@@ -787,6 +787,7 @@ describe('ChildWorkerSupervisor', () => {
         // Codex #2 — the respawned child is alive and was NOT killed by a stale
         // timer aimed at the old child.
         expect(ctx.sup.childAlive).toBe(true);
+        expect(ctx.sup.childPid).toBeGreaterThan(0);
       } finally {
         await ctx.stop();
         h.cleanup();

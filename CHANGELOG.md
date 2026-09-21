@@ -2,6 +2,41 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.51.0.1] - 2026-09-21
+
+**Reinstalling Autopilot now reliably turns it back on, and status proves when its guarded worker is actually enforcing zero paid spend.**
+
+On macOS, launchd remembers a disabled service even after its file is reloaded. A reinstall now clears that persistent override, replaces the registered job, and starts it through the normal repository guard. Status reports a remaining launchd override as disabled instead of calling an intentionally stopped service stale.
+
+The same status response now distinguishes configured policy from live enforcement. It reports a live managed worker only when the heartbeat is fresh, the lock record is exact, and the operating system confirms that the owning process is the installed GBrain runtime. Missing or ambiguous evidence stays unknown rather than claiming protection.
+
+### How to use it
+
+```bash
+gbrain autopilot --install --repo /path/to/canonical/gbrain-source
+gbrain autopilot --status --json
+```
+
+### What changes in practice
+
+| Situation | Result |
+|---|---|
+| Autopilot was disabled with launchctl | Reinstall clears the persistent override and starts the guarded daemon. |
+| launchd still has a disabled override | Status returns `disabled` with exit 2. |
+| A fresh Autopilot owns a managed worker | `zero_paid_spend.live_managed_worker` reports the live enforcement state. |
+| The lock is stale, malformed, foreign, inline-only, or cannot be verified | Live enforcement remains `null`; configured policy is still reported separately. |
+
+### Things to watch
+
+The live receipt is deliberately fail-closed. Hosts that cannot expose process executable identity may show an unknown live state even when the durable policy is enabled; investigate the runtime instead of treating configuration as enforcement.
+
+### Itemized changes
+
+- Replace legacy macOS `launchctl unload/load` installation with `enable`, `bootout`, `bootstrap`, and `kickstart`.
+- Read launchd's persistent disabled override and include it in Autopilot status classification.
+- Add strict runtime-lock metadata for Autopilot-managed workers and bind the live zero-paid-spend receipt to a fresh, OS-verified owner.
+- Add shimmed and real launchd regressions for disable, status, reinstall, guarded startup, and command failures.
+
 ## [0.51.0.0] - 2026-09-16
 
 **Concurrent edits now have durable outcomes, safe retries, and one coherent page revision.**

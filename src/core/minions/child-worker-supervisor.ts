@@ -204,6 +204,9 @@ export class ChildWorkerSupervisor {
   get childAlive(): boolean {
     return this._child !== null && this._child.exitCode === null;
   }
+  get childPid(): number | null {
+    return this.childAlive && this._child?.pid ? this._child.pid : null;
+  }
   get inBackoff(): boolean {
     return this._inBackoff;
   }
