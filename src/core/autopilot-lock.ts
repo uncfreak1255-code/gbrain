@@ -61,8 +61,11 @@ export function argvMatchesAutopilotEntrypoint(
   const normalized = argv.map((arg) => arg.replace(/\\/g, '/'));
   const expectedEntrypoint = entrypoint.replace(/\\/g, '/');
   const expectedLauncher = launcher.replace(/\\/g, '/');
+  const launcherName = expectedLauncher.split('/').at(-1)?.toLowerCase();
+  const compiledLauncher = launcherName === 'gbrain' || launcherName === 'gbrain.exe';
   return (normalized[0] === expectedEntrypoint && normalized[1] === 'autopilot')
-    || (normalized[0] === expectedLauncher && normalized[1] === expectedEntrypoint && normalized[2] === 'autopilot');
+    || (normalized[0] === expectedLauncher && normalized[1] === expectedEntrypoint && normalized[2] === 'autopilot')
+    || (compiledLauncher && normalized[0] === expectedLauncher && normalized[1] === 'autopilot');
 }
 
 export function verifyAutopilotRuntimeOwner(
@@ -119,11 +122,15 @@ export function verifyAutopilotManagedWorker(
     const normalized = argv.map((arg) => arg.replace(/\\/g, '/'));
     const expectedEntrypoint = entrypoint.replace(/\\/g, '/');
     const expectedLauncher = launcher.replace(/\\/g, '/');
+    const launcherName = expectedLauncher.split('/').at(-1)?.toLowerCase();
+    const compiledLauncher = launcherName === 'gbrain' || launcherName === 'gbrain.exe';
     const normalizedExecutable = executable.replace(/\\/g, '/');
     if (normalizedExecutable !== expectedLauncher && normalizedExecutable !== expectedEntrypoint) return false;
     return (normalized[0] === expectedEntrypoint && normalized[1] === 'jobs' && normalized[2] === 'work')
       || (normalized[0] === expectedLauncher && normalized[1] === expectedEntrypoint
-        && normalized[2] === 'jobs' && normalized[3] === 'work');
+        && normalized[2] === 'jobs' && normalized[3] === 'work')
+      || (compiledLauncher && normalized[0] === expectedLauncher
+        && normalized[1] === 'jobs' && normalized[2] === 'work');
   });
 }
 

@@ -275,6 +275,8 @@ describe('verifyAutopilotRuntimeOwner', () => {
   test('accepts only the exact release entrypoint followed by the autopilot subcommand', () => {
     expect(argvMatchesAutopilotEntrypoint([launcher, entrypoint, 'autopilot', '--repo', '/brain'], entrypoint, launcher)).toBe(true);
     expect(argvMatchesAutopilotEntrypoint([`${launcher} ${entrypoint} autopilot`], entrypoint, launcher)).toBe(false);
+    expect(argvMatchesAutopilotEntrypoint(['/opt/gbrain', 'autopilot'], '/$bunfs/root/gbrain', '/opt/gbrain')).toBe(true);
+    expect(argvMatchesAutopilotEntrypoint([launcher, 'autopilot'], '/$bunfs/root/gbrain', launcher)).toBe(false);
     expect(commandMatchesAutopilotEntrypoint(
       `${launcher} ${entrypoint} autopilot --repo /brain`,
       entrypoint,
@@ -386,6 +388,12 @@ describe('verifyAutopilotRuntimeOwner', () => {
       isPidAlive: () => true,
       readProcessParentPid: () => 9999,
     })).toBe(false);
+    expect(verifyAutopilotManagedWorker(8765, 4321, [8765], '/$bunfs/root/gbrain', '/opt/gbrain', {
+      isPidAlive: () => true,
+      readProcessParentPid: () => 4321,
+      readProcessArgv: () => ['/opt/gbrain', 'jobs', 'work'],
+      readProcessExecutable: () => '/opt/gbrain',
+    })).toBe(true);
     expect(verifyAutopilotManagedWorker(8765, 4321, [], entrypoint, launcher, {
       isPidAlive: () => true,
       readProcessParentPid: () => 4321,
