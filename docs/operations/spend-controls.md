@@ -8,6 +8,48 @@ The orienting idea: **GBrain itself is rounding error; the spend that matters is
 downstream embedding.** These gates exist so a routine sync or enrich can't run up
 an unexpected embedding bill, while never wedging an unattended cron.
 
+## Queue zero-paid-spend boundary
+
+`GBRAIN_QUEUE_ZERO_PAID_SPEND` is the hard provider-call boundary for queue and
+daemon work. When it is on, every call through `invokeAI` is refused unless it
+uses a known local provider at a loopback endpoint. Shell jobs are refused too,
+because a spawned command sits outside the provider policy.
+
+Enable it durably for autopilot with:
+
+```bash
+gbrain autopilot --install --zero-paid-spend
+```
+
+The choice is stored as `autopilot.zero_paid_spend` in `config.json`, and every
+later bare `gbrain autopilot --install` reproduces it in the generated wrapper.
+Use `--no-zero-paid-spend` to disable it explicitly.
+
+For a manually started worker or supervisor, pass `--zero-paid-spend` or export
+`GBRAIN_QUEUE_ZERO_PAID_SPEND=1`. Unset, `0`, `false`, `no`, `off`, and an empty
+value mean off. Any other set value means on: an unrecognized value fails closed
+toward no paid spend instead of silently disabling the boundary.
+
+Inspect it with `gbrain doctor` or `gbrain jobs supervisor status --json`. The
+status distinguishes four facts that should not be conflated:
+
+- `current_process`: whether this CLI process sees the enforcing environment;
+- `durable_autopilot`: the saved choice for future daemon installs;
+- `wrapper_declaration`: whether a canonical generated wrapper declares the
+  boundary (configuration evidence only, not proof of its final shell env); and
+- `live_supervisor`: what the running supervisor recorded passing to its workers
+  (`null` means no current local DB-lock acquisition can be bound to the audit
+  receipt, including versions that predate this receipt).
+
+The wrapper declaration and config checks report consistency, not enforcement.
+Only
+`live_supervisor: true` is runtime evidence for the supervisor lane: its host,
+PID, queue, and DB-lock acquisition token all match the current lock. The
+actual provider admission remains centralized inside `invokeAI`. A loopback
+endpoint can itself proxy to a paid service; configuring such a relay under a
+local provider identity is outside what GBrain can detect from this side of the
+socket.
+
 **Keyless mode:** if you run with zero provider keys (`gbrain init --no-embedding`,
 the keyless bootstrap posture — see `docs/guides/bootstrap.md` and
 `docs/operations/headless-install.md`), nothing here can spend and none of these

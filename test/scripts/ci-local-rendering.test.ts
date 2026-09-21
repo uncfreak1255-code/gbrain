@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
 const source = readFileSync(join(import.meta.dir, '../../scripts/ci-local.sh'), 'utf8');
 const templateStart = source.indexOf("INNER_CMD=$(cat <<'EOF'");
@@ -93,6 +94,10 @@ printf '%s:%s\\n' "$stage" "\${DATABASE_URL-unset}" >> "$TRACE"
     for (const script of ['check-jsonb-pattern.sh', 'check-progress-to-stdout.sh', 'check-trailing-newline.sh', 'check-wasm-embedded.sh']) {
       put(`scripts/${script}`, 'exit 0');
     }
+    put('scripts/check-bun-test-timeout.sh', `
+printf 'timeout_guard:%s\\n' "\${DATABASE_URL-unset}" >> "$TRACE"
+[ "$FAIL_STAGE" != timeout_guard ] || exit 7
+`);
     put('scripts/run-unit-shard.sh', `
 printf 'unit:%s:%s\\n' "\${SHARD-all}" "\${DATABASE_URL-unset}" >> "$TRACE"
 printf '%s\\n' 'early diagnostic retained beyond summary tail' >&2
@@ -103,10 +108,11 @@ for line in {1..35}; do printf 'fixture progress %s\\n' "$line"; done
     put('scripts/run-e2e.sh', `
 set -eu
 case "$DATABASE_URL" in postgresql://postgres:postgres@postgres-*:5432/gbrain_test) ;; *) exit 42 ;; esac
-[ "$GBRAIN_PGBOUNCER_URL" = postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer ] || exit 43
+[ "$GBRAIN_PGBOUNCER_URL" = postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer_test ] || exit 43
 [ "$GBRAIN_PGBOUNCER_DIRECT_URL" = postgresql://postgres:postgres@postgres-1:5432/gbrain_test ] || exit 44
 [ "$GBRAIN_CI_REQUIRE_PGBOUNCER" = 1 ] || exit 45
 [ "$GBRAIN_TEST_DB" = 1 ] || exit 46
+printf 'target:%s\\n' "$DATABASE_URL" "$GBRAIN_PGBOUNCER_URL" "$GBRAIN_PGBOUNCER_DIRECT_URL" >> "$TRACE"
 printf 'e2e:%s:%s\\n' "\${SHARD-all}" "$*" >> "$TRACE"
 [ "$FAIL_STAGE" != e2e ] || exit 7
 `);
@@ -140,12 +146,15 @@ describe('ci-local execution coverage', () => {
       test(`serial and slow precede unit/E2E with live target forwarding (no-shard=${noShard}, diff=${diff})`, () => {
         const result = runPhases(noShard, diff);
         expect(result.status, result.stdout + result.stderr).toBe(0);
-        expect(result.trace.slice(0, 3)).toEqual(['verify:ambient-fixture', 'serial:unset', 'slow:unset']);
+        expect(result.trace.slice(0, 4)).toEqual(['timeout_guard:ambient-fixture', 'verify:ambient-fixture', 'serial:unset', 'slow:unset']);
         const units = result.trace.filter(line => line.startsWith('unit:'));
         const e2e = result.trace.filter(line => line.startsWith('e2e:'));
         expect(units).toHaveLength(noShard ? 1 : 4);
         expect(units.every(line => line.endsWith(':unset'))).toBe(true);
         expect(e2e).toHaveLength(noShard ? 1 : 4);
+        const targets = result.trace.filter(line => line.startsWith('target:'));
+        expect(targets).toHaveLength(noShard ? 3 : 12);
+        for (const target of targets) expect(() => assertSafeE2eDatabaseUrl(target.slice(7), {})).not.toThrow();
         if (diff) expect(e2e.every(line => line.endsWith('test/e2e/one.test.ts test/e2e/two.test.ts'))).toBe(true);
         if (!noShard) {
           expect(result.stdout).toContain('Complete shard logs saved to .context/ci-local-shards/');
@@ -158,15 +167,16 @@ describe('ci-local execution coverage', () => {
     }
   }
 
-  for (const failStage of ['verify', 'serial', 'slow', 'unit', 'e2e']) {
+  for (const failStage of ['timeout_guard', 'verify', 'serial', 'slow', 'unit', 'e2e']) {
     test(`a failed ${failStage} stage cannot produce a green local CI result`, () => {
       const result = runPhases(false, false, failStage);
       expect(result.status).not.toBe(0);
       expect(result.stdout).not.toContain('All 4 shards passed');
       if (failStage !== 'e2e') expect(result.trace.some(line => line.startsWith('e2e:'))).toBe(false);
-      if (['verify', 'serial', 'slow'].includes(failStage)) {
+      if (['timeout_guard', 'verify', 'serial', 'slow'].includes(failStage)) {
         expect(result.status).toBe(7);
         expect(result.trace.some(line => line.startsWith('unit:'))).toBe(false);
+        if (failStage === 'timeout_guard') expect(result.trace.some(line => line.startsWith('verify:'))).toBe(false);
       } else {
         for (const log of result.archivedLogs) {
           expect(log).toContain('early diagnostic retained beyond summary tail');
@@ -189,6 +199,10 @@ describe('ci-local execution coverage', () => {
         const end = source.indexOf('# Pre-flight: postgres host ports');
         const script = `command() { if [ "$1" = -v ] && [ "\${2:-}" = gitleaks ] && [ "$SCAN_MODE" = missing ]; then return 1; fi; builtin command "$@"; }\n${source.slice(0, end)}`;
         const log = join(home, 'scans');
+        // Keep this branch-routing fixture focused on the scanner result;
+        // the real detector/configuration canary runs separately in CI.
+        writeFileSync(join(home, 'scripts/test-gitleaks-config.sh'), 'exit 0\n');
+        writeFileSync(join(home, 'scripts/scan-worktree-secrets.sh'), 'gitleaks dir . --redact --no-banner\n');
         const result = spawnSync('bash', ['-c', script, join(home, 'scripts/ci-local.sh'), '--diff'], {
           encoding: 'utf8', timeout: 5_000,
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SCAN_MODE: gitleaks, SCAN_LOG: log },
@@ -227,7 +241,7 @@ printf ' %s pass\\n 0 fail\\n' "$FAKE_PASSES"
 exit "$FAKE_EXIT"
 `, { mode: 0o755 });
         const report = join(home, 'environment');
-        const pooled = 'postgresql://localhost:6543/gbrain_pgbouncer';
+        const pooled = 'postgresql://localhost:6543/gbrain_pgbouncer_test';
         const direct = 'postgresql://localhost:5434/gbrain_test';
         const parentCoverage = join(home, 'parent-coverage');
         const parentManifest = join(parentCoverage, 'lane-manifest.json');
@@ -262,5 +276,56 @@ exit "$FAKE_EXIT"
         rmSync(home, { recursive: true, force: true });
       }
     });
+  }
+});
+
+describe('local test configuration through run-e2e', () => {
+  for (const disabled of ['1', '0', undefined]) {
+    test(`preserves configuration isolation flag ${disabled ?? '(absent)'} through the actual Bun child`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'gbrain-e2e-env-file-'));
+      const repo = resolve(import.meta.dir, '../..');
+      try {
+        mkdirSync(join(fixture, 'scripts/lib'), { recursive: true });
+        mkdirSync(join(fixture, 'test/e2e'), { recursive: true });
+        // Copy the real loader into a separate fixture: its import.meta.dir
+        // must resolve ONLY our synthetic .env.testing, never the checkout's.
+        writeFileSync(join(fixture, 'scripts/run-e2e.sh'), readFileSync(join(repo, 'scripts/run-e2e.sh')));
+        writeFileSync(join(fixture, 'scripts/lib/test-env.sh'), 'ensure_pglite_snapshot() { :; }\n');
+        writeFileSync(join(fixture, 'test/e2e/helpers.ts'), readFileSync(join(repo, 'test/e2e/helpers.ts')));
+        symlinkSync(join(repo, 'src'), join(fixture, 'src'), 'dir');
+        symlinkSync(join(repo, 'test/helpers'), join(fixture, 'test/helpers'), 'dir');
+        writeFileSync(join(fixture, '.env.testing'), 'E2E_CONFIG_FILE_CANARY=synthetic-fixture-loaded\n');
+        const expected = {
+          disabled: disabled ?? null,
+          loaded: disabled === '1' ? null : 'synthetic-fixture-loaded',
+          operatorOverride: null,
+        };
+        writeFileSync(join(fixture, 'test/e2e/config-file-probe.test.ts'), `
+import { expect, test } from 'bun:test';
+import './helpers.ts';
+test('configuration file respects the parent isolation policy', () => {
+  expect({
+    disabled: process.env.GBRAIN_CI_DISABLE_TEST_ENV_FILE ?? null,
+    loaded: process.env.E2E_CONFIG_FILE_CANARY ?? null,
+    operatorOverride: process.env.GBRAIN_SOURCE ?? null,
+  }).toEqual(${JSON.stringify(expected)});
+});
+`);
+        const env: Record<string, string | undefined> = {
+          ...process.env, HOME: fixture, PATH: `${dirname(process.execPath)}:${process.env.PATH}`,
+          SHARD: '', COVERAGE_DIR: '', DATABASE_URL: '', GBRAIN_DATABASE_URL: '',
+          GBRAIN_CI_REQUIRE_PGBOUNCER: '0', GBRAIN_SOURCE: 'ambient-must-be-removed',
+          GBRAIN_CI_DISABLE_TEST_ENV_FILE: disabled,
+        };
+        delete env.E2E_CONFIG_FILE_CANARY;
+        const result = spawnSync('bash', [join(fixture, 'scripts/run-e2e.sh'), 'test/e2e/config-file-probe.test.ts'], {
+          cwd: fixture, encoding: 'utf8', timeout: 20_000, env,
+        });
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(result.stdout).toContain('1 pass');
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    }, 25_000);
   }
 });

@@ -628,7 +628,7 @@ async function runPipelineBodyInner(
     const resolved = f.entity_slug
       ? await resolveEntitySlugWithSource(ctx.engine, ctx.sourceId, f.entity_slug)
       : null;
-    const resolvedSlug = resolved?.slug ?? null;
+    const resolvedSlug = resolved?.source === 'fallback_slugify' ? null : resolved?.slug ?? null;
     const resolutionSource = resolved?.source ?? null;
 
     const { findRecordedFact } = await import('./write-single.ts');

@@ -1,3 +1,4 @@
+import { assertNoUnreviewedJobs, authorizeJobExecution, withSubmissionAuthority } from './submission-authority.ts';
 /**
  * MinionWorker — Concurrent in-process job worker with BullMQ-inspired patterns.
  *
@@ -47,6 +48,7 @@ import {
   type PoolDiagnostics,
 } from './db-probe.ts';
 import { buildJobContext } from './job-context.ts';
+import { withQueueZeroPaidSpend } from './zero-paid-spend.ts';
 import {
   runJobInChild,
   ChildSpawnInfraError,
@@ -381,6 +383,7 @@ export class MinionWorker extends EventEmitter {
     }
 
     await this.queue.ensureSchema();
+    await assertNoUnreviewedJobs(this.engine);
     this.running = true;
     // R2-9 lifecycle: (re-)enable the event-loop-delay histogram for this
     // run; stop() disables it so embedding hosts / test suites that cycle
@@ -1302,10 +1305,10 @@ export class MinionWorker extends EventEmitter {
           abort.signal,
           this.shutdownAbort.signal,
         );
-
     try {
-      const result = isolated
-        ? await runJobInChild({
+      const authority = await authorizeJobExecution(this.engine, job);
+      const result = await withQueueZeroPaidSpend(() => isolated
+        ? runJobInChild({
             jobId: job.id,
             jobName: job.name,
             lockToken,
@@ -1316,7 +1319,7 @@ export class MinionWorker extends EventEmitter {
           })
         // #4218: attribute every gateway.chat() the handler makes to this
         // job so chat_usage_log rows carry `phase = 'job:<name>'`.
-        : await withChatPhase(`job:${job.name}`, () => handler(context as MinionJobContext));
+        : withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => handler(context as MinionJobContext)), abort.signal));
 
       // The child spawned and ran — the spawn path is healthy again.
       this._consecutiveChildSpawnFailures = 0;

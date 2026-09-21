@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync, mkdirSync, rmSync } from 'fs';
 import { spawn } from 'child_process';
 import { join } from 'path';
-import { tmpdir } from 'os';
-import { readSupervisorEvents, computeSupervisorAuditFilename } from '../src/core/minions/handlers/supervisor-audit.ts';
+import { hostname, tmpdir } from 'os';
+import { readSupervisorEvents, readSupervisorStartEventForIdentity, computeSupervisorAuditFilename } from '../src/core/minions/handlers/supervisor-audit.ts';
 import { calculateBackoffMs, resolveHardStopMaxCrashes, MinionSupervisor, type SupervisorEmission } from '../src/core/minions/supervisor.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
@@ -105,6 +105,42 @@ function readAudit(auditDir: string) {
     else process.env.GBRAIN_AUDIT_DIR = origEnv;
   }
 }
+
+describe('supervisor audit identity lookup', () => {
+  it('retains exact live start evidence across the 24h window and weekly rotation', () => {
+    const auditDir = join(tmpdir(), `gbrain-supervisor-identity-${process.pid}-${Date.now()}`);
+    mkdirSync(auditDir, { recursive: true });
+    const prior = process.env.GBRAIN_AUDIT_DIR;
+    process.env.GBRAIN_AUDIT_DIR = auditDir;
+    try {
+      writeFileSync(join(auditDir, 'supervisor-2025-W01.jsonl'), [
+        JSON.stringify({ event: 'started', ts: '2025-01-01T00:00:00.000Z', supervisor_pid: 41, queue: 'default', lock_acquisition_token: 'wanted', zero_paid_spend: true }),
+        '',
+      ].join('\n'));
+      writeFileSync(join(auditDir, 'supervisor-2026-W38.jsonl'), [
+        '{truncated',
+        JSON.stringify({ event: 'started', ts: '2026-09-20T00:00:00.000Z', supervisor_pid: 41, queue: 'default', lock_acquisition_token: 'stale', zero_paid_spend: false }),
+        '',
+      ].join('\n'));
+
+      const found = readSupervisorStartEventForIdentity({
+        holder_pid: 41,
+        holder_host: hostname(),
+        acquisition_token: 'wanted',
+      }, 'default');
+      expect((found as Record<string, unknown>)?.zero_paid_spend).toBe(true);
+      expect(readSupervisorStartEventForIdentity({
+        holder_pid: 41,
+        holder_host: 'remote-host',
+        acquisition_token: 'wanted',
+      }, 'default')).toBeNull();
+    } finally {
+      if (prior === undefined) delete process.env.GBRAIN_AUDIT_DIR;
+      else process.env.GBRAIN_AUDIT_DIR = prior;
+      rmSync(auditDir, { recursive: true, force: true });
+    }
+  });
+});
 
 /** Poll until predicate returns true or deadline elapses. */
 async function waitFor(pred: () => boolean, timeoutMs: number, tickMs = 20): Promise<boolean> {
@@ -237,7 +273,10 @@ describe('MinionSupervisor', () => {
       try {
         // hard ceiling defaults to SUP_MAX_CRASHES in the harness (see
         // spawnSupervisor) so this give-up lifecycle still fires at 3 (#1994).
-        const sup = spawnSupervisor(h, { SUP_MAX_CRASHES: '3' });
+        const sup = spawnSupervisor(h, {
+          SUP_MAX_CRASHES: '3',
+          SUP_ZERO_PAID_SPEND: '1',
+        });
         const { code } = await sup.exited;
 
         expect(code).toBe(1);
@@ -255,6 +294,12 @@ describe('MinionSupervisor', () => {
         expect(eventTypes).toContain('max_crashes_exceeded');
         expect(eventTypes).toContain('shutting_down');
         expect(eventTypes).toContain('stopped');
+
+        // The status/doctor receipt records what this live supervisor really
+        // handed to workers, rather than inferring runtime state from config.
+        const startedEvt = events.filter(e => e.event === 'started').pop();
+        expect((startedEvt as Record<string, unknown>).zero_paid_spend).toBe(true);
+        expect((startedEvt as Record<string, unknown>).lock_acquisition_token).toBeString();
 
         // The stopped event should carry exit_code=1 and reason=max_crashes.
         const stoppedEvt = events.filter(e => e.event === 'stopped').pop();

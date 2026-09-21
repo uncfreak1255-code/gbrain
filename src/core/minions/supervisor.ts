@@ -82,8 +82,12 @@ export interface SupervisorOpts {
   healthInterval: number;
   /** Path to the gbrain CLI executable (MUST be a compiled binary; .ts sources cannot be spawned). */
   cliPath: string;
-  /** Allow shell jobs on child worker. Default: false. When true, sets GBRAIN_ALLOW_SHELL_JOBS=1 on child env. */
+  /** Allow shell jobs on child worker. Default: false. When true, sets GBRAIN_ALLOW_SHELL_JOBS=1 on the
+   *  child env AND passes `--allow-shell-jobs` (buildWorkerArgs) so the worker's cwd-.env quarantine
+   *  cannot silently drop the opt-in. */
   allowShellJobs: boolean;
+  /** Workers may call only explicitly local providers, and may not run shell jobs. */
+  zeroPaidSpend: boolean;
   /** JSON mode: emit JSONL events on stderr, reserve stdout for data payloads. Default: false. */
   json: boolean;
   /** RSS threshold (MB) passed to the spawned worker as `--max-rss N`.
@@ -159,6 +163,7 @@ const DEFAULTS: Omit<SupervisorOpts, 'cliPath'> = {
   maxCrashes: 10,
   healthInterval: 60_000,
   allowShellJobs: false,
+  zeroPaidSpend: false,
   json: false,
   maxRssMb: 2048,
   // issue #1801 progress-watchdog defaults. Conservative: a dead-pool wedge is
@@ -180,7 +185,8 @@ const DEFAULTS: Omit<SupervisorOpts, 'cliPath'> = {
  * niceness also inherits to the worker's own children automatically.
  */
 export function buildWorkerArgs(
-  opts: Pick<SupervisorOpts, 'concurrency' | 'queue' | 'maxRssMb' | 'nice_requested' | 'jobIsolation'>,
+  opts: Pick<SupervisorOpts, 'concurrency' | 'queue' | 'maxRssMb' | 'nice_requested' | 'jobIsolation'> &
+    Partial<Pick<SupervisorOpts, 'allowShellJobs' | 'zeroPaidSpend'>>,
 ): string[] {
   const args = [
     'jobs', 'work',
@@ -197,6 +203,19 @@ export function buildWorkerArgs(
   // argv is byte-identical (pinned by supervisor-build-worker-args.test.ts).
   if (opts.jobIsolation === 'process') {
     args.push('--job-isolation', 'process');
+  }
+  // Conditional push: the shell opt-in travels as a flag as well as env. The
+  // worker's startup cwd-.env quarantine (core/env-trust.ts) drops
+  // GBRAIN_ALLOW_SHELL_JOBS whenever a .env in the worker's cwd assigns it,
+  // so an env-only handoff could silently disable shell jobs; `jobs work`
+  // re-asserts the env from this flag after its preflight.
+  if (opts.allowShellJobs) {
+    args.push('--allow-shell-jobs');
+  }
+  // Conditional push, same handshake: the spend boundary must survive the
+  // handoff to a spawned worker rather than relying on env inheritance alone.
+  if (opts.zeroPaidSpend) {
+    args.push('--zero-paid-spend');
   }
   return args;
 }
@@ -806,6 +825,10 @@ export class MinionSupervisor {
       // #1849: record the EFFECTIVE --max-rss so `gbrain doctor` can surface
       // the cap a rogue second supervisor would have fought over.
       max_rss_mb: this.opts.maxRssMb,
+      lock_acquisition_token: this.dbLock.acquisitionToken,
+      // Runtime evidence for doctor/status. This records what the live
+      // supervisor actually passed to its workers, not merely config intent.
+      zero_paid_spend: this.opts.zeroPaidSpend,
       // Niceness (issue #1815): record requested + effective so doctor/status can
       // surface a failed renice even for a detached supervisor whose stderr is gone.
       ...(this.opts.nice_requested !== undefined ? { nice_requested: this.opts.nice_requested } : {}),

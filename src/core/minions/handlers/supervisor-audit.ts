@@ -30,6 +30,7 @@
  */
 
 import { createAuditWriter, computeIsoWeekFilename } from '../../audit/audit-writer.ts';
+import { hostname } from 'node:os';
 import type { SupervisorEmission } from '../supervisor.ts';
 
 /**
@@ -115,6 +116,60 @@ export function readSupervisorEvents(opts: { sinceMs?: number } = {}): Superviso
     }
   }
   return events;
+}
+
+/**
+ * Find the exact start event for the queue lock that is live now.
+ *
+ * Status windows intentionally stay bounded to 24 hours for crash counts, but
+ * a healthy supervisor may outlive that window or an ISO-week rotation. Its
+ * start event carries the effective zero-paid-spend setting, so search the
+ * retained weekly files newest-first and bind the result to pid + queue + the
+ * unguessable lock acquisition token. Remote lock holders cannot borrow this
+ * host's audit evidence.
+ */
+export function readSupervisorStartEventForIdentity(
+  identity: { holder_pid: number; holder_host: string; acquisition_token: string },
+  queue: string,
+): SupervisorEmission | null {
+  if (identity.holder_host !== hostname()) return null;
+  const fs = require('node:fs') as typeof import('node:fs');
+  const path = require('node:path') as typeof import('node:path');
+  const dir = writer.resolveDir();
+  let filenames: string[];
+  try {
+    filenames = fs.readdirSync(dir)
+      .filter(name => /^supervisor-\d{4}-W\d{2}\.jsonl$/.test(name))
+      .sort()
+      .reverse();
+  } catch {
+    return null;
+  }
+
+  for (const filename of filenames) {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(dir, filename), 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = raw.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i]?.trim()) continue;
+      try {
+        const event = JSON.parse(lines[i]!) as SupervisorEmission;
+        if (event.event === 'started' &&
+            (event as Record<string, unknown>).supervisor_pid === identity.holder_pid &&
+            (event as Record<string, unknown>).queue === queue &&
+            (event as Record<string, unknown>).lock_acquisition_token === identity.acquisition_token) {
+          return event;
+        }
+      } catch {
+        // Ignore malformed/truncated rows and keep searching older evidence.
+      }
+    }
+  }
+  return null;
 }
 
 /**

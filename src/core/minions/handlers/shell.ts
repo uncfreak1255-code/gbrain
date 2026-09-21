@@ -33,6 +33,7 @@ import { UnrecoverableError } from '../types.ts';
 import { deriveEnvKey, resolveInheritValue } from './shell-inherit.ts';
 import { validateShellJobParams } from './shell-validate.ts';
 import { redactSecretsInText } from './shell-redact.ts';
+import { queueZeroPaidSpendEnabled } from '../zero-paid-spend.ts';
 import { loadConfig } from '../../config.ts';
 
 /** Environment variables passed through to shell children by default. Callers
@@ -206,11 +207,31 @@ class TailBuffer {
 export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResult> {
   if (process.env.GBRAIN_ALLOW_SHELL_JOBS !== '1') {
     const warning =
-      `[shell] Job #${ctx.id} rejected: GBRAIN_ALLOW_SHELL_JOBS=1 not set on this worker.\n` +
-      '        Shell jobs require the env var on the worker process.';
+      `[shell] Job #${ctx.id} rejected: shell jobs are not enabled on this worker.\n` +
+      '        Start it with `gbrain jobs work --allow-shell-jobs` (or export GBRAIN_ALLOW_SHELL_JOBS=1\n' +
+      '        from your shell; a .env in the working directory cannot set it).';
     console.warn(warning);
     throw new UnrecoverableError(
-      'shell handler disabled on this worker (set GBRAIN_ALLOW_SHELL_JOBS=1 to execute shell jobs)',
+      'shell handler disabled on this worker (start it with --allow-shell-jobs or ' +
+      'GBRAIN_ALLOW_SHELL_JOBS=1 to execute shell jobs)',
+    );
+  }
+
+  // A zero-paid-spend worker cannot admit a shell job. The queue boundary is
+  // an in-process policy on the AI gateway (core/minions/zero-paid-spend.ts);
+  // a spawned command runs outside that process and reaches any paid endpoint
+  // it likes — `curl https://api.anthropic.com/...` bills the account without
+  // the policy ever seeing an invocation. Nothing here can police a child's
+  // network, so the only honest answer is to refuse before spawning.
+  if (queueZeroPaidSpendEnabled()) {
+    const warning =
+      `[shell] Job #${ctx.id} rejected: this worker enforces zero paid spend.\n` +
+      '        Shell commands run outside the provider policy, so they cannot be proven free.\n' +
+      '        Run shell jobs on a worker started without --zero-paid-spend.';
+    console.warn(warning);
+    throw new UnrecoverableError(
+      'queue_zero_paid_spend: refused shell job on a zero-paid-spend worker; ' +
+      'a child process is outside the provider policy, so no command was run',
     );
   }
 
