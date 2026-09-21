@@ -26,17 +26,27 @@ import type { BrainEngine } from '../core/engine.ts';
 import { loadPreferences } from '../core/preferences.ts';
 import { loadConfig, loadConfigFileOnly, saveConfig, gbrainPath as gbrainHomePath } from '../core/config.ts';
 import { persistDurableZeroPaidSpend, readDurableZeroPaidSpend } from '../core/ai/zero-paid-spend-config.ts';
+import { inspectZeroPaidSpendStatus } from '../core/ai/zero-paid-spend-status.ts';
+import {
+  autopilotStatusExitCode,
+  classifyAutopilotStatus,
+  parseAutopilotRuntimeLock,
+  parseLaunchdDisabledOverride,
+  parseLaunchdJobPid,
+  readLaunchdDisabledOverrideForLabel,
+  readLaunchdJobPidForLabel,
+  writeAutopilotRuntimeLock,
+  type AutopilotRuntimeLock,
+} from '../core/autopilot-runtime-status.ts';
 import {
   QUEUE_ZERO_PAID_SPEND_FLAG,
   queueZeroPaidSpendEnabled,
   resolveZeroPaidSpendChoice,
 } from '../core/minions/zero-paid-spend.ts';
-import {
-  classifyAutopilotLockHolder,
-  type AutopilotLockProbeDeps,
-  isPidAlive,
-} from '../core/autopilot-lock.ts';
+import { classifyAutopilotLockHolder, type AutopilotLockProbeDeps,
+  isPidAlive, verifyAutopilotRuntimeTree } from '../core/autopilot-lock.ts';
 import { ChildWorkerSupervisor } from '../core/minions/child-worker-supervisor.ts';
+import { readWorkers } from '../core/minions/worker-registry.ts';
 import { VERSION } from '../version.ts';
 import {
   canSelfUpdate,
@@ -75,6 +85,13 @@ import {
 export { autopilotLockPath, autopilotDisabledMarkerPath, autopilotPausedMarkerPath, autopilotLaunchdLabel };
 export { relativeSourceLocalPathSkipWarning as relativeLocalPathSkipWarning };
 export { persistDurableZeroPaidSpend };
+export {
+  autopilotStatusExitCode,
+  classifyAutopilotStatus,
+  parseAutopilotRuntimeLock,
+  parseLaunchdDisabledOverride,
+  parseLaunchdJobPid,
+} from '../core/autopilot-runtime-status.ts';
 
 /**
  * v0.37.7.0 #1162 — classify autopilot reconnect-loop errors.
@@ -670,6 +687,14 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   const engineType = cfg?.engine ?? 'pglite';
   const useMinionsDispatch = mode !== 'off' && engineType === 'postgres' && !forceInline;
   const spawnManagedWorker = useMinionsDispatch && !noWorker;
+  // Upgrade the PID-only acquisition record once the worker topology is known.
+  // Status treats this payload as live only while the heartbeat remains fresh.
+  try {
+    writeAutopilotRuntimeLock(lockPath, {
+      zero_paid_spend: queueZeroPaidSpendEnabled(),
+      worker_pid: null,
+    });
+  } catch { /* best-effort projection; admission remains fail-closed */ }
 
   // Engine identity at boot, re-checked every tick. A cross-engine migration
   // flips config.json at the END of its copy; this long-lived process would
@@ -687,6 +712,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
 
   let stopping = false;
   let childSupervisor: ChildWorkerSupervisor | null = null;
+  const projectManagedWorker = (workerPid: number | null) => {
+    try { writeAutopilotRuntimeLock(lockPath, { zero_paid_spend: queueZeroPaidSpendEnabled(), worker_pid: workerPid }); }
+    catch { /* best-effort projection; admission remains fail-closed */ }
+  };
 
   // #1872: graceful engine shutdown. On PGLite the cycle steps run INLINE in
   // this process, so a hard `process.exit` mid-write (systemctl stop →
@@ -759,14 +788,17 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         // Matches the prior console output shape so operators reading
         // existing logs see the same lines.
         if (event.kind === 'worker_spawned') {
+          projectManagedWorker(event.pid);
           console.log(
             `[autopilot] Minions worker spawned (pid: ${event.pid}, watchdog: ${autopilotMaxRssMb}MB${event.tini ? ', tini: active' : ''})`,
           );
         } else if (event.kind === 'worker_spawn_failed') {
+          projectManagedWorker(null);
           console.error(
             `[autopilot] worker spawn failed (${event.phase}): ${event.error}${event.errnoCode ? ` (code=${event.errnoCode})` : ''}`,
           );
         } else if (event.kind === 'worker_exited') {
+          projectManagedWorker(null);
           console.error(
             `[autopilot] worker exited code=${event.code} signal=${event.signal} after ${event.runDurationMs}ms, crashCount=${event.crashCount}, cause=${event.likelyCause}`,
           );
@@ -780,9 +812,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
               `[autopilot] crash backoff ${event.ms}ms (crashCount=${event.crashCount})`,
             );
           }
-          // reason='clean_exit' with ms:0 is the steady-state watchdog drain;
-          // logging every iteration would be noisy. Keep silent (the
-          // worker_exited line already covers the user-visible signal).
+          // Keep steady-state clean-exit watchdog drains quiet; worker_exited
+          // already provides the user-visible signal.
         } else if (event.kind === 'health_warn') {
           console.error(
             `[autopilot] health_warn: ${event.reason} count=${event.count} window=${event.windowMs}ms`,
@@ -790,8 +821,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         }
       },
     });
-    // Fire-and-forget; runs alongside the dispatch loop. shutdown() drives
-    // the child-supervisor's isStopping accessor + drain.
+    // Fire-and-forget alongside dispatch; shutdown() drives its drain.
     void childSupervisor.run();
   } else if (!useMinionsDispatch) {
     const why = mode === 'off'
@@ -802,11 +832,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
     console.log('[autopilot] --no-worker set: dispatch loop only (worker managed externally)');
   }
 
-  // Async shutdown with 35s drain window for the worker child. The worker
-  // has its own SIGTERM handler (minions/worker.ts:79-85) that drains
-  // in-flight jobs for up to 30s before exit. We give it 35s here to
-  // account for signal-delivery latency, then SIGKILL as a last resort.
-  //
+  // The worker drains SIGTERM for up to 30s; allow 35s, then SIGKILL.
   // No `process.on('exit')` handler — its callback runs synchronously and
   // cannot await the worker's drain.
   const shutdown = async (sig: string) => {
@@ -873,7 +899,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
 
     // Refresh the lock mtime so another cron-fired autopilot doesn't
     // declare the instance stale after 10 minutes (Codex C).
-    try { utimesSync(lockPath, new Date(), new Date()); } catch { /* best-effort */ }
+    if (spawnManagedWorker) projectManagedWorker(childSupervisor?.childPid ?? null);
+    else {
+      try { utimesSync(lockPath, new Date(), new Date()); } catch { /* best-effort */ }
+    }
 
     // #2608: loud once-per-process signal when no chat provider is servable.
     // Without this a keyless daemon looks healthy forever while every LLM
@@ -2115,13 +2144,17 @@ function installLaunchd(wrapperPath: string, home: string, repoPath: string) {
     // plist written under an umask-0 parent stays 0666 forever) — so
     // normalize unconditionally.
     chmodSync(plistPath(), 0o644);
-    // Unload-before-load (same pattern as uninstall): bare `launchctl load`
-    // on an already-loaded agent errors and aborted every reinstall — and a
-    // running daemon must be relaunched anyway to pick up a regenerated
-    // wrapper / env file (#2608: the boot warning tells users to re-run
-    // --install to reload; this line is what makes that true on macOS).
-    execSync(`launchctl unload "${plistPath()}" 2>/dev/null || true`, { stdio: 'pipe' });
-    execSync(`launchctl load "${plistPath()}"`, { stdio: 'pipe' });
+    const uid = typeof process.getuid === 'function'
+      ? process.getuid()
+      : Number(execSync('id -u', { encoding: 'utf8' }).trim());
+    const domain = `gui/${uid}`;
+    const service = `${domain}/${autopilotLaunchdLabel()}`;
+    // Legacy unload/load preserves launchd's persistent disabled override.
+    // Clear it, replace the registered job, then force one guarded start.
+    execSync(`launchctl enable "${service}"`, { stdio: 'pipe' });
+    execSync(`launchctl bootout "${service}" 2>/dev/null || true`, { stdio: 'pipe' });
+    execSync(`launchctl bootstrap "${domain}" "${plistPath()}"`, { stdio: 'pipe' });
+    execSync(`launchctl kickstart -k "${service}"`, { stdio: 'pipe' });
     console.log(`Installed launchd service: ${autopilotLaunchdLabel()}`);
     console.log(`  Repo: ${repoPath}`);
     console.log(`  Log: ~/.gbrain/autopilot.log`);
@@ -2343,7 +2376,7 @@ function installCrontab(wrapperPath: string, home: string) {
       // environment until it exits. Never auto-kill a user process; tell
       // them exactly how (#2608: makes the boot warning's re-run---install
       // remediation honest on the cron target).
-      console.log(`  A running autopilot loop keeps its old environment until it exits — end it with: kill $(cat '${autopilotLockPath().replace(/'/g, "'\\''")}')`);
+      console.log(`  A running autopilot loop keeps its old environment until it exits — end it with: kill $(head -n 1 '${autopilotLockPath().replace(/'/g, "'\\''")}')`);
       console.log('  The next cron tick relaunches it with the refreshed wrapper and env file.');
       return;
     }
@@ -2509,88 +2542,6 @@ export function autopilotEngineIdentity(
   });
 }
 
-export type AutopilotState = 'not_installed' | 'disabled' | 'paused' | 'never_run' | 'stale' | 'fresh';
-
-export interface AutopilotStatusReport {
-  installed: boolean;
-  install_target: InstallTarget | null;
-  state: AutopilotState;
-  disabled_reason: string | null;
-  paused_reason: string | null;
-  heartbeat_age_seconds: number | null;
-  stale_after_seconds: number;
-  last_log: string;
-}
-
-/**
- * Exit codes for `gbrain autopilot --status`, so cron and CI can gate on it.
- *   0 — fresh, or nothing installed (nothing claimed, nothing broken)
- *   1 — installed but not syncing (stale heartbeat, never ran, or parked on a
- *       cooperative pause marker — a live migrate, or one that died without
- *       cleaning up; either way the brain is not being kept current)
- *   2 — the daemon took itself out of rotation (repo gone)
- */
-export function autopilotStatusExitCode(state: AutopilotState): number {
-  if (state === 'disabled') return 2;
-  if (state === 'stale' || state === 'never_run' || state === 'paused') return 1;
-  return 0;
-}
-
-/**
- * Pure classifier so the tri-state is testable without an installed daemon.
- *
- * The heartbeat is the lock mtime, which the tick loop already refreshes every
- * pass (`utimesSync(lockPath, ...)`). Deliberately NOT a new artifact: a second
- * one could disagree with the first, and a daemon still running a pre-upgrade
- * binary would never write it, so a healthy install would report stale until it
- * happened to relaunch.
- */
-export function classifyAutopilotStatus(input: {
-  installed: boolean;
-  installTarget: InstallTarget | null;
-  disabledReason: string | null;
-  pausedReason?: string | null;
-  heartbeatAgeSeconds: number | null;
-  intervalSeconds: number;
-  lastLog: string;
-}): AutopilotStatusReport {
-  // Tolerance = 6 intervals. The adaptive scheduler sleeps TWO intervals
-  // between ticks on the healthiest brains (score >= 90), and the heartbeat
-  // only refreshes at tick top — so a healthy gap is cycle_duration + 2x
-  // interval, and a 3x tolerance would flap 'stale' exit-1 alarms on exactly
-  // the installs doing best. 6x still catches the dead-daemon incident in
-  // 30 minutes at the default interval instead of 71 days. A non-finite or
-  // non-positive interval (a typo'd flag upstream) would make staleAfter NaN
-  // and every age comparison false — reading a long-dead daemon as 'fresh' —
-  // so the pure layer defends itself too.
-  const staleAfter = Number.isFinite(input.intervalSeconds) && input.intervalSeconds > 0
-    ? input.intervalSeconds * 6
-    : 1800;
-  const pausedReason = input.pausedReason ?? null;
-  let state: AutopilotState;
-  if (input.disabledReason !== null) state = 'disabled';
-  else if (!input.installed) state = 'not_installed';
-  // Paused outranks the heartbeat states: the tick loop refreshes its
-  // heartbeat BEFORE honoring the pause marker, so a parked daemon looks
-  // 'fresh' by mtime while doing no work. Without this state a pause marker
-  // orphaned by a dead migrate is invisible — the daemon idles forever and
-  // status swears everything is fine (the 71-day incident's shape again).
-  else if (pausedReason !== null) state = 'paused';
-  else if (input.heartbeatAgeSeconds === null) state = 'never_run';
-  else state = input.heartbeatAgeSeconds > staleAfter ? 'stale' : 'fresh';
-
-  return {
-    installed: input.installed,
-    install_target: input.installTarget,
-    state,
-    disabled_reason: input.disabledReason,
-    paused_reason: pausedReason,
-    heartbeat_age_seconds: input.heartbeatAgeSeconds,
-    stale_after_seconds: staleAfter,
-    last_log: input.lastLog,
-  };
-}
-
 /**
  * Which supervisor, if any, currently holds an autopilot install.
  *
@@ -2654,20 +2605,44 @@ function showStatus(json: boolean, intervalSeconds: number) {
   } catch { /* not paused */ }
 
   let heartbeatAgeSeconds: number | null = null;
+  let runtime: AutopilotRuntimeLock | null = null;
   try {
     const { mtimeMs } = statSync(autopilotLockPath());
     heartbeatAgeSeconds = Math.max(0, Math.floor((Date.now() - mtimeMs) / 1000));
+    runtime = parseAutopilotRuntimeLock(readFileSync(autopilotLockPath(), 'utf8'));
   } catch { /* never ran, or already cleaned up */ }
 
   const installTarget = detectInstalledTarget();
+  const launchdReadable = installTarget === 'macos' && process.platform === 'darwin' && typeof process.getuid === 'function';
+  const uid = launchdReadable ? process.getuid!() : null;
+  const launchdDisabledOverride = uid === null ? null : readLaunchdDisabledOverrideForLabel(autopilotLaunchdLabel(), uid);
+  const entrypoint = resolvePath(process.argv[1] ?? '');
+  const launcher = resolvePath(process.execPath);
+  const runtimeVerification = verifyAutopilotRuntimeTree(runtime, {
+    servicePid: uid === null ? null : readLaunchdJobPidForLabel(autopilotLaunchdLabel(), uid),
+    serviceManaged: launchdReadable,
+    entrypoint,
+    launcher,
+    registeredWorkerPids: readWorkers().map((worker) => worker.pid),
+  });
+  const configuredZeroPaidSpend = inspectZeroPaidSpendStatus();
   const report = classifyAutopilotStatus({
     installed: installTarget !== null,
     installTarget,
     disabledReason,
+    launchdDisabledOverride,
     pausedReason,
     heartbeatAgeSeconds,
     intervalSeconds,
     lastLog: lastLine,
+    runtime,
+    runtimeOwnerVerified: runtimeVerification.ownerVerified,
+    runtimeWorkerVerified: runtimeVerification.workerVerified,
+    zeroPaidSpendConfiguration: {
+      durable_autopilot: configuredZeroPaidSpend.durable_autopilot,
+      wrapper_declaration: configuredZeroPaidSpend.wrapper_declaration,
+      configuration_consistent: configuredZeroPaidSpend.configuration_consistent,
+    },
   });
 
   if (json) {
@@ -2705,6 +2680,14 @@ function showStatus(json: boolean, intervalSeconds: number) {
         break;
     }
     if (lastLine) console.log(`Last log: ${lastLine}`);
+    const live = report.zero_paid_spend.live_managed_worker;
+    const managed = report.zero_paid_spend.managed_worker;
+    console.log(
+      `Zero paid spend: live_managed_worker=${live === null ? 'unknown' : live ? 'on' : 'off'} ` +
+      `managed_worker=${managed === null ? 'unknown' : managed ? 'yes' : 'no'} ` +
+      `durable=${report.zero_paid_spend.durable_autopilot} ` +
+      `wrapper=${report.zero_paid_spend.wrapper_declaration}`,
+    );
   }
 
   setCliExitVerdict(autopilotStatusExitCode(report.state));
