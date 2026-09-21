@@ -21,6 +21,7 @@ function readCommandToken(command: string, start: number): { value: string; next
   if (command[index] === '"') {
     const end = command.indexOf('"', index + 1);
     if (end < 0) return null;
+    if (end + 1 < command.length && !/\s/.test(command[end + 1])) return null;
     return { value: command.slice(index + 1, end), next: end + 1 };
   }
   let end = index;
