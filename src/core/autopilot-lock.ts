@@ -14,8 +14,18 @@ export interface AutopilotLockProbeDeps {
   readProcessExecutable?: (pid: number) => string | null;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function readCommandToken(command: string, start: number): { value: string; next: number } | null {
+  let index = start;
+  while (index < command.length && /\s/.test(command[index])) index++;
+  if (index >= command.length) return null;
+  if (command[index] === '"') {
+    const end = command.indexOf('"', index + 1);
+    if (end < 0) return null;
+    return { value: command.slice(index + 1, end), next: end + 1 };
+  }
+  let end = index;
+  while (end < command.length && !/\s/.test(command[end])) end++;
+  return { value: command.slice(index, end), next: end };
 }
 
 /** Require the exact release entrypoint immediately before the autopilot
@@ -30,12 +40,14 @@ export function commandMatchesAutopilotEntrypoint(
   const normalizedEntrypoint = entrypoint.replace(/\\/g, '/').trim();
   const normalizedLauncher = launcher.replace(/\\/g, '/').trim();
   if (!normalizedEntrypoint.startsWith('/') || !normalizedLauncher.startsWith('/')) return false;
-  const exact = escapeRegExp(normalizedEntrypoint);
-  const entry = `(?:"${exact}"|${exact})`;
-  const direct = new RegExp(`^${entry}\\s+autopilot(?:\\s|$)`);
-  const exactLauncher = escapeRegExp(normalizedLauncher);
-  const bun = new RegExp(`^(?:"${exactLauncher}"|${exactLauncher})\\s+${entry}\\s+autopilot(?:\\s|$)`);
-  return direct.test(normalizedCommand) || bun.test(normalizedCommand);
+  const first = readCommandToken(normalizedCommand, 0);
+  if (first === null) return false;
+  const entry = first.value === normalizedLauncher
+    ? readCommandToken(normalizedCommand, first.next)
+    : first;
+  if (entry === null || entry.value !== normalizedEntrypoint) return false;
+  const subcommand = readCommandToken(normalizedCommand, entry.next);
+  return subcommand?.value === 'autopilot';
 }
 
 export function verifyAutopilotRuntimeOwner(

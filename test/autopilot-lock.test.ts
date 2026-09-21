@@ -246,7 +246,17 @@ describe('verifyAutopilotRuntimeOwner', () => {
       launcher,
     )).toBe(true);
     expect(commandMatchesAutopilotEntrypoint(
+      `"${launcher}"   "${entrypoint}"\tautopilot --repo /brain`,
+      entrypoint,
+      launcher,
+    )).toBe(true);
+    expect(commandMatchesAutopilotEntrypoint(
       `bun /tmp/src/cli.ts autopilot --repo /brain`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+    expect(commandMatchesAutopilotEntrypoint(
+      `${launcher} "${entrypoint} autopilot --repo /brain`,
       entrypoint,
       launcher,
     )).toBe(false);
