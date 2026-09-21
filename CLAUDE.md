@@ -435,11 +435,11 @@ grep -E '(fail\)|✗|error:' /tmp/ship_units.txt | head -30
 bun test 2>&1 | tail -10
 ```
 
-The pipe form silently breaks /ship Step T1 (test failure ownership triage) and
-the test verification gate (Step 16) because:
+The pipe form silently breaks test failure ownership triage and the release
+verification gate because:
 - `$?` after a pipe is the LAST command's exit code (`tail` → 0), not bun's
 - bun prints failure details before the summary line, so `tail -N` drops them
-- Step T1 needs the full failure list to classify in-branch vs pre-existing
+- release triage needs the full failure list to classify in-branch vs pre-existing
 
 This bit us during v0.26.2 ship: `bun test 2>&1 | tail -10` reported "3911 pass / 23 fail"
 but no failure details survived, forcing a 23-minute re-run to triage.
@@ -527,9 +527,9 @@ ms, max waiters) for `--json`; a one-line summary prints to stderr.
 ## Version locations (single source of truth: `VERSION` file)
 
 Every release advances the version in **every file in the table below at
-once**. Keep these in sync. `/ship` enforces this via Step 12's idempotency check (VERSION vs
-package.json drift), but the canonical list lives here so future runs and
-the auto-update agent know where to look.
+once**. Keep these in sync. The CI version gate and mandatory audit below enforce
+`VERSION` versus `package.json` drift; the canonical list lives here so release
+runs and the auto-update agent know where to look.
 
 **Version format is mandatory: `MAJOR.MINOR.PATCH.MICRO` (four numeric
 segments, dot-separated, no leading `v`).** Every new release MUST use the
@@ -546,7 +546,7 @@ four numeric segments are required first. Historical 3-segment versions
 
 | File | What lives there | Format |
 |---|---|---|
-| `VERSION` | The single source of truth. Read first by `/ship`, the binary, and CI version-gate. | Bare 4-segment string `MAJOR.MINOR.PATCH.MICRO` (e.g. `0.31.4.1`), no leading `v`. |
+| `VERSION` | The single source of truth. Read first during release preparation, by the binary, and by the CI version gate. | Bare 4-segment string `MAJOR.MINOR.PATCH.MICRO` (e.g. `0.31.4.1`), no leading `v`. |
 | `package.json` | Bun/npm package version. `gbrain --version` reads it via the compiled binary's bundled package metadata. CI version-gate cross-checks this against `VERSION` and fails if they drift. | `"version": "0.31.4.1"` |
 | `CHANGELOG.md` | Top entry header `## [0.31.4.1] - YYYY-MM-DD` plus the "To take advantage of v0.31.4.1" block. | Standard Keep-a-Changelog header. |
 | `TODOS.md` | Any TODO entries that mention "follow-up from vX.Y.Z.W" use the version of the release that filed them. Update only when filing NEW follow-up TODOs. | Inline `vX.Y.Z.W` references in TODO bodies. |
@@ -594,16 +594,15 @@ four numeric segments are required first. Historical 3-segment versions
   (e.g. "v0.21.0 Code Cathedral"); update only when the README's marketing
   copy is intentionally being refreshed, NOT on every micro/patch bump.
 
-**The /ship workflow's version idempotency check:** Step 12 reads
-`VERSION` and `package.json`, classifies as FRESH / ALREADY_BUMPED /
-DRIFT_STALE_PKG / DRIFT_UNEXPECTED, and refuses to proceed on
-DRIFT_UNEXPECTED. This is why the two must move together.
+**Release version preflight:** read `VERSION`, `package.json`, the top
+`CHANGELOG.md` entry, and `origin/master:VERSION` before release publication.
+The branch values must agree, use four numeric segments, and be strictly newer
+than master. Refuse publication on any mismatch or already-claimed version.
 
 **The CI version-gate** rejects pushes where `VERSION` and
 `package.json` disagree, OR where `VERSION` is not strictly greater
-than master's VERSION. If a queue collision claims your version on
-master before yours lands, /ship's queue-aware allocator (Step 12)
-will detect drift and re-bump on the next run.
+than master's VERSION. If another merge claims the version first, allocate a new
+version, refresh every required version location, and rerun the release gates.
 
 ### Mandatory version-consistency audit (run after EVERY merge or commit that touches VERSION, package.json, or CHANGELOG)
 
@@ -628,9 +627,8 @@ because:
   fails the CI version-gate.
 - A green CHANGELOG entry under the wrong version header silently lies
   to release-notes consumers.
-- /ship's Step 12 idempotency check classifies a mismatch as
-  `DRIFT_UNEXPECTED` and HALTS — but only if you remember to run /ship
-  before pushing. Manual `git push` skips the check.
+- The CI version gate rejects the mismatch, but that is late feedback. Run the
+  audit before every push that touches release metadata.
 
 ### Merge-conflict recovery procedure (memorize this)
 
@@ -677,10 +675,8 @@ echo "package.json: $(node -e 'process.stdout.write(require("./package.json").ve
 grep -E "^## \[" CHANGELOG.md | head -1
 ```
 
-If you've been editing the branch via `/ship` you can rely on Step 12's
-idempotency check. If you've been editing manually (merge resolution,
-conflict fix, version bump), the audit is the last line of defense
-before CI yells at you.
+Run this audit for every merge resolution, conflict fix, or version bump. It is
+the last local line of defense before CI rejects release metadata drift.
 
 ## Conductor branch-name = workspace-name (IRON RULE)
 
@@ -717,38 +713,32 @@ Caught the hard way on v0.41.9.0 ship: workspace `puebla-v4` but branch
 `garrytan/gstack-requests` produced PR #1439 that Conductor wouldn't
 display. Renamed to `garrytan/puebla-v4`; recreated as #1440.
 
-The /ship workflow's Step 1 should be augmented to run the mismatch
-check; until that lands upstream, ALWAYS run the check above before
-`/ship` invokes its first push or PR-create step.
+Always run the mismatch check above before the first push or PR creation step.
 
 
 ## Releasing
 
-Before any ship, read **[docs/RELEASING.md](docs/RELEASING.md)** in full. It carries the
-full release + contributor process: pre-ship test requirements (`bun run ci:local` / the
+Before any release, read **[docs/RELEASING.md](docs/RELEASING.md)** in full. It carries the
+full release + contributor process: pre-release test requirements (`bun run ci:local` / the
 E2E lifecycle), the CHANGELOG voice + release-summary template, the "To take advantage of
 vX" self-repair block, version migrations, the GitHub Actions SHA refresh, PR conventions,
-and the community-PR-wave process. **Use `/ship` — never hand-roll a release.** Every
+and the community-PR-wave process. Execute that checked-in process directly. Every
 community wave runs `bun run wave-security-scan <base>..<head>` (RELEASING.md step 5) before
-ship — the repeatable mechanical sweep (obfuscation/eval, gitleaks with the test/skills
+release — the repeatable mechanical sweep (obfuscation/eval, gitleaks with the test/skills
 allowlist stripped, committed `admin/dist` changes as alarms; new endpoints/spawns/env/deps
 as context).
 
-The ship-critical IRON RULES stay inline in this file (do NOT relocate them): the
+The release-critical IRON RULES stay inline in this file (do NOT relocate them): the
 Version-locations table above (the 5-file sync + the 3-line VERSION/package.json/CHANGELOG
-audit), the Conductor branch=workspace rule (above), Post-ship `/document-release` (below),
+audit), the Conductor branch=workspace rule (above), the post-release docs audit (below),
 the Privacy + Responsible-disclosure rules (below), and the PR-title-version-first rule
 (below).
 
-## Post-ship requirements (MANDATORY)
+## Post-release requirements (MANDATORY)
 
-After EVERY /ship, you MUST run /document-release. This is NOT optional. Do NOT
-skip it. Do NOT say "docs look fine" without running it. The skill reads every .md
-file in the project, cross-references the diff, and updates anything that drifted.
-
-If /ship's Step 8.5 triggers document-release automatically, that counts. But if
-it gets skipped for ANY reason (timeout, error, oversight), you MUST run it manually
-before considering the ship complete.
+After every release, audit the changed behavior against every affected `.md` file
+and update anything that drifted. Do not call the release complete based on a casual
+"docs look fine" check; cross-reference the full diff against the documentation set.
 
 Files that MUST be checked on every ship:
 - README.md — does it reflect new features, commands, or setup steps?
@@ -925,8 +915,8 @@ read version-first. A title with the version parenthesized at the end
 (`feat(search): autocut ... (v0.42.3.0)`) is WRONG — fix it with
 `gh pr edit <N> --title "vX.Y.Z.W <type>: <summary>"`.
 
-This applies to `gh pr create` and every `gh pr edit --title`. When `/ship`
-(or any flow) sets a PR title, the version is the first token. Same rule for the
+This applies to `gh pr create` and every `gh pr edit --title`. When any flow sets
+a PR title, the version is the first token. Same rule for the
 final commit subject that carries the version bump.
 
 
@@ -936,21 +926,18 @@ When the user's request matches an available skill, ALWAYS invoke it using the S
 tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
 The skill has specialized workflows that produce better results than ad-hoc answers.
 
-**NEVER hand-roll ship operations.** Do not manually run git commit + push + gh pr
-create when /ship is available. /ship handles VERSION bump, CHANGELOG, document-release,
-pre-landing review, test coverage audit, and adversarial review. Manually creating a PR
-skips all of these. If the user says "commit and ship", "push and ship", "bisect and
-ship", or any combination that ends with shipping — invoke /ship and let it handle
-everything including the commits. If the branch name contains a version (e.g.
-`v0.5-live-sync`), /ship should use that version for the bump.
+For release, push, or PR requests, follow `docs/RELEASING.md` directly. Its version
+bump, CHANGELOG, documentation audit, test, current-diff review, and publication
+gates remain mandatory even when no external workflow helper is installed. Changes
+to guards or proof gates use the adversarial review route defined there.
 
 Key routing rules:
 - Product ideas, "is this worth building", brainstorming → invoke office-hours
 - Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR, "commit and ship", "push and ship" → invoke ship
+- Release, push, or create PR → follow `docs/RELEASING.md`; deployment remains a separate action
 - QA, test the site, find bugs → invoke qa
 - Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
+- Update docs after release → run the post-release docs audit above
 - Weekly retro → invoke retro
 - Design system, brand → invoke design-consultation
 - Visual audit, design polish → invoke design-review

@@ -10,7 +10,7 @@
 #
 # Mirrors scripts/check-wasm-embedded.sh from v0.19.0 (tree-sitter pattern).
 #
-# Wired into `bun run verify` (which `/ship` and `bun run test:full` call).
+# Wired into `bun run verify` (the release process and `bun run test:full` call it).
 
 set -euo pipefail
 

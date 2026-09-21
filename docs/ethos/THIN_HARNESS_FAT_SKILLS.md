@@ -59,7 +59,7 @@ A resolver is a routing table for context. When task type X appears, load docume
 
 Skills say HOW. Resolvers say WHAT to load WHEN. A developer changes a prompt. Without the resolver, they ship it. With the resolver, the model reads `docs/EVALS.md` first, which says: run the eval suite, compare scores, if accuracy drops more than 2%, revert and investigate. The developer didn't know the eval suite existed. The resolver loaded the right context at the right moment.
 
-Claude Code has a built-in resolver. Every skill has a description field, and the model matches user intent to skill descriptions automatically. You never have to remember `/ship` exists. The description IS the resolver. It's like Clippy. Except it actually works.
+Claude Code has a built-in resolver. Every skill has a description field, and the model matches user intent to skill descriptions automatically. You never have to remember command names. The description IS the resolver. It's like Clippy. Except it actually works.
 
 A confession: my CLAUDE.md was 20,000 lines. Every single thing I ran across went in there. Every quirk, every pattern, every lesson. Completely ridiculous. The model's attention degraded. Claude Code literally told me to cut it back. The fix: about 200 lines. Just pointers to documents. The resolver loads the right one when it matters.
 

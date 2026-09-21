@@ -99,21 +99,21 @@ describe("build-llms generator", () => {
 
 // Content contracts for the CLAUDE.md resolver restructure. The restructure moved
 // the per-file index + testing discipline into on-demand docs and (per codex
-// outside-voice) keeps the ship-critical IRON RULES inline. These pin that the
+// outside-voice) keeps the release-critical IRON RULES inline. These pin that the
 // safety-relevant content did NOT silently move out of CLAUDE.md, and that the
 // new docs are wired into the bundle the way intended (KEY_FILES link-only,
 // not inlined).
 describe("CLAUDE.md restructure content contracts", () => {
   const claude = () => readFileSync(join(repoRoot, "CLAUDE.md"), "utf8");
 
-  test("CLAUDE.md keeps the inline ship IRON RULES (must NOT move to a doc)", () => {
+  test("CLAUDE.md keeps the inline release IRON RULES (must NOT move to a doc)", () => {
     const c = claude();
     // Version format — the table stays inline (CI version-gate depends on it).
     expect(c).toContain("MAJOR.MINOR.PATCH.MICRO");
-    // Post-ship discipline — /document-release stays referenced inline.
-    expect(c.toLowerCase()).toContain("document-release");
-    // Never hand-roll ship.
-    expect(c.toLowerCase()).toMatch(/hand-roll ship/);
+    // Post-release documentation discipline stays referenced inline.
+    expect(c.toLowerCase()).toContain("post-release requirements");
+    // The checked-in release procedure is the authoritative route.
+    expect(c).toContain("docs/RELEASING.md");
   });
 
   test("CLAUDE.md carries the resolver + cross-cutting invariants (orientation survived)", () => {
@@ -130,6 +130,25 @@ describe("CLAUDE.md restructure content contracts", () => {
     expect(agents).toContain("Read this order");
     expect(agents).toContain("docs/architecture/KEY_FILES.md");
     expect(agents).toContain("docs/TESTING.md");
+  });
+
+  test("active release surfaces route directly to checked-in policy", () => {
+    const activeReleaseSurfaces = [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "CONTRIBUTING.md",
+      "docs/RELEASING.md",
+      "docs/TESTING.md",
+    ];
+    for (const path of activeReleaseSurfaces) {
+      const content = readFileSync(join(repoRoot, path), "utf8");
+      expect(content, `${path} still routes through the retired release command`).not.toMatch(/\/ship\b/);
+    }
+    const releasing = readFileSync(join(repoRoot, "docs/RELEASING.md"), "utf8");
+    expect(releasing).toContain("## Pre-landing review");
+    expect(releasing).toContain("complete current material diff");
+    expect(releasing).toContain("adversarial review");
+    expect(releasing).toContain("Any material change after review requires fresh review");
   });
 
   test("llms.txt indexes the relocated docs", () => {

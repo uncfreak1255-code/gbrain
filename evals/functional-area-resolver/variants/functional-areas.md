@@ -138,7 +138,7 @@ Key rules always in effect:
 
 ## Coding Tasks — GStack Integration
 
-Coding on gstack/gbrain/GL/any dev project: read `skills/acp-coding/SKILL.md`, spawn Codex via ACP, give full context, monitor+relay. Slash: `/code`, `/codex`, `/ship`, `/qa`, `/review`, `/investigate`.
+Coding on gstack/gbrain/GL/any dev project: read `skills/acp-coding/SKILL.md`, spawn Codex via ACP, give full context, monitor+relay. Slash: `/code`, `/codex`, `/qa`, `/review`, `/investigate`.
 
 <!-- gbrain:skillpack:begin -->
 <!-- Installed by gbrain 0.25.1. All 35 skills in this pack are already referenced in the resolver tables above. -->

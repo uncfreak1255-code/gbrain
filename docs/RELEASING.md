@@ -1,14 +1,14 @@
 # Releasing & contributing (gbrain)
 
-The full release + contributor process. CLAUDE.md keeps the ship-critical IRON RULES
-inline (the Version-locations table, branch=workspace, post-ship `/document-release`,
-the Privacy + Responsible-disclosure rules, PR-title-version-first, never-hand-roll-ship)
-and points here for everything else. **Before any ship, read this in full. Use `/ship` —
-never hand-roll a release.**
+The full release + contributor process. CLAUDE.md keeps the release-critical IRON
+RULES inline (the Version-locations table, branch=workspace, post-release docs audit,
+the Privacy + Responsible-disclosure rules, and PR-title-version-first) and points
+here for everything else. **Before any release, read this in full and execute these
+checked-in steps directly.**
 
 ## Pre-ship requirements
 
-Before shipping (/ship) or reviewing (/review), always run the full test suite.
+Before releasing or reviewing, always run the full test suite.
 Two equivalent paths:
 
 **Path A — local CI gate (recommended, v0.23.1+):**
@@ -31,6 +31,19 @@ Two equivalent paths:
   `bun run test:e2e`, then tear it down.
 
 Both must pass. Do not ship with failing E2E tests. Do not skip E2E tests.
+
+## Pre-landing review
+
+Before every release merge, review the complete current material diff, including
+committed, staged, unstaged, and new files. Use one review route appropriate to the
+change. Ordinary changes need a current-head code review; changes to guards, auth,
+permissions, validation, CI, or release controls need an adversarial review that
+tries to defeat the control and reports executed evidence. Fix or explicitly block
+every confirmed finding. Any material change after review requires fresh review.
+
+The review is complete only when its exact head, result, and unresolved findings
+are readable on the PR or in the owning review system. A generated receipt or a
+passing test run cannot substitute for inspecting the current material diff.
 
 **Always run typecheck before pushing.** Neither `bun test` (the bun runner)
 nor `bun run test` gates on types — `bun run test` is just
@@ -59,7 +72,7 @@ here.** Every feature branch that ships gets its own version bump and CHANGELOG
 entry. The entry is product release notes for users; it is not a log of internal
 decisions, review rounds, or codex findings.
 
-**Write the CHANGELOG entry at /ship time, not during development.** Mid-branch
+**Write the CHANGELOG entry during release preparation, not during development.** Mid-branch
 iterations, review rounds (CEO/Eng/Codex/DX), and implementation detours belong
 in the plan file at `~/.claude/plans/`, not in the CHANGELOG. One unified entry
 per branch, covering what the branch added vs the base branch.
@@ -353,8 +366,8 @@ Phase C/E. Never modify a user's custom directories or re-suggest declined ones.
 
 ## GitHub Actions SHA maintenance
 
-All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Before shipping
-(`/ship`) or reviewing (`/review`), check for stale pins and update them:
+All GitHub Actions in `.github/workflows/` are pinned to commit SHAs. Before releasing
+or reviewing, check for stale pins and update them:
 
 ```bash
 for action in actions/checkout oven-sh/setup-bun actions/upload-artifact actions/download-artifact softprops/action-gh-release gitleaks/gitleaks-action; do
