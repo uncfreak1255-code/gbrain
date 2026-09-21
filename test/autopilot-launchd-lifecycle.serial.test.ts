@@ -148,8 +148,28 @@ describe.skipIf(SKIP_SUBPROCESS)('autopilot launchd lifecycle — shimmed (all p
     recordFile = join(tmpbin, 'record.log');
     breadcrumbFile = join(tmpbin, 'execed.log');
 
-    // launchctl argv recorder — exit 0 so install's execSync succeeds.
-    writeFileSync(join(tmpbin, 'launchctl'), `#!/bin/sh\necho "launchctl $*" >> '${recordFile}'\nexit 0\n`, { mode: 0o755 });
+    // launchctl argv recorder with a persistent disabled-bit simulation.
+    // kickstart runs the generated wrapper only after `enable` cleared it,
+    // proving reinstall reaches the guarded daemon instead of stopping at a
+    // successful command receipt.
+    writeFileSync(join(tmpbin, 'launchctl'), `#!/bin/sh
+echo "launchctl $*" >> '${recordFile}'
+case "$1" in
+  print-disabled)
+    state="$(cat '${join(tmpbin, 'disabled.state')}' 2>/dev/null)"
+    printf '{\n\t"${label}" => %s\n}\n' "\${state:-enabled}"
+    ;;
+  disable) printf 'disabled\n' > '${join(tmpbin, 'disabled.state')}' ;;
+  enable) printf 'enabled\n' > '${join(tmpbin, 'disabled.state')}' ;;
+  kickstart)
+    if [ "$(cat '${join(tmpbin, 'disabled.state')}' 2>/dev/null)" != disabled ]; then
+      bash '${join(home, '.gbrain', 'autopilot-run.sh')}'
+    fi
+    ;;
+esac
+[ "\${GBRAIN_TEST_LAUNCHCTL_FAIL:-}" = "$1" ] && exit 19
+exit 0
+`, { mode: 0o755 });
     // crontab no-op — detectInstalledTarget falls through to the REAL
     // `crontab -l` on non-darwin; a dev's real gbrain cron entry would flip
     // the verdict to linux-cron.
@@ -182,7 +202,7 @@ describe.skipIf(SKIP_SUBPROCESS)('autopilot launchd lifecycle — shimmed (all p
     expect(report.state).toBe('not_installed');
   }, 120_000);
 
-  test('2. install --target macos: plist + wrapper + recorded load', () => {
+  test('2. install --target macos: plist + wrapper + enable/bootstrap/kickstart starts daemon', () => {
     // #677: a PGLite brain REFUSES a daemon install without --force (the
     // daemon would hold the single-writer DB lock 24/7). Pin the refusal at
     // the CLI boundary first, then run the lifecycle arc through the
@@ -198,7 +218,11 @@ describe.skipIf(SKIP_SUBPROCESS)('autopilot launchd lifecycle — shimmed (all p
     expect(existsSync(plist())).toBe(true);
     const xml = readFileSync(plist(), 'utf8');
     expect(xml).toContain(`<string>${label}</string>`);
-    expect(recorded()).toContain(`launchctl load ${plist()}`);
+    expect(recorded()).toContain(`launchctl enable gui/`);
+    expect(recorded()).toContain(`/${label}`);
+    expect(recorded()).toContain(`launchctl bootstrap gui/`);
+    expect(recorded()).toContain(plist());
+    expect(recorded()).toContain(`launchctl kickstart -k gui/`);
     const w = readFileSync(wrapper(), 'utf8');
     // Guard precedes exec — the self-disable must run before the daemon could start.
     expect(w.indexOf('repo path gone')).toBeGreaterThan(-1);
@@ -211,10 +235,24 @@ describe.skipIf(SKIP_SUBPROCESS)('autopilot launchd lifecycle — shimmed (all p
     expect(w.indexOf('repo path gone')).toBeLessThan(w.indexOf(`\ncd '`));
     expect(w.indexOf(`\ncd '`)).toBeLessThan(w.indexOf('exec '));
     expect(xml).not.toContain(`<key>WorkingDirectory</key><string>${repoDir}</string>`);
+    expect(readFileSync(breadcrumbFile, 'utf8')).toContain('autopilot --repo');
+  }, 120_000);
+
+  test('2b. install fails closed when a required launchctl action fails', () => {
+    for (const action of ['enable', 'bootstrap', 'kickstart']) {
+      const failed = runCli(
+        ['autopilot', '--install', '--force', '--target', 'macos', '--repo', repoDir],
+        { ...env, GBRAIN_TEST_LAUNCHCTL_FAIL: action },
+        90_000,
+      );
+      expect(failed.exitCode).toBe(1);
+      expect(failed.stderr).toContain('Failed to install');
+    }
   }, 120_000);
 
   test('3. repo deleted → three strikes, THEN marker + recorded bootout', () => {
     rmSync(repoDir, { recursive: true, force: true });
+    const bootoutCountBefore = recorded().split('launchctl bootout gui/').length - 1;
     // One transient miss must not kill the install (repos on external or
     // cloud-synced volumes are routinely absent right after login) — the
     // guard requires three consecutive misses. Runs 1 and 2 exit 0 with no
@@ -223,14 +261,14 @@ describe.skipIf(SKIP_SUBPROCESS)('autopilot launchd lifecycle — shimmed (all p
       const res = spawnSync('bash', [wrapper()], { env, encoding: 'utf8', timeout: 30_000 });
       expect(res.status).toBe(0);
       expect(existsSync(marker())).toBe(false);
-      expect(recorded()).not.toContain('launchctl bootout gui/');
+      expect(recorded().split('launchctl bootout gui/').length - 1).toBe(bootoutCountBefore);
       expect(run).toBeGreaterThan(0);
     }
     const res = spawnSync('bash', [wrapper()], { env, encoding: 'utf8', timeout: 30_000 });
     expect(res.status).toBe(0);
     expect(existsSync(marker())).toBe(true);
     expect(readFileSync(marker(), 'utf8')).toContain(repoDir);
-    expect(recorded()).toContain(`launchctl bootout gui/`);
+    expect(recorded().split('launchctl bootout gui/').length - 1).toBe(bootoutCountBefore + 1);
     expect(recorded()).toContain(label);
   }, 120_000);
 
@@ -242,14 +280,27 @@ describe.skipIf(SKIP_SUBPROCESS)('autopilot launchd lifecycle — shimmed (all p
     expect(report.disabled_reason).toContain(repoDir);
   }, 120_000);
 
-  test('5. reinstall against a RECREATED repo clears the marker', () => {
+  test('5. reinstall after persistent disable clears override, marker, and starts guarded daemon', () => {
     // Recreate first — reinstalling against the deleted path would only prove
     // marker-clearing while leaving an immediately-doomed install.
     mkdirSync(repoDir, { recursive: true });
+    spawnSync(join(tmpbin, 'launchctl'), ['disable', `gui/${process.getuid?.() ?? 0}/${label}`], { env });
+    rmSync(marker(), { force: true });
+    // Status consults launchd only on Darwin. The cross-platform shim proves
+    // disable→reinstall startup below; the real-Darwin arc proves the live
+    // persistent-override status read before its reinstall.
+    if (process.platform === 'darwin') {
+      const disabled = runCli(['autopilot', '--status', '--json'], env, 90_000);
+      expect(disabled.exitCode).toBe(2);
+      expect(JSON.parse(disabled.stdout.trim().split('\n').pop()!).launchd_disabled_override).toBe(true);
+    }
+    rmSync(breadcrumbFile, { force: true });
     // --force: PGLite daemon guard (#677) — see test 2.
     const r = runCli(['autopilot', '--install', '--force', '--target', 'macos', '--repo', repoDir], env, 90_000);
     expect(r.exitCode).toBe(0);
     expect(existsSync(marker())).toBe(false);
+    expect(recorded()).toContain(`launchctl enable gui/`);
+    expect(readFileSync(breadcrumbFile, 'utf8')).toContain('autopilot --repo');
   }, 120_000);
 
   test('6. uninstall: plist gone, recorded unload, markers cleared', () => {
@@ -268,9 +319,9 @@ describe.skipIf(SKIP_SUBPROCESS)('autopilot launchd lifecycle — shimmed (all p
     expect(status.exitCode).toBe(0);
   }, 240_000);
 
-  test('7. the daemon never started: breadcrumb has no autopilot exec', () => {
+  test('7. the guarded daemon started on install and reinstall', () => {
     const crumbs = existsSync(breadcrumbFile) ? readFileSync(breadcrumbFile, 'utf8') : '';
-    expect(crumbs).not.toContain('autopilot --repo');
+    expect(crumbs).toContain('autopilot --repo');
   });
 });
 
@@ -404,4 +455,34 @@ describe.skipIf(SKIP_SUBPROCESS || !LAUNCHD_OK)('autopilot launchd lifecycle —
     const report = JSON.parse(r.stdout.trim().split('\n').pop()!);
     expect(report.state).toBe('disabled');
   }, 120_000);
+
+  test('4. reinstall after launchctl disable starts the guarded daemon', async () => {
+    mkdirSync(repoDir, { recursive: true });
+    spawnSync('launchctl', ['disable', `gui/${uid}/${label}`], { timeout: 10_000 });
+    rmSync(marker(), { force: true });
+    const before = runCli(['autopilot', '--status', '--json'], env, 90_000);
+    expect(before.exitCode).toBe(2);
+    const beforeReport = JSON.parse(before.stdout.trim().split('\n').pop()!);
+    expect(beforeReport.state).toBe('disabled');
+    expect(beforeReport.launchd_disabled_override).toBe(true);
+    rmSync(breadcrumbFile, { force: true });
+
+    const r = runCli(['autopilot', '--install', '--force', '--target', 'macos', '--repo', repoDir], env, 90_000);
+    expect(r.exitCode).toBe(0);
+
+    let started = false;
+    for (let i = 0; i < 60; i++) {
+      if (existsSync(breadcrumbFile) && readFileSync(breadcrumbFile, 'utf8').includes('autopilot --repo')) {
+        started = true;
+        break;
+      }
+      await sleep(500);
+    }
+    expect(started).toBe(true);
+    expect(printJob().status).toBe(0);
+
+    const disabled = spawnSync('launchctl', ['print-disabled', `gui/${uid}`], { encoding: 'utf8', timeout: 10_000 });
+    expect(disabled.status).toBe(0);
+    expect(disabled.stdout).toContain(`"${label}" => enabled`);
+  }, 180_000);
 });

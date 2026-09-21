@@ -7,7 +7,13 @@ import {
   decideLockAcquisition,
   isPidAlive,
 } from '../src/commands/autopilot.ts';
-import { looksLikeGbrainAutopilotCommand, readProcessCommand } from '../src/core/autopilot-lock.ts';
+import {
+  commandMatchesAutopilotEntrypoint,
+  looksLikeGbrainAutopilotCommand,
+  readProcessCommand,
+  readProcessExecutable,
+  verifyAutopilotRuntimeOwner,
+} from '../src/core/autopilot-lock.ts';
 
 let tmp: string;
 let lockPath: string;
@@ -224,5 +230,94 @@ describe('looksLikeGbrainAutopilotCommand', () => {
   test('rejects unrelated live processes', () => {
     expect(looksLikeGbrainAutopilotCommand('/sbin/launchd')).toBe(false);
     expect(looksLikeGbrainAutopilotCommand('/usr/bin/python worker.py')).toBe(false);
+    expect(looksLikeGbrainAutopilotCommand('gbrain status autopilot')).toBe(false);
+    expect(looksLikeGbrainAutopilotCommand('bun src/cli.ts status autopilot')).toBe(false);
+  });
+});
+
+describe('verifyAutopilotRuntimeOwner', () => {
+  const entrypoint = '/opt/gbrain-release/src/cli.ts';
+  const launcher = '/opt/homebrew/bin/bun';
+
+  test('accepts only the exact release entrypoint followed by the autopilot subcommand', () => {
+    expect(commandMatchesAutopilotEntrypoint(
+      `${launcher} ${entrypoint} autopilot --repo /brain`,
+      entrypoint,
+      launcher,
+    )).toBe(true);
+    expect(commandMatchesAutopilotEntrypoint(
+      `bun /tmp/src/cli.ts autopilot --repo /brain`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+    expect(commandMatchesAutopilotEntrypoint(
+      `bun /OPT/GBRAIN-RELEASE/SRC/CLI.ts autopilot --repo /brain`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+    expect(commandMatchesAutopilotEntrypoint(
+      `/tmp/gbrain autopilot --repo /brain`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+    expect(commandMatchesAutopilotEntrypoint(
+      `bun ${entrypoint} status autopilot`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+    expect(commandMatchesAutopilotEntrypoint(
+      `evil-wrapper ${entrypoint} autopilot --repo /brain`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+    expect(commandMatchesAutopilotEntrypoint(
+      `sleep 600 ${entrypoint} autopilot`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+    expect(commandMatchesAutopilotEntrypoint(
+      `/tmp/bun ${entrypoint} autopilot`,
+      entrypoint,
+      launcher,
+    )).toBe(false);
+  });
+
+  test('fails closed for a dead pid, unreadable command, or relative expected path', () => {
+    expect(verifyAutopilotRuntimeOwner(4321, entrypoint, launcher, {
+      isPidAlive: () => true,
+      readProcessCommand: () => `${launcher} ${entrypoint} autopilot`,
+      readProcessExecutable: () => launcher,
+    })).toBe(true);
+    expect(verifyAutopilotRuntimeOwner(4321, entrypoint, launcher, {
+      isPidAlive: () => false,
+      readProcessCommand: () => `${launcher} ${entrypoint} autopilot`,
+      readProcessExecutable: () => launcher,
+    })).toBe(false);
+    expect(verifyAutopilotRuntimeOwner(4321, entrypoint, launcher, {
+      isPidAlive: () => true,
+      readProcessCommand: () => null,
+      readProcessExecutable: () => launcher,
+    })).toBe(false);
+    expect(verifyAutopilotRuntimeOwner(4321, 'src/cli.ts', launcher, {
+      isPidAlive: () => true,
+      readProcessCommand: () => 'bun src/cli.ts autopilot',
+      readProcessExecutable: () => launcher,
+    })).toBe(false);
+    expect(verifyAutopilotRuntimeOwner(4321, entrypoint, launcher, {
+      isPidAlive: () => true,
+      readProcessCommand: () => `${launcher} ${entrypoint} autopilot`,
+      readProcessExecutable: () => '/bin/cat',
+    })).toBe(false);
+  });
+});
+
+describe('readProcessExecutable', () => {
+  test('reads the current executable from OS metadata', () => {
+    expect(readProcessExecutable(process.pid)).toBe(process.execPath);
+  });
+
+  test('returns null for invalid pids', () => {
+    expect(readProcessExecutable(0)).toBeNull();
+    expect(readProcessExecutable(-1)).toBeNull();
   });
 });

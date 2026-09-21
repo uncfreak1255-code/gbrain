@@ -16,6 +16,8 @@ import {
   autopilotStatusExitCode,
   autopilotLaunchdLabel,
   autopilotEngineIdentity,
+  parseAutopilotRuntimeLock,
+  parseLaunchdDisabledOverride,
   AUTOPILOT_SYSTEMD_UNIT,
 } from '../src/commands/autopilot.ts';
 
@@ -149,6 +151,18 @@ describe('classifyAutopilotStatus', () => {
     expect(autopilotStatusExitCode(r.state)).toBe(2);
   });
 
+  test('launchd persistent disabled override is disabled, not stale', () => {
+    const r = classifyAutopilotStatus({
+      ...base,
+      launchdDisabledOverride: true,
+      heartbeatAgeSeconds: 71 * 86400,
+    });
+    expect(r.state).toBe('disabled');
+    expect(r.disabled_reason).toContain('launchd persistent disabled override');
+    expect(r.launchd_disabled_override).toBe(true);
+    expect(autopilotStatusExitCode(r.state)).toBe(2);
+  });
+
   test('a healthy adaptive-schedule gap does not flip the verdict — a real outage does', () => {
     // The adaptive scheduler sleeps TWO intervals between ticks on the
     // healthiest brains and the heartbeat only refreshes at tick top, so a
@@ -199,6 +213,71 @@ describe('classifyAutopilotStatus', () => {
     });
     expect(stray.state).toBe('not_installed');
     expect(autopilotStatusExitCode(stray.state)).toBe(0);
+  });
+});
+
+describe('launchd and live autopilot runtime readback', () => {
+  test('parses only the selected launchd label persistent override', () => {
+    const output = `disabled services = {\n\t"com.other" => true\n\t"com.gbrain.autopilot" => false\n}`;
+    expect(parseLaunchdDisabledOverride(output, 'com.gbrain.autopilot')).toBe(false);
+    expect(parseLaunchdDisabledOverride(output, 'com.other')).toBe(true);
+    expect(parseLaunchdDisabledOverride(output, 'com.missing')).toBeNull();
+    expect(parseLaunchdDisabledOverride('"com.gbrain.autopilot" => disabled', 'com.gbrain.autopilot')).toBe(true);
+    expect(parseLaunchdDisabledOverride('"com.gbrain.autopilot" => enabled', 'com.gbrain.autopilot')).toBe(false);
+  });
+
+  test('lock payload exposes live zero-spend enforcement for autopilot-managed workers', () => {
+    expect(parseAutopilotRuntimeLock('4321\n{"zero_paid_spend":true,"managed_worker":true}\n')).toEqual({
+      pid: 4321,
+      zero_paid_spend: true,
+      managed_worker: true,
+    });
+    expect(parseAutopilotRuntimeLock('4321')).toEqual({
+      pid: 4321,
+      zero_paid_spend: null,
+      managed_worker: null,
+    });
+  });
+
+  test('malformed or extended lock records never become enforcement evidence', () => {
+    for (const raw of [
+      '4321garbage\n{"zero_paid_spend":true,"managed_worker":true}\n',
+      '1.5\n{"zero_paid_spend":true,"managed_worker":true}\n',
+      '+77\n{"zero_paid_spend":true,"managed_worker":true}\n',
+      '1e9\n{"zero_paid_spend":true,"managed_worker":true}\n',
+      '4321\n{"zero_paid_spend":true,"managed_worker":true}\nextra\n',
+      '4321\n{"zero_paid_spend":true,"managed_worker":true,"extra":false}\n',
+      '4321\n{"zero_paid_spend":false,"zero_paid_spend":true,"managed_worker":true}\n',
+      '4321\n{"managed_worker":true,"zero_paid_spend":true}\n',
+      '4321\n{ "zero_paid_spend":true,"managed_worker":true}\n',
+    ]) {
+      expect(parseAutopilotRuntimeLock(raw).zero_paid_spend).toBeNull();
+      expect(parseAutopilotRuntimeLock(raw).managed_worker).toBeNull();
+    }
+  });
+
+  test('only a verified fresh autopilot-managed worker exposes live enforcement', () => {
+    const common = {
+      installed: true,
+      installTarget: 'macos' as const,
+      disabledReason: null,
+      heartbeatAgeSeconds: 1,
+      intervalSeconds: 300,
+      lastLog: '',
+      runtime: { pid: 4321, zero_paid_spend: true, managed_worker: true },
+    };
+    expect(classifyAutopilotStatus({ ...common, runtimeOwnerVerified: false }).zero_paid_spend.live_managed_worker).toBeNull();
+    expect(classifyAutopilotStatus({ ...common, runtimeOwnerVerified: true }).zero_paid_spend.live_managed_worker).toBe(true);
+    expect(classifyAutopilotStatus({
+      ...common,
+      runtimeOwnerVerified: true,
+      runtime: { ...common.runtime, managed_worker: false },
+    }).zero_paid_spend.live_managed_worker).toBeNull();
+    expect(classifyAutopilotStatus({
+      ...common,
+      runtimeOwnerVerified: true,
+      heartbeatAgeSeconds: 1801,
+    }).zero_paid_spend.live_managed_worker).toBeNull();
   });
 });
 

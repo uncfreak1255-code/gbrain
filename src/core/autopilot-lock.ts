@@ -1,5 +1,5 @@
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readlinkSync } from 'node:fs';
 
 export type AutopilotLockHolder =
   | { state: 'dead' }
@@ -11,6 +11,49 @@ export type AutopilotLockHolder =
 export interface AutopilotLockProbeDeps {
   isPidAlive?: (pid: number) => boolean;
   readProcessCommand?: (pid: number) => string | null;
+  readProcessExecutable?: (pid: number) => string | null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Require the exact release entrypoint immediately before the autopilot
+ * subcommand. Basename-only matching is intentionally insufficient: an
+ * arbitrary /tmp/gbrain must not authenticate a zero-spend receipt. */
+export function commandMatchesAutopilotEntrypoint(
+  command: string,
+  entrypoint: string,
+  launcher: string,
+): boolean {
+  const normalizedCommand = command.replace(/\\/g, '/').trim();
+  const normalizedEntrypoint = entrypoint.replace(/\\/g, '/').trim();
+  const normalizedLauncher = launcher.replace(/\\/g, '/').trim();
+  if (!normalizedEntrypoint.startsWith('/') || !normalizedLauncher.startsWith('/')) return false;
+  const exact = escapeRegExp(normalizedEntrypoint);
+  const entry = `(?:"${exact}"|${exact})`;
+  const direct = new RegExp(`^${entry}\\s+autopilot(?:\\s|$)`);
+  const exactLauncher = escapeRegExp(normalizedLauncher);
+  const bun = new RegExp(`^(?:"${exactLauncher}"|${exactLauncher})\\s+${entry}\\s+autopilot(?:\\s|$)`);
+  return direct.test(normalizedCommand) || bun.test(normalizedCommand);
+}
+
+export function verifyAutopilotRuntimeOwner(
+  pid: number,
+  entrypoint: string,
+  launcher: string,
+  deps: AutopilotLockProbeDeps = {},
+): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  const probeAlive = deps.isPidAlive ?? isPidAlive;
+  if (!probeAlive(pid)) return false;
+  const command = (deps.readProcessCommand ?? readProcessCommand)(pid);
+  if (command === null || !commandMatchesAutopilotEntrypoint(command, entrypoint, launcher)) return false;
+  const executable = (deps.readProcessExecutable ?? readProcessExecutable)(pid);
+  if (executable === null) return false;
+  const normalizedExecutable = executable.replace(/\\/g, '/');
+  return normalizedExecutable === launcher.replace(/\\/g, '/')
+    || normalizedExecutable === entrypoint.replace(/\\/g, '/');
 }
 
 export function isPidAlive(pid: number): boolean {
@@ -77,13 +120,50 @@ export function readProcessCommand(pid: number, deps: ProcessCommandProbeDeps = 
   }
 }
 
+/** OS-reported executable identity, independent of forgeable argv[0]. */
+export function readProcessExecutable(pid: number, deps: ProcessCommandProbeDeps = {}): string | null {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  const platform = deps.platform ?? process.platform;
+  const exec = deps.execFile ?? execFileSync;
+  if (platform === 'win32') {
+    try {
+      const out = exec('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | Select-Object -ExpandProperty ExecutablePath`,
+      ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, windowsHide: true }).trim();
+      return out.length > 0 ? out : null;
+    } catch {
+      return null;
+    }
+  }
+  if (platform === 'linux') {
+    try {
+      return readlinkSync(`/proc/${pid}/exe`);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const out = exec('lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1000,
+    });
+    const executable = out.split(/\r?\n/).find((line) => line.startsWith('n/'))?.slice(1) ?? '';
+    return executable.length > 0 ? executable : null;
+  } catch {
+    return null;
+  }
+}
+
 export function looksLikeGbrainAutopilotCommand(command: string): boolean {
   const normalized = command.replace(/\\/g, '/').trim();
-  if (!/(^|\s)autopilot(\s|$)/i.test(normalized)) return false;
-  // Win32_Process.CommandLine quotes executables under paths with spaces: `"C:/Program Files/gbrain/gbrain.exe" autopilot`.
-  if (/(^|[\/\s])"?gbrain(?:\.exe)?"?(\s|$)/i.test(normalized)) return true;
-  return /(^|\s)(?:\S+\/)?(?:\.{1,2}\/)?(?:src\/)?cli\.(?:ts|js|mjs)(\s|$)/i.test(normalized)
-    || /(^|\s)\S*\/src\/cli\.(?:ts|js|mjs)(\s|$)/i.test(normalized);
+  // Bind the ownership signal to the command shape, not mere word presence.
+  // `gbrain status autopilot` is a client process and must never authenticate
+  // as the long-lived `gbrain autopilot` lock holder.
+  const packaged = /(?:^|\s)(?:"(?:[^"]*\/)?gbrain(?:\.exe)?"|(?:\S*\/)?gbrain(?:\.exe)?)\s+autopilot(?:\s|$)/i;
+  const sourceCli = /(?:^|\s)(?:"[^"]*(?:\/|^)cli\.(?:ts|js|mjs)"|\S*(?:\/|^)cli\.(?:ts|js|mjs))\s+autopilot(?:\s|$)/i;
+  return packaged.test(normalized) || sourceCli.test(normalized);
 }
 
 export function classifyAutopilotLockHolder(

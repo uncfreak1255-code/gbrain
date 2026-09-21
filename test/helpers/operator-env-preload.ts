@@ -50,6 +50,7 @@ const KEEP_EXACT = new Set([
   'GBRAIN_AUDIT_DIR', // audit-dir-preload honors a wrapper pre-set (inspect audit output after a run)
   'GBRAIN_SYNC_FAILURES_DIR', // same wrapper pre-set contract in sync-failures-preload
   'GBRAIN_DEBUG_PRELOAD', // the preload stack's own logging hatch
+  'GBRAIN_SKIP_LAUNCHD_E2E', // explicit opt-out for the real macOS launchd lifecycle test
   // Test-control opt-in documented in cycle-synthesize-triage-calibration's
   // header — the scrub was silently no-op'ing the paid live layer (any
   // GBRAIN_* opt-in read by a test file needs a row here or a KEEP_PREFIX).

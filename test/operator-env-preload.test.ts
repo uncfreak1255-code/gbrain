@@ -119,6 +119,7 @@ describe('operator-env-preload (#4023)', () => {
       'GBRAIN_CI_PG_PORT',
       'GBRAIN_E2E_ALLOW_DB',
       'GBRAIN_REAL_HERMES_E2E',
+      'GBRAIN_SKIP_LAUNCHD_E2E',
     ];
     const ambient: Record<string, string> = {
       // '1' (not 'off') so a strip is distinguishable from provider-keys-
@@ -135,6 +136,7 @@ describe('operator-env-preload (#4023)', () => {
       GBRAIN_CI_PG_PORT: '5434',
       GBRAIN_E2E_ALLOW_DB: 'gbrain_probe_db',
       GBRAIN_REAL_HERMES_E2E: '0',
+      GBRAIN_SKIP_LAUNCHD_E2E: '1',
     };
     const r = runProbe(ambient, probed);
     expect(r.exitCode).toBe(0);
