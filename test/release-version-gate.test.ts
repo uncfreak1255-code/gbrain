@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 function run(root: string, extraEnv: Record<string, string> = {}) {
-  const env = { ...process.env, GBRAIN_RELEASE_ROOT: root };
+  const env: Record<string, string | undefined> = { ...process.env, GBRAIN_RELEASE_ROOT: root };
   delete env.GITHUB_REF;
   delete env.GITHUB_EVENT_NAME;
   return spawnSync("bash", [guard], {
