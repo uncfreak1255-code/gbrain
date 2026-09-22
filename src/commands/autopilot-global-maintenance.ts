@@ -127,7 +127,8 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
         && phase.details.budget_deferred_transcripts.length > 0);
   });
   if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
-    && !incompleteMixedPhase && report.reason !== 'aborted' && report.reason !== 'lock_stolen') {
+    && !incompleteMixedPhase && !persistenceStateReadFailed
+    && report.reason !== 'aborted' && report.reason !== 'lock_stolen') {
     try {
       await engine.setConfig(LAST_GLOBAL_AT_KEY, new Date().toISOString());
     } catch (error) {

@@ -483,5 +483,6 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(result.phases_rejected_by_persistence).toEqual(['synthesize']);
     expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
     expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
+    expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
   });
 });
