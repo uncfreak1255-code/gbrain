@@ -381,6 +381,11 @@ describe.skipIf(SKIP_SUBPROCESS || !LAUNCHD_OK)('autopilot launchd lifecycle —
     // tmp-HOME LaunchAgents dir, so a leftover job dies at logout regardless,
     // but booting first keeps the teardown quiet.
     spawnSync('launchctl', ['bootout', `gui/${uid}/${label}`], { timeout: 10_000 });
+    // The lifecycle test deliberately exercises both `disable` and the
+    // reinstall path. launchd retains that per-label override even after
+    // bootout, so clear it before the unique test label and its temp HOME
+    // disappear.
+    spawnSync('launchctl', ['disable', `gui/${uid}/${label}`], { timeout: 10_000 });
     rmSync(home, { recursive: true, force: true });
     rmSync(tmpbin, { recursive: true, force: true });
   });
