@@ -19,10 +19,14 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
   const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
   const { managedPersistenceEnabled } = await import('../core/persistence/ownership.ts');
-  const mixedSet = new Set<string>(MIXED_PHASES);
-  // `purge` hard-deletes pages through the legacy engine path too. It is
-  // globally scoped, but cannot run while the managed writer owns deletions.
-  const managedUnsafeSet = new Set<string>([...MIXED_PHASES, 'purge']);
+  // These legacy phases can canonically write pages, facts, takes, or derived
+  // records without the managed-writer coordinator. Keep Autopilot on the
+  // compatible maintenance lane until each has a coordinated path.
+  const managedUnsafeSet = new Set<string>([
+    ...MIXED_PHASES,
+    'purge', 'synthesize_concepts', 'propose_takes', 'grade_takes',
+    'calibration_profile', 'drift', 'skillopt', 'embed',
+  ]);
   let persistenceStateReadFailed = false;
   let managed = true;
   try {
@@ -74,7 +78,7 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
     const code = error && typeof error === 'object' && 'code' in error
       ? String((error as { code?: unknown }).code)
       : null;
-    if (code !== 'writer_coordinator_required' || !effectivePhases.some((phase) => mixedSet.has(phase))) {
+    if (code !== 'writer_coordinator_required' || !effectivePhases.some((phase) => managedUnsafeSet.has(phase))) {
       throw error;
     }
     phasesRejectedByPersistence = phases.filter((phase) => managedUnsafeSet.has(phase));
@@ -82,6 +86,21 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
     if (effectivePhases.length === 0) {
       return skipped({ persistence_transition_recovered: true });
     }
+    persistenceTransitionRecovered = true;
+    report = await runSelectedPhases(effectivePhases);
+  }
+
+  // Some phases (notably purge) report a writer fence as a failed result
+  // rather than throwing. Treat that activation race exactly like a thrown
+  // fence, then rerun only the compatible lane.
+  const rejectedResult = report.phases.find((phase) =>
+    phase.status === 'fail'
+    && managedUnsafeSet.has(phase.phase)
+    && phase.error?.code === 'writer_coordinator_required');
+  if (rejectedResult) {
+    phasesRejectedByPersistence = phases.filter((phase) => managedUnsafeSet.has(phase));
+    effectivePhases = phases.filter((phase) => !managedUnsafeSet.has(phase));
+    if (effectivePhases.length === 0) return skipped({ persistence_transition_recovered: true });
     persistenceTransitionRecovered = true;
     report = await runSelectedPhases(effectivePhases);
   }

@@ -376,11 +376,11 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
 
       const result = await handler!({
         id: 4103,
-        data: { phases: ['synthesize', 'patterns', 'orphans'], repoPath },
+        data: { phases: ['synthesize', 'patterns', 'synthesize_concepts', 'orphans'], repoPath },
         signal: undefined,
       });
 
-      expect(result.phases_rejected_by_persistence).toEqual(['synthesize', 'patterns']);
+      expect(result.phases_rejected_by_persistence).toEqual(['synthesize', 'patterns', 'synthesize_concepts']);
       expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
       expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
       expect(['ok', 'clean']).toContain(result.report.status);
