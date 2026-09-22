@@ -3,6 +3,40 @@ import type { MinionJobContext } from '../core/minions/types.ts';
 
 type GlobalMaintenanceJob = Pick<MinionJobContext, 'id' | 'data' | 'signal' | 'deadlineAtMs'>;
 
+/** Application fence plus the trigger SQLSTATE used by managed_writer_guard. */
+export const WRITER_COORDINATOR_REQUIRED = 'writer_coordinator_required';
+export const MANAGED_WRITER_SQLSTATE = 'P0001';
+
+/**
+ * Global maintenance phases that still write canonical pages/facts/takes
+ * through the legacy engine path. `embed` is intentionally absent: the
+ * managed-writer trigger permits embedding-only derived projections, and
+ * per-source cycles already delegate embedding to this global lane.
+ */
+export const MANAGED_UNSAFE_GLOBAL_PHASES = [
+  'purge',
+  'synthesize_concepts',
+  'grade_takes',
+  'calibration_profile',
+  'drift',
+  'skillopt',
+] as const;
+
+/** True when a thrown error or failed-phase report is the managed-writer fence. */
+export function isWriterCoordinatorFence(error: unknown): boolean {
+  if (error == null) return false;
+  const rec = typeof error === 'object'
+    ? error as { code?: unknown; sqlState?: unknown; message?: unknown }
+    : { message: error };
+  const code = rec.code != null ? String(rec.code) : '';
+  const sqlState = rec.sqlState != null ? String(rec.sqlState) : '';
+  const message = rec.message != null ? String(rec.message) : '';
+  if (code === WRITER_COORDINATOR_REQUIRED) return true;
+  if (message.includes(WRITER_COORDINATOR_REQUIRED)) return true;
+  return (code === MANAGED_WRITER_SQLSTATE || sqlState === MANAGED_WRITER_SQLSTATE)
+    && message.includes('persistence coordinator');
+}
+
 /** Run brain-wide Autopilot maintenance without bypassing managed-writer ownership. */
 export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: GlobalMaintenanceJob) {
   const { runCycle, MAINTENANCE_PHASES, MIXED_PHASES, LAST_GLOBAL_AT_KEY } = await import('../core/cycle.ts');
@@ -19,14 +53,9 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
   const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
   const { managedPersistenceEnabled } = await import('../core/persistence/ownership.ts');
-  // These legacy phases can canonically write pages, facts, takes, or derived
-  // records without the managed-writer coordinator. Keep Autopilot on the
-  // compatible maintenance lane until each has a coordinated path.
-  const managedUnsafeSet = new Set<string>([
-    ...MIXED_PHASES,
-    'purge', 'synthesize_concepts', 'propose_takes', 'grade_takes',
-    'calibration_profile', 'drift', 'skillopt', 'embed',
-  ]);
+  // Mixed phases plus the remaining legacy canonical writers. Embedding stays
+  // on: it is the only automatic vector lane and the trigger allows it.
+  const managedUnsafeSet = new Set<string>([...MIXED_PHASES, ...MANAGED_UNSAFE_GLOBAL_PHASES]);
   let persistenceStateReadFailed = false;
   let managed = true;
   try {
@@ -75,10 +104,7 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
   } catch (error) {
     // Activation can race the initial read. The legacy writer's own fence stays
     // authoritative; recover the durable job with only compatible phases.
-    const code = error && typeof error === 'object' && 'code' in error
-      ? String((error as { code?: unknown }).code)
-      : null;
-    if (code !== 'writer_coordinator_required' || !effectivePhases.some((phase) => managedUnsafeSet.has(phase))) {
+    if (!isWriterCoordinatorFence(error) || !effectivePhases.some((phase) => managedUnsafeSet.has(phase))) {
       throw error;
     }
     phasesRejectedByPersistence = phases.filter((phase) => managedUnsafeSet.has(phase));
@@ -96,7 +122,7 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
   const rejectedResult = report.phases.find((phase) =>
     phase.status === 'fail'
     && managedUnsafeSet.has(phase.phase)
-    && phase.error?.code === 'writer_coordinator_required');
+    && isWriterCoordinatorFence(phase.error));
   if (rejectedResult) {
     phasesRejectedByPersistence = phases.filter((phase) => managedUnsafeSet.has(phase));
     effectivePhases = phases.filter((phase) => !managedUnsafeSet.has(phase));

@@ -36,6 +36,12 @@ import {
   isGlobalMaintenanceStale,
   dispatchPerSource,
 } from '../src/commands/autopilot-fanout.ts';
+import {
+  isWriterCoordinatorFence,
+  MANAGED_UNSAFE_GLOBAL_PHASES,
+  MANAGED_WRITER_SQLSTATE,
+  WRITER_COORDINATOR_REQUIRED,
+} from '../src/commands/autopilot-global-maintenance.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 describe('cycle phase partition (#2194 fix #3)', () => {
@@ -138,6 +144,38 @@ describe('cycle phase partition (#2194 fix #3)', () => {
     }
   });
 
+});
+
+describe('managed-writer fence recognition', () => {
+  test('embed stays on the compatible lane; every remaining global writer is fenced', () => {
+    expect(MANAGED_UNSAFE_GLOBAL_PHASES).not.toContain('embed');
+    expect(MANAGED_UNSAFE_GLOBAL_PHASES).not.toContain('orphans');
+    expect(MANAGED_UNSAFE_GLOBAL_PHASES).not.toContain('resolve_symbol_edges');
+    for (const phase of MANAGED_UNSAFE_GLOBAL_PHASES) {
+      expect(MAINTENANCE_PHASES).toContain(phase);
+      expect(GLOBAL_PHASES).toContain(phase);
+    }
+    expect(new Set(MANAGED_UNSAFE_GLOBAL_PHASES)).toEqual(new Set([
+      'purge', 'synthesize_concepts', 'grade_takes',
+      'calibration_profile', 'drift', 'skillopt',
+    ]));
+  });
+
+  test('recognizes the application code, trigger SQLSTATE, and message token', () => {
+    expect(isWriterCoordinatorFence({ code: WRITER_COORDINATOR_REQUIRED })).toBe(true);
+    expect(isWriterCoordinatorFence({
+      code: MANAGED_WRITER_SQLSTATE,
+      message: `${WRITER_COORDINATOR_REQUIRED}: canonical writer must use the persistence coordinator`,
+    })).toBe(true);
+    expect(isWriterCoordinatorFence({
+      sqlState: MANAGED_WRITER_SQLSTATE,
+      message: `${WRITER_COORDINATOR_REQUIRED}: canonical writer must use the persistence coordinator`,
+    })).toBe(true);
+    expect(isWriterCoordinatorFence(`${WRITER_COORDINATOR_REQUIRED}: source topology`)).toBe(true);
+    expect(isWriterCoordinatorFence({ code: MANAGED_WRITER_SQLSTATE, message: 'unrelated raise' })).toBe(false);
+    expect(isWriterCoordinatorFence({ code: 'ECONNREFUSED', message: 'db down' })).toBe(false);
+    expect(isWriterCoordinatorFence(null)).toBe(false);
+  });
 });
 
 describe('isGlobalMaintenanceStale', () => {
@@ -389,6 +427,36 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     }
   });
 
+  test('managed brains keep embed enabled while excluding the remaining canonical writers', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-embed-maintenance-'));
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    try {
+      const handlers = await captureHandlers();
+      const result = await handlers.get('autopilot-global-maintenance')!({
+        id: 4108,
+        data: {
+          phases: [
+            'synthesize_concepts', 'grade_takes', 'calibration_profile',
+            'drift', 'skillopt', 'purge', 'embed', 'orphans',
+          ],
+          repoPath,
+        },
+        signal: undefined,
+      });
+
+      expect(result.phases_rejected_by_persistence).toEqual([
+        'synthesize_concepts', 'grade_takes', 'calibration_profile',
+        'drift', 'skillopt', 'purge',
+      ]);
+      expect(result.report.phases.map((p: any) => p.phase)).toEqual(['embed', 'orphans']);
+      const orphans = result.report.phases.find((p: any) => p.phase === 'orphans');
+      expect(orphans?.status).not.toBe('fail');
+      // Missing embedding creds fail the phase; they must not reject the lane.
+    } finally {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }
+  }, 60_000);
+
   test('managed brains exclude purge because its legacy page deletion bypasses the writer', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-purge-maintenance-'));
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
@@ -463,6 +531,51 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
       await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     }
   });
+
+  test('a mid-cycle purge fence reported as SQLSTATE P0001 still recovers compatible phases', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-purge-sqlstate-'));
+    let stateReads = 0;
+    const racingEngine = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'purgeDeletedPages') {
+          return async () => {
+            const error = new Error(`${WRITER_COORDINATOR_REQUIRED}: canonical writer must use the persistence coordinator`);
+            (error as NodeJS.ErrnoException).code = MANAGED_WRITER_SQLSTATE;
+            throw error;
+          };
+        }
+        if (prop !== 'executeRaw') return Reflect.get(target, prop, receiver);
+        return async (sql: string, params?: unknown[]) => {
+          if (sql === 'SELECT enabled FROM persistence_brain WHERE singleton=1') {
+            stateReads += 1;
+            if (stateReads === 1) {
+              await target.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+              return [{ enabled: false }];
+            }
+          }
+          return target.executeRaw(sql, params);
+        };
+      },
+    }) as unknown as BrainEngine;
+    try {
+      const handlers = await captureHandlers(racingEngine);
+      const result = await handlers.get('autopilot-global-maintenance')!({
+        id: 4109,
+        data: { phases: ['purge', 'orphans'], repoPath },
+        signal: undefined,
+      });
+
+      expect(stateReads).toBeGreaterThanOrEqual(1);
+      expect(result.persistence_transition_recovered).toBe(true);
+      expect(result.phases_rejected_by_persistence).toEqual(['purge']);
+      expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
+      expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
+      const purge = result.report.phases.find((p: any) => p.phase === 'purge');
+      expect(purge).toBeUndefined();
+    } finally {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }
+  }, 60_000);
 
   test('an unavailable persistence-state read fails mixed writers closed but still runs global phases', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-read-failure-'));
