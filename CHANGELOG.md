@@ -17,6 +17,7 @@ The release preflight is executable too. `bun run verify` now rejects a version 
 | An agent is asked to release, push, or open a PR | It follows `docs/RELEASING.md` directly. |
 | Release metadata is inconsistent | `bun run verify` fails before publication. |
 | A version is equal to or older than the base | The release-version guard fails closed. |
+| CI verify runs on a shallow checkout | The guard fetches `origin/master` and deepens `HEAD^` instead of failing closed. |
 | A guard, permission, validation, CI, or release control changes | The release policy requires executed adversarial review evidence. |
 
 ### Things to watch
@@ -27,7 +28,7 @@ Historical CHANGELOG and TODO entries still name the retired command because the
 
 - Replace the retired external release-command route across active agent, contributor, testing, resolver, and release-policy surfaces.
 - Add a current-material-diff review gate with adversarial review for control changes.
-- Add and register `check-release-version.sh` with synthetic fail-closed regressions.
+- Add and register `check-release-version.sh` with synthetic fail-closed regressions, including shallow-checkout fetch of missing `origin/master` / `HEAD^`.
 - Regenerate the public agent-documentation bundles and release-stamped plugin/template artifacts.
 
 ## [0.51.0.1] - 2026-09-21
