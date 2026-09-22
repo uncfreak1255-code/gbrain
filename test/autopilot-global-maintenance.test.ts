@@ -366,7 +366,7 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
   });
 
-  test('managed brains exclude legacy mixed writers instead of dead-lettering global maintenance', async () => {
+  test('managed brains exclude guarded writers instead of dead-lettering compatible maintenance', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-global-maintenance-'));
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
     try {
@@ -376,11 +376,11 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
 
       const result = await handler!({
         id: 4103,
-        data: { phases: ['synthesize', 'patterns', 'orphans'], repoPath },
+        data: { phases: ['synthesize', 'patterns', 'orphans', 'purge', 'synthesize_concepts'], repoPath },
         signal: undefined,
       });
 
-      expect(result.phases_rejected_by_persistence).toEqual(['synthesize', 'patterns']);
+      expect(result.phases_rejected_by_persistence).toEqual(['synthesize', 'patterns', 'purge', 'synthesize_concepts']);
       expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
       expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
       expect(['ok', 'clean']).toContain(result.report.status);
@@ -409,8 +409,19 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     }
   });
 
-  test('an activation race fails the legacy writer closed and still runs compatible global phases', async () => {
+  test('an activation race recovers when purge reports a guarded writer as a failed phase', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-race-maintenance-'));
+    await engine.putPage('notes/expired-managed-race', {
+      type: 'note',
+      title: 'Expired managed-race page',
+      compiled_truth: 'This page exists only to make purge reach its guarded DELETE.',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.executeRaw(
+      "UPDATE pages SET deleted_at = now() - interval '73 hours' WHERE slug = $1",
+      ['notes/expired-managed-race'],
+    );
     let stateReads = 0;
     const racingEngine = new Proxy(engine, {
       get(target, prop, receiver) {
@@ -431,15 +442,16 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
       const handlers = await captureHandlers(racingEngine);
       const result = await handlers.get('autopilot-global-maintenance')!({
         id: 4105,
-        data: { phases: ['synthesize', 'orphans'], repoPath },
+        data: { phases: ['purge', 'orphans'], repoPath },
         signal: undefined,
       });
 
       expect(stateReads).toBeGreaterThanOrEqual(2);
       expect(result.persistence_transition_recovered).toBe(true);
-      expect(result.phases_rejected_by_persistence).toEqual(['synthesize']);
+      expect(result.phases_rejected_by_persistence).toEqual(['purge']);
       expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
       expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
+      expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).not.toBeNull();
     } finally {
       await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     }
