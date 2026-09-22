@@ -8,7 +8,7 @@
 # processes). The PGLite WASM test suite then OOMs (8-shard) or crawls
 # (~12min for 1/3 of files vs ~85s normally). The suite already runs on
 # GitHub's ephemeral runners on every PR push; this script makes a local
-# caller (human or agent, e.g. /ship Step 5) AWAIT that cloud run exactly
+# caller (human or agent during release verification) AWAIT that cloud run exactly
 # like a local `bun run test` — push, dispatch, `gh run watch --exit-status`.
 #
 # USAGE:

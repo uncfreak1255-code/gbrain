@@ -2,6 +2,35 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.51.0.2] - 2026-09-21
+
+**Releases now run from GBrain's checked-in policy and executable gates, without depending on an external release command.**
+
+The repository now tells every contributor and coding agent to follow `docs/RELEASING.md` directly. Version synchronization, full tests, current-diff review, documentation checks, PR conventions, and GitHub publication remain required, but the path is visible and maintainable in the same repository as the code it governs.
+
+The release preflight is executable too. `bun run verify` now rejects a version that disagrees with `package.json` or the top CHANGELOG entry, lacks four numeric parts, or does not advance the selected base branch. This closes the gap where written policy claimed version monotonicity while CI checked only formatting.
+
+### What changes in practice
+
+| Situation | Result |
+|---|---|
+| An agent is asked to release, push, or open a PR | It follows `docs/RELEASING.md` directly. |
+| Release metadata is inconsistent | `bun run verify` fails before publication. |
+| A version is equal to or older than the base | The release-version guard fails closed. |
+| CI verify runs on a shallow checkout | The guard fetches `origin/master` and deepens `HEAD^` instead of failing closed. |
+| A guard, permission, validation, CI, or release control changes | The release policy requires executed adversarial review evidence. |
+
+### Things to watch
+
+Historical CHANGELOG and TODO entries still name the retired command because they record how older releases were produced. They are not active routing or release policy.
+
+### Itemized changes
+
+- Replace the retired external release-command route across active agent, contributor, testing, resolver, and release-policy surfaces.
+- Add a current-material-diff review gate with adversarial review for control changes.
+- Add and register `check-release-version.sh` with synthetic fail-closed regressions, including shallow-checkout fetch of missing `origin/master` / `HEAD^`.
+- Regenerate the public agent-documentation bundles and release-stamped plugin/template artifacts.
+
 ## [0.51.0.1] - 2026-09-21
 
 **Reinstalling Autopilot now reliably turns it back on, and status proves when its guarded worker is actually enforcing zero paid spend.**

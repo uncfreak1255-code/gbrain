@@ -74,7 +74,7 @@ ALLOWED=(
 #   - aliased:         import { operations as ops } from '...core/operations.ts'
 #   - namespace:       import * as opsModule from '...core/operations.ts'
 # The original narrow regex only matched the destructured form — codex caught
-# the bypass class during /ship adversarial review (aliased + namespace forms
+# the bypass class during release adversarial review (aliased + namespace forms
 # slipped through). The broadened regex below specifically requires `operations`
 # inside the destructured clause OR a namespace import (`* as X`); type-only
 # imports of sibling exports like `sourceScopeOpts` / `OperationContext` are

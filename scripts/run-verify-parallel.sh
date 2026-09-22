@@ -112,6 +112,7 @@ CHECKS=(
   "check:worker-lock-renewal-shape"
   "check:bootstrap-tag"
   "check:plugin-tree"
+  "check:release-version"
   "check:skill-refs"
   # Previously reachable ONLY from the deleted check:all (i.e. never run):
   "check:newlines"
