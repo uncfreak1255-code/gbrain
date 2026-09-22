@@ -389,6 +389,25 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     }
   });
 
+  test('managed brains exclude purge because its legacy page deletion bypasses the writer', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-managed-purge-maintenance-'));
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    try {
+      const handlers = await captureHandlers();
+      const result = await handlers.get('autopilot-global-maintenance')!({
+        id: 4107,
+        data: { phases: ['orphans', 'purge'], repoPath },
+        signal: undefined,
+      });
+
+      expect(result.phases_rejected_by_persistence).toEqual(['purge']);
+      expect(result.report.phases.map((p: any) => p.phase)).toEqual(['orphans']);
+      expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(false);
+    } finally {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }
+  });
+
   test('managed brains report an explicit no-op when every requested phase uses a legacy writer', async () => {
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
     try {

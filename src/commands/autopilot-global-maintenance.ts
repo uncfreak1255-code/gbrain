@@ -20,6 +20,9 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
 
   const { managedPersistenceEnabled } = await import('../core/persistence/ownership.ts');
   const mixedSet = new Set<string>(MIXED_PHASES);
+  // `purge` hard-deletes pages through the legacy engine path too. It is
+  // globally scoped, but cannot run while the managed writer owns deletions.
+  const managedUnsafeSet = new Set<string>([...MIXED_PHASES, 'purge']);
   let persistenceStateReadFailed = false;
   let managed = true;
   try {
@@ -31,7 +34,7 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
   }
 
   let phasesRejectedByPersistence = managed
-    ? phases.filter((phase) => mixedSet.has(phase))
+    ? phases.filter((phase) => managedUnsafeSet.has(phase))
     : [];
   let effectivePhases = phases.filter((phase) => !phasesRejectedByPersistence.includes(phase));
   const skipped = (extra: Record<string, unknown> = {}) => ({
@@ -74,8 +77,8 @@ export async function runAutopilotGlobalMaintenance(engine: BrainEngine, job: Gl
     if (code !== 'writer_coordinator_required' || !effectivePhases.some((phase) => mixedSet.has(phase))) {
       throw error;
     }
-    phasesRejectedByPersistence = phases.filter((phase) => mixedSet.has(phase));
-    effectivePhases = phases.filter((phase) => !mixedSet.has(phase));
+    phasesRejectedByPersistence = phases.filter((phase) => managedUnsafeSet.has(phase));
+    effectivePhases = phases.filter((phase) => !managedUnsafeSet.has(phase));
     if (effectivePhases.length === 0) {
       return skipped({ persistence_transition_recovered: true });
     }
