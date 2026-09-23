@@ -365,4 +365,21 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(stamped).not.toBeNull();
     expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
   });
+
+  test('managed maintenance fences canonical writers but keeps embedding maintenance available', async () => {
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    try {
+      const handlers = await captureHandlers();
+      const result = await handlers.get('autopilot-global-maintenance')!({
+        id: 4103,
+        data: { phases: ['synthesize', 'synthesize_concepts', 'embed', 'orphans'] },
+        signal: undefined,
+      });
+      expect(result.phases_rejected_by_persistence).toEqual(['synthesize', 'synthesize_concepts']);
+      expect(result.report.phases.map((p: any) => p.phase)).toContain('embed');
+      expect(result.report.phases.map((p: any) => p.phase)).toContain('orphans');
+    } finally {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    }
+  });
 });

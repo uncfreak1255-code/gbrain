@@ -2791,7 +2791,7 @@ export async function registerBuiltinHandlers(
   // No source_id → uses the legacy global cycle lock; stamps autopilot.last_global_at
   // on success so the dispatch gate backs off.
   worker.register('autopilot-global-maintenance', async (job) => {
-    const { runCycle, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } = await import('../core/cycle.ts');
+    const { runCycle, MAINTENANCE_PHASES, MIXED_PHASES, LAST_GLOBAL_AT_KEY } = await import('../core/cycle.ts');
     const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
       : (await engine.getConfig('sync.repo_path')) ?? null;
@@ -2806,20 +2806,56 @@ export async function registerBuiltinHandlers(
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
-    const report = await runCycle(engine, {
+    // Managed persistence owns canonical pages and facts. Keep derived
+    // embedding maintenance active, but reject the legacy canonical writers
+    // until they have a coordinated path.
+    const managedUnsafe = new Set<string>([...MIXED_PHASES, 'purge', 'synthesize_concepts']);
+    let managed = true;
+    let persistenceStateReadFailed = false;
+    try {
+      const { managedPersistenceEnabled } = await import('../core/persistence/ownership.ts');
+      managed = await managedPersistenceEnabled(engine);
+    } catch {
+      persistenceStateReadFailed = true;
+    }
+    let phasesRejectedByPersistence = managed ? phases.filter((phase) => managedUnsafe.has(phase)) : [];
+    let effectivePhases = phases.filter((phase) => !phasesRejectedByPersistence.includes(phase));
+    const skipped = (extra: Record<string, unknown> = {}) => ({
+      partial: false,
+      status: 'skipped',
+      report: { reason: 'all_phases_rejected_by_persistence', phases_rejected_by_persistence: phasesRejectedByPersistence, ...extra },
+      phases_rejected_by_persistence: phasesRejectedByPersistence,
+      ...extra,
+    });
+    if (effectivePhases.length === 0) return skipped(persistenceStateReadFailed ? { persistence_state_read_failed: true } : {});
+
+    const runSelectedPhases = (selectedPhases: typeof MAINTENANCE_PHASES) => runCycle(engine, {
       brainDir: repoPath,
-      pull: false, // brain-wide DB/maintenance work never git-pulls
+      pull: false,
       signal: job.signal,
-      deadlineAtMs: job.deadlineAtMs, // #2781: phases budget sub-work from remaining time
-      // The maintenance lane is where synthesize/patterns actually run on
-      // multi-source brains (per-source payloads normalize down to the
-      // freshness phases) — without the owner id its private queues would be
-      // owner-less and recovery would degrade to lease-expiry only.
+      deadlineAtMs: job.deadlineAtMs,
       privateQueueOwnerJobId: job.id,
-      phases,
+      phases: selectedPhases,
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
+
+    let report = await runSelectedPhases(effectivePhases);
+    // PostgreSQL reports the writer trigger as SQLSTATE P0001 and keeps the
+    // application marker in its message. Recover that activation race by
+    // rerunning only the compatible phases.
+    const ownershipFailure = report.phases.some((phase) =>
+      phase.status === 'fail' && managedUnsafe.has(phase.phase)
+      && phase.error?.code === 'P0001'
+      && phase.error.message.includes('writer_coordinator_required'));
+    let persistenceTransitionRecovered = false;
+    if (ownershipFailure) {
+      phasesRejectedByPersistence = phases.filter((phase) => managedUnsafe.has(phase));
+      effectivePhases = phases.filter((phase) => !managedUnsafe.has(phase));
+      if (effectivePhases.length === 0) return skipped({ persistence_transition_recovered: true });
+      persistenceTransitionRecovered = true;
+      report = await runSelectedPhases(effectivePhases);
+    }
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
       && !report.phases.some(phase => {
@@ -2847,6 +2883,9 @@ export async function registerBuiltinHandlers(
       partial: report.status === 'partial' || report.status === 'failed',
       status: report.status,
       report,
+      ...(phasesRejectedByPersistence.length > 0 ? { phases_rejected_by_persistence: phasesRejectedByPersistence } : {}),
+      ...(persistenceStateReadFailed ? { persistence_state_read_failed: true } : {}),
+      ...(persistenceTransitionRecovered ? { persistence_transition_recovered: true } : {}),
     };
   });
 
