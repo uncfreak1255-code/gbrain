@@ -17,6 +17,7 @@ import { recordManagedSyncFailure, clearManagedSyncFailureAfterSuccess, formatMa
 import { writeFailureDiagnostic } from './verb-errors.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
 import type { WriteRequest } from './model.ts';
+import { clearLegacyCheckpointFailuresAfterSuccessfulRetry } from '../sync-failure-ledger.ts';
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
@@ -166,6 +167,9 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
   let phase: ManagedSyncFailure['phase'] = 'resume';
   let discoveryTarget: string | null = null;
   const discoveryRun = randomUUID();
+  const clearLegacyCheckpointAfterRetry = (): void => {
+    if (opts.retryFailed) clearLegacyCheckpointFailuresAfterSuccessfulRetry(context.sourceId);
+  };
   try {
     try { cursor = await readCursor(engine, key); }
     catch (error) {
@@ -198,7 +202,7 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
       }
     }
     if (cursor?.done && opts.dryRun) return result(cursor, 'dry_run');
-    if (cursor?.done && company) { await clearManagedSyncFailureAfterSuccess(engine, key); return result(cursor, cursor.from === null ? 'first_sync' : 'synced'); }
+    if (cursor?.done && company) { await clearManagedSyncFailureAfterSuccess(engine, key); clearLegacyCheckpointAfterRetry(); return result(cursor, cursor.from === null ? 'first_sync' : 'synced'); }
     if (cursor?.done) {
       await clearManagedSyncFailureAfterSuccess(engine, key);
       await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 AND completed_keys=$3::text::jsonb', [OP, key, JSON.stringify([header(cursor)])]);
@@ -210,7 +214,7 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
       const discovery = await discoverManagedSync(engine, opts, context);
       const fresh: Cursor = { ...discovery, authority, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 }, ...(company ? { companyReceiptId: company.receiptId } : {}) };
       if (opts.dryRun) return result(fresh, 'dry_run');
-      if (!fresh.entries.length && fresh.from === fresh.target) { await clearManagedSyncFailureAfterSuccess(engine, key); return result(fresh, 'up_to_date'); }
+      if (!fresh.entries.length && fresh.from === fresh.target) { await clearManagedSyncFailureAfterSuccess(engine, key); clearLegacyCheckpointAfterRetry(); return result(fresh, 'up_to_date'); }
       if (company) await company.protect([{ op: OP, fingerprint: key, kind: 'managed_cursor' }, { op: `${OP}-manifest`, fingerprint: fresh.runId, kind: 'manifest' }]);
       cursor = await saveCursor(engine, key, null, fresh);
     }
@@ -277,6 +281,7 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
         cursor = (await readCursor(engine, key))!;
         if (!cursor?.done) throw new OperationError('storage_error', 'Committed sync checkpoint lost its cursor.');
         await clearManagedSyncFailureAfterSuccess(engine, key);
+        clearLegacyCheckpointAfterRetry();
         if (cursor.counts.added + cursor.counts.modified + cursor.counts.deleted > 0) await refreshProjectionStatistics(engine);
         return result(cursor, cursor.from === null ? 'first_sync' : 'synced');
       }
