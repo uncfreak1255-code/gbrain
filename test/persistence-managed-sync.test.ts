@@ -76,7 +76,12 @@ test('imports files without rewriting bytes and checkpoints only committed page 
     expect((await engine.getPage('notes/example',{sourceId:f.id}))?.source_path).toBe('notes/example.md');
     const [source] = await engine.executeRaw<{last_commit:string}>('SELECT last_commit FROM sources WHERE id=$1',[f.id]); expect(source.last_commit).toBe(f.head);
     const requests = await engine.executeRaw<{state:string}>('SELECT state FROM persistence_requests WHERE source_id=$1',[f.id]); expect(requests).toHaveLength(2); expect(requests.every(r=>r.state==='committed')).toBe(true);
+    await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () =>
+      tx.executeRaw("UPDATE sources SET last_sync_at='2000-01-01T00:00:00.000Z' WHERE id=$1", [f.id]),
+    ));
     expect((await performManagedSync(engine,{sourceId:f.id,noPull:true})).status).toBe('up_to_date');
+    const [heartbeat] = await engine.executeRaw<{last_sync_at:string}>('SELECT last_sync_at FROM sources WHERE id=$1',[f.id]);
+    expect(Date.parse(heartbeat.last_sync_at)).toBeGreaterThan(Date.parse('2000-01-01T00:00:00.000Z'));
     expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1',[f.id])).toHaveLength(2);
   }
 }),120_000);

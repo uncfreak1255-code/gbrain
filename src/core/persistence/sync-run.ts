@@ -18,6 +18,7 @@ import { writeFailureDiagnostic } from './verb-errors.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
 import type { WriteRequest } from './model.ts';
 import { clearLegacyCheckpointFailuresAfterSuccessfulRetry } from '../sync-failure-ledger.ts';
+import { withCoordinatedWrite } from './context.ts';
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
@@ -214,7 +215,14 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
       const discovery = await discoverManagedSync(engine, opts, context);
       const fresh: Cursor = { ...discovery, authority, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 }, ...(company ? { companyReceiptId: company.receiptId } : {}) };
       if (opts.dryRun) return result(fresh, 'dry_run');
-      if (!fresh.entries.length && fresh.from === fresh.target) { await clearManagedSyncFailureAfterSuccess(engine, key); clearLegacyCheckpointAfterRetry(); return result(fresh, 'up_to_date'); }
+      if (!fresh.entries.length && fresh.from === fresh.target) {
+        await engine.transaction(tx => withCoordinatedWrite(tx, [context.sourceId], () =>
+          tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1', [context.sourceId]),
+        ));
+        await clearManagedSyncFailureAfterSuccess(engine, key);
+        clearLegacyCheckpointAfterRetry();
+        return result(fresh, 'up_to_date');
+      }
       if (company) await company.protect([{ op: OP, fingerprint: key, kind: 'managed_cursor' }, { op: `${OP}-manifest`, fingerprint: fresh.runId, kind: 'manifest' }]);
       cursor = await saveCursor(engine, key, null, fresh);
     }
