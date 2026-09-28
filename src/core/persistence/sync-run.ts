@@ -25,6 +25,7 @@ import { extractManagedStaleLinks } from './links-maintenance.ts';
 import { CHECKPOINT_VALIDATION_TIMEOUT, checkpointTimeoutHint } from './checkpoint-validation.ts';
 import { isTerminalWriteState, publicWriteReceipt, type WriteReceipt } from './types.ts';
 import type { WriteRequest } from './model.ts';
+import { withCoordinatedWrite } from './context.ts';
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
@@ -356,6 +357,9 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
       const fresh: Cursor = { ...discovery, authority, processingOptions, syncOptions, runId: discoveryRun, index: 0, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 }, ...(company ? { companyReceiptId: company.receiptId } : {}) };
       if (opts.dryRun) return result(fresh, 'dry_run');
       if (!fresh.entries.length && fresh.from === fresh.target) {
+        await engine.transaction(tx => withCoordinatedWrite(tx, [context.sourceId], () =>
+          tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1', [context.sourceId]),
+        ));
         await clearManagedSyncFailureAfterSuccess(engine, key);
         assertActive();
         return result(fresh, 'up_to_date');
