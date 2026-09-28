@@ -377,7 +377,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(result.skippedUnavailablePath[0].skip_warning).toContain('notes/brain');
   });
 
-  test('pull: true only when source.config.remote_url is set', async () => {
+  test('never pulls sources, even when source.config.remote_url is set', async () => {
     const remote = src('remote', undefined, { remote_url: 'https://github.com/x/y' });
     const local = src('local');
     const { engine, queue, added, fanoutOpts } = makeStubs([remote, local]);
@@ -385,16 +385,16 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     const byId = new Map<string, AddedJob>(
       added.map(j => [(j.data as Record<string, unknown>).source_id as string, j]),
     );
-    expect((byId.get('remote')!.data as Record<string, unknown>).pull).toBe(true);
+    expect((byId.get('remote')!.data as Record<string, unknown>).pull).toBe(false);
     expect((byId.get('local')!.data as Record<string, unknown>).pull).toBe(false);
   });
 
-  test('pull: true when PGLite returns source.config as a JSON string', async () => {
+  test('never pulls when PGLite returns source.config as a JSON string', async () => {
     const remote = src('remote');
     remote.config = '{"remote_url":"https://github.com/x/y"}' as unknown as SourceRow['config'];
     const { engine, queue, added, fanoutOpts } = makeStubs([remote]);
     await dispatchPerSource(engine, queue, fanoutOpts);
-    expect((added[0].data as Record<string, unknown>).pull).toBe(true);
+    expect((added[0].data as Record<string, unknown>).pull).toBe(false);
   });
 
   test('#4399: a syncEnabled:false source keeps its freshness cycle but is never pulled or synced', async () => {
@@ -416,7 +416,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(disabledData.pull).toBe(false);
     const normalData = byId.get('normal')!.data as Record<string, unknown>;
     expect(normalData.phases).toEqual(SOURCE_FRESHNESS_PHASES);
-    expect(normalData.pull).toBe(true);
+    expect(normalData.pull).toBe(false);
   });
 
   test('fanoutMax cap: 3 sources, fanoutMax=1, 1 dispatched + 2 in skippedCap', async () => {

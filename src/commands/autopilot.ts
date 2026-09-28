@@ -45,7 +45,7 @@ import { detectInstallMethod } from './upgrade.ts';
 import { evaluateQuietHours } from '../core/minions/quiet-hours.ts';
 import { inspectLock } from '../core/db-lock.ts';
 import { registerCleanup } from '../core/process-cleanup.ts';
-import { loadAllSources, sourceConfigHasRemoteUrl, sourceLocalPathSkipWarning, relativeSourceLocalPathSkipWarning } from '../core/sources-load.ts';
+import { loadAllSources, sourceLocalPathSkipWarning, relativeSourceLocalPathSkipWarning } from '../core/sources-load.ts';
 import { isSyncDisabledConfig } from '../core/sync-policy.ts';
 import { resolveAutopilotDispatchTimeoutMs } from './autopilot-timeout.ts';
 import {
@@ -1113,7 +1113,9 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
                   {
                     sourceId: src.id,
                     repoPath: src.local_path,
-                    pull: sourceConfigHasRemoteUrl(src.config),
+                    // Repository updates are owned by agents. Managed syncs
+                    // must only index the checked-out worktree.
+                    pull: false,
                     auto_embed_backfill: true,
                     embed_reason: 'autopilot_freshness',
                   },
@@ -1487,10 +1489,9 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         // and pass the abort signal so the cycle winds down between phases.
         const cyclePromise = runCycle(engine, {
           brainDir: repoPath,
-          // Autopilot daemon path: pulls by default (matches
-          // pre-v0.17 autopilot behavior). CLI dream defaults false
-          // for cron safety; that choice is scoped to dream only.
-          pull: true,
+          // Repository updates are owned by agents. Managed syncs only index
+          // the checked-out worktree.
+          pull: false,
           signal: shutdownAbort.signal,
           yieldBetweenPhases: async () => {
             await new Promise(r => setImmediate(r));

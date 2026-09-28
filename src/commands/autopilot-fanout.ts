@@ -10,8 +10,8 @@
  *   - P0-5: each per-source cycle writes `last_full_cycle_at` in its
  *     `sources.config` JSONB on success (handled in `runCycle` exit hook,
  *     not here — this module just READS it for freshness gating).
- *   - P1-2: explicitly threads `pull: !!source.config.remote_url` so
- *     local-only sources don't try to git-pull.
+ *   - P1-2: explicitly threads `pull: false`; repository updates are owned
+ *     by agents and managed syncs index the checked-out worktree.
  *   - P1-3: PGLite engines default `fanoutMax=1` (PGLite is single-writer;
  *     parallel fan-out would queue uselessly behind the file lock).
  *   - P1-4: enumeration filters `local_path IS NOT NULL` so pure-DB
@@ -36,7 +36,7 @@ import { existsSync } from 'fs';
 import type { BrainEngine, SourceRow } from '../core/engine.ts';
 import type { MinionQueue } from '../core/minions/queue.ts';
 import { SOURCE_FRESHNESS_PHASES, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } from '../core/cycle.ts';
-import { sourceConfigHasRemoteUrl, sourceLocalPathSkipWarning } from '../core/sources-load.ts';
+import { sourceLocalPathSkipWarning } from '../core/sources-load.ts';
 import { isSyncDisabledConfig } from '../core/sync-policy.ts';
 import { AUTOPILOT_FULL_CYCLE_FLOOR_MINUTES } from './autopilot-remediation-policy.ts';
 
@@ -511,7 +511,7 @@ export async function dispatchPerSource(
       // stamp; only the sync phase (and the pull that feeds it) is dropped —
       // normalizeQueuedSourcePhases passes a freshness subset through as-is.
       const syncDisabled = isSyncDisabledConfig(src.config);
-      const shouldPull = sourceConfigHasRemoteUrl(src.config) && !syncDisabled;
+      const shouldPull = false;
       const job = await queue.add(
         'autopilot-cycle',
         {
