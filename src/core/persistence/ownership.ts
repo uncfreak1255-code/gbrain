@@ -8,6 +8,8 @@ import { discoverGitRoot } from '../sync-git.ts';
 import { digest, sha256 } from './digest.ts';
 import { localHostId, persistenceHome } from './identity.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
+import { managedPersistenceEnabled } from './managed-mode.ts';
+export { managedPersistenceEnabled } from './managed-mode.ts';
 import { acquireNativeLock, tryAcquireNativeLock, type NativeLockHandle } from './native-lock.ts';
 import { managedFilesystemDatastorePath, refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 import { assertPhysicalRoot, claimPhysicalRoot, isPhysicalRootMetadata, preparePhysicalRootTransfer, readPhysicalRootReservation, restampPhysicalRoot } from './physical-root.ts';
@@ -32,10 +34,6 @@ export interface WorktreeBinding {
 export function containsPath(root: string, path: string): boolean {
   const rel = relative(root, path);
   return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
-}
-export async function managedPersistenceEnabled(engine: SqlEngine): Promise<boolean> {
-  const [row] = await engine.executeRaw<{ enabled: boolean }>('SELECT enabled FROM persistence_brain WHERE singleton=1');
-  return row?.enabled === true;
 }
 export async function getWorktreeBinding(engine: SqlEngine, sourceId: string, hostId: string | null = localHostId()): Promise<WorktreeBinding | null> {
   const [row] = await engine.executeRaw<WorktreeBinding>(`SELECT s.source_id,s.source_incarnation,s.worktree_id,s.relative_path,
