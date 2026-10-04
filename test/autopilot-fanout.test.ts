@@ -229,6 +229,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
+      executeRaw: async () => [],
       listAllSources: async () => {
         if (opts?.listThrows) throw new Error('sources table missing');
         return sources;
@@ -461,6 +462,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
+      executeRaw: async () => [],
       listAllSources: async () => sources,
     } as unknown as BrainEngine;
     const queue = {

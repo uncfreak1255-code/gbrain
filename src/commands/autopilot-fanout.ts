@@ -45,6 +45,7 @@ import { attemptedConnectorSourceIds } from '../core/persistence/connector-state
 import { parseSourceConfig, sourceConfigHasRemoteUrl, sourceLocalPathSkipWarning } from '../core/sources-load.ts';
 import { isSyncDisabledConfig } from '../core/sync-policy.ts';
 import { loadActivationPendingSourceIds, skipActivationPendingSync } from '../core/sync-policy.ts';
+import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
 import { AUTOPILOT_FULL_CYCLE_FLOOR_MINUTES } from './autopilot-remediation-policy.ts';
 
 // #2194 fix #2: failure cooldown. A source whose autopilot-cycle keeps
@@ -453,7 +454,7 @@ export async function dispatchPerSource(
     // (default source) and pre-v0.18 brains without the sources table.
     const job = await queue.add(
       'autopilot-cycle',
-      { repoPath: opts.repoPath },
+      { repoPath: opts.repoPath, pull: !(await managedPersistenceEnabled(engine)) },
       {
         queue: 'default',
         // Slot key dedups repeats within one slot; maxPending: 1 is the
@@ -547,7 +548,7 @@ export async function dispatchPerSource(
       );
       const syncDisabled = isSyncDisabledConfig(src.config) || pendingActivation;
       const connector = connectorIds.has(src.id);
-      const shouldPull = sourceConfigHasRemoteUrl(src.config) && !syncDisabled && !connector;
+      const shouldPull = !(await managedPersistenceEnabled(engine)) && sourceConfigHasRemoteUrl(src.config) && !syncDisabled && !connector;
       const job = await queue.add(
         'autopilot-cycle',
         {

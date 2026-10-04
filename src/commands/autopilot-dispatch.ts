@@ -9,6 +9,7 @@ import type { MinionQueue } from '../core/minions/queue.ts';
 import { loadAllSources, parseSourceConfig, sourceConfigHasRemoteUrl, sourceLocalPathSkipWarning, type SourceRow } from '../core/sources-load.ts';
 import { isConnectorSourceKind } from '../core/persistence/connector-identity.ts';
 import { attemptedConnectorSourceIds } from '../core/persistence/connector-state.ts';
+import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
 import { isSyncDisabledConfig } from '../core/sync-policy.ts';
 import { loadActivationPendingSourceIds, skipActivationPendingSync } from '../core/sync-policy.ts';
 import { resolveAutopilotDispatchTimeoutMs } from './autopilot-timeout.ts';
@@ -193,7 +194,9 @@ export async function dispatchAutopilotTick(
           };
           const job = await queue.add(
             step.job,
-            step.params,
+            step.job === 'sync' && await managedPersistenceEnabled(engine)
+              ? { ...step.params, pull: false }
+              : step.params,
             submitOpts,
             isProtected ? { allowProtectedSubmit: true } : undefined,
           );
@@ -261,6 +264,7 @@ export async function dispatchFreshnessSyncs(
       const attempted = await attemptedConnectorSourceIds(engine).catch(() => null);
       const sources = await loadAllSources(engine);
       const activationPending = await loadActivationPendingSourceIds(engine);
+      const managed = await managedPersistenceEnabled(engine);
       const intervalMs = baseInterval * 1000;
       const now = Date.now();
       for (const src of sources) {
@@ -296,7 +300,7 @@ export async function dispatchFreshnessSyncs(
             {
               sourceId: src.id,
               repoPath: src.local_path,
-              pull: sourceConfigHasRemoteUrl(src.config),
+              pull: !managed && sourceConfigHasRemoteUrl(src.config),
               auto_embed_backfill: true,
               embed_reason: 'autopilot_freshness',
             },
