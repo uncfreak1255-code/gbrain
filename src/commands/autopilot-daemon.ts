@@ -4,7 +4,7 @@
  * install/uninstall/status/pause mode flag is present.
  */
 import type { BrainEngine } from '../core/engine.ts';
-import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
+import { managedPersistenceEnabled } from '../core/persistence/managed-mode.ts';
 import { ChildWorkerSupervisor } from '../core/minions/child-worker-supervisor.ts';
 import { MIGRATE_PAUSE_MARKER_PREFIX, autopilotLockPath, autopilotPaused, autopilotPausedMarkerPath, markerHolderAlive } from '../core/autopilot-paths.ts';
 import { OwnerProcessingState } from '../core/minions/processing-state.ts';

@@ -81,6 +81,14 @@ const AGENT_REGISTER_FLAGS = [
  */
 const AGENT_PHANTOM_FLAGS = ['--delete-brain', '--confirm-destructive', '--break-lock', '--force', '--remove', '--home', '--project', '--workspace'];
 
+test('managed-state utility imports do not legalize governance flags for autopilot', () => {
+  const fresh = buildFlagRegistry();
+  for (const flag of ['--admin-intent', '--expected-epoch', '--expected-state', '--manifest', '--self-transfer']) {
+    expect(fresh.autopilot).not.toContain(flag);
+    expect(validateCommandFlags('autopilot', ['--once', flag])).toBe(flag);
+  }
+});
+
 describe('segmentDispatchBlocks — every if/case shape is a marker for its command', () => {
   const SNIPPET = [
     `  if (command === 'alpha') {`,

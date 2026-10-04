@@ -45,7 +45,7 @@ import { attemptedConnectorSourceIds } from '../core/persistence/connector-state
 import { parseSourceConfig, sourceConfigHasRemoteUrl, sourceLocalPathSkipWarning } from '../core/sources-load.ts';
 import { isSyncDisabledConfig } from '../core/sync-policy.ts';
 import { loadActivationPendingSourceIds, skipActivationPendingSync } from '../core/sync-policy.ts';
-import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
+import { managedPersistenceEnabled } from '../core/persistence/managed-mode.ts';
 import { AUTOPILOT_FULL_CYCLE_FLOOR_MINUTES } from './autopilot-remediation-policy.ts';
 
 // #2194 fix #2: failure cooldown. A source whose autopilot-cycle keeps
