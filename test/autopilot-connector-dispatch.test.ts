@@ -63,6 +63,22 @@ async function freshness(lines: string[]): Promise<void> {
 }
 
 describe('#5673 connector dispatch gate', () => {
+  for (const enabled of [true, false]) {
+    test(`automatic filesystem sync respects managed persistence enabled=${enabled}`, async () => {
+      await addSource('remote-notes', { remote_url: 'https://example.com/notes.git' }, dir);
+      await engine.executeRaw('INSERT INTO persistence_brain (singleton, enabled) VALUES (1, $1) ON CONFLICT (singleton) DO UPDATE SET enabled=EXCLUDED.enabled', [enabled]);
+      await freshness([]);
+      const syncs = (await jobs()).filter(job => job.name === 'sync');
+      expect(syncs).toHaveLength(1);
+      expect(syncs[0].data.pull).toBe(!enabled);
+      await dispatchPerSource(engine, new MinionQueue(engine), { repoPath: dir, slot: 'managed-policy', timeoutMs: 60_000, fanoutMax: 10, jsonMode: true, emit: () => {}, log: () => {} });
+      const cycles = (await jobs()).filter(job => job.name === 'autopilot-cycle');
+      expect(cycles).toHaveLength(1);
+      expect(cycles[0].data.pull).toBe(!enabled);
+      expect(cycles[0].data.phases).toContain('sync');
+    });
+  }
+
   test('the freshness loop syncs an attempted connector with a stale local_path, without a repoPath', async () => {
     await addSource('gmail-stale', { kind: 'google' }, join(dir, 'missing-checkout'));
     await recordConnectorSyncAttempt(engine, 'gmail-stale');
