@@ -581,3 +581,7 @@ E2E_TEST_MAP["src/core/engine-sql/normalize.ts"] = ["test/e2e/engine-sql-normali
 E2E_TEST_MAP["src/core/engine-sql/brands.ts"] = ["test/e2e/engine-sql-rls-scope.test.ts"];
 E2E_TEST_MAP["src/core/engine-sql/chunks.ts"] = ["test/e2e/evidence-delivery-leak.test.ts", "test/e2e/evidence-delivery-parity.test.ts"];
 E2E_TEST_MAP["src/core/engine-sql/links.ts"] = ["test/e2e/links-read-order.test.ts", "test/e2e/attendance-retrieval-postgres.test.ts"];
+
+// Complete creation-time backlog scan: shared storage plus the registered recall mode.
+E2E_TEST_MAP["src/core/engine-sql/facts.ts"] = ["test/e2e/facts-keyset-scan-postgres.test.ts", "test/e2e/engine-parity.test.ts"];
+E2E_TEST_MAP["src/core/ops/facts-scan.ts"] = ["test/e2e/facts-keyset-scan-postgres.test.ts"];

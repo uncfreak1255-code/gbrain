@@ -635,6 +635,22 @@ export interface FactListOpts {
   excludeAuditRows?: boolean;
 }
 
+/** Read-only creation-time keyset scan. Cursor IDs refer to one concrete source. */
+export interface FactScanOpts {
+  afterId?: number;
+  throughId?: number;
+  limit?: number;
+  activeOnly?: boolean;
+  visibility?: FactVisibility[];
+}
+
+export interface FactScanPage {
+  facts: FactRow[];
+  throughId: number;
+  nextAfterId: number;
+  hasMore: boolean;
+}
+
 /** Per-source operational health snapshot consumed by `gbrain doctor`. */
 export interface FactsHealth {
   source_id: string;
@@ -2188,6 +2204,9 @@ export interface BrainEngine {
     since: Date,
     opts?: FactListOpts & { entitySlug?: string; sessionId?: string },
   ): Promise<FactRow[]>;
+
+  /** ID-ascending, creation-time inclusive scan with a fixed upper ID bound. */
+  scanFacts(source_id: string, since: Date, opts?: FactScanOpts): Promise<FactScanPage>;
 
   /** List facts captured under a session id within a source. */
   listFactsBySession(
