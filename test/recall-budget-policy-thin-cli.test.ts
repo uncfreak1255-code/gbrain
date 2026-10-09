@@ -213,4 +213,40 @@ describe('actual remote source selection', () => {
       expect(invalid.localStoreCreated).toBe(false);
     }
   }, 90_000);
+  test('thin scan reaches the real authorized operation and pages beyond 100 without local storage', async () => {
+    await remote.executeRaw("INSERT INTO sources(id,name) VALUES('scan-example','scan-example')");
+    await remote.executeRaw(`INSERT INTO facts(source_id,fact,source,visibility,created_at,valid_from)
+      SELECT 'scan-example','Saved claim ' || i::text,'synthetic','world','2026-06-10','2020-01-01'
+      FROM generate_series(1,150) AS i`);
+    await remote.insertFact({ fact: 'Private claim', source: 'synthetic', visibility: 'private' }, { source_id: 'scan-example' });
+    const dispatch = (args: Record<string, unknown>) => dispatchToolCall(remote, 'recall', args, {
+      remote: true, sourceId: 'default', auth: { allowedSources: ['default', 'scan-example'] }, config: {},
+    } as never);
+    const base = ['--scan', '--since', '2026-01-01T00:00:00.000Z', '--source', 'scan-example', '--include-expired', '--limit', '100', '--json'];
+    const first = await thinCall('postgres', base, { dispatch });
+    expect({ code: first.exitCode, stderr: first.stderr }).toMatchObject({ code: 0 });
+    const page = JSON.parse(first.stdout);
+    expect(page.facts).toHaveLength(100);
+    expect(page.scan).toMatchObject({ version: 1, source_id: 'scan-example', has_more: true });
+    expect(first.calls[0]).toEqual({ name: 'recall', arguments: {
+      scan: true, since: '2026-01-01T00:00:00.000Z', source_id: 'scan-example', include_expired: true, limit: 100,
+    } });
+    expect(first.localStoreCreated).toBe(false);
+    const second = await thinCall('pglite', [...base, '--after-id', String(page.scan.next_after_id), '--through-id', String(page.scan.through_id)], { dispatch });
+    expect({ code: second.exitCode, stderr: second.stderr }).toMatchObject({ code: 0 });
+    const tail = JSON.parse(second.stdout);
+    expect(tail.facts).toHaveLength(50);
+    expect(tail.scan).toMatchObject({ through_id: page.scan.through_id, after_id: page.scan.next_after_id, has_more: false });
+    expect(new Set([...page.facts, ...tail.facts].map(row => row.id)).size).toBe(150);
+    expect(second.localStoreCreated).toBe(false);
+    const denied = await thinCall('postgres', [...base, '--source', 'denied'], { dispatch });
+    expect(denied.exitCode).not.toBe(0);
+    expect(JSON.parse(denied.stdout).error).toBe('permission_denied');
+    expect(denied.localStoreCreated).toBe(false);
+    const ambiguous = await thinCall('postgres', ['--scan', '--since', '2026-01-01T00:00:00.000Z', '--json'], { dispatch });
+    expect(ambiguous.exitCode).not.toBe(0);
+    expect(JSON.parse(ambiguous.stdout).error).toBe('invalid_params');
+    expect(ambiguous.localStoreCreated).toBe(false);
+  });
+
 });

@@ -64,11 +64,34 @@ registry cannot assign its flags to the preceding thin-recall branch.
 `test/cli-recall-flag-ownership.test.ts` pins fresh generation and real CLI
 rejection of serve-only flags before a brain opens.
 
+## Complete saved-fact traversal
+
+`recall` with `scan: true` (CLI `recall --scan --since <ISO> --json`) reads one
+concrete authorized source in increasing fact-ID order. `since` is an inclusive
+creation-time cutoff, independent of event time. A single SQL statement returns
+at most 100 rows, fixes the first page's eligible maximum ID as `through_id`,
+and reads one extra row to prove `has_more`; an exact 100-row tail is complete.
+Continuation passes the same `since`, source and expiry policy, returned
+`through_id`, and `next_after_id` as exclusive `after_id`. Scan requests reject
+relevance, entity/session, budget and audit-mode options; ordinary recall is
+unchanged. Remote scans preserve the existing world-only visibility and source
+grants before paging. No scan writes a cursor, expiry, or retrieval timestamp.
+
+`through_id` bounds visible IDs; it is not a transactional commit watermark.
+PostgreSQL transactions can allocate a lower ID and commit after an earlier
+page has passed it. Consumers requiring loss-free repeated recovery must replay
+a full retained window and deduplicate by fact ID, rather than persist a scan
+cursor or advance a timestamp beyond unprocessed rows. Reads do not freeze
+fact content across multiple pages. Missing capability or inconsistent metadata
+must remain a consumer failure, never a fallback to the newest-100 list.
+
 ## Files
 
 - `src/core/facts/extraction-availability.ts` — the ONE extraction-availability gate: `resolveExtractionAvailability(engine, model?)` resolves the extraction model through the engine (`getFactsExtractionModel`, DB-plane `facts.extraction_model` included) and asks the configured gateway `isAvailable('chat', model)`; `extractionAvailableForEngine(engine, capabilities?)` is the corpus-harvest form, where an explicit caller-supplied capability report stays authoritative. Used by the serve checkpoint harvest (both lanes), the maintenance sweep's corpus pass, OpenClaw compact() rung 3 and the facts backstop's execution-time gate, so a servable DB-plane model is never classified keyless by the engine-blind `detectCapabilities()` probe; an unconfigured gateway answers unavailable (the segment stays banked for the sweep). Pinned by `test/facts-extraction-availability.test.ts`, `test/checkpoint-harvest.serial.test.ts`, `test/sweep-writeback-corpus.test.ts` and `test/e2e/context-engine-rung3-extraction.test.ts`.
 
 - `src/core/extract-timeline-from-meetings.ts` — normalizes canonical incoming and pack-owned outgoing `attended` edges into meeting/person roles before timeline fan-out. SQL requires a live person and live meeting (including legacy meeting notes); existing private-meeting filtering, source opt-in and source-qualified deduplication still apply. Dual-engine tests in `test/extract-timeline-attendance.test.ts` use an empty gazetteer so a body-mention fallback cannot conceal a broken attendance consumer.
+
+- `src/core/ops/facts-scan.ts` — optional read-only `recall` keyset mode, strict cursor/window validation, single-source authorization and liveness, remote visibility, and versioned traversal metadata. `BrainEngine.scanFacts` delegates through both engines to `src/core/engine-sql/facts.ts`; the bound and page share one SQL snapshot. Regression suites cover exact/oversized pages, ties, backdated events, expiry/privacy, retries, late inserts and complete full-window replay.
 
 - `src/core/ops/facts.ts` — shared fact/memory operations, including `recall`. Recall keeps source/visibility and fact filters before per-arm candidate limits. Its default/explicit `facts_first` packing preserves the frozen memory-verb contract, including the positive sub-one budget quirk. Optional `query_first` packs the ranked page prefix first only with a nonblank query and positive finite budget; floor-zero and exhausted remainders explicitly return empty arms rather than call the unbounded zero-budget packer. Neither arm skips oversized prefix items or truncates. No-query and inactive-budget paths keep legacy behavior. Only policy-supplied calls add `budget_packing` effective-policy/reason and candidate/kept/dropped/estimated-used accounting. Counter sums match the frozen fields. Do not change the global packer or fact relevance to implement this policy. `test/recall-budget-policy.test.ts` pins numeric boundaries, compatibility, candidate ordering, filters, source/private/safe-projection behavior and shared transport validation.
 

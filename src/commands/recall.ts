@@ -56,6 +56,11 @@ const KIND_ICON: Record<FactKind, string> = {
 };
 
 interface ParsedFlags {
+  scan: boolean;
+  scanSince: string | null;
+  afterId: number | null;
+  throughId: number | null;
+  scanLimit: number | null;
   entity: string | null;
   since: Date | null;
   sessionId: string | null;
@@ -90,6 +95,11 @@ const DEFAULT_FALLBACK_HOURS = 24;
 
 function parseFlags(args: string[]): ParsedFlags {
   const out: ParsedFlags = {
+    scan: false,
+    scanSince: null,
+    afterId: null,
+    throughId: null,
+    scanLimit: null,
     entity: null,
     since: null,
     sessionId: null,
@@ -114,7 +124,12 @@ function parseFlags(args: string[]): ParsedFlags {
   let rawBudget: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--since') { out.since = parseSinceParam(args[++i] ?? ''); continue; }
+    if (a === '--scan') { out.scan = true; continue; }
+    if (a === '--after-id') { out.afterId = Number(args[++i] || NaN); continue; }
+    if (a === '--through-id') { out.throughId = Number(args[++i] || NaN); continue; }
+    if (a.startsWith('--after-id=')) { out.afterId = Number(a.slice('--after-id='.length) || NaN); continue; }
+    if (a.startsWith('--through-id=')) { out.throughId = Number(a.slice('--through-id='.length) || NaN); continue; }
+    if (a === '--since') { out.scanSince = args[++i] ?? ''; out.since = parseSinceParam(out.scanSince); continue; }
     if (a === '--session' || a === '--session-id') { out.sessionId = args[++i] ?? null; continue; }
     if (a === '--grep') { out.grep = (args[++i] ?? '').toLowerCase(); continue; }
     if (a === '--today') { out.today = true; continue; }
@@ -125,7 +140,7 @@ function parseFlags(args: string[]): ParsedFlags {
     if (a === '--source') { out.source = args[++i] ?? 'default'; out.sourceExplicit = true; continue; }
     if (a === '--source-id') { out.source = args[++i] ?? ''; out.sourceExplicit = true; continue; }
     if (a.startsWith('--source-id=')) { out.source = a.slice('--source-id='.length); out.sourceExplicit = true; continue; }
-    if (a === '--limit') { out.limit = parseInt(args[++i] ?? '50', 10) || 50; continue; }
+    if (a === '--limit') { const raw = args[++i]; out.scanLimit = Number(raw); out.limit = parseInt(raw ?? '50', 10) || 50; continue; }
     if (a === '--query') { out.query = args[++i] ?? null; continue; }
     if (a === '--budget-tokens') { rawBudget = args[++i]; continue; }
     if (a === '--budget-policy') {
@@ -165,6 +180,11 @@ function parseFlags(args: string[]): ParsedFlags {
 
 export function hasRecallBudgetPolicy(args: string[]): boolean {
   return parseFlags(args).budgetPolicy !== null;
+}
+
+export function hasRecallOperationRoute(args: string[]): boolean {
+  const flags = parseFlags(args);
+  return flags.budgetPolicy !== null || flags.scan || flags.afterId !== null || flags.throughId !== null;
 }
 
 function parseSinceParam(raw: string): Date | null {
@@ -239,12 +259,14 @@ async function resolveSourceForRecall(
 
 export async function runRecall(engine: BrainEngine, args: string[]): Promise<void> {
   const flags = parseFlags(args);
-  if (flags.budgetPolicy !== null) {
+  if (flags.budgetPolicy !== null || flags.scan || flags.afterId !== null || flags.throughId !== null) {
     const { MEMORY_VERBS_VERSION, operationsByName, verbError } = await import('../core/operations.ts');
     const { validateParams } = await import('../mcp/validate-params.ts');
     const { reportPersistenceCliError } = await import('./persistence-delegate.ts');
     try {
-      const error = validateParams(operationsByName.recall, { budget_policy: flags.budgetPolicy })
+      const error = flags.scan && (flags.today || flags.pending || flags.asContext || flags.watchSeconds !== null || flags.sinceLastRun || flags.rollup)
+        ? '--scan cannot be combined with --today, --pending, --as-context, --watch, --since-last-run, or --rollup.'
+        : validateParams(operationsByName.recall, flags.budgetPolicy !== null ? { budget_policy: flags.budgetPolicy } : {})
         ?? (flags.watchSeconds !== null || flags.sinceLastRun || flags.rollup || flags.asContext
           ? '--budget-policy cannot be combined with --watch, --since-last-run, --rollup, or --as-context.' : null);
       if (error) throw verbError('invalid_params', error,
@@ -257,6 +279,7 @@ export async function runRecall(engine: BrainEngine, args: string[]): Promise<vo
       const thinClient = isThinClient(loadConfig());
       const sourceId = resolveSourceIdEngineFree(flags.sourceExplicit ? flags.source : null)
         ?? (thinClient ? undefined : await resolveSourceId(engine, null));
+      if (flags.scan) flags.json = true;
       await runRecallVerb(engine, flags, sourceId);
     } catch (error) {
       if (error instanceof RemoteMcpError) {
@@ -328,19 +351,22 @@ async function runRecallVerb(engine: BrainEngine, flags: ParsedFlags, sourceId?:
     ...(flags.entity ? { entity: flags.entity } : {}),
     ...(flags.query ? { query: flags.query } : {}),
     ...(flags.budgetTokens ? { budget_tokens: flags.budgetTokens } : {}),
-    ...(flags.since ? { since: flags.since.toISOString() } : {}),
+    ...(flags.scan ? { scan: true, since: flags.scanSince, limit: flags.scanLimit ?? 100 }
+      : flags.since ? { since: flags.since.toISOString() } : {}),
+    ...(flags.afterId !== null ? { after_id: flags.afterId } : {}),
+    ...(flags.throughId !== null ? { through_id: flags.throughId } : {}),
     ...(flags.grep ? { grep: flags.grep } : {}),
     include_expired: flags.includeExpired,
-    limit: flags.limit,
-    ...(flags.budgetPolicy !== null ? {
-      budget_policy: flags.budgetPolicy,
+    limit: flags.scan ? flags.scanLimit ?? 100 : flags.limit,
+    ...(flags.budgetPolicy !== null || flags.scan || flags.afterId !== null || flags.throughId !== null ? {
+      ...(flags.budgetPolicy !== null ? { budget_policy: flags.budgetPolicy } : {}),
       ...(sourceId !== undefined ? { source_id: sourceId } : {}),
       ...(flags.sessionId ? { session_id: flags.sessionId } : {}),
       ...(flags.supersessions ? { supersessions: true } : {}),
       ...(flags.pending ? { include_pending: true } : {}),
     } : {}),
   };
-  const result = (flags.budgetPolicy !== null && isThinClient(ctx.config)
+  const result = ((flags.budgetPolicy !== null || flags.scan || flags.afterId !== null || flags.throughId !== null) && isThinClient(ctx.config)
     ? unpackToolResult(await callRemoteTool(ctx.config, 'recall', params, { timeoutMs: 30_000 }))
     : await op.handler(ctx, params)) as {
     facts: Array<{ fact_id: string; fact: string; kind: string; entity_slug: string | null; provenance: string }>;

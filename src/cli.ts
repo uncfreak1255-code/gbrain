@@ -2528,8 +2528,8 @@ async function prepareConnectedDispatch(command: string, args: string[]): Promis
   }
 
   if (command === 'recall' && isThinClient(loadConfig())) {
-    const { hasRecallBudgetPolicy, runRecall } = await import('./commands/recall.ts');
-    if (hasRecallBudgetPolicy(args)) {
+    const { hasRecallOperationRoute, runRecall } = await import('./commands/recall.ts');
+    if (hasRecallOperationRoute(args)) {
       if (getCliOptions().brain) {
         console.error('--brain is not supported on a thin-client install: the remote server is a single brain. ' +
           'Remove the flag, or run from a machine with local mounts (gbrain mounts list).');

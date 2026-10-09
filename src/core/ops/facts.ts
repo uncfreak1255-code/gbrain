@@ -1,3 +1,4 @@
+import { recallFactScan } from './facts-scan.ts';
 import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
 import { deliverEvidence, effectivePlan, resolveEvidencePlan, type DeliveryMeta, type EvidencePlan } from '../search/evidence-delivery.ts';
 import { randomUUID } from 'node:crypto';
@@ -202,6 +203,9 @@ const recall: Operation = {
   description:
     'MEMORY VERB (v1): retrieve saved facts/snippets — the protocol read verb. Filters hot-memory facts by entity / since / session_id; pass `query` to ALSO run hybrid search over pages (results[] arm); pass `budget_tokens` for server-side packing (response reports budget_used + dropped_count — never trims client-side). Remote callers see visibility=world facts only. Routing: for ONE known person/company/project card use `entity` (zero LLM); for broad questions needing reasoning use `synthesize` (expensive). Branch on structured fields (status/kind/evidence), never on prose. Every response carries protocol_version.',
   params: {
+    scan: { type: 'boolean', description: 'Read-only creation-time backlog scan. Requires since as an absolute ISO datetime and one concrete authorized source. Returns ID-ascending facts plus scan v1 keyset metadata; retain through_id across pages. Incompatible with relevance, budget, entity/session, audit, and grep options.' },
+    after_id: { type: 'number', description: 'Scan-only exclusive fact ID cursor (default 0). A positive cursor requires through_id from the first scan page.' },
+    through_id: { type: 'number', description: 'Scan-only inclusive snapshot fact ID from the first page; preserve it on every continuation.' },
     entity: { type: 'string', description: 'Entity slug (canonical). Returns facts about this entity newest first, each labelled with its source_id. Across several granted sources, same-slug entities that no entity-identity group links are different entities: facts comes back empty and ambiguous_entity names each (source_id, entity_slug); pass source_id to read one.' },
     query: { type: 'string', description: 'MEMORY_VERBS v1: free-text retrieval over pages (hybrid search arm). Response adds results[] (slug, title, chunk, evidence, create_safety, provenance). Combinable with entity (both arms run). Degrades to keyword-only search when no embedding provider is configured (search_degraded notes it; never an error).' },
     budget_tokens: { type: 'number', description: 'MEMORY_VERBS v1: server-side token budget (char/4 estimate). Facts pack first, then results. Response adds budget_tokens, budget_used, dropped_count.' },
@@ -221,6 +225,10 @@ const recall: Operation = {
   verb: true,
   annotations: { title: 'recall (memory read)', readOnlyHint: true },
   handler: async (ctx, p) => {
+    if (p.scan === true) return recallFactScan(ctx, p);
+    if (p.after_id !== undefined || p.through_id !== undefined) {
+      throw verbError('invalid_params', 'Fact scan cursors require scan: true.', 'Use scan: true and retain the returned scan metadata.');
+    }
     const sourceId = ctx.sourceId ?? 'default';
     const limit = clampRecallLimit(p.limit);
     const includeExpired = p.include_expired === true;
