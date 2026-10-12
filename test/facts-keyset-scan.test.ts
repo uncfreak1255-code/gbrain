@@ -128,13 +128,14 @@ for (const backend of testBackends()) {
       const page = await scan('scan-hundred', { since: '0001-01-01T00:00:00Z', limit: 1 });
       expect((await scan('scan-hundred', { since: '2024-02-29T00:00:00Z', limit: 1 })).scan.since).toBe('2024-02-29T00:00:00.000Z');
       expect(page.scan.since).toBe('0001-01-01T00:00:00.000Z');
+      expect((await scan('scan-hundred', { since: '2024-02-29T00:00:00.123000Z', limit: 1 })).scan.since).toBe('2024-02-29T00:00:00.123Z');
     });
 
     test('invalid cursors, incompatible options and ambiguous or unauthorized sources fail closed', async () => {
       for (const bad of [
         { after_id: 1 }, { after_id: -1 }, { after_id: 0.5 }, { after_id: 5, through_id: 4 },
         { through_id: 9007199254740992 }, { through_id: -1 }, { limit: 101 }, { limit: 0 }, { limit: 1.5 },
-        { since: '7 days ago' }, { since: 'bad' }, { since: '2026-02-31T00:00:00Z' }, { since: '2023-02-29T00:00:00Z' }, { since: '2026-01-01T24:00:00Z' }, { since: '2026-01-01T00:00:00+24:00' }, { query: 'claim' }, { budget_tokens: 1 }, { entity: 'example' },
+        { since: '7 days ago' }, { since: 'bad' }, { since: '2026-02-31T00:00:00Z' }, { since: '2023-02-29T00:00:00Z' }, { since: '2026-01-01T24:00:00Z' }, { since: '2026-01-01T00:00:00+24:00' }, { since: '2026-01-01T00:00:00.000999Z' }, { since: '0000-01-01T00:00:00Z' }, { since: '0001-01-01T00:00:00+01:00' }, { query: 'claim' }, { budget_tokens: 1 }, { entity: 'example' },
       ]) {
         const result = await dispatchToolCall(engine, 'recall', { scan: true, source_id: 'scan-many', since: SINCE, ...bad }, { remote: false, sourceId: 'scan-many' });
         expect(result.isError).toBe(true);
