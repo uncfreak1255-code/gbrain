@@ -7,7 +7,8 @@ const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,
 
 /**
  * Parse an ISO datetime, refusing impossible calendar values Date would silently roll over,
- * sub-millisecond digits Date would truncate, and year zero, which PostgreSQL lacks.
+ * sub-millisecond digits Date would truncate, year zero (absent in PostgreSQL), and years past
+ * 9999, whose expanded ISO form would not round-trip as a continuation cutoff.
  */
 function parseScanSince(value: unknown): Date | null {
   const m = typeof value === 'string' ? ISO_DATETIME.exec(value) : null;
@@ -19,7 +20,7 @@ function parseScanSince(value: unknown): Date | null {
   if (daysInMonth === undefined || d < 1 || d > daysInMonth) return null;
   if (h > 23 || mi > 59 || sec > 59 || oh > 23 || om > 59) return null;
   const parsed = new Date(value as string);
-  return y >= 1 && Number.isFinite(parsed.getTime()) && parsed.getUTCFullYear() >= 1 ? parsed : null;
+  return y >= 1 && Number.isFinite(parsed.getTime()) && parsed.getUTCFullYear() >= 1 && parsed.getUTCFullYear() <= 9999 ? parsed : null;
 }
 
 /** Recall's v1 error contract for source failures: helper errors become verb errors. */
