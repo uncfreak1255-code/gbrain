@@ -10,8 +10,10 @@ function parseScanSince(value: unknown): Date | null {
   const m = typeof value === 'string' ? ISO_DATETIME.exec(value) : null;
   if (!m) return null;
   const [y, mo, d, h, mi, sec, oh = 0, om = 0] = m.slice(1).map(part => part === undefined ? undefined : Number(part)) as number[];
-  const day = new Date(Date.UTC(y, mo - 1, d));
-  if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return null;
+  // Computed directly: Date.UTC maps years 0-99 to 1900-1999.
+  const leap = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  if (daysInMonth === undefined || d < 1 || d > daysInMonth) return null;
   if (h > 23 || mi > 59 || sec > 59 || oh > 23 || om > 59) return null;
   const parsed = new Date(value as string);
   return Number.isFinite(parsed.getTime()) ? parsed : null;
