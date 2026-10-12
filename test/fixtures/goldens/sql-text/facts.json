@@ -820,8 +820,8 @@
               "number",
               "number"
             ],
-            "sql": "WITH scan_bound AS ( SELECT COALESCE($1::integer, (SELECT MAX(id) FROM facts WHERE source_id = $2 AND created_at >= $3 AND source != ALL($4::text[]) AND visibility = ANY($5::text[])), 0) AS scan_through_id ) SELECT scan_bound.scan_through_id, page.* FROM scan_bound LEFT JOIN LATERAL ( SELECT * FROM facts WHERE source_id = $6 AND created_at >= $7 AND source != ALL($8::text[]) AND visibility = ANY($9::text[]) AND id > $10 AND id <= scan_bound.scan_through_id ORDER BY id ASC LIMIT $11 ) page ON true ORDER BY page.id ASC",
-            "textSha256": "9fd20a7ade2b6c6b4ddda1f7663d83bf1f2236a0bd6fb624964a5fba3fb9e0b0"
+            "sql": "WITH scan_bound AS ( SELECT COALESCE($1::bigint, (SELECT MAX(id) FROM facts WHERE source_id = $2 AND created_at >= $3 AND source != ALL($4::text[]) AND visibility = ANY($5::text[])), 0) AS scan_through_id ) SELECT scan_bound.scan_through_id, page.* FROM scan_bound LEFT JOIN LATERAL ( SELECT * FROM facts WHERE source_id = $6 AND created_at >= $7 AND source != ALL($8::text[]) AND visibility = ANY($9::text[]) AND id > $10 AND id <= scan_bound.scan_through_id ORDER BY id ASC LIMIT $11 ) page ON true ORDER BY page.id ASC",
+            "textSha256": "f3cc53d40ee2ffd9a65ac6d34bd26b717f0122792204e07e0128010e8aec4b98"
           }
         ],
         "default": [
@@ -838,8 +838,8 @@
               "number",
               "number"
             ],
-            "sql": "WITH scan_bound AS ( SELECT COALESCE($1::integer, (SELECT MAX(id) FROM facts WHERE source_id = $2 AND created_at >= $3 AND source != ALL($4::text[]) AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now()) ), 0) AS scan_through_id ) SELECT scan_bound.scan_through_id, page.* FROM scan_bound LEFT JOIN LATERAL ( SELECT * FROM facts WHERE source_id = $5 AND created_at >= $6 AND source != ALL($7::text[]) AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now()) AND id > $8 AND id <= scan_bound.scan_through_id ORDER BY id ASC LIMIT $9 ) page ON true ORDER BY page.id ASC",
-            "textSha256": "07e10b67c401eac6cbe66d5e6034b9e5fbc22839637ff495a3daba3b695ae618"
+            "sql": "WITH scan_bound AS ( SELECT COALESCE($1::bigint, (SELECT MAX(id) FROM facts WHERE source_id = $2 AND created_at >= $3 AND source != ALL($4::text[]) AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now()) ), 0) AS scan_through_id ) SELECT scan_bound.scan_through_id, page.* FROM scan_bound LEFT JOIN LATERAL ( SELECT * FROM facts WHERE source_id = $5 AND created_at >= $6 AND source != ALL($7::text[]) AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now()) AND id > $8 AND id <= scan_bound.scan_through_id ORDER BY id ASC LIMIT $9 ) page ON true ORDER BY page.id ASC",
+            "textSha256": "56fc3324cafdc72ee14aaa77985d69333eb0a81024524033819b9418f777ab8f"
           }
         ]
       }

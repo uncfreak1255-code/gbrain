@@ -127,7 +127,7 @@ for (const backend of testBackends()) {
     test('invalid cursors, incompatible options and ambiguous or unauthorized sources fail closed', async () => {
       for (const bad of [
         { after_id: 1 }, { after_id: -1 }, { after_id: 0.5 }, { after_id: 5, through_id: 4 },
-        { through_id: 2147483648 }, { through_id: -1 }, { limit: 101 }, { limit: 0 }, { limit: 1.5 },
+        { through_id: 9007199254740992 }, { through_id: -1 }, { limit: 101 }, { limit: 0 }, { limit: 1.5 },
         { since: '7 days ago' }, { since: 'bad' }, { query: 'claim' }, { budget_tokens: 1 }, { entity: 'example' },
       ]) {
         const result = await dispatchToolCall(engine, 'recall', { scan: true, source_id: 'scan-many', since: SINCE, ...bad }, { remote: false, sourceId: 'scan-many' });
@@ -168,6 +168,17 @@ for (const backend of testBackends()) {
       expect(tail.facts.map((row: any) => row.id)).toEqual([10200]);
       const fullReplay = await scan('scan-late', { include_expired: true });
       expect(fullReplay.facts.map((row: any) => row.id)).toEqual([9999, 10000, 10200]);
+    });
+
+    test('BIGSERIAL fact IDs beyond int4 stay traversable across pages', async () => {
+      await engine.executeRaw("INSERT INTO sources(id,name) VALUES('scan-big','big')");
+      await engine.executeRaw(`INSERT INTO facts(id,source_id,fact,source,visibility,created_at,valid_from)
+        VALUES (3000000000,'scan-big','First large-ID claim','synthetic','world',$1::timestamptz,'2020-01-01'),
+          (3000000001,'scan-big','Second large-ID claim','synthetic','world',$1::timestamptz,'2020-01-01')`, [SINCE]);
+      const first = await scan('scan-big', { limit: 1 });
+      expect(first.scan).toMatchObject({ through_id: 3000000001, next_after_id: 3000000000, has_more: true });
+      const tail = await scan('scan-big', { after_id: first.scan.next_after_id, through_id: first.scan.through_id });
+      expect(tail.facts.map((row: any) => row.id)).toEqual([3000000001]);
     });
 
     test('engine validation refuses malformed cursors or empty visibility instead of widening', async () => {

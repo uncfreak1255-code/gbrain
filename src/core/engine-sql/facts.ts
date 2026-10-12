@@ -414,7 +414,7 @@ export async function scanFacts(
   const afterId = opts.afterId ?? 0;
   const limit = opts.limit ?? 100;
   for (const [name, value] of [['afterId', afterId], ['throughId', opts.throughId ?? 0]] as const) {
-    if (!Number.isInteger(value) || value < 0 || value > 2147483647) throw new Error(`Invalid fact scan ${name}`);
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Invalid fact scan ${name}`);
   }
   if (!Number.isFinite(since.getTime())) throw new Error('Invalid fact scan since');
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid fact scan limit');
@@ -430,7 +430,7 @@ export async function scanFacts(
     ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}`;
   const rows = (await exec.run<FactRowSqlShape & { scan_through_id: number | bigint }>(sqlFragment`
     WITH scan_bound AS (
-      SELECT COALESCE(${opts.throughId ?? null}::integer,
+      SELECT COALESCE(${opts.throughId ?? null}::bigint,
         (SELECT MAX(id) FROM facts WHERE ${eligible}), 0) AS scan_through_id
     )
     SELECT scan_bound.scan_through_id, page.* FROM scan_bound
@@ -441,8 +441,10 @@ export async function scanFacts(
     ) page ON true
     ORDER BY page.id ASC
   `)).rows;
+  // facts.id is BIGSERIAL; refuse IDs JavaScript cannot represent exactly
+  // rather than hand back a rounded cursor.
   const throughId = Number(rows[0]?.scan_through_id);
-  if (!Number.isInteger(throughId) || throughId < 0) throw new Error('Invalid fact scan watermark');
+  if (!Number.isSafeInteger(throughId) || throughId < 0) throw new Error('Invalid fact scan watermark');
   const candidates = rows.filter(row => row.id != null);
   const facts = candidates.slice(0, limit).map(rowToFact);
   return { facts, throughId, nextAfterId: facts.at(-1)?.id ?? afterId, hasMore: candidates.length > limit };

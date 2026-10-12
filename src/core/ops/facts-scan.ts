@@ -21,8 +21,8 @@ export async function recallFactScan(ctx: OperationContext, p: Record<string, un
   const cursor = (name: string, fallback?: number): number | undefined => {
     const value = p[name] ?? fallback;
     if (value === undefined) return undefined;
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 2147483647) {
-      throw verbError('invalid_params', `Fact scan ${name} must be a nonnegative int4 fact ID.`,
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+      throw verbError('invalid_params', `Fact scan ${name} must be a nonnegative safe-integer fact ID.`,
         'Retain the exact cursor IDs returned by the scan.');
     }
     return value;
