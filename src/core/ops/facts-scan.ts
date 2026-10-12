@@ -3,7 +3,19 @@ import { verbError } from './contract.ts';
 import { assertExplicitSourceLive, federatedSearchScope, parseSourceIdParam, sourceScopeOpts } from './context.ts';
 
 const SCAN_PARAMS = new Set(['scan', 'since', 'after_id', 'through_id', 'source_id', 'limit', 'include_expired']);
-const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+/** Parse an ISO datetime, refusing impossible calendar values Date would silently roll over. */
+function parseScanSince(value: unknown): Date | null {
+  const m = typeof value === 'string' ? ISO_DATETIME.exec(value) : null;
+  if (!m) return null;
+  const [y, mo, d, h, mi, sec, oh = 0, om = 0] = m.slice(1).map(part => part === undefined ? undefined : Number(part)) as number[];
+  const day = new Date(Date.UTC(y, mo - 1, d));
+  if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return null;
+  if (h > 23 || mi > 59 || sec > 59 || oh > 23 || om > 59) return null;
+  const parsed = new Date(value as string);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
 
 /** Optional recall mode: complete bounded fact traversal, never a relevance query. */
 export async function recallFactScan(ctx: OperationContext, p: Record<string, unknown>, recallParams: readonly string[]) {
@@ -13,8 +25,8 @@ export async function recallFactScan(ctx: OperationContext, p: Record<string, un
     throw verbError('invalid_params', 'Fact scans cannot be combined with other recall filters or budgets.',
       'Use only scan, since, source_id, after_id, through_id, limit, and include_expired.');
   }
-  const since = typeof p.since === 'string' && ISO_DATETIME.test(p.since) ? new Date(p.since) : null;
-  if (!since || !Number.isFinite(since.getTime())) {
+  const since = parseScanSince(p.since);
+  if (!since) {
     throw verbError('invalid_params', 'Fact scans require since as an absolute ISO datetime.',
       'Pass a fixed ISO datetime with a timezone and preserve it across pages.');
   }
