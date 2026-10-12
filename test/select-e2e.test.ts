@@ -296,7 +296,8 @@ describe("selectTests", () => {
   test("src/core/engine-sql/** selects both engines' E2E files and the E5 binding matrix, not all (refactor wave 1)", () => {
     const selected = select(["src/core/engine-sql/facts.ts"]);
     const engineRows = ["src/core/postgres-engine.ts", "src/core/pglite-engine.ts", "src/core/postgres-engine/**", "src/core/pglite-engine/**"];
-    expect(selected).toEqual([...new Set(engineRows.flatMap((k) => E2E_TEST_MAP[k]))].sort());
+    // facts.ts also carries a narrow entry (keyset scan); the selector unions both.
+    expect(selected).toEqual([...new Set([...engineRows.flatMap((k) => E2E_TEST_MAP[k]), ...E2E_TEST_MAP["src/core/engine-sql/facts.ts"]])].sort());
     expect(selected).toContain("test/e2e/executor-binding-matrix.test.ts");
     expect(selected).toContain("test/e2e/engine-parity.test.ts");
     expect(selected).not.toContain("test/e2e/skills.test.ts");

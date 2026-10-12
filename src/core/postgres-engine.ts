@@ -2399,6 +2399,14 @@ export class PostgresEngine implements BrainEngine {
     return factsImpl.listFactsSince(unscopedExecutor(this.engineSql, 'facts: unscoped on master (EO4 inventory)'), source_id, since, opts);
   }
 
+  async scanFacts(
+    source_id: string,
+    since: Date,
+    opts?: import('./engine.ts').FactScanOpts,
+  ): Promise<import('./engine.ts').FactScanPage> {
+    return factsImpl.scanFacts(unscopedExecutor(this.engineSql, 'facts: explicit source and visibility enforced by scan'), source_id, since, opts);
+  }
+
   async listFactsBySession(
     source_id: string,
     sessionId: string,

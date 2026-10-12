@@ -180,6 +180,7 @@
           "revertToVersion: (slug: string, versionId: number, opts?: { sourceId?: string; }) => Promise<void>",
           "rewriteLinks: (oldSlug: string, newSlug: string) => Promise<void>",
           "runMigration: (version: number, sql: string) => Promise<void>",
+          "scanFacts: (source_id: string, since: Date, opts?: FactScanOpts) => Promise<FactScanPage>",
           "searchKeyword: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchKeywordChunks: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchTakes: (query: string, opts?: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[]; }) => Promise<TakeHit[]>",
@@ -1107,6 +1108,7 @@
           "revertToVersion: (slug: string, versionId: number, opts?: { sourceId?: string; }) => Promise<void>",
           "rewriteLinks: (_oldSlug: string, _newSlug: string) => Promise<void>",
           "runMigration: (_version: number, sqlStr: string) => Promise<void>",
+          "scanFacts: (source_id: string, since: Date, opts?: FactScanOpts) => Promise<FactScanPage>",
           "searchKeyword: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchKeywordChunks: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchTakes: (query: string, opts?: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[]; }) => Promise<TakeHit[]>",
@@ -3139,6 +3141,7 @@
           "revertToVersion: (slug: string, versionId: number, opts?: { sourceId?: string; }) => Promise<void>",
           "rewriteLinks: (oldSlug: string, newSlug: string) => Promise<void>",
           "runMigration: (version: number, sql: string) => Promise<void>",
+          "scanFacts: (source_id: string, since: Date, opts?: FactScanOpts) => Promise<FactScanPage>",
           "searchKeyword: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchKeywordChunks: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchTakes: (query: string, opts?: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[]; }) => Promise<TakeHit[]>",
@@ -3289,6 +3292,27 @@
           "visibility: FactVisibility"
         ],
         "name": "FactRow"
+      },
+      {
+        "kind": "interface",
+        "members": [
+          "activeOnly?: boolean | undefined",
+          "afterId?: number | undefined",
+          "limit?: number | undefined",
+          "throughId?: number | undefined",
+          "visibility?: FactVisibility[] | undefined"
+        ],
+        "name": "FactScanOpts"
+      },
+      {
+        "kind": "interface",
+        "members": [
+          "facts: FactRow[]",
+          "hasMore: boolean",
+          "nextAfterId: number",
+          "throughId: number"
+        ],
+        "name": "FactScanPage"
       },
       {
         "kind": "type",
@@ -5736,6 +5760,7 @@
           "revertToVersion: (slug: string, versionId: number, opts?: { sourceId?: string; }) => Promise<void>",
           "rewriteLinks: (_oldSlug: string, _newSlug: string) => Promise<void>",
           "runMigration: (_version: number, sql: string) => Promise<void>",
+          "scanFacts: (source_id: string, since: Date, opts?: FactScanOpts) => Promise<FactScanPage>",
           "searchKeyword: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchKeywordChunks: (query: string, opts?: SearchOpts) => Promise<SearchResult[]>",
           "searchTakes: (query: string, opts?: SearchOpts & { takesHoldersAllowList?: string[]; }) => Promise<TakeHit[]>",
