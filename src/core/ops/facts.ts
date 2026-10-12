@@ -225,7 +225,7 @@ const recall: Operation = {
   verb: true,
   annotations: { title: 'recall (memory read)', readOnlyHint: true },
   handler: async (ctx, p) => {
-    if (p.scan === true) return recallFactScan(ctx, p);
+    if (p.scan === true) return recallFactScan(ctx, p, Object.keys(recall.params));
     if (p.after_id !== undefined || p.through_id !== undefined) {
       throw verbError('invalid_params', 'Fact scan cursors require scan: true.', 'Use scan: true and retain the returned scan metadata.');
     }

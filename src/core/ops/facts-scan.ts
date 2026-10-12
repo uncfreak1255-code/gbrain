@@ -2,12 +2,14 @@ import type { OperationContext } from './contract.ts';
 import { verbError } from './contract.ts';
 import { assertExplicitSourceLive, federatedSearchScope, parseSourceIdParam, sourceScopeOpts } from './context.ts';
 
-const SCAN_PARAMS = new Set(['scan', 'since', 'after_id', 'through_id', 'source_id', 'limit', 'include_expired', '_meta', 'dry_run']);
+const SCAN_PARAMS = new Set(['scan', 'since', 'after_id', 'through_id', 'source_id', 'limit', 'include_expired']);
 const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 /** Optional recall mode: complete bounded fact traversal, never a relevance query. */
-export async function recallFactScan(ctx: OperationContext, p: Record<string, unknown>) {
-  if (Object.keys(p).some(key => !SCAN_PARAMS.has(key) && p[key] !== undefined)) {
+export async function recallFactScan(ctx: OperationContext, p: Record<string, unknown>, recallParams: readonly string[]) {
+  // Reject only declared recall options that scans cannot honor; undeclared keys
+  // stay with the dispatcher's mcp.strict_params policy (warn ignores them).
+  if (recallParams.some(key => !SCAN_PARAMS.has(key) && p[key] !== undefined)) {
     throw verbError('invalid_params', 'Fact scans cannot be combined with other recall filters or budgets.',
       'Use only scan, since, source_id, after_id, through_id, limit, and include_expired.');
   }

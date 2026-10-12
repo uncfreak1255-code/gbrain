@@ -8,6 +8,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
+import { RESPONSE_SCHEMAS } from '../src/core/verbs.ts';
+import { validateAgainstSchema } from '../src/core/verbs/conformance.ts';
 import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 
@@ -105,6 +107,21 @@ for (const backend of testBackends()) {
         const decorated = await scan('scan-hundred', { include_expired: true, ...transport });
         expect(decorated).toEqual(plain);
       }
+    });
+
+    test('scan pages publish their continuation metadata in the recall response schema', async () => {
+      const page = await scan('scan-hundred', { limit: 3 });
+      expect(validateAgainstSchema(page, RESPONSE_SCHEMAS.recall)).toEqual([]);
+      const { has_more: _hasMore, ...truncated } = page.scan;
+      expect(validateAgainstSchema({ ...page, scan: truncated }, RESPONSE_SCHEMAS.recall).length).toBeGreaterThan(0);
+    });
+
+    test('an undeclared argument follows the default warn policy instead of failing the scan', async () => {
+      const plain = await scan('scan-hundred', { limit: 5 });
+      const result = await dispatchToolCall(engine, 'recall', { scan: true, since: SINCE, source_id: 'scan-hundred', limit: 5, limt: 5 },
+        { remote: false, sourceId: 'scan-hundred' } as never);
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(result.content[0].text)).toEqual(plain);
     });
 
     test('invalid cursors, incompatible options and ambiguous or unauthorized sources fail closed', async () => {
