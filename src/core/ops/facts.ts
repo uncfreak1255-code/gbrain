@@ -1,4 +1,4 @@
-import { recallFactScan } from './facts-scan.ts';
+import { recallFactScan, recallSourceError } from './facts-scan.ts';
 import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
 import { deliverEvidence, effectivePlan, resolveEvidencePlan, type DeliveryMeta, type EvidencePlan } from '../search/evidence-delivery.ts';
 import { randomUUID } from 'node:crypto';
@@ -248,14 +248,8 @@ const recall: Operation = {
       scope = sourceIdParam === undefined ? sourceScopeOpts(ctx) : federatedSearchScope(ctx, sourceIdParam);
       await assertExplicitSourceLive(ctx, sourceIdParam);
     } catch (error) {
-      if (!(error instanceof OperationError) || p.source_id === undefined || p.source_id === null) throw error;
-      const code = error.code === 'permission_denied' ? 'scope_denied'
-        : error.code === 'unknown_source' ? 'not_found'
-          : error.code === 'invalid_params' ? 'invalid_params' : null;
-      if (code === null) throw error;
-      throw verbError(code, error.message,
-        error.suggestion ?? 'Choose a permitted active source, or omit source_id to use your existing scope.',
-        error.detail ?? error.code);
+      if (p.source_id === undefined || p.source_id === null) throw error;
+      throw recallSourceError(error);
     }
     // Set-dedupe: a grant carrying a repeated id (or the scalar source again)
     // must not fan out the same source twice into the merge.

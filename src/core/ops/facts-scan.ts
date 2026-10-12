@@ -1,5 +1,5 @@
 import type { OperationContext } from './contract.ts';
-import { verbError } from './contract.ts';
+import { OperationError, verbError } from './contract.ts';
 import { assertExplicitSourceLive, federatedSearchScope, parseSourceIdParam, sourceScopeOpts } from './context.ts';
 
 const SCAN_PARAMS = new Set(['scan', 'since', 'after_id', 'through_id', 'source_id', 'limit', 'include_expired']);
@@ -20,6 +20,18 @@ function parseScanSince(value: unknown): Date | null {
   if (h > 23 || mi > 59 || sec > 59 || oh > 23 || om > 59) return null;
   const parsed = new Date(value as string);
   return y >= 1 && Number.isFinite(parsed.getTime()) && parsed.getUTCFullYear() >= 1 ? parsed : null;
+}
+
+/** Recall's v1 error contract for source failures: helper errors become verb errors. */
+export function recallSourceError(error: unknown): unknown {
+  if (!(error instanceof OperationError)) return error;
+  const code = error.code === 'permission_denied' ? 'scope_denied'
+    : error.code === 'unknown_source' ? 'not_found'
+      : error.code === 'invalid_params' ? 'invalid_params' : null;
+  if (code === null) return error;
+  return verbError(code, error.message,
+    error.suggestion ?? 'Choose a permitted active source, or omit source_id to use your existing scope.',
+    error.detail ?? error.code);
 }
 
 /** Optional recall mode: complete bounded fact traversal, never a relevance query. */
@@ -54,15 +66,25 @@ export async function recallFactScan(ctx: OperationContext, p: Record<string, un
     throw verbError('invalid_params', 'Invalid fact scan cursor: after_id requires and cannot exceed through_id.',
       'Start with after_id: 0, then retain through_id and next_after_id from the first page.');
   }
-  const requested = parseSourceIdParam(p.source_id, 'recall scan');
-  const scope = requested === undefined ? sourceScopeOpts(ctx) : federatedSearchScope(ctx, requested);
-  const sources = [...new Set(scope.sourceIds ?? (scope.sourceId ? [scope.sourceId] : []))];
+  let sources: string[];
+  try {
+    const requested = parseSourceIdParam(p.source_id, 'recall scan');
+    const scope = requested === undefined ? sourceScopeOpts(ctx) : federatedSearchScope(ctx, requested);
+    sources = [...new Set(scope.sourceIds ?? (scope.sourceId ? [scope.sourceId] : []))];
+  } catch (error) {
+    throw recallSourceError(error);
+  }
   if (sources.length !== 1) {
     throw verbError('invalid_params', 'Fact scans require one concrete authorized source.',
       'Pass source_id for the single source to scan; federated and all-source scans are unsupported.');
   }
-  const sourceId = parseSourceIdParam(sources[0], 'recall scan')!;
-  await assertExplicitSourceLive(ctx, sourceId);
+  let sourceId: string;
+  try {
+    sourceId = parseSourceIdParam(sources[0], 'recall scan')!;
+    await assertExplicitSourceLive(ctx, sourceId);
+  } catch (error) {
+    throw recallSourceError(error);
+  }
   const page = await ctx.engine.scanFacts(sourceId, since, {
     afterId, throughId, limit,
     activeOnly: p.include_expired !== true,

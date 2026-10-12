@@ -141,16 +141,16 @@ for (const backend of testBackends()) {
         expect(result.isError).toBe(true);
         expect(JSON.parse(result.content[0].text).error).toBe('invalid_params');
       }
-      for (const [source_id, expected] of [['scan-hundred', 'permission_denied'], ['missing-example', 'permission_denied'], ['__all__', 'invalid_params']]) {
+      for (const [source_id, expected] of [['scan-hundred', 'scope_denied'], ['missing-example', 'scope_denied'], ['__all__', 'invalid_params']]) {
         const result = await dispatchToolCall(engine, 'recall', { scan: true, since: SINCE, source_id },
           { remote: true, sourceId: 'scan-many', auth: { allowedSources: ['scan-many'] } } as never);
         expect(result.isError).toBe(true);
-        expect(JSON.parse(result.content[0].text).error).toBe(expected);
+        expect(JSON.parse(result.content[0].text)).toMatchObject({ error: expected, protocol_version: 1 });
       }
       for (const source_id of ['scan-archive', 'missing-example']) {
         const result = await dispatchToolCall(engine, 'recall', { scan: true, since: SINCE, source_id }, { remote: false, sourceId: 'scan-many' });
         expect(result.isError).toBe(true);
-        expect(JSON.parse(result.content[0].text).error).toBe('unknown_source');
+        expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'not_found', protocol_version: 1 });
       }
       const ambiguous = await dispatchToolCall(engine, 'recall', { scan: true, since: SINCE },
         { remote: true, sourceId: 'scan-many', auth: { allowedSources: ['scan-many', 'scan-hundred'] } } as never);

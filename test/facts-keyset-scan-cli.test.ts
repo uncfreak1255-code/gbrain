@@ -57,6 +57,6 @@ test('CLI scan rejects invalid cursors, windows and mixed modes instead of runni
   ]) {
     const result = await call(args);
     expect(result.exitCode).not.toBe(0);
-    expect(JSON.parse(result.stdout).error).toBe(args.includes('missing-example') ? 'unknown_source' : 'invalid_params');
+    expect(JSON.parse(result.stdout).error).toBe(args.includes('missing-example') ? 'not_found' : 'invalid_params');
   }
 }, 90_000);

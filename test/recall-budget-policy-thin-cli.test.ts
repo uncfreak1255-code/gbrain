@@ -241,7 +241,7 @@ describe('actual remote source selection', () => {
     expect(second.localStoreCreated).toBe(false);
     const denied = await thinCall('postgres', [...base, '--source', 'denied'], { dispatch });
     expect(denied.exitCode).not.toBe(0);
-    expect(JSON.parse(denied.stdout).error).toBe('permission_denied');
+    expect(JSON.parse(denied.stdout).error).toBe('scope_denied');
     expect(denied.localStoreCreated).toBe(false);
     const ambiguous = await thinCall('postgres', ['--scan', '--since', '2026-01-01T00:00:00.000Z', '--json'], { dispatch });
     expect(ambiguous.exitCode).not.toBe(0);
