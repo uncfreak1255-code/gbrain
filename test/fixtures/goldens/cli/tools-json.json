@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 200378,
-    "stdoutSha256": "c23df35de49ce6ca01006bf4db2ce92fb57d2f37f089f82fef292c047982b00e",
+    "stdoutBytes": 201216,
+    "stdoutSha256": "c6b0e54ef12571fe11f2db74dc8c37c3b2c5a0a9fd3452499c168d4b064fd310",
     "toolNames": [
       "remember",
       "entity",
@@ -4227,6 +4227,7 @@
         "description": "MEMORY VERB (v1): retrieve saved facts/snippets — the protocol read verb. Filters hot-memory facts by entity / since / session_id; pass `query` to ALSO run hybrid search over pages (results[] arm); pass `budget_tokens` for server-side packing (response reports budget_used + dropped_count — never trims client-side). Remote callers see visibility=world facts only. Routing: for ONE known person/company/project card use `entity` (zero LLM); for broad questions needing reasoning use `synthesize` (expensive). Branch on structured fields (status/kind/evidence), never on prose. Every response carries protocol_version.",
         "name": "recall",
         "parameters": {
+          "after_id": "number?",
           "budget_policy": "string?",
           "budget_tokens": "number?",
           "entity": "string?",
@@ -4237,13 +4238,19 @@
           "query": "string?",
           "return_unit": "string?",
           "return_window": "number?",
+          "scan": "boolean?",
           "session_id": "string?",
           "since": "string?",
           "source_id": "string?",
-          "supersessions": "boolean?"
+          "supersessions": "boolean?",
+          "through_id": "number?"
         },
         "schema": {
           "properties": {
+            "after_id": {
+              "description": "Scan-only exclusive fact ID cursor (default 0). A positive cursor requires through_id from the first scan page.",
+              "type": "number"
+            },
             "budget_policy": {
               "description": "Optional packing order. facts_first preserves legacy behavior (default). query_first packs the ranked page prefix before facts only with a nonblank query and positive finite budget; a positive budget below one token keeps neither arm. No query or inactive budget preserves legacy behavior. Neither policy skips oversized items or truncates. Supplying this option adds budget_packing accounting. Keep fact-focused/entity-filtered questions on facts_first.",
               "enum": [
@@ -4295,6 +4302,10 @@
               "description": "Neighbor chunks on each side for return_unit 'window' (integer 1-3, default 1).",
               "type": "number"
             },
+            "scan": {
+              "description": "Read-only creation-time backlog scan. Requires since as an absolute ISO datetime and one concrete authorized source. Returns ID-ascending facts plus scan v1 keyset metadata; retain through_id across pages. Incompatible with relevance, budget, entity/session, audit, and grep options.",
+              "type": "boolean"
+            },
             "session_id": {
               "description": "Source session id (e.g. topic-A). Returns facts captured in that session.",
               "type": "string"
@@ -4310,6 +4321,10 @@
             "supersessions": {
               "description": "When true, return only the supersession audit log (facts with superseded_by set), newest first by COALESCE(expired_at, valid_until).",
               "type": "boolean"
+            },
+            "through_id": {
+              "description": "Scan-only inclusive snapshot fact ID from the first page; preserve it on every continuation.",
+              "type": "number"
             }
           },
           "required": [],

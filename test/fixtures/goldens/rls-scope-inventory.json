@@ -2649,6 +2649,28 @@
         ],
         "flagOnScopes": []
       },
+      "scanFacts#continuation": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "scanFacts#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
       "searchKeyword#cjk": {
         "flagOffLanes": [
           "tx"
@@ -3446,6 +3468,7 @@
         "rlsScopeBindingEnabled": "none",
         "runMigration": "none",
         "runUnsafe": "none",
+        "scanFacts": "none",
         "searchKeyword": "direct",
         "searchKeywordChunks": "direct",
         "searchTakes": "none",

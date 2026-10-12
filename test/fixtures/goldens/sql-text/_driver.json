@@ -1691,6 +1691,30 @@
             "via": "tagged"
           }
         ]
+      },
+      "scanFacts": {
+        "continuation": [
+          {
+            "paramCount": 11,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "default": [
+          {
+            "paramCount": 9,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
       }
     },
     "files": {
