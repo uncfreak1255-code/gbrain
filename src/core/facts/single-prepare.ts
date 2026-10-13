@@ -3,9 +3,10 @@ import { verbError } from '../ops/contract.ts';
 import { isAvailable, embedOne, getEmbeddingModel } from '../ai/gateway.ts';
 import { cosineSimilarity } from './classify.ts';
 import { isFactWithdrawn } from './withdrawal.ts';
+import { sourceCorrectionMode, type CorrectionMode } from './supersession-policy.ts';
 
 export type FactCandidate = FactRow & { source_markdown_slug: string | null; row_num: number | null };
-export interface FactDecision { status: 'inserted' | 'duplicate' | 'superseded'; candidate: FactCandidate | null; }
+export interface FactDecision { status: 'inserted' | 'duplicate' | 'superseded'; candidate: FactCandidate | null; correctionMode: CorrectionMode; }
 export interface SingleFactIntent {
   fact: string; kind: FactRow['kind']; visibility: FactRow['visibility']; entity_slug: string | null;
 }
@@ -28,12 +29,13 @@ export async function assertFactNotWithdrawn(engine: BrainEngine, sourceId: stri
 }
 /** SQL-only, so publication can verify the semantic decision under its guard. */
 export async function decideSingleFact(engine: BrainEngine, sourceId: string, input: SingleFactIntent, embedding: Float32Array | null, embeddingModel?: string | null): Promise<FactDecision> {
+  const correctionMode = await sourceCorrectionMode(engine, sourceId);
   const [exact] = await engine.executeRaw<FactCandidate>(`SELECT * FROM facts WHERE source_id=$1
     AND entity_slug IS NOT DISTINCT FROM $2 AND visibility=$3 AND expired_at IS NULL
     AND (valid_until IS NULL OR valid_until>now()) AND gbrain_fact_fingerprint(fact)=gbrain_fact_fingerprint($4)
     ORDER BY id LIMIT 1`, [sourceId, input.entity_slug, input.visibility, input.fact]);
-  if (exact) return { status: 'duplicate', candidate: { ...exact, id: Number(exact.id) } };
-  if (embedding && input.entity_slug) {
+  if (exact) return { status: 'duplicate', candidate: { ...exact, id: Number(exact.id) }, correctionMode };
+  if (embedding && input.entity_slug && correctionMode === 'semantic') {
     const candidates = await engine.findCandidateDuplicates(sourceId, input.entity_slug, input.fact, { embedding, embeddingModel, k: 5 });
     const metadata = await engine.executeRaw<{ id: number; source_markdown_slug: string | null; row_num: number | null }>(
       'SELECT id,source_markdown_slug,row_num FROM facts WHERE source_id=$1 AND id=ANY($2::int[])',
@@ -53,8 +55,8 @@ export async function decideSingleFact(engine: BrainEngine, sourceId: string, in
       if (next > score) { score = next; candidate = c; }
     }
     if (candidate && score >= 0.95) return {
-      status: candidate.kind === input.kind ? 'superseded' : 'duplicate', candidate,
+      status: candidate.kind === input.kind ? 'superseded' : 'duplicate', candidate, correctionMode,
     };
   }
-  return { status: 'inserted', candidate: null };
+  return { status: 'inserted', candidate: null, correctionMode };
 }

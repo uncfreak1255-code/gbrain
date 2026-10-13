@@ -278,6 +278,8 @@ describe('sources --help reaches its own usage block instead of the circular gen
     // and instead defers to `sources --help` for.
     expect(stdout).toContain('rename');
     expect(stdout).toContain('set-cr-mode');
+    expect(stdout).toContain('set-correction-mode');
+    expect(stdout).toContain('drain source writers/jobs and read back before resuming');
     expect(stdout).toContain('federate');
     expect(stdout).toContain('attach');
     expect(stdout).toContain('harden');

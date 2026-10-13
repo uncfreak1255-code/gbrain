@@ -230,6 +230,63 @@ describe('journaled memory publication, both engines', () => {
     }
   });
 
+  test('remember can retain concurrent corrections until an exact branch is withdrawn', async () => {
+    configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536,
+      env: { OPENAI_API_KEY: 'synthetic-test-only' } });
+    __setEmbedTransportForTests((async (opts: { values: string[] }) => ({
+      embeddings: opts.values.map(() => [1, ...new Array(1535).fill(0)]),
+    })) as never);
+    try {
+      for (const engine of engines) {
+        const slug = 'people/correction-conflict-example';
+        await setupPage(engine, slug);
+        await engine.updateSourceConfig(sourceId, { correction_mode: 'explicit' });
+        const ctx = context(engine);
+        const remember = operationsByName.remember!.handler;
+        const recall = operationsByName.recall!.handler;
+        const forget = operationsByName.forget!.handler;
+        const priorRequestId = randomUUID();
+        const prior = await remember(ctx, { fact: 'Prefers morning meetings.', kind: 'preference', entity: slug,
+          provenance: 'synthetic prior', request_id: priorRequestId }) as { id: string; status: string };
+        expect(prior.status).toBe('inserted');
+        // A legacy/default writer must not silently retire an unresolved personal claim.
+        await remember(ctx, { fact: 'Prefers afternoon meetings.', kind: 'preference', entity: slug,
+          provenance: 'synthetic legacy writer', request_id: randomUUID() });
+        const mixedWriters = await recall(ctx, { entity: slug, source_id: sourceId }) as { facts: Array<{ fact: string }> };
+        expect(mixedWriters.facts.map(row => row.fact)).toEqual(expect.arrayContaining([
+          'Prefers morning meetings.', 'Prefers afternoon meetings.',
+        ]));
+        const duplicate = await remember(ctx, { fact: 'Prefers morning meetings.', kind: 'preference', entity: slug,
+          provenance: 'synthetic duplicate', request_id: randomUUID() }) as { id: string; status: string };
+        expect(duplicate.status).toBe('duplicate');
+        expect(duplicate.id).toBe(prior.id);
+        const replay = await remember(ctx, { fact: 'Prefers morning meetings.', kind: 'preference', entity: slug,
+          provenance: 'synthetic prior', request_id: priorRequestId }) as { id: string };
+        expect(replay.id).toBe(prior.id);
+        const [weekday, weekend] = await Promise.all([
+          remember(ctx, { fact: 'Prefers morning meetings on weekdays.', kind: 'preference', entity: slug,
+            provenance: 'independent correction A', request_id: randomUUID() }),
+          remember(ctx, { fact: 'Prefers morning meetings on weekends.', kind: 'preference', entity: slug,
+            provenance: 'independent correction B', request_id: randomUUID() }),
+        ]) as Array<{ id: string; status: string }>;
+        expect([weekday.status, weekend.status]).toEqual(['inserted', 'inserted']);
+
+        await forget(ctx, { id: prior.id, reason: 'both corrections explicitly replace this prior', request_id: randomUUID() });
+        const unresolved = await recall(ctx, { entity: slug, source_id: sourceId }) as { facts: Array<{ fact_id: string; fact: string }> };
+        expect(unresolved.facts.map(row => row.fact)).toEqual(expect.arrayContaining([
+          'Prefers morning meetings on weekdays.', 'Prefers morning meetings on weekends.',
+        ]));
+        await forget(ctx, { id: weekday.id, reason: 'synthetic resolution selects weekend branch', request_id: randomUUID() });
+        const resolved = await recall(ctx, { entity: slug, source_id: sourceId }) as { facts: Array<{ fact_id: string; fact: string }> };
+        expect(resolved.facts.map(row => row.fact)).toContain('Prefers morning meetings on weekends.');
+        expect(resolved.facts.map(row => row.fact)).not.toContain('Prefers morning meetings on weekdays.');
+      }
+    } finally {
+      __setEmbedTransportForTests(null);
+      configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: {} });
+    }
+  });
+
   test('a prepared remember cannot publish across a stored embedding generation change', async () => {
     configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536,
       env: { OPENAI_API_KEY: 'synthetic-only' } });

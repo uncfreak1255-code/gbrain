@@ -98,3 +98,37 @@ test('managed extract_facts publishes multiple private entity fences and replays
     });
   } finally { await disposePersistenceConsumer(engine); rmSync(home, { recursive: true, force: true }); }
 }, 60_000);
+
+test('managed extraction cannot override a source explicit-correction policy', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-correction-mode-'));
+  try {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      const entity = 'people/correction-policy-managed';
+      await engine.putPage(entity, { type: 'person', title: entity, compiled_truth: 'A registered entity.' }, { sourceId: 'default' });
+      await engine.updateSourceConfig('default', { correction_mode: 'explicit' });
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      let calls = 0;
+      __setChatTransportForTests(async () => {
+        const fact = calls++ === 0 ? 'Prefers the morning schedule.' : 'Prefers the afternoon schedule.';
+        return { text: JSON.stringify({ facts: [{ fact, kind: 'preference', entity, confidence: 1, notability: 'high' }] }),
+          blocks: [], stopReason: 'end', usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 }, model: 'test:stub', providerId: 'test' };
+      });
+      __setEmbedTransportForTests((async ({ values }: { values: string[] }) => ({ embeddings: values.map(() => [1, ...Array(1535).fill(0)]) })) as never);
+      const ctx = { engine, config: { engine: 'pglite' as const }, remote: false, sourceId: 'default', dryRun: false, logger: console };
+      const first = await operationsByName.extract_facts.handler(ctx, { turn_text: 'First schedule observation.', request_id: randomUUID() }) as { inserted: number };
+      const second = await operationsByName.extract_facts.handler(ctx, { turn_text: 'Second schedule observation.', request_id: randomUUID() }) as { inserted: number };
+      expect(first.inserted).toBe(1);
+      expect(second.inserted).toBe(1);
+      const rows = await engine.executeRaw<{ fact: string; expired: boolean }>(
+        `SELECT fact, expired_at IS NOT NULL AS expired FROM facts WHERE source_id='default' AND entity_slug=$1 ORDER BY id`, [entity]);
+      expect(rows.map(row => row.fact)).toEqual(expect.arrayContaining(['Prefers the morning schedule.', 'Prefers the afternoon schedule.']));
+      expect(rows.every(row => !row.expired)).toBe(true);
+      expect((await engine.getPage(entity, { sourceId: 'default' }))?.compiled_truth).toContain('Prefers the morning schedule.');
+      expect((await engine.getPage(entity, { sourceId: 'default' }))?.compiled_truth).toContain('Prefers the afternoon schedule.');
+    });
+  } finally {
+    await disposePersistenceConsumer(engine);
+    await engine.updateSourceConfig('default', { correction_mode: 'semantic' });
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 60_000);

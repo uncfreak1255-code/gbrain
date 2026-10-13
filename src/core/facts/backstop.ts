@@ -695,7 +695,7 @@ async function runPipelineBodyInner(
     // at write time). Threshold 0.95 unchanged.
     const exact = resolvedSlug ? await decideSingleFact(ctx.engine, ctx.sourceId, { entity_slug: resolvedSlug, fact: f.fact, kind: f.kind ?? 'fact', visibility }, null) : null;
     let matchedExistingId: number | null = exact?.candidate?.id ?? null;
-    if (matchedExistingId === null && resolvedSlug && f.embedding) {
+    if (matchedExistingId === null && exact?.correctionMode === 'semantic' && resolvedSlug && f.embedding) {
       const candidates = await ctx.engine.findCandidateDuplicates(
         ctx.sourceId,
         resolvedSlug,

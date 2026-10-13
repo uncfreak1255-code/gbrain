@@ -193,6 +193,7 @@ describe('recall — G1B superset + budget packing', () => {
 });
 
 describe('remember — contract behavior', () => {
+
   it("kind enum is frozen at the 5 protocol kinds — 'idea' is extractor/DB-only", () => {
     // docs/protocol/MEMORY_VERBS_v1.md:39-41 — the remember verb's kind enum
     // is a frozen protocol surface. The extractor/DB taxonomy gained 'idea'

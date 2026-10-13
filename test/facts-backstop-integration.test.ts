@@ -23,10 +23,13 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runFactsBackstop, runFactsPipeline } from '../src/core/facts/backstop.ts';
 import {
   __setChatTransportForTests,
+  __setEmbedTransportForTests,
+  configureGateway,
   resetGateway,
   type ChatResult,
 } from '../src/core/ai/gateway.ts';
 import { __resetFactsQueueForTests, getFactsQueue } from '../src/core/facts/queue.ts';
+import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 
 let engine: PGLiteEngine;
 
@@ -68,6 +71,32 @@ function chatStub(facts: Array<{ fact: string; kind: string; notability: 'high' 
 }
 
 describe('runFactsPipeline (extract_facts MCP op path) — response shape stability', () => {
+  test('source explicit mode preserves distinct semantic neighbors through extraction', async () => {
+    const entity = 'people/correction-mode-backstop';
+    await engine.putPage(entity, { type: 'person', title: 'Correction mode', compiled_truth: 'Correction mode fixture.', timeline: '', frontmatter: {} }, { sourceId: 'default' });
+    await engine.updateSourceConfig('default', { correction_mode: 'explicit' });
+    configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: { OPENAI_API_KEY: 'synthetic-test-only' } });
+    __setEmbedTransportForTests((async ({ values }: { values: string[] }) => ({
+      embeddings: values.map(() => [1, ...new Array(1535).fill(0)]),
+    })) as never);
+    try {
+      chatStub([{ fact: 'Works in correction-mode example.', kind: 'fact', notability: 'medium', entity }]);
+      const first = await runFactsPipeline('first correction-mode turn', { engine, sourceId: 'default', sessionId: 'correction-mode-a', source: 'mcp:extract_facts' });
+      chatStub([{ fact: 'Left correction-mode example.', kind: 'fact', notability: 'medium', entity }]);
+      const second = await runFactsPipeline('second correction-mode turn', { engine, sourceId: 'default', sessionId: 'correction-mode-b', source: 'mcp:extract_facts' });
+      expect(first.inserted).toBe(1);
+      expect(second.inserted).toBe(1);
+      const rows = await engine.executeRaw<{ fact: string; expired: boolean }>(
+        `SELECT fact, expired_at IS NOT NULL AS expired FROM facts WHERE source_id='default' AND entity_slug=$1 ORDER BY id`, [entity]);
+      expect(rows.map(row => row.fact)).toEqual(expect.arrayContaining(['Works in correction-mode example.', 'Left correction-mode example.']));
+      expect(rows.every(row => !row.expired)).toBe(true);
+    } finally {
+      await engine.updateSourceConfig('default', { correction_mode: 'semantic' });
+      __setEmbedTransportForTests(null);
+      resetGateway();
+    }
+  });
+
   test('returns {inserted, duplicate, superseded, fact_ids} on successful extraction', async () => {
     chatStub([
       { fact: 'pipeline-shape-1', kind: 'fact', notability: 'medium', entity: null },

@@ -3012,8 +3012,7 @@ SOURCES (multi-repo / multi-brain)
   sources archived                   List soft-deleted sources and their purge expiry
   sources purge [<id>]               Permanently delete archived sources
   sources status                     Per-source dashboard (sync lag, embed coverage)
-  sources --help                     Full subcommand list (rename, default, attach,
-                                     current, federate, set-cr-mode, webhook, harden, ...)
+  sources --help                     Full subcommand list (rename, default, attach, current, federate, set-cr-mode, set-correction-mode, webhook, harden, ...)
   sync --all                         Sync all sources with a local_path
   sync --source <id>                 Sync one specific source
   repos ...                          DEPRECATED alias for 'sources' (v0.19.0)
