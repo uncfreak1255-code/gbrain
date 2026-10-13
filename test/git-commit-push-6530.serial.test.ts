@@ -434,8 +434,13 @@ describe('pull', () => {
 
 describe('forced probe: the old in-tree rebase vs the new protocol', () => {
   test('pull --rebase --autostash rewrites another writer\'s in-flight edit; commit-push leaves it byte-identical', () => {
+    const fixtureRoot = root;
+    try {
     for (const mode of ['old', 'new'] as const) {
-      rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+      // Keep the ownership directory alive until afterEach drains it.
+      // Each protocol variant gets fresh repos without deleting the scope.
+      root = join(fixtureRoot, mode);
+      mkdirSync(root);
       const { a, b } = setup();
       writeFileSync(join(b, 'y.md'), 'remote edit\n');
       commitAndPush({ repo: b, paths: ['y.md'], message: 'remote', cwd: b });
@@ -451,6 +456,7 @@ describe('forced probe: the old in-tree rebase vs the new protocol', () => {
         expect(git(a, 'stash', 'list')).toBe('');
       }
     }
+    } finally { root = fixtureRoot; }
   });
 });
 
