@@ -1,5 +1,5 @@
 /** Own fixture subprocesses, including disowned Git hooks. Test-only, POSIX. */
-import { spawn, execFileSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawn, spawnSync, execFileSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -16,7 +16,10 @@ function publish(file: string, lease: Lease): void {
 function groupMembers(group: number): number[] {
   // The observer needs its own group, or every snapshot includes the `ps`
   // subprocess itself and falsely reports a surviving fixture descendant.
-  return execFileSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8', detached: true })
+  const snapshot = spawnSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8', detached: true });
+  if (snapshot.error) throw snapshot.error;
+  if (snapshot.status !== 0) throw new Error('Cannot inspect owned fixture process group');
+  return snapshot.stdout
     .trim().split('\n').map(line => line.trim().split(/\s+/).map(Number))
     .filter(([pid, pgid]) => pgid === group && pid !== group).map(([pid]) => pid);
 }
@@ -47,7 +50,13 @@ async function bounded<T>(promise: Promise<T>, ms: number): Promise<T> {
  * when the peer disappeared; a failed notification must never abort cleanup. */
 function send(peer: Pick<ChildProcess, 'connected' | 'send'> | NodeJS.Process, message: any): boolean {
   if (!peer.connected || !peer.send) return false;
-  try { peer.send(message, () => {}); return true; }
+  try {
+    // Process and ChildProcess expose different overload declarations for
+    // their shared two-argument message/callback IPC form.
+    const notify = peer.send as (value: any, callback: (error: Error | null) => void) => boolean;
+    notify.call(peer, message, () => {});
+    return true;
+  }
   catch { return false; }
 }
 
@@ -118,12 +127,12 @@ async function leadGroup(): Promise<void> {
     }
     send(process, { drained: true, code });
     clearInterval(hold);
-    if (process.connected) process.disconnect();
+    if (process.connected) process.disconnect?.();
   })().catch((error: any) => {
     send(process, { failure: error.message });
     clearInterval(hold);
     process.exitCode = 1;
-    if (process.connected) process.disconnect();
+    if (process.connected) process.disconnect?.();
   });
   process.on('SIGTERM', () => { void drain(); });
   process.on('SIGINT', () => { void drain(); });
