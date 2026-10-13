@@ -66,6 +66,7 @@ const remember: Operation = {
     'Set `entity` whenever the fact is about a specific person/company/project — entity-scoped recall will not find it otherwise. ' +
     'ttl accepts duration shorthand ("30d", "12h") or an absolute ISO 8601 timestamp; ISO-8601 durations like "P30D" are rejected with a fix. ' +
     'visibility defaults to "world" (readable by every agent connected to this brain; pass "private" for local-CLI-only facts). ' +
+    'Correction behavior is source-wide: `semantic` preserves automatic supersession; `explicit` retains competing claims until an owner resolves them with `forget` by exact fact id. ' +
     'Response: branch on `status` (inserted|duplicate|superseded), never on `status_text` (human rendering only). ' +
     'On duplicate, `id` is the EXISTING fact\'s id. For bulk extraction from a raw transcript use extract_facts instead.',
   params: {

@@ -8,11 +8,11 @@
  * 0.95 threshold) → fence-first write (markdown durability) with the same
  * legacy DB-only fallbacks (thin-client, unparented, stub-guard).
  *
- * Supersession [X1, frozen as implementation-defined]: minimal deterministic
- * rule, zero LLM — when the top dedup candidate scores >= threshold with the
- * SAME kind but DIFFERENT text, the new fact supersedes it (a near-duplicate
- * with changed content is an update: "X at Acme" → "X left Acme"). Same text
- * → plain duplicate (existing id returned, nothing written).
+ * Supersession [X1]: default `semantic` source mode uses the minimal
+ * deterministic rule, zero LLM — when the top dedup candidate scores >=
+ * threshold with the SAME kind but DIFFERENT text, the new fact supersedes it.
+ * Source `explicit` mode retains distinct semantic neighbors; exact repeats
+ * still return the existing id as duplicates.
  *
  * Degradation (documented in the protocol doc): with no embedding provider,
  * dedup/supersession are skipped on the fence path and near-duplicates may
@@ -24,6 +24,7 @@
  */
 
 import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
+import { decideSingleFact } from './single-prepare.ts';
 
 const DEDUP_THRESHOLD = 0.95;
 const DEDUP_CANDIDATE_LIMIT = 5;
@@ -109,6 +110,13 @@ export async function writeSingleFact(
       'Remember a corrected claim. Repeating the old claim does not restore withdrawn memory.');
   }
 
+  const exact = await decideSingleFact(engine, sourceId, { fact: factText, kind, visibility, entity_slug: resolvedSlug }, null);
+  const correctionMode = exact.correctionMode;
+  if (exact.status === 'duplicate' && exact.candidate) {
+    return { id: exact.candidate.id, status: 'duplicate', entity_slug: resolvedSlug,
+      valid_until: exact.candidate.valid_until ? new Date(exact.candidate.valid_until) : null, degraded_dedup: false };
+  }
+
   // Embedding (NOT an LLM call): powers dedup + downstream recall. Fail-soft —
   // a missing/failing provider degrades dedup, never the write.
   let embedding: Float32Array | null = null;
@@ -139,7 +147,7 @@ export async function writeSingleFact(
 
   // Dedup + supersession decision (same candidates + threshold as the pipeline).
   let supersedeId: number | null = null;
-  if (resolvedSlug && embedding) {
+  if (correctionMode === 'semantic' && resolvedSlug && embedding) {
     const candidates = await engine.findCandidateDuplicates(sourceId, resolvedSlug, factText, {
       embedding,
       embeddingModel,

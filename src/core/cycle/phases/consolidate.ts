@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto';
 import { isAborted } from '../../abort-check.ts';
 import { maintenancePreflight, submitMaintenanceConsolidation } from '../../persistence/prepared-maintenance.ts';
 import { managedPersistenceEnabled } from '../../persistence/ownership.ts';
+import { sourceCorrectionMode } from '../../facts/supersession-policy.ts';
 
 export interface ConsolidatePhaseOpts {
   dryRun?: boolean;
@@ -106,6 +107,14 @@ export async function runPhaseConsolidate(
     if (isAborted(opts.signal)) break;
     if (opts.yieldDuringPhase) {
       try { await opts.yieldDuringPhase(); } catch { /* keepalive errors non-fatal */ }
+    }
+
+    // Consolidation chooses one semantic winner and expires earlier claims.
+    // Sources that require explicit correction must retain every branch until
+    // an exact withdrawal resolves the conflict.
+    if (await sourceCorrectionMode(engine, b.source_id) === 'explicit') {
+      bucketsSkipped += 1;
+      continue;
     }
 
     const maintenance = managed && !dryRun ? await maintenancePreflight(engine, b.source_id) : null;

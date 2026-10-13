@@ -13,7 +13,7 @@ import type { WriteRequest } from './model.ts';
 function conflict(): never { throw new OperationError('revision_conflict', 'The memory changed during semantic preparation.'); }
 function candidateState(value: Awaited<ReturnType<typeof decideSingleFact>>): string {
   const c = value.candidate;
-  return JSON.stringify([value.status, c?.id, c?.fact, c?.kind, c?.visibility,
+  return JSON.stringify([value.correctionMode, value.status, c?.id, c?.fact, c?.kind, c?.visibility,
     c?.valid_until ? new Date(c.valid_until).toISOString() : null, c?.source_markdown_slug, c?.row_num]);
 }
 function outcome(id: number, status: 'inserted' | 'duplicate' | 'superseded', entitySlug: string | null, validUntil: Date | string | null, degraded: boolean) {

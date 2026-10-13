@@ -20,6 +20,7 @@ import { authorizePageVisibility } from './page-visibility.ts';
 import { nativeLockCapability } from './native-lock.ts';
 import { assertPhysicalRoot } from './physical-root.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
+import { sourceCorrectionMode } from '../facts/supersession-policy.ts';
 
 export interface MaintenanceAuthority {
   writer: WriteAuthority;
@@ -165,6 +166,9 @@ async function readFacts(engine: BrainEngine, sourceId: string, ids: number[], l
 export async function submitMaintenanceConsolidation(engine: BrainEngine, authority: MaintenanceAuthority,
   slug: string, cluster: FactRow[], take: { claim: string; weight: number; source: string; since: string }): Promise<Record<string, unknown>> {
   const sourceId = authority.writer.sourceId;
+  if (await sourceCorrectionMode(engine, sourceId) === 'explicit') {
+    throw new OperationError('revision_conflict', 'This source requires explicit correction; semantic consolidation is disabled.');
+  }
   const facts = await readFacts(engine, sourceId, cluster.map(f => f.id));
   if (facts.length !== cluster.length || facts.some(f => f.value.visibility !== 'world' || f.value.expired_at || f.value.consolidated_at)) {
     throw new OperationError('revision_conflict', 'The consolidation facts are no longer eligible.');
@@ -284,6 +288,12 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
   if (row.intent?.kind === 'managed_maintenance_phantom_delete') return (await import('../cycle/phantom-redirect-managed.ts')).preparePhantomDelete(engine, row, config);
   if (row.intent?.kind !== 'managed_maintenance_consolidate') throw new OperationError('invalid_params', 'Unsupported maintenance request.');
   const p = row.intent;
+  const assertConsolidationAllowed = async (db: BrainEngine) => {
+    if (await sourceCorrectionMode(db, row.source_id) === 'explicit') {
+      throw new OperationError('revision_conflict', 'This source requires explicit correction; semantic consolidation is disabled.');
+    }
+  };
+  await assertConsolidationAllowed(engine);
   const facts = p.facts as FactSnapshot[];
   const pages = p.pages as EvidencePage[];
   const [existing] = await engine.executeRaw<{ id: number; row_num: number; active: boolean; resolved_at: unknown }>(
@@ -302,6 +312,7 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
   return { ...prepared, additionalPageKeys: pages.map(page => ({ sourceId: row.source_id, slug: page.slug })),
     validate: async tx => {
       await prepared.validate?.(tx);
+      await assertConsolidationAllowed(tx);
       for (const page of pages) {
         const current = await tx.readPageSnapshot(page.slug, { sourceId: row.source_id, excludePrivate: true });
         if (!current || current.page.id !== page.id || current.revision !== page.revision) {

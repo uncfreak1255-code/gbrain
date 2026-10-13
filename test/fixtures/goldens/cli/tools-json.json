@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 200378,
-    "stdoutSha256": "c23df35de49ce6ca01006bf4db2ce92fb57d2f37f089f82fef292c047982b00e",
+    "stdoutBytes": 200556,
+    "stdoutSha256": "5fd3e6afe8e82ccbb2cedb032a1ea5e1319e174602f9dbad2daf7bacf6bdbb7a",
     "toolNames": [
       "remember",
       "entity",
@@ -161,7 +161,7 @@
     ],
     "tools": [
       {
-        "description": "MEMORY VERB (v1): save one fact to durable agent memory — the protocol write verb. provenance is REQUIRED (free text, e.g. \"conversation 2026-06-12\", \"user said in chat\", \"import: notes.md\"). Set `entity` whenever the fact is about a specific person/company/project — entity-scoped recall will not find it otherwise. ttl accepts duration shorthand (\"30d\", \"12h\") or an absolute ISO 8601 timestamp; ISO-8601 durations like \"P30D\" are rejected with a fix. visibility defaults to \"world\" (readable by every agent connected to this brain; pass \"private\" for local-CLI-only facts). Response: branch on `status` (inserted|duplicate|superseded), never on `status_text` (human rendering only). On duplicate, `id` is the EXISTING fact's id. For bulk extraction from a raw transcript use extract_facts instead.",
+        "description": "MEMORY VERB (v1): save one fact to durable agent memory — the protocol write verb. provenance is REQUIRED (free text, e.g. \"conversation 2026-06-12\", \"user said in chat\", \"import: notes.md\"). Set `entity` whenever the fact is about a specific person/company/project — entity-scoped recall will not find it otherwise. ttl accepts duration shorthand (\"30d\", \"12h\") or an absolute ISO 8601 timestamp; ISO-8601 durations like \"P30D\" are rejected with a fix. visibility defaults to \"world\" (readable by every agent connected to this brain; pass \"private\" for local-CLI-only facts). Correction behavior is source-wide: `semantic` preserves automatic supersession; `explicit` retains competing claims until an owner resolves them with `forget` by exact fact id. Response: branch on `status` (inserted|duplicate|superseded), never on `status_text` (human rendering only). On duplicate, `id` is the EXISTING fact's id. For bulk extraction from a raw transcript use extract_facts instead.",
         "name": "remember",
         "parameters": {
           "entity": "string?",

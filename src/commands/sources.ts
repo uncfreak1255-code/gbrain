@@ -1883,6 +1883,7 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     case 'tracked-branch': return runTrackedBranch(engine, rest);
     // v0.40.3.0 contextual retrieval (from master)
     case 'set-cr-mode': return runSetCrMode(engine, rest);
+    case 'set-correction-mode': { const { runSetCorrectionMode } = await import('./sources-set-correction-mode.ts'); return runSetCorrectionMode(engine, rest); }
     // #4739 non-destructive local_path pointer repair
     case 'set-path':   { const { runSetPath } = await import('./sources-set-path.ts'); return runSetPath(engine, rest); }
     case 'retry-held': { const { runRetryHeld } = await import('./sources-retry-held.ts'); return runRetryHeld(engine, rest); }
@@ -1952,10 +1953,9 @@ Subcommands:
   federate <id>                     Make source appear in cross-source default search.
   unfederate <id>                   Isolate source from default search.
   set-cr-mode <id> <none|title|per_chunk_synopsis>
-                                    Per-source contextual retrieval mode
-                                    override (v0.40.3.0). Pass "unset" or
-                                    "default" to clear (NULL falls through
-                                    to the global search.mode bundle).
+                                    Per-source retrieval override; "unset" or
+                                    "default" clears it; NULL uses global mode.
+  set-correction-mode <id> <semantic|explicit>  Set policy; drain source writers/jobs and read back before resuming.
   set-path <id> <path> [--force]    Repair a source's local_path pointer
                                     (DB column only, never touches disk).
                                     --force skips the overlapping-path guard.

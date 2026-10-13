@@ -16,6 +16,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runPhaseConsolidate } from '../src/core/cycle/phases/consolidate.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { operationsByName } from '../src/core/operations.ts';
 
 let engine: PGLiteEngine;
 
@@ -79,15 +80,42 @@ async function insertFact(args: {
   text: string;
   valid_from: Date;
   confidence?: number;
+  sourceId?: string;
 }): Promise<number> {
   const r = await engine.executeRaw<{ id: number }>(
     `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from, confidence, embedding, embedded_at, embedding_model, embedded_text_hash)
-     VALUES ('default', $1, $2, 'fact', 'test', $3::timestamptz, $4, $5::vector, $3::timestamptz, 'openai:text-embedding-3-large', md5($2))
+     VALUES ($6, $1, $2, 'fact', 'test', $3::timestamptz, $4, $5::vector, $3::timestamptz, 'openai:text-embedding-3-large', md5($2))
      RETURNING id`,
-    [args.entity_slug, args.text, args.valid_from.toISOString(), args.confidence ?? 0.9, unitVec()],
+    [args.entity_slug, args.text, args.valid_from.toISOString(), args.confidence ?? 0.9, unitVec(), args.sourceId ?? 'default'],
   );
   return r[0].id;
 }
+
+test('explicit correction mode skips semantic consolidation and preserves every active claim', async () => {
+  const sourceId = 'cdx4-explicit-correction';
+  const slug = 'cdx4-explicit-correction-person';
+  await engine.executeRaw(`INSERT INTO sources(id,name,config) VALUES($1,$1,'{"correction_mode":"explicit"}')
+    ON CONFLICT(id) DO UPDATE SET config=EXCLUDED.config`, [sourceId]);
+  await engine.executeRaw(`INSERT INTO pages(source_id,slug,type,title) VALUES($1,$2,'person','Correction fixture')`, [sourceId, slug]);
+  const claims = [
+    ['Prefers morning meetings.', new Date('2025-02-01T00:00:00Z'), 0.9],
+    ['Prefers afternoon meetings.', new Date('2026-03-01T00:00:00Z'), 0.9],
+    ['Prefers evening meetings.', new Date('2026-06-01T00:00:00Z'), 0.8],
+  ] as const;
+  for (const [text, valid_from, confidence] of claims) await insertFact({ entity_slug: slug, text, valid_from, confidence, sourceId });
+
+  const result = await runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 });
+  expect(result.details.facts_consolidated).toBe(0);
+  expect(await engine.executeRaw('SELECT id FROM takes WHERE page_id=(SELECT id FROM pages WHERE source_id=$1 AND slug=$2)', [sourceId, slug])).toHaveLength(0);
+  const facts = await engine.executeRaw<{ fact: string; valid_until: Date | null; consolidated_at: Date | null }>(
+    'SELECT fact,valid_until,consolidated_at FROM facts WHERE source_id=$1 AND entity_slug=$2 ORDER BY valid_from', [sourceId, slug]);
+  expect(facts.map(f => f.fact)).toEqual(claims.map(([claim]) => claim));
+  expect(facts.every(f => f.valid_until === null && f.consolidated_at === null)).toBe(true);
+  const recalled = await operationsByName.recall!.handler({ engine, remote: false, sourceId,
+    config: { engine: engine.kind }, dryRun: false, logger: { info() {}, warn() {}, error() {} } },
+    { entity: slug, source_id: sourceId }) as { facts: Array<{ fact: string }> };
+  expect(recalled.facts.map(f => f.fact)).toEqual(expect.arrayContaining(claims.map(([claim]) => claim)));
+});
 
 describe('#4057 — consolidation work-window eligibility', () => {
   test('#4057: consolidated rows cannot hide older unconsolidated facts beyond the 100-row window', async () => {
