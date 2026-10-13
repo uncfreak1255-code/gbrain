@@ -20,7 +20,7 @@
  * outside the root (including an index entry with a `..` segment) refuse with
  * `writer_manifest_unsafe` before anything is read.
  */
-import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { opError } from '../ops/contract.ts';
 import { createProgress, type ProgressOptions } from '../progress.ts';
@@ -99,14 +99,31 @@ export function worktreeManifest(root: string, opts: { progress?: ProgressOption
     ...(opts.withFiles ? { files } : {}) };
 }
 
+/**
+ * Repositories may expose their in-tree agent skills at `skills/<name>`. Sync never follows that link, and its
+ * target is constrained to a normal in-tree skill directory (SKILL.md is a regular file). Every other link stays unsafe.
+ */
+function isInTreeSkillLink(canonical: string, path: string): boolean {
+  const parts = relative(canonical, path).split(sep);
+  if (parts.length !== 2 || parts[0] !== 'skills') return false;
+  try {
+    const target = realpathSync(path), within = relative(canonical, target);
+    return within !== '' && within.split(sep)[0] !== '..' && !isAbsolute(within)
+      && statSync(target).isDirectory() && lstatSync(join(target, 'SKILL.md')).isFile();
+  } catch { return false; }
+}
+
 function treePaths(canonical: string): { paths: string[]; untracked?: number } {
   const paths: string[] = [];
   const visit = (dir: string) => {
     for (const name of readdirSync(dir).sort()) {
       if (name === '.git' || name === '.gbrain-managed' || isPhysicalRootMetadata(name)) continue;
       const path = join(dir, name), info = lstatSync(path);
-      if (info.isSymbolicLink()) throw unsafe('The canonical checkout manifest requires a symlink-free checkout.',
-        `${relative(canonical, path).split(sep).join('/')} in the checkout is a symlink, so no manifest was recorded. Ask the user to replace it with a real file or directory (or remove it), then run the step again.`);
+      if (info.isSymbolicLink()) {
+        if (isInTreeSkillLink(canonical, path)) continue;
+        throw unsafe('The canonical checkout manifest requires a symlink-free checkout.',
+          `${relative(canonical, path).split(sep).join('/')} in the checkout is a symlink, so no manifest was recorded. Ask the user to replace it with a real file or directory (or remove it), then run the step again.`);
+      }
       if (info.isDirectory()) visit(path);
       else if (info.isFile()) paths.push(relative(canonical, path).split(sep).join('/'));
     }
@@ -129,6 +146,7 @@ function trackedPaths(canonical: string): { paths: string[]; untracked: number }
     if (excluded(rel)) continue;
     if (mode === '160000') throw unsafe('Canonical worktree transfer does not support Git submodules.',
       `${rel} in ${canonical} is a Git submodule, so no manifest was recorded. Ask the user to replace the submodule with ordinary tracked files (or remove it), then run the step again.`);
+    if (mode === '120000' && isInTreeSkillLink(canonical, join(canonical, ...rel.split('/')))) continue;
     if (mode === '120000') throw unsafe('The canonical checkout manifest requires a symlink-free checkout.',
       `${rel} in the checkout is a tracked symlink, so no manifest was recorded. Ask the user to replace it with a real file (or remove it), then run the step again.`);
     paths.add(rel);

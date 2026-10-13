@@ -54,6 +54,36 @@ async function queued(source:string,requestId=randomUUID()){
     worktreeId:binding.worktree_id,topologyGeneration:binding.topology_generation});
 }
 
+test('tree-scope worktree manifest permits only in-tree skill links',()=>fixture(async(_home,_source,root)=>{
+  mkdirSync(join(root,'content'));
+  writeFileSync(join(root,'content','note.md'),'Syncable');
+  mkdirSync(join(root,'.agents','skills','agent'),{recursive:true});
+  writeFileSync(join(root,'.agents','skills','agent','SKILL.md'),'Agent skill');
+  mkdirSync(join(root,'skills'));
+  symlinkSync('../.agents/skills/agent',join(root,'skills','agent'));
+
+  const manifest=worktreeManifest(root,{withFiles:true});
+  expect(Object.keys(manifest.files??{}).sort()).toEqual(['.agents/skills/agent/SKILL.md','content/note.md','example.md']);
+  symlinkSync('example.md',join(root,'content-link.md'));
+  expect(()=>worktreeManifest(root)).toThrow(/symlink/);
+}),60_000);
+
+test('git-scope worktree manifest permits a tracked in-tree skill link and still refuses other links',()=>fixture(async(_home,_source,root)=>{
+  const git=(...args:string[])=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
+  mkdirSync(join(root,'.agents','skills','agent'),{recursive:true});
+  writeFileSync(join(root,'.agents','skills','agent','SKILL.md'),'Agent skill');
+  mkdirSync(join(root,'skills'));
+  symlinkSync('../.agents/skills/agent',join(root,'skills','agent'));
+  git('init','-q');git('add','-A');
+  git('-c','user.name=t','-c','user.email=t@t','commit','-qm','init');
+  const manifest=worktreeManifest(root,{scope:'git',withFiles:true});
+  expect(manifest.scope).toBe('git');
+  expect(Object.keys(manifest.files??{})).not.toContain('skills/agent');
+  expect(Object.keys(manifest.files??{})).toContain('example.md');
+  symlinkSync('example.md',join(root,'content-link.md'));git('add','content-link.md');
+  expect(()=>worktreeManifest(root,{scope:'git'})).toThrow(/symlink/);
+}),60_000);
+
 test('archive/restore advance topology and permanently invalidate accepted old bindings',()=>fixture(async(_home,source)=>{
   const old=(await getWorktreeBinding(engine,source))!;const accepted=await queued(source);
   const requestId=randomUUID();
