@@ -16,7 +16,10 @@ function publish(file: string, lease: Lease): void {
 function groupMembers(group: number): number[] {
   // The observer needs its own group, or every snapshot includes the `ps`
   // subprocess itself and falsely reports a surviving fixture descendant.
-  const snapshot = spawnSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8', detached: true });
+  // Bun's POSIX sync spawner honors detached; Node's older declaration
+  // omits it. Keep the runtime option without weakening result typing.
+  const options = { encoding: 'utf8' as const, detached: true };
+  const snapshot = spawnSync('ps', ['-eo', 'pid=,pgid='], options);
   if (snapshot.error) throw snapshot.error;
   if (snapshot.status !== 0) throw new Error('Cannot inspect owned fixture process group');
   return snapshot.stdout

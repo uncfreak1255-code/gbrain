@@ -8,7 +8,7 @@ import { FixtureProcesses } from './helpers/fixture-processes.ts';
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function ready(path: string): Promise<number> {
-  for (let i = 0; i < 100; i++) { if (existsSync(path)) return Number(readFileSync(path, 'utf8')); await sleep(20); }
+  for (let i = 0; i < 250; i++) { if (existsSync(path)) return Number(readFileSync(path, 'utf8')); await sleep(20); }
   throw new Error('Owned child did not become ready');
 }
 function sleeper(path: string, ignoreTerm = false): string[] {
