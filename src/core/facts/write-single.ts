@@ -12,11 +12,12 @@
  * through the coordinated write (`submitRememberMutation`); the production
  * caller of this helper is loops extraction.
  *
- * Supersession [X1, frozen as implementation-defined]: minimal deterministic
- * rule, zero LLM — when the top dedup candidate scores >= threshold with the
- * SAME kind but DIFFERENT text, the new fact supersedes it (a near-duplicate
- * with changed content is an update: "X at Acme" → "X left Acme"). Same text
- * → plain duplicate (existing id returned, nothing written).
+ * Supersession [X1]: default `semantic` source mode uses the minimal
+ * deterministic rule, zero LLM — when the top dedup candidate scores >=
+ * threshold with the SAME kind but DIFFERENT text, the new fact supersedes it.
+ * Source `explicit` mode retains distinct semantic neighbors; exact repeats
+ * still return the existing id as duplicates (`decideSingleFact` applies the
+ * source policy).
  *
  * Degradation (documented in the protocol doc): with no embedding provider,
  * the semantic half of dedup/supersession is skipped and near-duplicates may

@@ -27,6 +27,7 @@ import { nativeLockCapability } from './native-lock.ts';
 import { assertPhysicalRoot } from './physical-root.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
 import { MaintenanceWriteWait } from './maintenance-wait.ts';
+import { sourceCorrectionMode } from '../facts/supersession-policy.ts';
 import { declaredWriteTrust, lowerToDerivedTier, readDerivationDeclaration, recordTaintEdges, type DerivationDeclaration } from '../trust/taint.ts';
 
 export interface MaintenanceAuthority {
@@ -260,6 +261,10 @@ export async function submitMaintenanceConsolidation(engine: BrainEngine, author
   slug: string, cluster: FactRow[], take: { claim: string; weight: number; source: string; since: string },
   derivation?: DerivationDeclaration): Promise<Record<string, unknown>> {
   const sourceId = authority.writer.sourceId;
+  if (await sourceCorrectionMode(engine, sourceId) === 'explicit') {
+    throw opError('revision_conflict', 'This source requires explicit correction; semantic consolidation is disabled.',
+      `Source '${sourceId}' has correction_mode=explicit, so facts on ${slug} are never consolidated; nothing was submitted. Resolve competing claims with forget by exact fact id.`);
+  }
   const facts = await readFacts(engine, sourceId, cluster.map(f => f.id));
   if (facts.length !== cluster.length || facts.some(f => f.value.visibility !== 'world' || f.value.expired_at || f.value.consolidated_at)) {
     throw opError('revision_conflict', 'The consolidation facts are no longer eligible.',
@@ -462,6 +467,14 @@ async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, co
     `Request ${row.request_id} for ${row.slug} in ${row.source_id} carries a maintenance kind this gbrain version does not publish (likely queued by a newer release); nothing changed. Upgrade gbrain on the brain host, and read the receipt before submitting anything new.`,
     { fix: receiptFix(row) });
   const p = row.intent;
+  const assertConsolidationAllowed = async (db: BrainEngine) => {
+    if (await sourceCorrectionMode(db, row.source_id) === 'explicit') {
+      throw opError('revision_conflict', 'This source requires explicit correction; semantic consolidation is disabled.',
+        `Source '${row.source_id}' changed to correction_mode=explicit before request ${row.request_id} on ${row.slug} published; nothing was written. Read the receipt before submitting anything new.`,
+        { fix: receiptFix(row) });
+    }
+  };
+  await assertConsolidationAllowed(engine);
   const facts = p.facts as FactSnapshot[];
   const pages = p.pages as EvidencePage[];
   const [existing] = await engine.executeRaw<{ id: number; row_num: number; active: boolean; resolved_at: unknown }>(
@@ -482,6 +495,7 @@ async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, co
   return { ...prepared, additionalPageKeys: pages.map(page => ({ sourceId: row.source_id, slug: page.slug })),
     validate: async tx => {
       await prepared.validate?.(tx);
+      await assertConsolidationAllowed(tx);
       for (const page of pages) {
         const current = await tx.readPageSnapshot(page.slug, { sourceId: row.source_id, excludePrivate: true });
         if (!current || current.page.id !== page.id || current.revision !== page.revision) {

@@ -183,7 +183,7 @@ for (const kind of testBackends()) {
       await engine.setConfig('facts.supersession_thresholds', JSON.stringify({ [`test-model@${dims}`]: 0.95 }));
       try {
         expect((await decide(false)).candidate?.id).toBe(hidden);
-        expect(await decide(true)).toEqual({ status: 'inserted', candidate: null });
+        expect(await decide(true)).toEqual({ status: 'inserted', candidate: null, correctionMode: 'semantic' });
       } finally { await engine.unsetConfig('facts.supersession_thresholds'); }
     }, 90_000);
 

@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 231878,
-    "stdoutSha256": "483f72a8533acf46fd7ff62602c053a1d78c6b77b872d60e56b3982d63df1ed9",
+    "stdoutBytes": 231971,
+    "stdoutSha256": "c764ab9a3c6f66c305d29ab290db791494552c88aa6a72006a544bfe0eb666d7",
     "toolNames": [
       "remember",
       "entity",
@@ -178,7 +178,7 @@
     ],
     "tools": [
       {
-        "description": "MEMORY VERB (v1): save facts with provenance. Set `entity` (the subject) or recall misses it. Branch on `status` (inserted|duplicate|superseded); write_pending: poll get_write_request.",
+        "description": "MEMORY VERB (v1): save facts with provenance. Set `entity` (the subject) or recall misses it. Branch on `status` (inserted|duplicate|superseded); write_pending: poll get_write_request. Correction mode is source-wide: `explicit` keeps competing claims until `forget` by fact id.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,

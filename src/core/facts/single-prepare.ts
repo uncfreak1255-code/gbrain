@@ -10,9 +10,10 @@ import { readSupersessionThreshold } from './supersession-threshold.ts';
 import { privateProvenanceFilterFragment } from '../search/private-visibility.ts';
 import { pageNotVisibleError } from '../persistence/page-visibility.ts';
 import { slugUnderBoundPrefixes } from '../ops/context.ts';
+import { sourceCorrectionMode, type CorrectionMode } from './supersession-policy.ts';
 
 export type FactCandidate = FactRow & { source_markdown_slug: string | null; row_num: number | null };
-export interface FactDecision { status: 'inserted' | 'duplicate' | 'superseded'; candidate: FactCandidate | null; }
+export interface FactDecision { status: 'inserted' | 'duplicate' | 'superseded'; candidate: FactCandidate | null; correctionMode: CorrectionMode; }
 export interface SingleFactIntent {
   fact: string; kind: FactRow['kind']; visibility: FactRow['visibility']; entity_slug: string | null;
   /** Speaker of the new claim; a fact another known speaker asserted is never its duplicate. */
@@ -102,13 +103,14 @@ export async function listSupersessionCandidates(engine: BrainEngine, sourceId: 
  * `lane` is the writer's `facts.source`: capture lanes never drop by cosine (#5888).
  */
 export async function decideSingleFact(engine: BrainEngine, sourceId: string, input: SingleFactIntent, embedding: Float32Array | null, embeddingModel?: string | null, lane?: string | null, opts: { excludePrivate?: boolean } = {}): Promise<FactDecision> {
+  const correctionMode = await sourceCorrectionMode(engine, sourceId);
   const [exact] = await engine.executeRaw<FactCandidate>(`SELECT * FROM facts WHERE source_id=$1
     AND entity_slug IS NOT DISTINCT FROM $2 AND visibility=$3 AND expired_at IS NULL
     AND (valid_until IS NULL OR valid_until>now()) AND gbrain_fact_fingerprint(fact)=gbrain_fact_fingerprint($4)
     AND ($5::text IS NULL OR attributed_to IS NULL OR attributed_to=$5)${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}
     ORDER BY id LIMIT 1`, [sourceId, input.entity_slug, input.visibility, input.fact, input.attributed_to ?? null]);
-  if (exact) return { status: 'duplicate', candidate: { ...exact, id: Number(exact.id) } };
-  if (embedding && input.entity_slug) {
+  if (exact) return { status: 'duplicate', candidate: { ...exact, id: Number(exact.id) }, correctionMode };
+  if (embedding && input.entity_slug && correctionMode === 'semantic') {
     const candidates = await listSupersessionCandidates(engine, sourceId, input.entity_slug, input.fact, embedding, embeddingModel, undefined, input.attributed_to ?? null);
     const metadata = await engine.executeRaw<{ id: number; source_markdown_slug: string | null; row_num: number | null; trust_tier: FactRow['trust_tier'] }>(
       `SELECT id,source_markdown_slug,row_num,trust_tier FROM facts WHERE source_id=$1 AND id=ANY($2::int[])${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}`,
@@ -128,10 +130,10 @@ export async function decideSingleFact(engine: BrainEngine, sourceId: string, in
       if (next > score) { score = next; candidate = c; }
     }
     if (candidate && cosineVerdict(lane, score, input.fact, candidate.fact, (await readSupersessionThreshold(engine, embeddingModel, embedding.length)).threshold) === 'duplicate') return {
-      status: candidate.kind === input.kind ? 'superseded' : 'duplicate', candidate,
+      status: candidate.kind === input.kind ? 'superseded' : 'duplicate', candidate, correctionMode,
     };
   }
-  return { status: 'inserted', candidate: null };
+  return { status: 'inserted', candidate: null, correctionMode };
 }
 
 /**
@@ -177,9 +179,9 @@ export async function decideReplacement(engine: BrainEngine, sourceId: string, i
   }
   const exact = await decideSingleFact(engine, sourceId, input, null, undefined, undefined, { excludePrivate: opts.excludePrivate });
   if (exact.status === 'duplicate') {
-    if (exact.candidate!.id === candidate.id) return { status: 'duplicate', candidate };
+    if (exact.candidate!.id === candidate.id) return { status: 'duplicate', candidate, correctionMode: exact.correctionMode };
     throw verbError('invalid_params', `replaces_duplicate: an active fact (#${exact.candidate!.id}) already states this claim.`,
       `Forget fact #${targetId} if it is no longer true; the existing fact #${exact.candidate!.id} already says the new claim.`);
   }
-  return { status: 'superseded', candidate };
+  return { status: 'superseded', candidate, correctionMode: exact.correctionMode };
 }

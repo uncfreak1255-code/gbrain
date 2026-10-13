@@ -30,6 +30,7 @@ import { testBackends } from './helpers/test-backends.ts';
 import { rawProvenanceCheck } from '../src/commands/doctor/checks/core-health.ts';
 import { __setMaintenanceWriteWaitForTests } from '../src/core/persistence/maintenance-wait.ts';
 import { testWaitMs } from './helpers/wait-for.ts';
+import { operationsByName } from '../src/core/operations.ts';
 
 const backends = testBackends();
 const engines: BrainEngine[] = [];
@@ -204,6 +205,26 @@ test('managed consolidation publishes take, facts, canonical page, and file toge
   });
 }, 30_000);
 
+test('managed explicit correction mode skips semantic consolidation and preserves every active claim', async () => {
+  await fixture(async (engine, sourceId) => {
+    await engine.executeRaw('UPDATE sources SET config=$2::jsonb WHERE id=$1', [sourceId, JSON.stringify({ correction_mode: 'explicit' })]);
+    await seed(engine, sourceId);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    const result = await runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 });
+    expect(result.details.facts_consolidated).toBe(0);
+    expect(result.details.takes_written).toBe(0);
+    expect(await engine.executeRaw('SELECT id FROM takes WHERE page_id=(SELECT id FROM pages WHERE source_id=$1 AND slug=$2)', [sourceId, 'people/example'])).toHaveLength(0);
+    const facts = await engine.executeRaw<{ fact: string; valid_until: Date | null; consolidated_at: Date | null }>(
+      'SELECT fact,valid_until,consolidated_at FROM facts WHERE source_id=$1 ORDER BY valid_from', [sourceId]);
+    expect(facts.map(f => f.fact)).toEqual(['Example claim alpha', 'Example claim beta', 'Example claim gamma']);
+    expect(facts.every(f => f.valid_until === null && f.consolidated_at === null)).toBe(true);
+    const recalled = await operationsByName.recall!.handler({ engine, remote: false, sourceId,
+      config: { engine: engine.kind }, dryRun: false, logger: { info() {}, warn() {}, error() {} } },
+      { entity: 'people/example', source_id: sourceId }) as { facts: Array<{ fact: string }> };
+    expect(recalled.facts.map(f => f.fact)).toEqual(expect.arrayContaining(['Example claim alpha', 'Example claim beta', 'Example claim gamma']));
+  });
+}, 30_000);
+
 test('managed dry-run and private facts never publish takes or consolidate evidence', async () => {
   await fixture(async (engine, sourceId) => {
     await seed(engine, sourceId);
@@ -265,8 +286,8 @@ for (const retirement of ['inactive', 'resolved'] as const) {
   }, 30_000);
 }
 
-for (const change of ['derived', 'semantic'] as const) {
-  test(`public admitted consolidation ${change === 'derived' ? 'ignores unchanged vectors and embedding telemetry' : 'rejects a changed semantic fact'}`, async () => {
+for (const change of ['derived', 'semantic', 'policy'] as const) {
+  test(`public admitted consolidation ${change === 'derived' ? 'ignores unchanged vectors and embedding telemetry' : change === 'semantic' ? 'rejects a changed semantic fact' : 'rechecks correction policy before publication'}`, async () => {
     await fixture(async (engine, sourceId) => {
       await seed(engine, sourceId);
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
@@ -279,7 +300,9 @@ for (const change of ['derived', 'semantic'] as const) {
       const row = (await claimNextWrite(engine, localHostId()))!;
       const prepared = await prepareMaintenanceMutation(engine, row, { engine: engine.kind, embedding_disabled: true });
       await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
-        await tx.executeRaw(change === 'derived'
+        if (change === 'policy') {
+          await tx.executeRaw('UPDATE sources SET config=$2::jsonb WHERE id=$1', [sourceId, JSON.stringify({ correction_mode: 'explicit' })]);
+        } else await tx.executeRaw(change === 'derived'
           ? 'UPDATE facts SET embedding=embedding,embedded_at=now() WHERE source_id=$1'
           : "UPDATE facts SET fact=fact||' changed' WHERE source_id=$1", [sourceId]);
       }, TEST_WRITE_ATTRIBUTION));

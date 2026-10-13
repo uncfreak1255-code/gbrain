@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { isAborted } from '../../abort-check.ts';
 import { maintenancePreflight, submitMaintenanceConsolidation } from '../../persistence/prepared-maintenance.ts';
 import { managedPersistenceEnabled } from '../../persistence/ownership.ts';
+import { sourceCorrectionMode } from '../../facts/supersession-policy.ts';
 import { declareDerivation, derivedMaintenanceTransaction, derivedWriteTrust, isExternalTier, readTaintInputs } from '../../trust/taint.ts';
 import { DEFAULT_WRITE_GATE_CONFIG, type WriteGateConfig } from '../../write-gate.ts';
 import { loadImportSanityConfig } from '../../import-screen.ts';
@@ -149,6 +150,9 @@ export async function runPhaseConsolidate(
     if (opts.yieldDuringPhase) {
       try { await opts.yieldDuringPhase(); } catch { /* keepalive errors non-fatal */ }
     }
+
+    // Explicit-correction sources keep every branch: consolidation would pick a semantic winner.
+    if (await sourceCorrectionMode(engine, b.source_id) === 'explicit') { bucketsSkipped += 1; continue; }
 
     const maintenance = managed && !dryRun ? await maintenancePreflight(engine, b.source_id) : null;
     const candidates = await engine.listFactsByEntity(b.source_id, b.entity_slug, {

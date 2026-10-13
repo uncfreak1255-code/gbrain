@@ -8728,6 +8728,22 @@ from the live operation definitions plus the response-shape registry — doc and
 code structurally cannot drift; conformance validates live responses against
 the same registry.
 
+Correction behavior is selected by the owning source's `config.correction_mode`
+setting, changed only through the local source-owner command
+`gbrain sources set-correction-mode <id> <semantic|explicit>`. Missing setting
+defaults to `semantic`. In `explicit` mode, every writer on that source retains
+distinct semantically similar claims; exact duplicates remain idempotent.
+Scheduled consolidation is also disabled for that source: it must not infer
+chronological supersession or publish a single derived take from unresolved
+claims. Existing facts remain recallable until an exact-ID withdrawal resolves
+the conflict.
+Do not change the mode while the source is active: drain its writers, scheduled
+jobs and prepared maintenance, set and read back the policy, then resume verified
+consumers. Concurrent capture and correction are supported after that transition.
+Agents must surface competing claims as unresolved and, after evidence selects
+the active answer, withdraw the obsolete claim with `forget` and its exact fact
+ID. The setting does not infer conflict or choose a winner.
+
 ## Versioning policy (the point of the freeze)
 
 - Every field NAME and its SEMANTICS in v1 are frozen forever — never removed,

@@ -68,6 +68,20 @@ async function chunkCount(slug: string): Promise<number> {
 }
 
 describe('fence-path supersession', () => {
+  test('explicit source policy keeps competing single-fact writes and exact duplicates deduped', async () => {
+    await engine.updateSourceConfig('default', { correction_mode: 'explicit' });
+    const first = await writeSingleFact(engine, 'default', { fact: 'SUPERSEDE-PAIR works at acme-example', provenance: 'test', entity: SLUG, kind: 'fact', visibility: 'world' });
+    const second = await writeSingleFact(engine, 'default', { fact: 'SUPERSEDE-PAIR left acme-example', provenance: 'test', entity: SLUG, kind: 'fact', visibility: 'world' });
+    expect(first.status).toBe('inserted');
+    expect(second.status).toBe('inserted');
+    const duplicate = await writeSingleFact(engine, 'default', { fact: 'SUPERSEDE-PAIR left acme-example', provenance: 'retry', entity: SLUG, kind: 'fact', visibility: 'world' });
+    expect(duplicate.status).toBe('duplicate');
+    expect(duplicate.id).toBe(second.id);
+    const rows = await engine.executeRaw<{ id: number; expired: boolean }>(
+      `SELECT id, expired_at IS NOT NULL AS expired FROM facts WHERE source_id='default' AND entity_slug=$1 ORDER BY id`, [SLUG]);
+    expect(rows.map(row => row.expired)).toEqual([false, false]);
+  });
+
   test('supersedes without recording a withdrawal or touching unrelated pages', async () => {
     const first = await writeSingleFact(engine, 'default', { fact: 'SUPERSEDE-PAIR works at acme-example', provenance: 'test', entity: SLUG, kind: 'fact', visibility: 'world' });
     expect(first.status).toBe('inserted');

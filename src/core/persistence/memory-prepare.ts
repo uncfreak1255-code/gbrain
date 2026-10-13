@@ -40,7 +40,7 @@ function conflict(row: WriteRequest): never {
 }
 function candidateState(value: Awaited<ReturnType<typeof decideSingleFact>>): string {
   const c = value.candidate;
-  return JSON.stringify([value.status, c?.id, c?.fact, c?.kind, c?.visibility,
+  return JSON.stringify([value.correctionMode, value.status, c?.id, c?.fact, c?.kind, c?.visibility,
     c?.valid_until ? new Date(c.valid_until).toISOString() : null, c?.source_markdown_slug, c?.row_num, c?.trust_tier ?? null]);
 }
 export const NO_ENTITY_HINT = 'Saved without an entity, so entity-scoped recall will not find it. To link it, remember the same claim again with `entity` (the person, company or project it is about): that replaces this copy, so there is nothing to forget. Do not forget it: a claim forgotten without an entity is withdrawn for every entity and cannot be saved again.';
