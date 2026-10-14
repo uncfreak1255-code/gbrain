@@ -12,6 +12,7 @@ import { execFileSync, spawn, spawnSync } from 'child_process';
 import { getLastPushOutcome, hardenBrainRepo, unhardenBrainRepo } from '../src/core/brain-repo-durability.ts';
 import { crontabAvailable } from './helpers/fs-perms.ts';
 import { runPull } from '../src/commands/sources-harden.ts';
+import { FixtureProcesses } from './helpers/fixture-processes.ts';
 
 // #2943 root cause: `env: process.env` is REQUIRED here. Bun snapshots
 // process.env at startup, so without it the spawned git — and any post-commit
@@ -61,6 +62,7 @@ async function waitForOrigin(bare: string, expectSha: string, ms = 30_000): Prom
 // regression test below pins that.
 
 let root: string, work: string, bare: string;
+let workers: FixtureProcesses;
 let oldHome: string | undefined, oldGbrainHome: string | undefined, oldPath: string | undefined;
 
 // #6530: the helper and hook delegate to `gbrain git commit-push`. Tests put a
@@ -69,12 +71,13 @@ let oldHome: string | undefined, oldGbrainHome: string | undefined, oldPath: str
 function installGbrainShim(dir: string): void {
   const bin = join(dir, 'gbrain-bin');
   mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, 'gbrain'), `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(import.meta.dir, '..', 'src', 'cli.ts'))} "$@"\n`, { mode: 0o755 });
+  workers.writeShim(join(bin, 'gbrain'), process.execPath, [join(import.meta.dir, '..', 'src', 'cli.ts')]);
   process.env.PATH = `${bin}:${process.env.PATH ?? ''}`;
 }
 
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'bdh-'));
+  workers = new FixtureProcesses(root);
   oldHome = process.env.HOME; oldGbrainHome = process.env.GBRAIN_HOME; oldPath = process.env.PATH;
   installGbrainShim(root);
   process.env.HOME = mkdtempSync(join(root, 'home-'));
@@ -93,11 +96,14 @@ beforeEach(async () => {
   git(work, 'remote', 'set-head', 'origin', 'main');
   await hardenBrainRepo({ repoPath: work, sourceId: 'wiki', pat: 'ghp_x', installCron: false });
 });
-afterEach(() => {
+afterEach(async () => {
+  try { await workers.cleanup(); } // Never remove a root with undrained hooks.
+  finally {
   if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
   if (oldGbrainHome === undefined) delete process.env.GBRAIN_HOME; else process.env.GBRAIN_HOME = oldGbrainHome;
   process.env.PATH = oldPath;
   delete process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT;
+  }
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -687,3 +693,24 @@ describe('#4682 — push-lock timeout is fail-loud for the helper only', () => {
     expect(hook).not.toContain('brain-commit-push.sh"');
   });
 });
+
+// Lifecycle seam: use the real installed post-commit hook, but a bounded fake
+// CLI instead of a database-backed GBrain process. Teardown must own it even
+// when the hook disowns it and closes stdio.
+test('fixture teardown owns a TERM-resistant disowned hook CLI', async () => {
+  const shim = join(root, 'gbrain-bin', 'gbrain');
+  const fake = join(root, 'fixture-worker.js');
+  const ready = join(root, 'fixture-worker.pid');
+  writeFileSync(fake, `process.on('SIGTERM',()=>{});require('fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000);`);
+  const cli = join(import.meta.dir, '..', 'src', 'cli.ts');
+  writeFileSync(shim, readFileSync(shim, 'utf8').replace(cli, fake), { mode: 0o755 });
+  writeFileSync(join(work, 'lifecycle.md'), 'fixture-owned child\n');
+  git(work, 'add', 'lifecycle.md');
+  git(work, 'commit', '-qm', 'trigger owned lifecycle worker');
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(ready) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  expect(existsSync(ready)).toBe(true);
+  // The controlled before/after probe reads this receipt and verifies absence
+  // after the real afterEach has completed, including fixture deletion.
+  console.log(`FIXTURE_LIFECYCLE ${readFileSync(ready, 'utf8')} ${root}`);
+}, 15_000);

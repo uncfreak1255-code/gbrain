@@ -11,6 +11,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { acquireCommitLock, commitAndPush, commitPathsLocked, pullShared, readIntegrateConflict } from '../src/core/git/commit-push.ts';
 import { getLastPushOutcome } from '../src/core/brain-repo-durability.ts';
+import { FixtureProcesses } from './helpers/fixture-processes.ts';
 
 let root: string;
 
@@ -55,15 +56,20 @@ function conflictOf(fn: () => unknown): { local: string; remote: string; paths: 
 /** Hold an OS lock file in a child (flock) until killed. */
 async function holdLock(path: string): Promise<{ kill(): void }> {
   writeFileSync(path, '');
-  const holder = spawn('flock', [path, 'sleep', '30'], { stdio: 'ignore' });
+  const holder = workers.spawn('flock', [path, 'sleep', '30'], { stdio: 'ignore' });
   await new Promise(r => setTimeout(r, 300));
-  return { kill: () => holder.kill('SIGKILL') };
+  return { kill: () => holder.kill('SIGTERM') };
 }
 
 beforeAll(() => { process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT = '1'; });
 afterAll(() => { delete process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT; });
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'cp6530-')); });
-afterEach(() => { delete process.env.BRAIN_COMMIT_LOCK_HELD; delete process.env.GBRAIN_GIT_NO_MERGE_TREE; rmSync(root, { recursive: true, force: true }); });
+let workers: FixtureProcesses;
+beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'cp6530-')); workers = new FixtureProcesses(root); });
+afterEach(async () => {
+  try { await workers.cleanup(); }
+  finally { delete process.env.BRAIN_COMMIT_LOCK_HELD; delete process.env.GBRAIN_GIT_NO_MERGE_TREE; }
+  rmSync(root, { recursive: true, force: true });
+});
 
 describe('commit scope', () => {
   test('commits only the named paths; another writer\'s staged and unstaged files stay put', () => {
@@ -303,14 +309,14 @@ describe('lock', () => {
     const { a } = setup();
     const lockPath = join(a, '.git', 'brain-commit.lock');
     writeFileSync(lockPath, '');
-    const holder = spawn('flock', [lockPath, 'sleep', '20'], { stdio: 'ignore' });
+    const holder = workers.spawn('flock', [lockPath, 'sleep', '20'], { stdio: 'ignore' });
     try {
       await new Promise(r => setTimeout(r, 300));
       writeFileSync(join(a, 'x.md'), 'mine\n');
       expect(() => commitAndPush({ repo: a, paths: ['x.md'], message: 'm', cwd: a, lockWaitMs: 300 }))
         .toThrow(expect.objectContaining({ code: 'commit_lock_busy' }));
       expect(status(a)).toBe(' M x.md');
-    } finally { holder.kill('SIGKILL'); }
+    } finally { holder.kill('SIGTERM'); }
   }, 30_000);
 
   test('the re-entrancy marker is honored only when it names this lock and the lock is really held', () => {
@@ -378,7 +384,7 @@ exec "${Bun.which('git')}" "$@"
     const { a } = setup();
     const lockPath = join(a, '.git', 'brain-commit.lock');
     writeFileSync(lockPath, '');
-    const holder = spawn('flock', [lockPath, 'sleep', '20'], { stdio: 'ignore' });
+    const holder = workers.spawn('flock', [lockPath, 'sleep', '20'], { stdio: 'ignore' });
     try {
       await new Promise(r => setTimeout(r, 300));
       writeFileSync(join(a, 'x.md'), 'page write\n');
@@ -386,7 +392,7 @@ exec "${Bun.which('git')}" "$@"
       expect(commitPathsLocked(a, [join(a, 'x.md')], 'gbrain: write-through x', { lockWaitMs: 200 })).not.toBeNull();
       expect(git(a, 'show', 'HEAD:x.md')).toBe('page write');
       expect(status(a)).toBe(' M y.md');
-    } finally { holder.kill('SIGKILL'); }
+    } finally { holder.kill('SIGTERM'); }
   }, 30_000);
 });
 
@@ -428,8 +434,13 @@ describe('pull', () => {
 
 describe('forced probe: the old in-tree rebase vs the new protocol', () => {
   test('pull --rebase --autostash rewrites another writer\'s in-flight edit; commit-push leaves it byte-identical', () => {
+    const fixtureRoot = root;
+    try {
     for (const mode of ['old', 'new'] as const) {
-      rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+      // Keep the ownership directory alive until afterEach drains it.
+      // Each protocol variant gets fresh repos without deleting the scope.
+      root = join(fixtureRoot, mode);
+      mkdirSync(root);
       const { a, b } = setup();
       writeFileSync(join(b, 'y.md'), 'remote edit\n');
       commitAndPush({ repo: b, paths: ['y.md'], message: 'remote', cwd: b });
@@ -445,6 +456,7 @@ describe('forced probe: the old in-tree rebase vs the new protocol', () => {
         expect(git(a, 'stash', 'list')).toBe('');
       }
     }
+    } finally { root = fixtureRoot; }
   });
 });
 
@@ -456,12 +468,13 @@ describe('many writers, two clones, one remote', () => {
     for (const { dir } of writers) writeFileSync(join(dir, `foreign-${dir === a ? 'a' : 'b'}.md`), 'never committed\n');
     const runs = writers.map(({ dir, file }) => new Promise<number>(resolve => {
       writeFileSync(join(dir, file), `${file}\n`);
-      const child = spawn(process.execPath, [cli, 'git', 'commit-push', '--path', dir, '-m', `write ${file}`, '--', file], {
-        stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, GBRAIN_COMMIT_LOCK_WAIT_SECONDS: '120' },
+      const child = workers.spawn(process.execPath, [cli, 'git', 'commit-push', '--path', dir, '-m', `write ${file}`, '--', file], {
+        stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: join(root, 'home'), GBRAIN_HOME: join(root, 'home'), GBRAIN_COMMIT_LOCK_WAIT_SECONDS: '120' },
       });
       let err = '';
       child.stderr?.on('data', d => { err += d; });
-      child.on('exit', code => { if (code) console.error(`${file}: exit ${code}\n${err}`); resolve(code ?? 1); });
+      child.on('error', () => resolve(1));
+      child.on('close', code => { if (code) console.error(`${file}: exit ${code}\n${err}`); resolve(code ?? 1); });
     }));
     const codes = await Promise.all(runs);
     expect(codes).toEqual(writers.map(() => 0));
