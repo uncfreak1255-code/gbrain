@@ -8,11 +8,19 @@ import { FixtureProcesses } from './helpers/fixture-processes.ts';
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function ready(path: string): Promise<number> {
-  for (let i = 0; i < 250; i++) { if (existsSync(path)) return Number(readFileSync(path, 'utf8')); await sleep(20); }
+  for (let i = 0; i < 250; i++) {
+    if (existsSync(path)) {
+      const value = readFileSync(path, 'utf8').trim();
+      // Creation precedes writing for a non-atomic producer. An empty marker
+      // is not ready: Number('') is zero, and kill(0, 0) checks our own group.
+      if (/^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value))) return Number(value);
+    }
+    await sleep(20);
+  }
   throw new Error('Owned child did not become ready');
 }
 function sleeper(path: string, ignoreTerm = false): string[] {
-  return ['-e', `${ignoreTerm ? "process.on('SIGTERM',()=>{});" : ''}require('fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)`, path];
+  return ['-e', `${ignoreTerm ? "process.on('SIGTERM',()=>{});" : ''}const fs=require('fs');const marker=process.argv[1];fs.writeFileSync(marker+'.tmp',String(process.pid));fs.renameSync(marker+'.tmp',marker);setInterval(()=>{},1000)`, path];
 }
 
 describe('fixture subprocess ownership', () => {
@@ -70,13 +78,17 @@ describe('fixture subprocess ownership', () => {
     const root = mkdtempSync(join(tmpdir(), 'fixture-workers-'));
     const scope = new FixtureProcesses(root, 10_000);
     const worker = join(root, 'worker.js');
-    writeFileSync(worker, "require('fs').writeFileSync(process.argv[2],String(process.pid));setInterval(()=>{},1000)");
+    // Exercise an incomplete marker before the worker atomically publishes
+    // its PID. The old reader returned zero and falsely reported a survivor.
+    writeFileSync(join(root, 'ready'), '');
+    writeFileSync(worker, "const fs=require('fs');const marker=process.argv[2];setTimeout(()=>{fs.writeFileSync(marker+'.tmp',String(process.pid));fs.renameSync(marker+'.tmp',marker);},100);setInterval(()=>{},1000)");
     const shim = join(root, 'gbrain');
     scope.writeShim(shim, process.execPath, [worker, join(root, 'ready')]);
     try {
       const hook = spawn('bash', ['-c', '"$1" </dev/null >/dev/null 2>&1 & disown', 'hook', shim], { cwd: root, stdio: 'ignore' });
       await new Promise(resolve => hook.once('close', resolve));
       const pid = await ready(join(root, 'ready'));
+      expect(pid).toBeGreaterThan(0);
       await scope.cleanup();
       expect(alive(pid)).toBe(false);
     } finally {
