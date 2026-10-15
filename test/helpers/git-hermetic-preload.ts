@@ -15,8 +15,7 @@
  *
  * Fix: git's environment-config mechanism (GIT_CONFIG_COUNT/KEY_n/VALUE_n,
  * git >= 2.31) injects the two keys at the HIGHEST config priority without
- * touching anything else — user identity, init.defaultBranch, and every other
- * global setting still resolve normally, and child processes inherit the env
+ * touching repository-local settings, and child processes inherit the env
  * through the usual `{ ...process.env }` spawn spreads. A per-repo
  * `git config commit.gpgsign false` in each test would fix only that repo and
  * misses repos created by the code under test.
@@ -28,6 +27,14 @@
  * Imported by `bunfig.toml` via
  * `preload = [..., "./test/helpers/git-hermetic-preload.ts"]`.
  */
+// Fixture commits must not execute workstation hooks. Inheriting a global
+// core.hooksPath can launch detached workers that outlive a deleted fixture,
+// and hardening tests can overwrite that shared hooks directory. Keep local
+// config/hooks available so the durability tests still exercise real hooks.
+// Set this at preload time: a test can install its own isolated config later.
+process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+process.env.GIT_CONFIG_SYSTEM = '/dev/null';
+
 const base = Number(process.env.GIT_CONFIG_COUNT ?? '0') || 0;
 const existingKeys: string[] = [];
 for (let i = 0; i < base; i++) {

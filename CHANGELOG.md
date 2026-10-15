@@ -2,6 +2,21 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.51.0.3] - 2026-10-15
+
+**Test runs no longer inherit workstation Git hooks.**
+
+A temporary test repository could run the same automation as a real project whenever it created a commit. That could launch background commands which survived after the test removed its files. Test Git processes now ignore system and global configuration while preserving repository-local hooks, so durability tests continue to exercise their real commit and push behavior.
+
+This takes effect automatically when running tests from the updated checkout. It does not stop existing processes, alter workstation Git settings, or change the running memory service.
+
+### Itemized changes
+
+### For contributors
+
+- Isolate system and global Git configuration in the shared test preload.
+- Add a real-commit regression test proving workstation hooks do not execute and repository-local hooks still do.
+
 ## [0.51.0.2] - 2026-09-21
 
 **Releases now run from GBrain's checked-in policy and executable gates, without depending on an external release command.**
