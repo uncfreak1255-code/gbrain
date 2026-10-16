@@ -4,7 +4,7 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.51.0.3] - 2026-10-15
 
-**Test commits stay local to their fixtures, and dependency updates remove ten known security advisories.**
+**Test commits stay local to their fixtures, and dependency updates remove known security advisories.**
 
 Temporary test repositories no longer run workstation Git automation when they create commits. This prevents unexpected background commands from surviving after a test removes its files. Repository-local hooks still run, so the durability tests continue to exercise real commit and push behavior.
 
@@ -19,6 +19,7 @@ Verify the dependency tree with `bun audit`, then run `bun test --timeout 15000 
 ### Itemized changes
 
 - Update the MCP SDK to 1.31.0, fast-uri to 3.1.8, ip-address to 10.7.1, and proxy-addr to 2.0.8.
+- Update the admin build dependency source-map-js to 1.2.2.
 - Replace argparse 1 with 2.0.1, removing sprintf-js; persist the YAML CLI API adaptation through Bun's package patch support.
 
 ### For contributors
