@@ -55,6 +55,15 @@ shared hook files. Repository-local configuration and hooks remain available.
 Tests that need global configuration must supply their own isolated config after
 the preload runs.
 
+### Dependency compatibility
+
+`bun audit` and the existing dependency/OSV CI scans check the resolved package
+tree. The argparse override removes the vulnerable sprintf-js dependency while
+retaining the existing js-yaml parser and schema. Bun applies
+`patches/js-yaml@3.15.2.patch` automatically on install; it adapts only the YAML
+CLI argument API. `test/yaml-cli-compat.test.ts` checks help/version and real
+stdin conversions, including legacy octal and quoted numeric strings.
+
 ### Native writer locks
 
 `bun test test/native-lock.test.ts test/scripts/native-lock-prebuilds.test.ts`

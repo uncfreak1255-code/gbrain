@@ -4,18 +4,27 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.51.0.3] - 2026-10-15
 
-**Test runs no longer inherit workstation Git hooks.**
+**Test commits stay local to their fixtures, and dependency updates remove ten known security advisories.**
 
-A temporary test repository could run the same automation as a real project whenever it created a commit. That could launch background commands which survived after the test removed its files. Test Git processes now ignore system and global configuration while preserving repository-local hooks, so durability tests continue to exercise their real commit and push behavior.
+Temporary test repositories no longer run workstation Git automation when they create commits. This prevents unexpected background commands from surviving after a test removes its files. Repository-local hooks still run, so the durability tests continue to exercise real commit and push behavior.
 
-This takes effect automatically when running tests from the updated checkout. It does not stop existing processes, alter workstation Git settings, or change the running memory service.
+The resolved dependency tree also replaces vulnerable networking and authorization components and removes an old formatter. Note parsing stays on the existing YAML library and schema, preserving legacy numeric values and quoting. A small command-line compatibility patch keeps that library's help, version, and conversion commands working with its updated argument parser.
+
+## To take advantage of v0.51.0.3
+
+Update the development checkout and run `bun install --frozen-lockfile`. Bun applies the checked-in compatibility patch automatically. No database migration, credential rotation, or change to an already-running service is part of this release.
+
+Verify the dependency tree with `bun audit`, then run `bun test --timeout 15000 test/git-hermetic-preload.test.ts test/yaml-cli-compat.test.ts`.
 
 ### Itemized changes
 
+- Update the MCP SDK to 1.31.0, fast-uri to 3.1.8, ip-address to 10.7.1, and proxy-addr to 2.0.8.
+- Replace argparse 1 with 2.0.1, removing sprintf-js; persist the YAML CLI API adaptation through Bun's package patch support.
+
 ### For contributors
 
-- Isolate system and global Git configuration in the shared test preload.
-- Add a real-commit regression test proving workstation hooks do not execute and repository-local hooks still do.
+- Exclude system and global Git configuration in the shared test preload while preserving repository-local hooks.
+- Exercise real fixture commits, YAML CLI help/version, and legacy scalar round trips in focused regression tests.
 
 ## [0.51.0.2] - 2026-09-21
 
