@@ -112,7 +112,7 @@ Is there a wrong fact with high confidence? Note its fact id.
 | **BRAIN_ERROR** | Wrong fact exists in a brain page | Edit the page in the brain repo, commit, re-sync |
 | **MEMORY_ERROR** | Wrong fact exists in memory files | Fix the memory file |
 | **SOUL_USER_ERROR** | Misleading passage in SOUL.md or USER.md | Fix the ANSWER BANK, re-render — never the rendered file |
-| **FACTS_TABLE_ERROR** | Wrong fact in the gbrain facts table | `recall` → `forget <fact-id>` → `remember` the correction |
+| **FACTS_TABLE_ERROR** | Wrong fact in the gbrain facts table | Recall the exact target, check replacement capability, replace with provenance, verify |
 | **HALLUCINATION** | No source — LLM confabulated from partial signals | Name the contamination vector (what partial signals led to it), write a guard fact |
 | **STALE_DATA** | Fact was once true but is no longer | Update the source with current truth; supersede the stale fact |
 | **CROSS_CONTAMINATION** | Correct fact about person A attributed to person B | Fix attribution in the source — on BOTH entities |
@@ -138,14 +138,26 @@ Is there a wrong fact with high confidence? Note its fact id.
   The full interview discipline (read-back ritual, verbatim answers, backup
   behavior) lives in `skills/soul-audit/SKILL.md` — route through it for
   anything beyond a single-key fix.
-- **FACTS_TABLE_ERROR:** Expire the wrong row and write the correction with
-  provenance:
-  ```bash
-  gbrain recall <entity-slug>                                  # find the fact id
-  gbrain forget <fact-id>                                      # expire the wrong fact
-  gbrain remember "<correct fact>" \
-    --provenance "user correction, YYYY-MM-DD" --entity <entity-slug>
-  ```
+- **FACTS_TABLE_ERROR:** Recall the exact wrong fact and retain its ID,
+  entity, source, visibility and original provenance. Check the currently
+  advertised client schema or local CLI help for explicit replacement support.
+  When supported, use `remember` with `replaces` set to that exact fact ID and
+  dated correction provenance, preserving the intended entity, source and
+  visibility. Do not guess unsupported parameters: starter MCP surfaces may
+  omit `replaces`, and private readback requires the trusted local path.
+
+  Verify the write receipt and active recall in the same scope: the correction
+  is active, the old claim is superseded, its original provenance remains in
+  history, and unrelated facts are unchanged. A pending receipt is not verified
+  completion. On a failed or uncertain write, inspect its receipt and readback
+  before retrying.
+
+  Separate `forget` and `remember` calls are not a transaction. Forget-first
+  can leave no active claim if saving fails; save-first can leave conflicting
+  claims if withdrawal fails. If explicit replacement is unavailable, leave
+  the old stored claim intact, identify it as disputed in the response and
+  report the correction as incomplete. Do not widen grants, make private facts
+  world-visible, or change the runtime merely to complete a correction.
 - **HALLUCINATION:** There is no source to fix. Identify the partial signal
   that seeded the confabulation, then write a guard so it can't reseed:
   ```bash
@@ -153,8 +165,8 @@ Is there a wrong fact with high confidence? Note its fact id.
     --provenance "user correction, YYYY-MM-DD (hallucination guard)" --entity <entity-slug>
   ```
 - **STALE_DATA:** Update the source page with current truth (BRAIN_ERROR
-  flow), and supersede any stale facts rows (`forget` + `remember` with the
-  current truth and fresh provenance).
+  flow), and supersede stale facts using the capability and verification
+  checks in FACTS_TABLE_ERROR, with current truth and fresh provenance.
 - **CROSS_CONTAMINATION:** Fix the attribution at the source, then check BOTH
   entities: person A's page and facts (does the fact now live where it
   belongs?) and person B's page and facts (is every trace of the
