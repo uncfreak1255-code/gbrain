@@ -192,7 +192,8 @@ Short report:
 **Error:** [what was wrong]
 **Root cause:** [BRAIN_ERROR | HALLUCINATION | etc.]
 **Source:** [specific file/line or fact id, or "no source — confabulated from X"]
-**Fixed:** [what was changed, where]
+**Status:** [verified correction | incomplete/disputed, with exact blocker]
+**Changed:** [what was verified changed, where; or "no stored change"]
 **Propagation:** [other files fixed, or "no propagation found"]
 ```
 
@@ -235,9 +236,11 @@ elsewhere in the brain.
 This skill guarantees:
 
 - Every factual error gets root-caused, not just noted
-- Source fixes land at the REAL fix surface for the error class (page edit +
-  commit + re-sync; `forget`/`remember` for facts rows; answer bank + re-render
-  for SOUL/USER — never a direct edit to a rendered file)
+- Authorized source fixes use the REAL fix surface for the error class (page
+  edit + commit + re-sync; capability-aware explicit replacement for facts
+  rows; answer bank + re-render for SOUL/USER — never a direct edit to a
+  rendered file). Unavailable or unverified corrections remain explicitly
+  incomplete; they are not reported as fixed.
 - Propagation is checked (whole-brain grep + `gbrain search`)
 - The user gets a clear report of what was wrong, why, and what was fixed
 - Routing matches the canonical triggers in the frontmatter
@@ -247,9 +250,10 @@ This skill guarantees:
 ## Output Format
 
 The skill's output is the Step 8 root-cause report delivered inline during the
-conversation, plus all source fixes applied (brain-repo edits committed and
-re-synced; facts rows expired/superseded; identity files re-rendered from the
-answer bank).
+conversation, plus verified authorized source fixes and explicit incomplete
+items. Report the actual result of brain-repo edits, fact replacement or
+identity re-rendering; a plan, pending receipt or failed second call is not a
+completed correction.
 
 ## Dedup (sharp boundaries)
 

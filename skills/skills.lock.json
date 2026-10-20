@@ -62,7 +62,7 @@
   "conventions/untrusted-content.md": "259384d490892cd0e1e8e054decf752d7354f516c83aee57b332c1a96aac6a6e",
   "conversation-archive/SKILL.md": "0d27c637f56fc10f8d27c1f0a02aedf70e2bac4355436e9f67f81b0bc120e3ba",
   "conversation-archive/routing-eval.jsonl": "ae087a84b1fd5b108b7cdab8d035a09b3ccecd8aad53ba5f71e463059108cfca",
-  "correction-pipeline/SKILL.md": "058191520102f2eba6eec8b9113d3b5e9695cb5ef91fc61edf5a24f71602cd62",
+  "correction-pipeline/SKILL.md": "e1eb8b2fee7cd45f94474d3c493ed2c47942ce313a6d79ca3e2b7d7650257a24",
   "correction-pipeline/routing-eval.jsonl": "7f8d96606a8d7bed3d79fdcee6904764c8abb9fa0b506adb414b5c4805b69d0b",
   "cron-scheduler/SKILL.md": "e3f9745c4f8e2dacba5b055f408b1ffe541b450aee6bbfe4773f7b424d90e04c",
   "cross-modal-review/SKILL.md": "685233b1afd477e96697562c502233eea22eda5db8df116b81dd2fa78f01f80c",
