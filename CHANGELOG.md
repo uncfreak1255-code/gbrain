@@ -19,6 +19,7 @@ Use the updated correction skill and check the currently advertised replacement 
 - Replace forget-first fact correction instructions with capability-aware explicit replacement and scoped readback.
 - Keep unavailable or uncertain corrections explicitly incomplete in the report and contract.
 - Regenerate the bundled skill mirrors and integrity manifest.
+- Update the MCP SDK to 1.32.0, Hono to 4.13.13, and ip-address to 10.7.4 to remove known security vulnerabilities from networking dependencies.
 
 ## [0.51.0.3] - 2026-10-15
 
