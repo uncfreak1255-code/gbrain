@@ -21,6 +21,7 @@ Use the updated correction skill and check the currently advertised replacement 
 - Regenerate the bundled skill mirrors and integrity manifest.
 - Update the MCP SDK to 1.32.0, Hono to 4.13.13, and ip-address to 10.7.4 to remove known security vulnerabilities from networking dependencies.
 - Update the admin app's Vite dependency to 6.4.5 to remove known development-server vulnerabilities.
+- Point the generated documentation index and source links at this fork for release distribution.
 
 ## [0.51.0.3] - 2026-10-15
 
