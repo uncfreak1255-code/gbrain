@@ -21,6 +21,10 @@ ee280a34288d697285fd41c35d423e49b61fe54d:CHANGELOG.md:sourcegraph-access-token:1
 7530e1d4a813209c1033f9fe2a1349b2610c2357:TODOS.md:sourcegraph-access-token:391
 7530e1d4a813209c1033f9fe2a1349b2610c2357:TODOS.md:sourcegraph-access-token:2323
 7530e1d4a813209c1033f9fe2a1349b2610c2357:CHANGELOG.md:sourcegraph-access-token:11
+# v0.60.414.0 stock history: documented Git revision IDs misread as Sourcegraph tokens; exact fingerprints only.
+c480f84652a74681b0b40707bfb71f694b266e37:TODOS.md:sourcegraph-access-token:778
+c480f84652a74681b0b40707bfb71f694b266e37:TODOS.md:sourcegraph-access-token:2715
+c480f84652a74681b0b40707bfb71f694b266e37:CHANGELOG.md:sourcegraph-access-token:11
 # #6377 content-repair lane (GBRA-72): a test constant named SECRET holding a synthetic sentinel sentence in
 # test/content-repair-judgment.test.ts and test/repair-slug-conflicts.test.ts (commit ac6e0868) read as generic-api-key;
 # the tree renamed the constant. These history-only fingerprints are not secrets.
