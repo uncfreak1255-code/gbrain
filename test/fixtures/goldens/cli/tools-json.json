@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 262702,
-    "stdoutSha256": "bfd962a82f16847c7969963ab23410170196491231dcdef214ab3863873b495e",
+    "stdoutBytes": 263365,
+    "stdoutSha256": "0492caf4e95154d1a7173fefcf194327aea3caf8c87f648965c6bc50f92fb32a",
     "toolNames": [
       "remember",
       "entity",
@@ -6578,6 +6578,7 @@
         "mutating": false,
         "name": "recall",
         "parameters": {
+          "after_id": "number?",
           "budget_policy": "string?",
           "budget_tokens": "number?",
           "entity": "string?",
@@ -6590,14 +6591,20 @@
           "question": "string?",
           "return_unit": "string?",
           "return_window": "number?",
+          "scan": "boolean?",
           "session_id": "string?",
           "since": "string?",
           "source_id": "string?",
-          "supersessions": "boolean?"
+          "supersessions": "boolean?",
+          "through_id": "number?"
         },
         "required_scopes": [],
         "schema": {
           "properties": {
+            "after_id": {
+              "description": "Scan-only exclusive fact ID cursor. A positive cursor requires through_id from the first page.",
+              "type": "number"
+            },
             "budget_policy": {
               "description": "Default facts_first.",
               "enum": [
@@ -6665,6 +6672,10 @@
               "description": "Window 1-3.",
               "type": "number"
             },
+            "scan": {
+              "description": "Read-only creation-time backlog scan for one authorized source. Requires an absolute ISO since; returns ID-ascending facts and scan v1 continuation metadata.",
+              "type": "boolean"
+            },
             "session_id": {
               "description": "This session's facts.",
               "type": "string"
@@ -6680,6 +6691,10 @@
             "supersessions": {
               "description": "Supersession log only.",
               "type": "boolean"
+            },
+            "through_id": {
+              "description": "Scan-only inclusive upper fact ID; preserve it across pages.",
+              "type": "number"
             }
           },
           "required": [],

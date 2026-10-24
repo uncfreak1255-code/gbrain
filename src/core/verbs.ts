@@ -628,6 +628,20 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
       budget_tokens: { type: 'integer', description: 'Present for a positive finite numeric budget, including when its floor is zero.' },
       budget_used: { type: 'integer' },
       dropped_count: { type: 'integer' },
+      scan: {
+        type: 'object',
+        description: 'Present only for scan: true. Continue with after_id = next_after_id and the same through_id while has_more is true.',
+        required: ['version', 'source_id', 'since', 'after_id', 'through_id', 'next_after_id', 'has_more'],
+        properties: {
+          version: { type: 'integer', const: 1 },
+          source_id: { type: 'string' },
+          since: { type: 'string', description: 'Normalized ISO creation-time lower bound; preserve it across pages.' },
+          after_id: { type: 'integer', minimum: 0 },
+          through_id: { type: 'integer', minimum: 0, description: 'Fixed upper ID, not a commit watermark.' },
+          next_after_id: { type: 'integer', minimum: 0 },
+          has_more: { type: 'boolean' },
+        },
+      },
       budget_packing: {
         type: 'object',
         description: 'Present only when a valid budget_policy is supplied. Per-arm used and dropped sums match budget_used and dropped_count when those fields exist.',

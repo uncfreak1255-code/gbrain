@@ -80,8 +80,9 @@ carries the routing-seam picture):
   `RemoteMcpErrorReason` union the dispatcher's `never` switch keys off.
   Full symbol-level detail: the `src/core/mcp-client.ts` entry in
   [`KEY_FILES.md`](./KEY_FILES.md).
-- `src/commands/recall.ts` — explicit `--budget-policy` calls bypass the local
-  engine in the CLI dispatcher and use the remote recall operation, as do the
+- `src/commands/recall.ts` — explicit `--budget-policy` and `--scan` calls bypass the local
+  engine in the CLI dispatcher and use the remote recall operation. Scan cursor
+  flags take that route too; cursors without `--scan` fail closed. So do the
   fact-list forms (no `--query`/`--budget-tokens`). An in-process `--query` or
   `--budget-tokens` call without a policy is refused with a hint naming the
   policy flag. The dispatcher reuses the command's parser, so a query value that

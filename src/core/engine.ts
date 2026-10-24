@@ -708,6 +708,20 @@ export interface FactListOpts {
 /** FactListOpts plus the entity the recall cursor reads (listFactsSince, listFactsKeyset) narrow to before LIMIT. */
 export type RecallFactReadOpts = FactListOpts & { entitySlug?: string };
 
+/** Read-only, source-scoped creation-time scan with an ID continuation. */
+export interface FactScanOpts extends Pick<FactListOpts, 'activeOnly' | 'visibility' | 'excludePrivate' | 'eligibility'> {
+  afterId?: number;
+  throughId?: number;
+  limit?: number;
+}
+
+export interface FactScanPage {
+  facts: FactRow[];
+  throughId: number;
+  nextAfterId: number;
+  hasMore: boolean;
+}
+
 /** Per-source operational health snapshot consumed by `gbrain doctor`. */
 export interface FactsHealth {
   source_id: string;
@@ -2320,6 +2334,9 @@ export interface BrainEngine {
     after: { createdAt: string; id: number | null } | null,
     opts?: RecallFactReadOpts,
   ): Promise<FactRow[]>;
+
+  /** ID-ascending retained facts, with a fixed inclusive upper ID bound. */
+  scanFacts(source_id: string, since: Date, opts?: FactScanOpts): Promise<FactScanPage>;
 
   /** List facts captured under a session id within a source. */
   listFactsBySession(
