@@ -821,6 +821,46 @@
             "textSha256": "0fa43bea9cb63eff28077cd4c1bb3d40eb9b6daed0563f67cbf69eb025862b5f"
           }
         ]
+      },
+      "scanFacts": {
+        "continuation": [
+          {
+            "lane": "pool",
+            "params": [
+              "number",
+              "string",
+              "Date",
+              "array<string>",
+              "array<string>",
+              "string",
+              "Date",
+              "array<string>",
+              "array<string>",
+              "number",
+              "number"
+            ],
+            "sql": "WITH scan_bound AS ( SELECT COALESCE($1::bigint, (SELECT MAX(id) FROM facts WHERE source_id = $2 AND created_at >= $3 AND source != ALL($4::text[]) AND visibility = ANY($5::text[]) ), 0) AS scan_through_id ) SELECT scan_bound.scan_through_id, page.* FROM scan_bound LEFT JOIN LATERAL ( SELECT * FROM facts WHERE source_id = $6 AND created_at >= $7 AND source != ALL($8::text[]) AND visibility = ANY($9::text[]) AND id > $10 AND id <= scan_bound.scan_through_id ORDER BY id ASC LIMIT $11 ) page ON true ORDER BY page.id ASC",
+            "textSha256": "d077bc0df66ca389c4324d1ca4d1e2b503a1804fd1110318dbfc9d7fb036ff3d"
+          }
+        ],
+        "firstPage": [
+          {
+            "lane": "pool",
+            "params": [
+              "null",
+              "string",
+              "Date",
+              "array<string>",
+              "string",
+              "Date",
+              "array<string>",
+              "number",
+              "number"
+            ],
+            "sql": "WITH scan_bound AS ( SELECT COALESCE($1::bigint, (SELECT MAX(id) FROM facts WHERE source_id = $2 AND created_at >= $3 AND source != ALL($4::text[]) AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now()) ), 0) AS scan_through_id ) SELECT scan_bound.scan_through_id, page.* FROM scan_bound LEFT JOIN LATERAL ( SELECT * FROM facts WHERE source_id = $5 AND created_at >= $6 AND source != ALL($7::text[]) AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now()) AND id > $8 AND id <= scan_bound.scan_through_id ORDER BY id ASC LIMIT $9 ) page ON true ORDER BY page.id ASC",
+            "textSha256": "6be65d5e830c52de79b82d911612d9d8f13fa9a67032e2c7415653c8615cb02b"
+          }
+        ]
       }
     }
   },

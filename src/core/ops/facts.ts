@@ -275,9 +275,9 @@ const recall: Operation = {
   outputRedaction: { retrieval: { localVerbatim: ['facts'] } },
   description: 'MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.',
   params: {
-    scan: { type: 'boolean', description: 'Read-only creation-time backlog scan for one authorized source. Requires an absolute ISO since; returns ID-ascending facts and scan v1 continuation metadata.' },
-    after_id: { type: 'number', description: 'Scan-only exclusive fact ID cursor. A positive cursor requires through_id from the first page.' },
-    through_id: { type: 'number', description: 'Scan-only inclusive upper fact ID; preserve it across pages.' },
+    scan: { type: 'boolean', fullSurfaceOnly: true, description: 'Read-only creation-time backlog scan for one authorized source. Requires an absolute ISO since; returns ID-ascending facts and scan v1 continuation metadata.' },
+    after_id: { type: 'number', fullSurfaceOnly: true, description: 'Scan-only exclusive fact ID cursor. A positive cursor requires through_id from the first page.' },
+    through_id: { type: 'number', fullSurfaceOnly: true, description: 'Scan-only inclusive upper fact ID; preserve it across pages.' },
     entity: { type: 'string', description: 'Entity slug; its facts.' },
     question: { type: 'string', description: 'Rank facts by relevance to it.' },
     query: { type: 'string', description: 'Also search pages (results[]).' },

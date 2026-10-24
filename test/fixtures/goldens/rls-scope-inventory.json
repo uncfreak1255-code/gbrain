@@ -2893,6 +2893,28 @@
         ],
         "flagOnScopes": []
       },
+      "scanFacts#continuation": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "scanFacts#firstPage": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
       "searchKeyword#cjk": {
         "flagOffLanes": [
           "pool",
@@ -3761,6 +3783,7 @@
         "runMigration": "none",
         "runUnsafe": "none",
         "runVectorAttempt": "direct",
+        "scanFacts": "none",
         "searchKeyword": "direct",
         "searchKeywordChunks": "direct",
         "searchKeywordPages": "direct",

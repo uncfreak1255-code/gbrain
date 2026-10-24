@@ -5544,14 +5544,17 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "params": {
       "scan": {
         "type": "boolean",
+        "fullSurfaceOnly": true,
         "description": "Read-only creation-time backlog scan for one authorized source. Requires an absolute ISO since; returns ID-ascending facts and scan v1 continuation metadata."
       },
       "after_id": {
         "type": "number",
+        "fullSurfaceOnly": true,
         "description": "Scan-only exclusive fact ID cursor. A positive cursor requires through_id from the first page."
       },
       "through_id": {
         "type": "number",
+        "fullSurfaceOnly": true,
         "description": "Scan-only inclusive upper fact ID; preserve it across pages."
       },
       "entity": {

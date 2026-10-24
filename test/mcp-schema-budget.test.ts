@@ -197,6 +197,15 @@ describe('served starter tool list (Cat 40 configuration)', () => {
 describe('per-tool schema budgets', () => {
   const starter = operations.filter(o => STARTER_OPS.has(o.name));
 
+  test('backlog scan controls are advertised on full, not the compact starter schema', () => {
+    const full = filterOpsForSurface(operations, 'full').find(o => o.name === 'recall')!;
+    const compact = filterOpsForSurface(operations, 'starter').find(o => o.name === 'recall')!;
+    for (const key of ['scan', 'after_id', 'through_id']) {
+      expect(full.params[key]?.fullSurfaceOnly).toBe(true);
+      expect(compact.params[key]).toBeUndefined();
+    }
+  });
+
   test('every starter op has a budget', () => {
     expect(starter.map(o => o.name).sort()).toEqual(Object.keys(TOOL_BUDGETS).sort());
   });

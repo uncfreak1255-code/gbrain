@@ -121,7 +121,7 @@ export const DOMAIN_OF: Record<string, string> = {
   'getEmbeddingsByChunkIds': 'chunks', 'getChunksWithEmbeddings': 'chunks',
   // facts (incl. the ontology rows of the facts table)
   'insertFact': 'facts', 'expireFact': 'facts', 'insertFacts': 'facts', 'deleteFactsForPage': 'facts',
-  'listFactsByEntity': 'facts', 'listFactsSince': 'facts', 'listFactsKeyset': 'facts', 'listFactsBySession': 'facts', 'listSupersessions': 'facts',
+  'listFactsByEntity': 'facts', 'listFactsSince': 'facts', 'listFactsKeyset': 'facts', 'scanFacts': 'facts', 'listFactsBySession': 'facts', 'listSupersessions': 'facts',
   'countUnconsolidatedFacts': 'facts', 'findCandidateDuplicates': 'facts', 'consolidateFact': 'facts',
   'findTrajectory': 'facts', 'getFactsHealth': 'facts', 'migrateFactsToCanonical': 'facts',
   'mergeOntologyFact': 'facts', 'getOntology': 'facts', 'discoverOntologyDimensions': 'facts', 'findOntologyConflicts': 'facts',
@@ -630,6 +630,10 @@ export const SQL_CASES: SqlCase[] = [
   ...variants('listFactsSince', [
     ['default', (e) => e.listFactsSince(SRC, EPOCH)],
     ['allFilters', (e) => e.listFactsSince(SRC, EPOCH, { entitySlug: SLUG, sessionId: 's1', eventTime: true, activeOnly: false, unconsolidatedOnly: true, kinds: ['fact'], visibility: ['world'], excludeAuditRows: true, grep: 'acme' })],
+  ]),
+  ...variants('scanFacts', [
+    ['firstPage', (e) => e.scanFacts(SRC, EPOCH), [[/WITH scan_bound AS/, [{ scan_through_id: 0, id: null }]]]],
+    ['continuation', (e) => e.scanFacts(SRC, EPOCH, { afterId: 3, throughId: 10, limit: 5, visibility: ['world'], activeOnly: false }), [[/WITH scan_bound AS/, [{ scan_through_id: 10, id: null }]]]],
   ]),
   ...variants('listFactsBySession', [
     ['default', (e) => e.listFactsBySession(SRC, 's1')],
