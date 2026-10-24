@@ -61,6 +61,11 @@ const KIND_ICON: Record<FactKind, string> = {
 };
 
 export interface ParsedFlags {
+  scan: boolean;
+  scanSince: string | null;
+  afterId: number | null;
+  throughId: number | null;
+  scanLimit: number | null;
   entity: string | null;
   /** #4828/#7166: the entity came from --entity (never split or widened), not the bare positional. */
   entityExplicit: boolean;
@@ -98,6 +103,11 @@ const DEFAULT_FALLBACK_HOURS = 24;
 
 export function parseFlags(args: string[]): ParsedFlags {
   const out: ParsedFlags = {
+    scan: false,
+    scanSince: null,
+    afterId: null,
+    throughId: null,
+    scanLimit: null,
     entity: null,
     entityExplicit: false,
     since: null,
@@ -125,6 +135,11 @@ export function parseFlags(args: string[]): ParsedFlags {
   let rawBudget: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
+    if (a === '--scan') { out.scan = true; continue; }
+    if (a === '--after-id') { out.afterId = Number(args[++i] || NaN); continue; }
+    if (a === '--through-id') { out.throughId = Number(args[++i] || NaN); continue; }
+    if (a.startsWith('--after-id=')) { out.afterId = Number(a.slice('--after-id='.length) || NaN); continue; }
+    if (a.startsWith('--through-id=')) { out.throughId = Number(a.slice('--through-id='.length) || NaN); continue; }
     if (a === '--since') {
       const raw = args[i + 1];
       const valueGiven = raw !== undefined && !raw.startsWith('--');
@@ -136,6 +151,7 @@ export function parseFlags(args: string[]): ParsedFlags {
             fix: { argv: ['gbrain', 'recall', '--help'], consent: [], actor: 'agent', why: 'Shows the accepted --since forms.', requires_exclusive: false },
           });
       }
+      out.scanSince = raw!;
       out.since = since;
       i++;
       continue;
@@ -186,7 +202,9 @@ export function parseFlags(args: string[]): ParsedFlags {
           fix: { argv, consent: [], actor: 'agent', why: 'The same recall with a valid --limit.', requires_exclusive: false },
         });
       }
-      out.limit = Number(raw); continue;
+      out.limit = Number(raw);
+      out.scanLimit = out.limit;
+      continue;
     }
     if (a === '--query') { out.query = args[++i] ?? null; continue; }
     if (a === '--question') { out.question = args[++i] ?? null; continue; }
@@ -316,6 +334,7 @@ positional is an entity name, then a literal piece of fact text.
   gbrain recall --grep <text>            facts whose text contains <text>
   gbrain recall --since "8 hours ago"    facts from a time window (--today: today, rendered by kind)
   gbrain recall --session <id>           facts from one session
+  gbrain recall --scan --since <ISO>      complete source-scoped creation-time fact scan (JSON)
 
 --since-last-run shows facts created since the previous run. When more than
 --limit facts arrived, it shows the oldest --limit of them and the next run
@@ -328,12 +347,14 @@ continues after the last one shown (local brains; a thin client warns instead).
 Options: --limit N, --include-expired, --json, --as-context, --source <id>,
 --budget-tokens N, --budget-policy facts_first|query_first, --supersessions,
 --since-last-run, --pending, --rollup, --watch [SECONDS].
+Scan continuation: --after-id N --through-id N (preserve the first page's through_id).
 Withdraw a fact with gbrain forget <fact-id>.
 `;
 
 export async function runRecall(engine: BrainEngine, args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) { process.stdout.write(RECALL_HELP); return; }
   const flags = parseFlags(args);
+  if (flags.scan) flags.json = true;
   if (isOneShotRecall(flags)) {
     try {
       await renderRecallVerbResult(flags, await oneShotRecallResult(engine, flags));
@@ -379,7 +400,7 @@ function callerRouting(): RecallRouting {
 
 /** MEMORY_VERBS v1 one-shot recall (`--budget-policy` or `--question`). */
 export function isOneShotRecall(flags: ParsedFlags): boolean {
-  return flags.budgetPolicy !== null || flags.question !== null;
+  return flags.budgetPolicy !== null || flags.question !== null || flags.scan || flags.afterId !== null || flags.throughId !== null;
 }
 
 /** The recall forms that run the recall op (and only it) before rendering: one-shot, `--query`, `--budget-tokens`. */
@@ -391,13 +412,16 @@ export function isRecallVerbForm(flags: ParsedFlags): boolean {
 export async function oneShotRecallResult(engine: BrainEngine, flags: ParsedFlags, routing: RecallRouting = callerRouting()): Promise<RecallVerbResult> {
   const { operationsByName, verbError } = await import('../core/operations.ts');
   const { validateParams } = await import('../mcp/validate-params.ts');
-  const option = flags.budgetPolicy !== null ? '--budget-policy' : '--question';
-  const error = (flags.budgetPolicy !== null ? validateParams(operationsByName.recall, { budget_policy: flags.budgetPolicy }) : null)
+  const option = flags.scan ? '--scan' : flags.budgetPolicy !== null ? '--budget-policy' : '--question';
+  const error = (flags.scan && (flags.today || flags.pending || flags.asContext || flags.watchSeconds !== null || flags.sinceLastRun || flags.rollup)
+    ? '--scan cannot be combined with --today, --pending, --as-context, --watch, --since-last-run, or --rollup.' : null)
+    ?? (flags.budgetPolicy !== null ? validateParams(operationsByName.recall, { budget_policy: flags.budgetPolicy }) : null)
     ?? (flags.watchSeconds !== null || flags.sinceLastRun || flags.rollup || flags.asContext
       ? `${option} cannot be combined with --watch, --since-last-run, --rollup, or --as-context.` : null);
   if (error) throw verbError('invalid_params', error, flags.budgetPolicy !== null
     ? 'Use --budget-policy facts_first or query_first on a one-shot recall, or omit the policy for CLI-only behavior.'
-    : 'Use --question on a one-shot recall, or drop it for the watch, cursor, rollup and context renders.');
+    : flags.scan ? 'Use only --scan, an absolute --since, --source, --limit, --include-expired and the returned cursor IDs.'
+      : 'Use --question on a one-shot recall, or drop it for the watch, cursor, rollup and context renders.');
   const selector = flags.sourceExplicit ? flags.source : routing.env || undefined;
   if (selector !== undefined && !SOURCE_ID_RE.test(selector)) {
     throw verbError('invalid_params', 'recall requires a concrete source id matching [a-z0-9-]{1,32}.',
@@ -450,6 +474,7 @@ export type RecallVerbResult = {
   budget_tokens?: number;
   budget_used?: number;
   dropped_count?: number;
+  scan?: { version: number; source_id: string; since: string; after_id: number; through_id: number; next_after_id: number; has_more: boolean };
 };
 
 /**
@@ -473,16 +498,19 @@ async function recallVerbResult(engine: BrainEngine, flags: ParsedFlags, sourceI
     remote: false as const,
     sourceId: sourceId ?? 'default',
   };
-  const oneShot = flags.budgetPolicy !== null || flags.question !== null;
+  const oneShot = isOneShotRecall(flags);
   const params = {
     ...(flags.entity ? { entity: flags.entity } : {}),
     ...(flags.question !== null ? { question: flags.question } : {}),
     ...(flags.query ? { query: flags.query } : {}),
     ...(flags.budgetTokens ? { budget_tokens: flags.budgetTokens } : {}),
-    ...(flags.since ? { since: flags.since.toISOString() } : {}),
+    ...(flags.scan ? { scan: true, since: flags.scanSince, limit: flags.scanLimit ?? 100 }
+      : flags.since ? { since: flags.since.toISOString() } : {}),
+    ...(flags.afterId !== null ? { after_id: flags.afterId } : {}),
+    ...(flags.throughId !== null ? { through_id: flags.throughId } : {}),
     ...(flags.grep ? { grep: flags.grep } : {}),
     include_expired: flags.includeExpired,
-    limit: flags.limit,
+    limit: flags.scan ? flags.scanLimit ?? 100 : flags.limit,
     ...(oneShot ? {
       ...(flags.budgetPolicy !== null ? { budget_policy: flags.budgetPolicy } : {}),
       ...(sourceId !== undefined ? { source_id: sourceId } : {}),

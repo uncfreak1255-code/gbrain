@@ -27,6 +27,7 @@ import type { Notice } from '../agent-output.ts';
 import { OperationError, opError, verbError } from './contract.ts';
 import { invalidParam, paramUse } from './op-fix.ts';
 import { assertExplicitSourceLive, federatedSearchScope, parseSourceIdParam, sourceScopeOpts, stampEvidenceSafe } from './context.ts';
+import { recallFactScan } from './facts-scan.ts';
 import { markKeywordHits } from '../search/evidence.ts';
 import { hybridSearchCached, stampContentFlags, type HybridSearchOpts } from '../search/hybrid.ts';
 import { dedupResults } from '../search/dedup.ts';
@@ -274,6 +275,9 @@ const recall: Operation = {
   outputRedaction: { retrieval: { localVerbatim: ['facts'] } },
   description: 'MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.',
   params: {
+    scan: { type: 'boolean', description: 'Read-only creation-time backlog scan for one authorized source. Requires an absolute ISO since; returns ID-ascending facts and scan v1 continuation metadata.' },
+    after_id: { type: 'number', description: 'Scan-only exclusive fact ID cursor. A positive cursor requires through_id from the first page.' },
+    through_id: { type: 'number', description: 'Scan-only inclusive upper fact ID; preserve it across pages.' },
     entity: { type: 'string', description: 'Entity slug; its facts.' },
     question: { type: 'string', description: 'Rank facts by relevance to it.' },
     query: { type: 'string', description: 'Also search pages (results[]).' },
@@ -295,6 +299,10 @@ const recall: Operation = {
   verb: true,
   annotations: { title: 'recall (memory read)', readOnlyHint: true },
   handler: async (ctx, p) => {
+    if (p.scan === true) return recallFactScan(ctx, p, Object.keys(recall.params));
+    if (p.after_id !== undefined || p.through_id !== undefined) {
+      throw verbError('invalid_params', 'Fact scan cursors require scan: true.', 'Use scan: true and retain the returned scan metadata.');
+    }
     const sourceId = ctx.sourceId ?? 'default';
     const limit = clampRecallLimit(p.limit);
     const includeExpired = p.include_expired === true;

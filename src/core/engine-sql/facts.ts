@@ -15,7 +15,7 @@
  */
 import type {
   FactRow, FactKind, FactVisibility, FactInsertStatus, FactAttribution,
-  NewFact, FactListOpts, RecallFactReadOpts, FactsHealth,
+  NewFact, FactListOpts, RecallFactReadOpts, FactScanOpts, FactScanPage, FactsHealth,
 } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 import { tryParseEmbedding } from '../utils.ts';
@@ -455,6 +455,51 @@ export async function listFactsSince(
     `)).rows;
     return rows.map(rowToFact);
   }
+
+/** One statement fixes the visible upper ID and reads a limit+1 page. */
+export async function scanFacts(
+  exec: LegacyUnscopedRead,
+  sourceId: string,
+  since: Date,
+  opts: FactScanOpts = {},
+): Promise<FactScanPage> {
+  const afterId = opts.afterId ?? 0;
+  const limit = opts.limit ?? 100;
+  for (const [name, value] of [['afterId', afterId], ['throughId', opts.throughId ?? 0]] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Invalid fact scan ${name}`);
+  }
+  if (!Number.isFinite(since.getTime())) throw new Error('Invalid fact scan since');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid fact scan limit');
+  if ((afterId > 0 && opts.throughId === undefined) || (opts.throughId !== undefined && afterId > opts.throughId)) {
+    throw new Error('Invalid fact scan cursor: retain throughId and do not pass afterId beyond it');
+  }
+  if (opts.visibility?.length === 0) throw new Error('Invalid fact scan visibility: empty visibility cannot widen a scan');
+  const activeOnly = opts.activeOnly !== false;
+  const visibility = opts.visibility ?? null;
+  const eligible = sqlFragment`source_id = ${sourceId} AND created_at >= ${since}
+    AND source != ALL(${AUDIT_ROW_SOURCES}::text[])
+    ${activeOnly ? sqlFragment`AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now())` : sqlFragment``}
+    ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}
+    ${privacyClause(opts)}${eligibilityClause(opts)}`;
+  const rows = (await exec.run<FactRowSqlShape & { scan_through_id: number | bigint }>(sqlFragment`
+    WITH scan_bound AS (
+      SELECT COALESCE(${opts.throughId ?? null}::bigint,
+        (SELECT MAX(id) FROM facts WHERE ${eligible}), 0) AS scan_through_id
+    )
+    SELECT scan_bound.scan_through_id, page.* FROM scan_bound
+    LEFT JOIN LATERAL (
+      SELECT * FROM facts WHERE ${eligible}
+        AND id > ${afterId} AND id <= scan_bound.scan_through_id
+      ORDER BY id ASC LIMIT ${limit + 1}
+    ) page ON true
+    ORDER BY page.id ASC
+  `)).rows;
+  const throughId = Number(rows[0]?.scan_through_id);
+  if (!Number.isSafeInteger(throughId) || throughId < 0) throw new Error('Invalid fact scan watermark');
+  const candidates = rows.filter(row => row.id != null);
+  const facts = candidates.slice(0, limit).map(rowToFact);
+  return { facts, throughId, nextAfterId: facts.at(-1)?.id ?? afterId, hasMore: candidates.length > limit };
+}
 
 /**
  * delta's facts arm (contributor audit wave P0): facts strictly after a
